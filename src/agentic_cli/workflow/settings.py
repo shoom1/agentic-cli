@@ -272,12 +272,20 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
     )
     webfetch_max_content_bytes: int = Field(
         default=102400,
+        ge=1,
+        le=10485760,
         title="WebFetch Max Content",
-        description="How much of a page the summarizer sees, in bytes (default: 100KB)",
+        description=(
+            "How much of a page's text the summarizer sees, in bytes of UTF-8 "
+            "(default: 100KB): the page converted whole (an HTML page's main "
+            "text, a PDF's text), then cut at this limit"
+        ),
         json_schema_extra={"ui_order": 59},
     )
     webfetch_max_pdf_bytes: int = Field(
         default=5242880,
+        ge=1,
+        le=104857600,
         title="WebFetch Max PDF Size",
         description="Maximum PDF size in bytes (default: 5MB). Separate from HTML limit because PDFs are larger but extracted text is compact.",
         json_schema_extra={"ui_order": 60},
@@ -290,7 +298,7 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         description=(
             "Largest HTML, text, Markdown, JSON or XML page read and saved, in "
             "bytes (default: 5MB; PDFs use webfetch_max_pdf_bytes instead). "
-            "The summarizer sees only the first webfetch_max_content_bytes of it."
+            "The summarizer sees the first webfetch_max_content_bytes of its text."
         ),
         json_schema_extra={"ui_order": 61},
     )
@@ -307,6 +315,18 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         title="Saved Pages Max Size",
         description="The oldest saved pages are deleted when ./.{app_name}/fetched grows past this many megabytes",
         json_schema_extra={"ui_order": 63},
+    )
+    arxiv_max_pdf_bytes: int = Field(
+        default=52428800,
+        ge=1,
+        le=524288000,
+        title="ArXiv Max PDF Size",
+        description=(
+            "Largest paper PDF ingest_arxiv_paper downloads, in bytes (default: "
+            "50MB); a larger one is not ingested. web_fetch keeps "
+            "webfetch_max_pdf_bytes."
+        ),
+        json_schema_extra={"ui_order": 64},
     )
 
     # Knowledge Base configuration

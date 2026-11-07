@@ -1,8 +1,67 @@
-"""HTML to Markdown conversion."""
+"""A fetched page as the text its summary is written from.
+
+``page_text`` is what ``web_fetch`` sends its summarizer: the whole body
+converted as the knowledge base converts a page (``convert_document``), then
+cut at ``webfetch_max_content_bytes``. ``HTMLToMarkdown`` is the converter
+``web_fetch`` used before, kept for applications that import it.
+"""
 
 from __future__ import annotations
 
 import html2text
+
+#: Ends a page's text cut at ``webfetch_max_content_bytes``.
+TRUNCATED = "\n\n[Content truncated at {limit} bytes of text]"
+#: What the summarizer is given for a page with no text (a scanned PDF, a
+#: page its scripts build).
+NO_TEXT = "[No text could be extracted from this page]"
+
+
+def page_text(
+    data: bytes,
+    *,
+    content_type: str,
+    extension: str,
+    charset: str | None,
+    url: str,
+    max_bytes: int,
+) -> tuple[str, bool]:
+    """A fetched page's text, and whether it was cut at ``max_bytes``.
+
+    The whole body is converted, so the limit counts text rather than markup
+    a converter drops: an HTML page's main text (trafilatura with the ``kb``
+    extra, else html2text of the whole page), a PDF's text, and any other
+    type ``web_fetch`` saves (``extension``, from ``saved_page_extension``)
+    as its text. A text longer than ``max_bytes`` of UTF-8 is cut on a
+    character boundary and ends with a marker naming the limit.
+
+    Runs pypdf, trafilatura or html2text over up to the download limit:
+    call it off the event loop.
+
+    Args:
+        data: The body as received.
+        content_type: The page's Content-Type.
+        extension: The extension the page is saved with.
+        charset: The page's charset; None reads it as UTF-8. Undecodable
+            bytes are replaced.
+        url: The URL the page was read from, which helps trafilatura.
+        max_bytes: The most text the summarizer gets, in bytes of UTF-8.
+
+    Raises:
+        UnsupportedDocument: html2text failed on the page.
+    """
+    from agentic_cli.memory.kb import convert_document
+
+    converted = convert_document(
+        data, content_type=content_type, extension=extension,
+        charset=charset or "utf-8", url=url,
+    )
+    text = converted.text.strip() or NO_TEXT
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text, False
+    kept = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return kept + TRUNCATED.format(limit=max_bytes), True
 
 
 class HTMLToMarkdown:

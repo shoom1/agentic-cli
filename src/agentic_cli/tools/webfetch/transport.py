@@ -37,7 +37,7 @@ class PinnedTransport(httpx.AsyncBaseTransport):
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=0),
         )
 
-    def _pin(self, request: httpx.Request) -> None:
+    async def _pin(self, request: httpx.Request) -> None:
         # The host as httpx sends it in the Host header: a Unicode host's
         # IDNA 2008 punycode. ``url.host`` is the Unicode form, which
         # getaddrinfo and the TLS check encode with IDNA 2003, so for ``faß.de``
@@ -45,7 +45,8 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         # ``xn--fa-hia.de``.
         host = request.url.raw_host.decode("ascii")
         port = request.url.port or (443 if request.url.scheme == "https" else 80)
-        pinned_ip = self._validator.resolve_and_validate(host, port)  # raises on block
+        # Raises on a blocked address, or a host that does not resolve.
+        pinned_ip = await self._validator.resolve_and_validate(host, port)
         # The client set the Host header from the original URL before this
         # transport runs; rewriting url.host to the IP does not touch it. Keep
         # Host + TLS SNI bound to the hostname.
@@ -54,7 +55,7 @@ class PinnedTransport(httpx.AsyncBaseTransport):
         request.extensions["sni_hostname"] = host
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        self._pin(request)
+        await self._pin(request)
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:

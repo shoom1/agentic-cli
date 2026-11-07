@@ -49,37 +49,92 @@ class TestIpIsSafe:
 
 
 class TestResolveAndValidate:
-    def test_public_host_returns_ip(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_public_host_returns_ip(self, monkeypatch):
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("93.184.216.34"))
-        assert URLValidator().resolve_and_validate("example.com", 443) == "93.184.216.34"
+        assert await URLValidator().resolve_and_validate("example.com", 443) == "93.184.216.34"
 
-    def test_private_host_rejected(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_private_host_rejected(self, monkeypatch):
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("127.0.0.1"))
         with pytest.raises(BlockedAddressError):
-            URLValidator().resolve_and_validate("localhost", 80)
+            await URLValidator().resolve_and_validate("localhost", 80)
 
-    def test_mixed_public_and_private_rejected(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_mixed_public_and_private_rejected(self, monkeypatch):
         # split-horizon: a public + a private answer → reject the whole host
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("93.184.216.34", "10.0.0.1"))
         with pytest.raises(BlockedAddressError):
-            URLValidator().resolve_and_validate("rebind.test", 443)
+            await URLValidator().resolve_and_validate("rebind.test", 443)
 
-    def test_ipv6_ula_rejected(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_ipv6_ula_rejected(self, monkeypatch):
         monkeypatch.setattr(socket, "getaddrinfo", stub_getaddrinfo("fc00::1"))
         with pytest.raises(BlockedAddressError):
-            URLValidator().resolve_and_validate("v6.test", 443)
+            await URLValidator().resolve_and_validate("v6.test", 443)
 
-    def test_unresolvable_host_raises_blocked(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_unresolvable_host_raises_blocked(self, monkeypatch):
         def boom(*a, **k):
             raise socket.gaierror("nope")
         monkeypatch.setattr(socket, "getaddrinfo", boom)
         with pytest.raises(BlockedAddressError):
-            URLValidator().resolve_and_validate("nx.test", 443)
+            await URLValidator().resolve_and_validate("nx.test", 443)
 
-    def test_ip_literal_public_ok_private_blocked(self):
-        assert URLValidator().resolve_and_validate("8.8.8.8", 443) == "8.8.8.8"
+    @pytest.mark.asyncio
+    async def test_ip_literal_public_ok_private_blocked(self):
+        assert await URLValidator().resolve_and_validate("8.8.8.8", 443) == "8.8.8.8"
         with pytest.raises(BlockedAddressError):
-            URLValidator().resolve_and_validate("169.254.169.254", 80)
+            await URLValidator().resolve_and_validate("169.254.169.254", 80)
+
+
+class TestResolutionOffTheLoop:
+    """The lookup runs in a worker thread (the loop's ``getaddrinfo``), as
+    httpx's own transport resolves: on the loop's thread a slow resolver froze
+    the spinner and held Ctrl+C for as long as each lookup took, two per
+    fetch (robots.txt, then the page) and one per redirect."""
+
+    @pytest.mark.asyncio
+    async def test_a_slow_lookup_does_not_stall_the_event_loop(self, monkeypatch):
+        import asyncio
+        import time
+
+        from agentic_cli.tools.webfetch.fetcher import ContentFetcher
+        from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
+
+        answer = stub_getaddrinfo("93.184.216.34")
+
+        def slow_getaddrinfo(host, port, *args, **kwargs):
+            time.sleep(0.3)
+            return answer(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", slow_getaddrinfo)
+
+        def handler(request):
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404)
+            return httpx.Response(200, text="hello", headers={"content-type": "text/plain"})
+
+        validator = URLValidator()
+        transport = mock_pinned_transport(handler, validator)
+        fetcher = ContentFetcher(validator, RobotsTxtChecker(transport=transport), transport)
+        ticks: list[float] = []
+
+        async def tick():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.create_task(tick())
+        await asyncio.sleep(0.03)
+        try:
+            result = await fetcher.fetch("https://example.com/page")
+            await asyncio.sleep(0.03)
+        finally:
+            ticker.cancel()
+
+        assert result.success is True
+        assert max(b - a for a, b in zip(ticks, ticks[1:])) < 0.1
 
 
 class TestValidateNoDNS:

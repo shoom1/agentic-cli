@@ -1,6 +1,6 @@
 """The ingestion converter (``agentic_cli.memory.kb.convert``).
 
-Ingestion has its own converter, separate from ``web_fetch``'s. A web page
+Ingestion owns the converter (``web_fetch``'s summaries use it too). A web page
 goes in as its main text, not its HTML: trafilatura (the ``kb`` extra) keeps
 the main text and reads the page's title, author, date and description;
 html2text, which keeps the whole page, is the fallback.

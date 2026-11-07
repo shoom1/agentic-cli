@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ class URLValidator:
 
     ``validate`` performs non-DNS policy (scheme, blocked domains, IP-literal
     safety). Authoritative resolution + pinning happens in
-    ``resolve_and_validate`` (used by PinnedTransport), which resolves every
+    ``resolve_and_validate`` (awaited by PinnedTransport), which resolves every
     A+AAAA and requires all of them to be globally routable.
     """
 
@@ -108,12 +109,17 @@ class URLValidator:
 
         return ValidationResult(valid=True)
 
-    def resolve_and_validate(self, host: str, port: int) -> str:
+    async def resolve_and_validate(self, host: str, port: int) -> str:
         """Resolve every A+AAAA for host and return one validated pinned IP.
 
         Rejects the whole host (BlockedAddressError) if ANY resolved address is
         unsafe, so a split-horizon / rebinding resolver cannot smuggle a private
         address alongside a public one. An IP-literal host is validated directly.
+
+        The lookup runs in a worker thread (the loop's ``getaddrinfo``), as
+        httpx's own transport resolves: on the loop's thread a slow resolver
+        froze every other task, the UI and Ctrl+C with it, for as long as each
+        lookup took.
         """
         literal = _as_ip_literal(host)
         if literal is not None:
@@ -122,7 +128,9 @@ class URLValidator:
             return str(literal)
 
         try:
-            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            infos = await asyncio.get_running_loop().getaddrinfo(
+                host, port, type=socket.SOCK_STREAM
+            )
         except socket.gaierror as exc:
             raise BlockedAddressError(f"could not resolve {host}: {exc}") from exc
 

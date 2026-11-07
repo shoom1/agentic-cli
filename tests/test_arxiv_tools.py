@@ -746,3 +746,195 @@ class TestIngestArxivPaper:
 
         assert result["success"] is False
         assert "kb manager" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# ingest_arxiv_paper's PDF: its own limit, and why a download failed
+# ---------------------------------------------------------------------------
+
+PAPER_ID = "2301.07041"
+PDF_PATH = f"/pdf/{PAPER_ID}"
+
+
+def _store_paper(source):
+    """``PAPER_ID``'s metadata in the source's cache, so no API request is made."""
+    source._store_entry(PAPER_ID, {
+        "arxiv_id": PAPER_ID, "title": "A paper", "authors": [],
+        "abstract": "The abstract.", "abs_url": f"https://arxiv.org/abs/{PAPER_ID}",
+        "pdf_url": f"https://arxiv.org{PDF_PATH}", "src_url": "", "published_date": "",
+        "updated_date": "", "categories": [], "primary_category": "",
+    })
+
+
+def _pdf(text: str, size: int = 0) -> bytes:
+    """A one-page PDF whose text is ``text``, padded with a comment to ``size`` bytes."""
+    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    if size:
+        out += b"%" + b"x" * max(size - 600, 0) + b"\n"
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)
+
+
+class _ArxivOrg:
+    """arxiv.org, faked behind web_fetch's real fetcher: ``pdfs`` maps a path to
+    its PDF, ``status`` a path to the status it answers instead; any other path
+    is a 404. ``requests`` holds each path asked for."""
+
+    def __init__(self) -> None:
+        self.pdfs: dict[str, bytes] = {}
+        self.status: dict[str, int] = {}
+        self.requests: list[str] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        self.requests.append(path)
+        if path in self.status:
+            return httpx.Response(self.status[path], text="refused")
+        if path in self.pdfs:
+            return httpx.Response(200, content=self.pdfs[path], headers={"content-type": "application/pdf"})
+        return httpx.Response(404, text="not found")
+
+
+@pytest.fixture
+def arxiv_org(monkeypatch):
+    """``get_or_create_fetcher`` builds its fetcher from the settings as it
+    does in an app; only DNS and the network under the pinned transport are
+    fakes."""
+    import socket
+
+    from agentic_cli.tools import webfetch_tool
+    from agentic_cli.tools.webfetch.transport import PinnedTransport
+
+    site = _ArxivOrg()
+
+    def _gai(host, port, *a, **k):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.42", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+    monkeypatch.setattr(
+        webfetch_tool, "PinnedTransport",
+        lambda validator: PinnedTransport(validator, inner=httpx.MockTransport(site.handle)),
+    )
+    monkeypatch.setattr(webfetch_tool, "_fetcher", None)
+    monkeypatch.setattr(webfetch_tool, "_fetcher_settings_snapshot", None)
+    return site
+
+
+class TestTheDownloadedPdf:
+    """A paper's PDF is read up to ``arxiv_max_pdf_bytes`` (50 MB; web_fetch's
+    5 MB limit was cutting papers with many figures, and the cut PDF was
+    stored as the paper). One over the limit fails the call; a download that
+    failed otherwise says why in the result, and a temporary refusal fails
+    the call rather than storing the abstract alone."""
+
+    def test_the_limit_setting(self):
+        from pydantic import ValidationError
+
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
+
+        assert BaseSettings().arxiv_max_pdf_bytes == 52428800
+        assert "arxiv_max_pdf_bytes" in PROJECT_SETTABLE_KEYS
+        assert BaseSettings(arxiv_max_pdf_bytes=524288000).arxiv_max_pdf_bytes == 524288000
+        with pytest.raises(ValidationError):
+            BaseSettings(arxiv_max_pdf_bytes=0)
+        with pytest.raises(ValidationError):
+            BaseSettings(arxiv_max_pdf_bytes=524288000 + 1)
+
+    @pytest.mark.asyncio
+    async def test_a_pdf_over_web_fetch_s_limit_is_ingested_whole(self, ingest_ctx, arxiv_org):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        pdf = _pdf("Attention replaces recurrence", size=6 * 1024 * 1024)
+        arxiv_org.pdfs[PDF_PATH] = pdf
+
+        result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is True
+        assert result["pdf_downloaded"] is True
+        doc = kb.get_document(result["document_id"])
+        assert kb.get_file_path(doc.id).read_bytes() == pdf
+        assert doc.content == "Attention replaces recurrence"
+
+    @pytest.mark.asyncio
+    async def test_a_pdf_over_the_limit_fails_the_call_naming_the_setting(self, ingest_ctx, arxiv_org):
+        source, kb = ingest_ctx
+        from agentic_cli.config import BaseSettings, SettingsContext
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        arxiv_org.pdfs[PDF_PATH] = _pdf("Attention replaces recurrence", size=3000)
+
+        with SettingsContext(BaseSettings(arxiv_max_pdf_bytes=2000)):
+            result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is False
+        assert "arxiv_max_pdf_bytes" in result["error"]
+        assert "2,000 bytes" in result["error"]
+        assert kb.list_documents() == []
+
+    @pytest.mark.asyncio
+    async def test_a_missing_pdf_stores_the_abstract_and_says_why(self, ingest_ctx, arxiv_org):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)  # arxiv.org answers 404 for its PDF
+
+        result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is True
+        assert result["pdf_downloaded"] is False
+        assert "HTTP 404" in result["pdf_download_error"]
+        assert kb.get_document(result["document_id"]).content == "The abstract."
+
+    @pytest.mark.asyncio
+    async def test_while_arxiv_refuses_requests_the_call_fails(self, ingest_ctx, arxiv_org):
+        """The source fails a call at once for a while after arXiv's
+        refusals: the paper is not stored as its abstract alone."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        arxiv_org.pdfs[PDF_PATH] = _pdf("Attention replaces recurrence")
+        source._refuse(60, "ArXiv is rate limiting requests")
+
+        result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is False
+        assert "try again in" in result["error"]
+        assert kb.list_documents() == []
+        assert arxiv_org.requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [429, 503])
+    async def test_a_pdf_download_refused_for_the_rate_fails_the_call(self, ingest_ctx, arxiv_org, status):
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        arxiv_org.status[PDF_PATH] = status
+
+        result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is False
+        assert f"HTTP {status}" in result["error"]
+        assert kb.list_documents() == []

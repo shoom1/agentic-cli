@@ -322,6 +322,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`arxiv_max_pdf_bytes`** (default 50 MB, at most 500 MB): the largest paper
+  PDF `ingest_arxiv_paper` downloads (`web_fetch` keeps
+  `webfetch_max_pdf_bytes`, 5 MB). A project's settings file may set it,
+  within those bounds. `ContentFetcher.fetch(max_pdf_bytes=)` gives one call
+  its own PDF limit; such a call neither reads nor fills the fetcher's cache.
 - **`agentic_cli.models`** (provisional: its names and signatures may change
   in 0.7.x) holds what agentic-cli knows about models, as data and logic with
   no provider SDK. It parses model references (`provider:model`, split on the
@@ -959,6 +964,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`webfetch_max_content_bytes` limits a page's converted text, not its raw
+  bytes.** It is how much of a page's text the summarizer sees, in bytes of
+  UTF-8 (default 100 KB), counted after the whole page is converted, for every
+  type, PDFs included. It and `webfetch_max_pdf_bytes` now have bounds (1 byte
+  to 10 MB of text, and to 100 MB), so a project's settings file can no longer
+  set 50 GiB or a negative value. `web_fetch` no longer uses `HTMLToMarkdown`,
+  and `ContentFetcher`'s `FetchResult.content` is no longer what the summary
+  is written from.
 - **On ADK, synchronous tools run in worker threads, as on Deep Agents.**
   A config-built app's synchronous function tools, the framework's and its
   own, now run in ADK's tool thread pool with a copy of the turn's context
@@ -1787,6 +1800,44 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A slow DNS server no longer freezes the app while `web_fetch` runs.** The
+  fetcher's SSRF-safe transport resolved each host with `socket.getaddrinfo`
+  on the event loop's thread: a fetch makes at least two lookups (robots.txt,
+  then the page) and one per redirect, an arXiv PDF download one more, and for
+  as long as each took the spinner froze, Ctrl+C did nothing and parallel
+  fetches waited on each other's lookups. The lookup now runs in a worker
+  thread (the loop's `getaddrinfo`, as httpx's own transport resolves); every
+  A and AAAA address is still checked, any unsafe one refuses the host, and
+  the connection is pinned as before. `URLValidator.resolve_and_validate` is
+  now a coroutine.
+- **`web_fetch` summarizes the page's text, whatever its type, within the
+  limit.** `webfetch_max_content_bytes` (100 KB) cut the raw HTML before it
+  was converted, so on a page whose head, scripts and menus fill the first 100
+  KB the summary was written from markup and navigation, without the article.
+  Markdown, XHTML, Atom, RSS, `+json` and `+xml` pages, saved as text, reached
+  the summarizer as `[Binary content: …]`, and a PDF's text reached it
+  uncapped (1.87 million characters for a 300-page PDF: a context overflow or
+  a very expensive call), extracted on the event loop. The whole page is now
+  converted in a worker thread, as the knowledge base converts it
+  (`convert_document`: an HTML page's main text through trafilatura, else
+  html2text; a PDF's text; any other type `web_fetch` saves as its text), and
+  the text is then cut at the limit with a marker naming it; `truncated` says
+  the text, or the download, was cut. A page that is not text (an image, an
+  archive) is an error rather than a summary of nothing. As a backstop,
+  `BaseWorkflowManager.summarize` (web_fetch's summaries and the knowledge
+  base's) and session fact extraction cut a prompt longer than the default
+  model takes in the middle, keeping its start and its end.
+- **`ingest_arxiv_paper` stores a paper only from its whole PDF, and says why
+  when it has none.** The download went through `web_fetch`'s 5 MB PDF limit,
+  and the cut bytes were stored as the paper (pypdf reads no page of them)
+  with `pdf_downloaded: True`; any other download failure, a rate-limit
+  refusal included, stored the abstract alone with `success: True` and the
+  reason only in the document's metadata. The PDF is now read up to its own
+  limit, `arxiv_max_pdf_bytes` (50 MB): a larger one fails the call, naming
+  the setting, and nothing is stored. While arXiv refuses requests (the source
+  failing calls after arXiv's refusals, or HTTP 429 or 503 for the PDF) the
+  call fails too, so it can be made again later; any other failure (no PDF, a
+  404) stores the abstract and returns the reason as `pdf_download_error`.
 - **Two terminals of one app no longer erase each other's model listings.**
   Each model catalog rewrote the whole model cache from what it had read at
   startup, so a listing another process (another terminal, another project of

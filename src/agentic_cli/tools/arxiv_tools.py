@@ -15,7 +15,12 @@ capture it in a closure.
 
 from typing import Any
 
-from agentic_cli.tools.arxiv_source import ARXIV_API_URL, ARXIV_PDF_URL, ArxivRequestError
+from agentic_cli.tools.arxiv_source import (
+    ARXIV_API_URL,
+    ARXIV_PDF_URL,
+    ArxivRequestError,
+    PdfTooLargeError,
+)
 from agentic_cli.tools.arxiv_source import _clean_arxiv_id  # re-exported for tests/back-compat
 from agentic_cli.tools.registry import (
     register_tool,
@@ -212,12 +217,15 @@ async def _ingest_arxiv_paper_with_services(
     2. Fetch metadata via ``source.fetch_by_id`` — a cache hit if the
        paper was returned by a prior search, else a single API call.
     3. Download the PDF from the feed-provided ``pdf_url`` (the source
-       waits on the shared rate limiter first).
+       waits on the shared rate limiter first), up to ``arxiv_max_pdf_bytes``.
     4. Ingest the PDF through ``KnowledgeBase.ingest_bytes``, citing the
        abstract page, with the abstract as fallback text; one summarizer
        call writes the summary and the sidecar.
-    5. On PDF download failure, ingest the abstract as text so the agent
-       at least has searchable content.
+    5. A PDF over the limit, or a refusal that passes (arXiv rate limiting),
+       fails the call: nothing is stored, and a later call can store the
+       paper. Any other download failure (no PDF, a 404) ingests the
+       abstract as text so the agent at least has searchable content, and
+       the result says why (``pdf_download_error``).
     """
     from agentic_cli.memory.kb import SourceType
 
@@ -253,11 +261,15 @@ async def _ingest_arxiv_paper_with_services(
     pdf_url = paper.get("pdf_url", "")
 
     # 2. PDF download via the source's encapsulated downloader (shared rate
-    # limiter, shared httpx import). On any failure the abstract goes in.
+    # limiter, shared httpx import). A PDF too large to read whole, or a
+    # refusal that passes, fails the call; on any other failure the abstract
+    # goes in.
     file_bytes: bytes | None = None
     if pdf_url:
         try:
             file_bytes = await source.download_pdf(pdf_url)
+        except (PdfTooLargeError, ArxivRequestError) as exc:
+            return {"success": False, "error": str(exc)}
         except Exception as exc:
             meta["pdf_download_error"] = str(exc)
 
@@ -287,7 +299,7 @@ async def _ingest_arxiv_paper_with_services(
         return {"success": False, "error": f"Ingestion failed: {exc}"}
 
     doc = found.document
-    return {
+    result = {
         "success": True,
         "document_id": doc.id,
         "title": doc.title,
@@ -295,6 +307,9 @@ async def _ingest_arxiv_paper_with_services(
         "summary": doc.summary,
         "pdf_downloaded": file_bytes is not None,
     }
+    if "pdf_download_error" in meta:
+        result["pdf_download_error"] = meta["pdf_download_error"]
+    return result
 
 
 @register_tool(
@@ -321,7 +336,9 @@ async def ingest_arxiv_paper(
     Returns:
         Dictionary with document_id, title, chunks_created, and a
         pdf_downloaded flag (False if PDF fetch failed and the abstract
-        was used as fallback content).
+        was used as fallback content, with the reason in
+        pdf_download_error). A PDF over arxiv_max_pdf_bytes, or arXiv
+        refusing requests for a while, is an error: nothing is stored.
     """
     source = require_service(ARXIV_SOURCE)
     if isinstance(source, dict):

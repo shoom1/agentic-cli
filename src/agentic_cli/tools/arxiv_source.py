@@ -79,6 +79,11 @@ class ArxivRequestError(RuntimeError):
     """A request arXiv refused, failed or did not answer; the message says which."""
 
 
+class PdfTooLargeError(RuntimeError):
+    """A paper's PDF is larger than ``arxiv_max_pdf_bytes``; the message
+    names the limit."""
+
+
 def _retry_after(response: httpx.Response) -> float | None:
     """The wait a ``Retry-After`` header asks for, in seconds (it gives a
     number of seconds or an HTTP date, ``-0000`` read as UTC), or None
@@ -378,7 +383,9 @@ class ArxivSearchSource(SearchSource):
 
         Arxiv's crawl policy does not distinguish the API host from
         arxiv.org, so a download waits its turn as ``asearch`` and
-        ``fetch_by_id`` do, and no other request runs meanwhile.
+        ``fetch_by_id`` do, and no other request runs meanwhile. The PDF is
+        read up to ``arxiv_max_pdf_bytes`` (web_fetch's ``webfetch_max_pdf_bytes``
+        is web_fetch's): a cut PDF is no paper, so one over it is an error.
 
         Args:
             pdf_url: The PDF URL to download (typically the ``pdf_url``
@@ -389,13 +396,19 @@ class ArxivSearchSource(SearchSource):
             Raw PDF bytes.
 
         Raises:
-            RuntimeError: If the fetch is blocked or fails. The ``pdf_url`` is
-                taken from a remote Atom feed, so it is attacker-influenceable;
-                routing the download through the shared ``ContentFetcher`` reuses
-                the SSRF guard (private-IP/redirect validation), the byte cap,
-                and DNS-rebinding checks rather than issuing a raw, unvalidated
-                GET that follows redirects to arbitrary hosts.
+            ArxivRequestError: A refusal that passes: the source fails calls
+                for a while after arXiv's refusals (``_take_turn``), or
+                arxiv.org answered HTTP 429 or 503.
+            PdfTooLargeError: The PDF is larger than ``arxiv_max_pdf_bytes``.
+            RuntimeError: If the fetch is blocked or fails otherwise. The
+                ``pdf_url`` is taken from a remote Atom feed, so it is
+                attacker-influenceable; routing the download through the shared
+                ``ContentFetcher`` reuses the SSRF guard (private-IP/redirect
+                validation), the byte cap, and DNS-rebinding checks rather than
+                issuing a raw, unvalidated GET that follows redirects to
+                arbitrary hosts.
         """
+        from agentic_cli.config import get_settings
         from agentic_cli.tools.webfetch_tool import get_or_create_fetcher
 
         # The URL comes from the feed. ingest_arxiv_paper declares ARXIV_PDF_URL
@@ -408,12 +421,25 @@ class ArxivSearchSource(SearchSource):
             # declares it reads.
             return None if _is_arxiv_pdf_url(next_url) else f"outside {ARXIV_PDF_URL}/"
 
+        limit = get_settings().arxiv_max_pdf_bytes
         fetcher = get_or_create_fetcher()
         async with self._gate():
             await self._take_turn()
-            result = await fetcher.fetch(pdf_url, timeout=int(timeout), authorize=only_pdfs)
+            result = await fetcher.fetch(
+                pdf_url, timeout=int(timeout), authorize=only_pdfs, max_pdf_bytes=limit,
+            )
         if not result.success:
+            if result.status_code in _RATE_LIMITED:
+                raise ArxivRequestError(
+                    f"ArXiv refused the PDF download (HTTP {result.status_code}); "
+                    "try again later"
+                )
             raise RuntimeError(f"PDF fetch blocked or failed: {result.error}")
+        if result.raw_truncated:
+            raise PdfTooLargeError(
+                f"The PDF is larger than arxiv_max_pdf_bytes ({limit:,} bytes): "
+                "the paper is not ingested. Raise the setting to ingest it."
+            )
 
         content = result.content
         if content is None:

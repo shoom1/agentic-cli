@@ -1,6 +1,7 @@
 """Turn a file's bytes into the text the knowledge base stores.
 
-Ingestion owns this converter; ``web_fetch`` keeps its own for summaries.
+Ingestion owns this converter; ``web_fetch`` writes its summaries from the
+same text (``tools/webfetch/converter.py::page_text``).
 
 - HTML goes through trafilatura when it is installed (the ``kb`` extra): it
   keeps a page's main text as Markdown, drops menus, sidebars, footers, links
