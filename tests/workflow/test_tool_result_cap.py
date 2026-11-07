@@ -262,7 +262,8 @@ class TestTurns:
     async def test_the_model_reads_the_note_of_a_cut_job_result(
         self, project, monkeypatch, provider
     ):
-        # OpenAI Responses is sent a job result's "result" alone.
+        # OpenAI Responses is sent a job result's "result" alone (before
+        # google-adk 2.14; from 2.14 the whole dict, so the note twice).
         if provider == "claude":
             api = FakeAPI(Answers([call("cap_probe_job"), says("Read it.")]))
             route(monkeypatch, anthropic, "AsyncAnthropic", api)
