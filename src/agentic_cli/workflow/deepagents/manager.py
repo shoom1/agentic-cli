@@ -737,9 +737,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         the run callback reports from inside a node (a summary that starts,
         its usage, the summary it made) is merged into the stream as it
         happens, so it shows while the node still runs, before the node's
-        own output. The conversation's row in the session index is written
-        as the turn starts, the input counted, and, however the turn ends,
-        from what it left (``_recording``).
+        own output. The turn's live events are its reporter too
+        (``live_events.current()``), which is how the summarization
+        middleware knows the turn a failed summary belongs to. The
+        conversation's row in the session index is written as the turn
+        starts, the input counted, and, however the turn ends, from what it
+        left (``_recording``).
         """
         processor = DeepAgentsEventProcessor(
             root=self._root_name,
@@ -769,18 +772,19 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             await asyncio.shield(started)
             # aclosing: a cancelled turn closes the merge, which closes the
             # stream, and its tasks, now, in the task that iterates it.
-            async with contextlib.aclosing(merged(stream, live)) as items:
-                async for item in items:
-                    if isinstance(item, WorkflowEvent):
-                        events = [item]
-                    else:
-                        namespace, mode, payload = item
-                        events = processor.process(namespace, mode, payload)
-                    for event in events:
-                        event = self._apply_event_hook(event)
-                        if event is not None:
-                            count += 1
-                            yield event
+            with live_events.reporting(live):
+                async with contextlib.aclosing(merged(stream, live)) as items:
+                    async for item in items:
+                        if isinstance(item, WorkflowEvent):
+                            events = [item]
+                        else:
+                            namespace, mode, payload = item
+                            events = processor.process(namespace, mode, payload)
+                        for event in events:
+                            event = self._apply_event_hook(event)
+                            if event is not None:
+                                count += 1
+                                yield event
         except (asyncio.CancelledError, GeneratorExit):
             # Its open calls are answered before the next turn's first model
             # call, from what the record kept (InterruptedCallsMiddleware).

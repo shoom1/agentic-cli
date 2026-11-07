@@ -18,6 +18,11 @@ A model whose window is unknown (an OpenAI-compatible provider's model whose
 so it fails where the agents are built, naming the model and its
 ``max_tokens``.
 
+**A summary that failed** is checked again before every model call of its
+turn, over the same range, and would fail again. ``FailedSummaries`` keeps
+it for the rest of that turn, until its range has grown by ``MIN_SAVING`` of
+the trigger.
+
 **Overflow errors.** Each provider says "too long" its own way:
 ``is_context_overflow`` reads the error's attributes (status, code, text,
 the SDK it came from) and never imports a provider SDK, and
@@ -30,6 +35,8 @@ Imports nothing from ``cli/``, no provider SDK and no LangChain at import.
 
 from __future__ import annotations
 
+import weakref
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -39,6 +46,7 @@ from agentic_cli.workflow.config import AgentGraphError
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.models import ResolvedModel
+    from agentic_cli.workflow.live_events import LiveEvents
 
 #: The window assumed for a model whose window is unknown.
 UNKNOWN_WINDOW = 128_000
@@ -46,6 +54,9 @@ UNKNOWN_WINDOW = 128_000
 MIN_BUDGET = 16_000
 #: The share of the trigger kept word for word after a summary.
 KEEP_FRACTION = 0.12
+#: The smallest saving worth a summary, as a share of the trigger; also how
+#: much a range must grow before a summary that failed in a turn is tried again.
+MIN_SAVING = 0.2
 #: The ``error_code`` of the error a conversation too long for its model ends in.
 OVERFLOW_ERROR_CODE = "CONTEXT_OVERFLOW"
 
@@ -131,6 +142,51 @@ class CompactResult:
     messages_summarized: int
     tokens_before: int
     tokens_after: int
+
+
+class FailedSummaries:
+    """The automatic summaries that failed in the current turn, by range.
+
+    A conversation past its trigger is checked for a summary before every
+    model call, and a summary that failed (no text written, a provider's
+    error) fails again over the same range, each attempt paying for all of
+    it: a turn of 20 tool steps sent the range 20 times. So a failure is
+    kept for its turn, whose later calls skip its range (``skips``) until it
+    has grown by ``MIN_SAVING`` of the trigger, the saving a summary must be
+    worth. A range is known by where it starts: after a summary written
+    since (``/compact``, an overflow's), the range starts past it, a range of
+    its own. The next turn tries again.
+
+    The turn is its ``LiveEvents`` (``workflow/live_events.py``), held
+    weakly, so a finished turn's is not kept alive; without one, nothing is
+    kept.
+
+    Args:
+        trigger: The trigger the growth is a share of, in tokens.
+    """
+
+    def __init__(self, trigger: int) -> None:
+        self._growth = MIN_SAVING * trigger
+        self._turn: weakref.ref[LiveEvents] | None = None
+        # The size of each range that failed, in tokens, by where it starts.
+        self._failed: dict[Hashable, int] = {}
+
+    def skips(self, turn: "LiveEvents | None", start: Hashable, tokens: int) -> bool:
+        """Whether the summary of ``tokens`` from ``start`` failed in ``turn``,
+        and the range has not grown enough since."""
+        failed = self._failed.get(start) if self._is_current(turn) else None
+        return failed is not None and tokens < failed + self._growth
+
+    def failed(self, turn: "LiveEvents | None", start: Hashable, tokens: int) -> None:
+        """Keep, for ``turn``, that the summary of ``tokens`` from ``start`` failed."""
+        if turn is None:
+            return
+        if not self._is_current(turn):
+            self._turn, self._failed = weakref.ref(turn), {}
+        self._failed[start] = tokens
+
+    def _is_current(self, turn: "LiveEvents | None") -> bool:
+        return turn is not None and self._turn is not None and self._turn() is turn
 
 
 def context_budget(resolved: "ResolvedModel", settings: "BaseSettings") -> ContextBudget:

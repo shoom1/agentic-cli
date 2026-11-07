@@ -41,10 +41,12 @@ of the events the summary's range covers; the session keeps them all, for
   (``report_stored``), so a cancel while it is stored never says it was
   made.
 - **A failure** of any kind is one recoverable ``ERROR`` a turn; nothing is
-  written, ADK goes on with the whole history, and its next model call tries
-  again. A summary asked for (``manual``) reports none of its own: its
-  caller reads ``last_error``. A cancel is no failure: it ends the turn, and
-  nothing is written.
+  written, and ADK goes on with the whole history. The turn's later model
+  calls skip the range that failed (``FailedSummaries``) until it has grown
+  by ``MIN_SAVING`` of the trigger: it would fail again, paid for in full each
+  time. The next turn tries again. A summary asked for (``manual``) is never
+  skipped and reports none of its own: its caller reads ``last_error``. A
+  cancel is no failure: it ends the turn, and nothing is written.
 
 ADK's own pass after each turn would make the user wait for a summary after
 the answer; ``NoAfterTurnCompactionRunner`` switches it off (it would also
@@ -77,7 +79,9 @@ from agentic_cli.workflow import live_events
 from agentic_cli.workflow.adk.model_factory import generate_text
 from agentic_cli.workflow.context import (
     ESTIMATE_MARGIN,
+    MIN_SAVING,
     CompactResult,
+    FailedSummaries,
     chars_per_token,
     usage_fields,
 )
@@ -99,8 +103,6 @@ logger = Loggers.workflow()
 SUMMARY_MAX_TOKENS = 8_000
 #: The most of one tool call or result the summary call reads, in characters.
 TOOL_PAYLOAD_CHARS = 2_000
-#: The smallest saving worth a summary, as a share of the trigger.
-MIN_SAVING = 0.2
 
 #: What the user is told, once a turn, when a summary could not be written.
 SUMMARY_FAILED = (
@@ -183,9 +185,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         settings: The manager's settings (retries, timeouts).
         app_name: The application's name, which some providers are told.
         manual: Asked for now (``/compact``, an overflow): written whoever
-            runs, whatever the saving. A failure is the caller's to report
-            (``last_error``): no warning of its own. What it did, too: its
-            ``CONTEXT_TRIMMED`` waits for ``report_stored``.
+            runs, whatever the saving, never skipped for a failure. A
+            failure is the caller's to report (``last_error``): no warning of
+            its own, and not kept. What it did, too: its ``CONTEXT_TRIMMED``
+            waits for ``report_stored``.
         focus: What the summary should keep above all (``/compact <focus>``).
         source: What ``CONTEXT_TRIMMED`` names as the summary's cause:
             ``"compact"`` when ``manual``, else ``"summarization"``, unless given
@@ -231,10 +234,15 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         self._app_name = app_name
         # A manual summary's CONTEXT_TRIMMED, until its caller stores it.
         self._unreported: WorkflowEvent | None = None
+        # The ranges that failed this turn, and the one the call in progress
+        # is for: where it starts and its size in tokens.
+        self._failures = FailedSummaries(budget.trigger)
+        self._paying_for: tuple[float, int] | None = None
 
     async def maybe_summarize_events(self, *, events: list[Event]) -> Event | None:
         self.last_error = None
         self._unreported = None
+        self._paying_for = None
         if not self.manual and running_agent() != self.root:
             return None
         try:
@@ -251,11 +259,15 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         summarized, kept = events[:cut], events[cut:]
         # The summary so far is replaced, not removed: it is no saving.
         measured = summarized[1:] if _is_seed(summarized[0]) else summarized
-        if not self.manual and estimate_event_tokens(measured, kind) < (
-            MIN_SAVING * self.budget.trigger
-        ):
-            return None
+        start, size = measured[0].timestamp, estimate_event_tokens(measured, kind)
+        if not self.manual:
+            if size < MIN_SAVING * self.budget.trigger:
+                return None
+            if self._failures.skips(live_events.current(), start, size):
+                logger.debug("adk_summary_not_retried", agent=self.root, tokens=size)
+                return None
 
+        self._paying_for = (start, size)
         live_events.report(WorkflowEvent.context_summarizing(self.root))
         try:
             summary, usage = await generate_text(
@@ -379,7 +391,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         return event
 
     def _failed(self, error: Exception) -> None:
-        """One warning a turn: ADK goes on with the whole history and tries again.
+        """One warning a turn: ADK goes on with the whole history, and the
+        turn's later calls skip the range that failed (``FailedSummaries``).
 
         A summary asked for reports nothing itself: its caller reads
         ``last_error`` (``/compact`` raises it).
@@ -392,6 +405,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         if self.manual:
             return
         live = live_events.current()
+        if self._paying_for is not None:
+            self._failures.failed(live, *self._paying_for)
         if live is not None and live.first(SUMMARY_FAILED_CODE):
             live.emit(WorkflowEvent.error(
                 SUMMARY_FAILED, error_code=SUMMARY_FAILED_CODE, recoverable=True

@@ -863,6 +863,16 @@ class TestTheDeepAgentsItRestsOn:
              "cutoff_message_id"},
         )
 
+    def test_a_failed_summary_s_range_is_found_as_deep_agents_finds_it(self):
+        """``_range`` cuts as the middleware does: the messages a request
+        sends (``_get_effective_messages``), cut by its own rule
+        (``_determine_cutoff_index``). A rename would fail every due check."""
+        effective = SummarizationMiddleware._get_effective_messages
+        cutoff = SummarizationMiddleware._determine_cutoff_index
+
+        assert list(inspect.signature(effective).parameters) == ["self", "request"]
+        assert list(inspect.signature(cutoff).parameters) == ["self", "messages"]
+
     def test_an_event_is_applied_as_the_summary_and_the_messages_after_its_cut(self):
         apply = SummarizationMiddleware._apply_event_to_messages
         messages = [HumanMessage("One?", id="h1"), AIMessage("A1", id="a1"),
