@@ -17,8 +17,9 @@ LIVE_ADK_CLAUDE_BUDGET_MODEL, LIVE_ADK_GPT_MODEL, LIVE_ADK_OPENROUTER_MODEL or
 LIVE_ADK_OPENROUTER_CLAUDE_MODEL (a ``provider:model`` reference). The
 openrouter case's model reasons in plain text; the openrouter-claude case's
 (an ``openrouter:anthropic/claude-…`` model that takes a reasoning effort)
-sends its signed thinking as ``reasoning_details``, which must go back with
-the tool result for the step after the call to succeed. The vLLM case runs
+sends its signed thinking as ``reasoning_details``, which go back with the
+tool result: the case checks that OpenRouter takes them (without them the
+loop also completes, as OpenRouter makes up for them). The vLLM case runs
 only when LIVE_VLLM_BASE_URL names a server (its model: LIVE_VLLM_MODEL, a
 Qwen3-style model whose chat template switches thinking).
 

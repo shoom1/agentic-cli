@@ -10,10 +10,11 @@ additions:
   thinking box fills for open models. The thoughts stay out of later
   requests (``_without_thoughts``): ADK would send them as answer text.
 - Reasoning details. OpenRouter also sends ``reasoning_details``, the
-  structured reasoning a provider needs back on the assistant message that
+  structured reasoning it asks to have back on the assistant message that
   called a tool: Claude's signed thinking, Gemini's thought signatures,
   OpenAI's encrypted reasoning. Streamed, they come in pieces, merged here
-  as ChatOpenRouter merges them. They are kept on the thought part, as its
+  much as ChatOpenRouter merges them (``_merged`` says how they differ).
+  They are kept on the thought part, as its
   ``thought_signature`` (JSON naming the model that wrote them), so the
   session holds them; a later request to that model carries them on that
   turn's assistant message (``_put_back_details``), and never one to

@@ -1783,13 +1783,14 @@ step; each entry says what to use instead.
 - **On ADK, an OpenRouter model's reasoning details go back to it with the
   tool results, as on Deep Agents.** Beside its reasoning text OpenRouter
   sends `reasoning_details` (Claude's signed thinking, Gemini's thought
-  signatures, OpenAI's encrypted reasoning), which the model needs back on
-  the assistant message that called a tool. ADK's adapter
+  signatures, OpenAI's encrypted reasoning), which OpenRouter asks to have
+  back on the assistant message that called a tool. ADK's adapter
   (`OpenAICompatibleLlm`) kept only the text and left every thought out of
-  the next request, so `openrouter:anthropic/claude-…` or
-  `openrouter:google/gemini-3…` with thinking on could fail at the second
-  step of a tool loop, or lose its reasoning there. The details, streamed
-  pieces merged as ChatOpenRouter merges them, are now kept on the thought
+  the next request. OpenRouter makes up for missing details today (a tool
+  loop on `openrouter:anthropic/claude-sonnet-4.5` or
+  `openrouter:google/gemini-3-flash-preview` completes without them); with
+  them the model gets its own reasoning back, as OpenRouter documents. The
+  details, streamed pieces merged in order, are now kept on the thought
   part (its `thought_signature`, with the model that wrote them), so the
   session holds them, also across a restart, and go back on that turn's
   assistant message with every later request to that model, OpenAI's `rs_`
