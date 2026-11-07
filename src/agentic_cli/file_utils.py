@@ -18,18 +18,86 @@ def sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
 
 
+#: The most patterns one brace pattern may stand for.
+MAX_BRACE_ALTERNATIVES = 100
+
+
+def expand_braces(pattern: str) -> list[str]:
+    """The patterns a brace pattern stands for, as a shell expands it.
+
+    ``*.{js,ts}`` is ``*.js`` and ``*.ts``; braces nest (``{a,b{1,2}}``). A
+    brace with no comma inside (``{x}``), one never closed, and one inside a
+    ``[...]`` class are literal. Duplicates are dropped, first one kept.
+
+    Raises:
+        ValueError: the pattern stands for more than
+            ``MAX_BRACE_ALTERNATIVES`` patterns.
+    """
+    expanded: list[str] = []
+    pending = [pattern]
+    while pending:
+        current = pending.pop(0)
+        group = _first_brace_group(current)
+        if group is None:
+            if current not in expanded:
+                expanded.append(current)
+            continue
+        start, end, alternatives = group
+        pending[:0] = [current[:start] + alt + current[end + 1:] for alt in alternatives]
+        if len(expanded) + len(pending) > MAX_BRACE_ALTERNATIVES:
+            raise ValueError(
+                f"Pattern stands for more than {MAX_BRACE_ALTERNATIVES} alternatives: {pattern!r}"
+            )
+    return expanded
+
+
+def _first_brace_group(pattern: str) -> tuple[int, int, list[str]] | None:
+    """The first ``{…,…}`` group in ``pattern``: where it starts and ends, and
+    its alternatives; None when there is none."""
+    i = 0
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "[":
+            close = pattern.find("]", i + 2)  # "[]...]" holds a "]"
+            i = close + 1 if close != -1 else i + 1
+            continue
+        if char == "{":
+            depth, commas, j = 0, [], i
+            while j < len(pattern):
+                if pattern[j] == "{":
+                    depth += 1
+                elif pattern[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif pattern[j] == "," and depth == 1:
+                    commas.append(j)
+                j += 1
+            if j < len(pattern) and commas:
+                bounds = [i, *commas, j]
+                return i, j, [pattern[a + 1:b] for a, b in zip(bounds, bounds[1:])]
+        i += 1
+    return None
+
+
 def glob_pattern_escapes_root(pattern: str) -> bool:
     """True if a glob pattern would search outside its base directory.
 
     Rejects absolute patterns and any pattern containing a ``..`` path
-    component. ``pathlib.Path.glob`` does not normalize ``..``, so a pattern
-    like ``../*`` escapes the base directory even though the permission engine
+    component, in any of the patterns its braces stand for (``{x,../*}``).
+    ``pathlib.Path.glob`` does not normalize ``..``, so a pattern like
+    ``../*`` escapes the base directory even though the permission engine
     only authorized that base. Callers should reject such patterns before
-    globbing.
+    globbing. A pattern that stands for too many patterns counts as one that
+    escapes.
     """
-    if os.path.isabs(pattern):
+    try:
+        patterns = expand_braces(pattern)
+    except ValueError:
         return True
-    return ".." in re.split(r"[\\/]+", pattern)
+    return any(
+        os.path.isabs(p) or ".." in re.split(r"[\\/]+", p) for p in patterns
+    )
 
 
 def path_is_within(path: Path, root: Path) -> bool:

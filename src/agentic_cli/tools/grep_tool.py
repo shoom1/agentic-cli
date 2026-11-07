@@ -10,10 +10,11 @@ import signal
 import subprocess
 import tempfile
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Literal
 
-from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
+from agentic_cli.file_utils import expand_braces, glob_pattern_escapes_root, path_is_within
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
@@ -82,6 +83,22 @@ def grep(
             "path": str(search_path),
         }
 
+    # The Python search has no braces: "*.{js,ts}" is searched as "*.js" and
+    # "*.ts" (ripgrep gets the same list, one --glob each).
+    file_patterns = None
+    if file_pattern:
+        try:
+            file_patterns = expand_braces(file_pattern)
+        except ValueError as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "matches": [],
+                "total_matches": 0,
+                "files_searched": 0,
+                "truncated": False,
+            }
+
     # The permission engine authorizes only `path`; a file_pattern like "../*"
     # or an absolute pattern would escape that authorized root, so reject it.
     if file_pattern and glob_pattern_escapes_root(file_pattern):
@@ -101,7 +118,7 @@ def grep(
             path=search_path,
             recursive=recursive,
             ignore_case=ignore_case,
-            file_pattern=file_pattern,
+            file_patterns=file_patterns,
             context_lines=context_lines,
             max_results=max_results,
             use_regex=use_regex,
@@ -114,7 +131,7 @@ def grep(
         path=search_path,
         recursive=recursive,
         ignore_case=ignore_case,
-        file_pattern=file_pattern,
+        file_patterns=file_patterns,
         context_lines=context_lines,
         max_results=max_results,
         use_regex=use_regex,
@@ -137,7 +154,7 @@ def _grep_with_ripgrep(
     path: Path,
     recursive: bool,
     ignore_case: bool,
-    file_pattern: str | None,
+    file_patterns: list[str] | None,
     context_lines: int,
     max_results: int,
     use_regex: bool,
@@ -158,7 +175,7 @@ def _grep_with_ripgrep(
     if context_lines > 0:
         cmd.extend(["-C", str(context_lines)])
 
-    if file_pattern:
+    for file_pattern in file_patterns or ():
         cmd.extend(["--glob", file_pattern])
     # ripgrep skips hidden files below the root, but a --glob overrides that
     # (`-g '*'` searches .env and .git): the last glob that matches wins, so
@@ -213,7 +230,7 @@ def _grep_with_ripgrep(
             path=path,
             recursive=recursive,
             ignore_case=ignore_case,
-            file_pattern=file_pattern,
+            file_patterns=file_patterns,
             context_lines=context_lines,
             max_results=max_results,
             use_regex=use_regex,
@@ -321,6 +338,15 @@ def _grep_with_ripgrep(
     }
 
 
+def _unique(paths: Iterator[Path]) -> Iterator[Path]:
+    """``paths`` without repeats, in order."""
+    seen: set[Path] = set()
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            yield p
+
+
 def _is_hidden_below(file_path: Path, root: Path) -> bool:
     """Whether a component of ``file_path`` below ``root`` starts with a dot."""
     try:
@@ -345,7 +371,7 @@ def _grep_python(
     path: Path,
     recursive: bool,
     ignore_case: bool,
-    file_pattern: str | None,
+    file_patterns: list[str] | None,
     context_lines: int,
     max_results: int,
     use_regex: bool,
@@ -377,8 +403,13 @@ def _grep_python(
     # Get files to search, capping how many we materialize.
     if path.is_file():
         candidates = iter([path])
-    elif file_pattern:
-        candidates = path.rglob(file_pattern) if recursive else path.glob(file_pattern)
+    elif file_patterns:
+        # A file two alternatives match is searched once.
+        candidates = _unique(
+            f
+            for file_pattern in file_patterns
+            for f in (path.rglob(file_pattern) if recursive else path.glob(file_pattern))
+        )
     else:
         candidates = path.rglob("*") if recursive else path.iterdir()
 

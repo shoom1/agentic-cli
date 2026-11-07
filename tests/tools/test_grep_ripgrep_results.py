@@ -62,7 +62,7 @@ def notes(tmp_path) -> Path:
 
 
 def _python_search(path: Path, **args) -> dict:
-    options = dict(recursive=True, ignore_case=False, file_pattern=None, context_lines=0,
+    options = dict(recursive=True, ignore_case=False, file_patterns=None, context_lines=0,
                    max_results=100, use_regex=True, output_mode="content")
     return grep_mod._grep_python(path=path, **{**options, **args})
 
