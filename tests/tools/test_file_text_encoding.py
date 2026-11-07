@@ -125,3 +125,62 @@ def test_diff_compare_reads_utf8_whatever_the_locale(tmp_path, cp1252_locale):
     assert result["success"] is True
     assert "+naïf" in result["diff"]
     assert "-naïve" in result["diff"]
+
+
+def test_a_multi_line_edit_matches_in_a_file_with_mixed_endings(tmp_path):
+    """read_file shows every line ending as LF, so the model's old_text has
+    LF; each line keeps the ending it had, and the new lines take the ending
+    of the text they replace."""
+    target = tmp_path / "config.ini"
+    target.write_bytes(b"[a]\r\nk=1\r\n[b]\nk=2\n")
+
+    result = edit_file(str(target), "[a]\nk=1", "[a]\nk=10\nj=0")
+
+    assert result["success"] is True
+    assert target.read_bytes() == b"[a]\r\nk=10\r\nj=0\r\n[b]\nk=2\n"
+
+
+def test_a_multi_line_edit_matches_in_a_file_with_cr_endings(tmp_path):
+    target = tmp_path / "old_mac.txt"
+    target.write_bytes(b"x\ry\rz\r")
+
+    result = edit_file(str(target), "x\ny", "X\nY")
+
+    assert result["success"] is True
+    assert target.read_bytes() == b"X\rY\rz\r"
+
+
+def test_a_regex_template_adding_a_crlf_line_does_not_double_the_cr(tmp_path):
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"a\r\nb\r\n")
+
+    result = edit_file(str(target), "a", r"a\r\nz", use_regex=True)
+
+    assert result["success"] is True
+    assert target.read_bytes() == b"a\r\nz\r\nb\r\n"
+
+
+def test_python_grep_reads_utf8_whatever_the_locale(tmp_path, cp1252_locale):
+    from unittest.mock import patch
+
+    from agentic_cli.tools.grep_tool import grep
+
+    (tmp_path / "notes.txt").write_bytes("naïve\n".encode())
+
+    with patch("agentic_cli.tools.grep_tool._ripgrep_available", return_value=False):
+        result = grep("naïve", path=str(tmp_path))
+
+    assert result["success"] is True
+    assert result["total_matches"] == 1
+
+
+def test_a_crlf_line_break_is_never_read_as_two(tmp_path):
+    """old_text with a blank line between x and y is not in a file where y
+    follows x directly."""
+    target = tmp_path / "notes.txt"
+    target.write_bytes(b"x\r\ny\r\n")
+
+    result = edit_file(str(target), "x\n\ny", "z")
+
+    assert result["success"] is False
+    assert target.read_bytes() == b"x\r\ny\r\n"

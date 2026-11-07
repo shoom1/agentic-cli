@@ -27,57 +27,68 @@ def expand_braces(pattern: str) -> list[str]:
 
     ``*.{js,ts}`` is ``*.js`` and ``*.ts``; braces nest (``{a,b{1,2}}``). A
     brace with no comma inside (``{x}``), one never closed, and one inside a
-    ``[...]`` class are literal. Duplicates are dropped, first one kept.
+    ``[...]`` class are literal. An empty alternative names no file and is
+    dropped (``{a,}`` is ``a``), as are duplicates, the first one kept.
 
     Raises:
         ValueError: the pattern stands for more than
-            ``MAX_BRACE_ALTERNATIVES`` patterns.
+            ``MAX_BRACE_ALTERNATIVES`` patterns (duplicates and empty ones
+            count: they cost the same work), or for none.
     """
     expanded: list[str] = []
+    produced = 0  # patterns finished, duplicates and empty ones included
     pending = [pattern]
     while pending:
         current = pending.pop(0)
         group = _first_brace_group(current)
         if group is None:
-            if current not in expanded:
+            produced += 1
+            if current and current not in expanded:
                 expanded.append(current)
             continue
-        start, end, alternatives = group
-        pending[:0] = [current[:start] + alt + current[end + 1:] for alt in alternatives]
-        if len(expanded) + len(pending) > MAX_BRACE_ALTERNATIVES:
+        start, end, commas = group
+        # Each pending pattern stands for at least one, so this is a lower
+        # bound of the total: checked before the group's patterns are built.
+        if produced + len(pending) + len(commas) + 1 > MAX_BRACE_ALTERNATIVES:
             raise ValueError(
                 f"Pattern stands for more than {MAX_BRACE_ALTERNATIVES} alternatives: {pattern!r}"
             )
+        bounds = [start, *commas, end]
+        pending[:0] = [
+            current[:start] + current[a + 1:b] + current[end + 1:]
+            for a, b in zip(bounds, bounds[1:])
+        ]
+    if not expanded:
+        raise ValueError(f"Pattern names no file: {pattern!r}")
     return expanded
 
 
-def _first_brace_group(pattern: str) -> tuple[int, int, list[str]] | None:
-    """The first ``{…,…}`` group in ``pattern``: where it starts and ends, and
-    its alternatives; None when there is none."""
+def _first_brace_group(pattern: str) -> tuple[int, int, list[int]] | None:
+    """The ``{…,…}`` group that starts first in ``pattern``: where it starts
+    and ends, and where its top-level commas are; None when there is none.
+
+    One pass with a stack of open braces, so unclosed ones cost nothing more.
+    """
+    found: tuple[int, int, list[int]] | None = None
+    open_braces: list[tuple[int, list[int]]] = []  # (start, its commas)
     i = 0
     while i < len(pattern):
         char = pattern[i]
         if char == "[":
             close = pattern.find("]", i + 2)  # "[]...]" holds a "]"
-            i = close + 1 if close != -1 else i + 1
-            continue
-        if char == "{":
-            depth, commas, j = 0, [], i
-            while j < len(pattern):
-                if pattern[j] == "{":
-                    depth += 1
-                elif pattern[j] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif pattern[j] == "," and depth == 1:
-                    commas.append(j)
-                j += 1
-            if j < len(pattern) and commas:
-                bounds = [i, *commas, j]
-                return i, j, [pattern[a + 1:b] for a, b in zip(bounds, bounds[1:])]
+            if close != -1:
+                i = close + 1
+                continue
+        elif char == "{":
+            open_braces.append((i, []))
+        elif char == "," and open_braces:
+            open_braces[-1][1].append(i)
+        elif char == "}" and open_braces:
+            start, commas = open_braces.pop()
+            if commas and (found is None or start < found[0]):
+                found = (start, i, commas)
         i += 1
-    return None
+    return found
 
 
 def glob_pattern_escapes_root(pattern: str) -> bool:

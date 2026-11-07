@@ -449,7 +449,7 @@ def _grep_python(
             continue
 
         try:
-            content = file_path.read_text()
+            content = file_path.read_text(encoding="utf-8")
             lines = content.splitlines()
         except (UnicodeDecodeError, PermissionError):
             continue

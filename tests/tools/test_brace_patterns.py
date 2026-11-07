@@ -59,6 +59,37 @@ def test_a_pattern_with_too_many_alternatives_is_refused():
         expand_braces("{a,b}" * 8)
 
 
+def test_duplicate_alternatives_count_toward_the_limit():
+    """Dropped duplicates kept the count low while the work doubled with
+    each group."""
+    from agentic_cli.file_utils import expand_braces
+
+    with pytest.raises(ValueError, match="alternatives"):
+        expand_braces("{a,a}" * 8)
+
+
+def test_one_group_over_the_limit_is_refused():
+    from agentic_cli.file_utils import expand_braces
+
+    with pytest.raises(ValueError, match="alternatives"):
+        expand_braces("{" + ",".join("a" * 10_000) + "}" + "x" * 10_000)
+
+
+def test_an_empty_alternative_names_no_file(project):
+    (project / "a").write_text("needle\n")
+
+    result = glob("{a,}", path=str(project))
+
+    assert result["success"] is True
+    assert result["files"] == ["a"]
+
+
+def test_a_pattern_naming_no_file_is_an_error(project):
+    result = glob("{,}", path=str(project))
+
+    assert result["success"] is False
+
+
 def test_glob_finds_every_alternative(project):
     result = glob("**/*.{js,ts}", path=str(project))
 
@@ -124,3 +155,27 @@ def test_ripgrep_gets_one_glob_per_alternative(project):
     cmd = captured["cmd"]
     globs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--glob"]
     assert globs == ["*.js", "*.ts", "!.*"]
+
+
+def test_ripgrep_gets_no_empty_glob(project):
+    """An empty --glob made ripgrep search every file."""
+    captured = {}
+
+    class Done:
+        pid = 4321
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = cmd
+        return Done()
+
+    with patch("agentic_cli.tools.grep_tool._ripgrep_available", return_value=True), \
+            patch("agentic_cli.tools.grep_tool.subprocess.Popen", side_effect=fake_popen):
+        grep("needle", path=str(project), file_pattern="{a,}")
+
+    cmd = captured["cmd"]
+    globs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--glob"]
+    assert globs == ["a", "!.*"]

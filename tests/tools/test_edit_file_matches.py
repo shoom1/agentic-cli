@@ -84,3 +84,24 @@ def test_an_empty_old_text_is_refused(tmp_path, replace_all, use_regex):
     assert result["success"] is False
     assert "empty" in result["error"]
     assert target.read_text() == "abc"
+
+
+def test_overlapping_occurrences_count_as_two(tmp_path):
+    target = tmp_path / "ends.txt"
+    target.write_text("end\nend\nend\n")
+
+    result = edit_file(str(target), "end\nend", "END")
+
+    assert result["success"] is False
+    assert "2 times" in result["error"]
+    assert target.read_text() == "end\nend\nend\n"
+
+
+def test_a_template_naming_an_unknown_group_is_an_error(tmp_path):
+    target = tmp_path / "ids.txt"
+    target.write_text("id1\n")
+
+    result = edit_file(str(target), r"id\d", r"\g<nope>", use_regex=True)
+
+    assert result["success"] is False
+    assert target.read_text() == "id1\n"

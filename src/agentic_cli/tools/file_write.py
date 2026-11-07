@@ -60,6 +60,24 @@ def _one_writer(file_path: Path) -> Iterator[None]:
                 del _FILE_LOCKS[file_path]
 
 
+#: A line break as a file may have it: CRLF, LF or a lone CR. A CR before
+#: an LF is never a break of its own, so one CRLF is never read as two.
+_LINE_BREAK = r"(?:\r\n|\r(?!\n)|\n)"
+_LINE_BREAK_RE = re.compile(_LINE_BREAK)
+
+
+def _lf(text: str) -> str:
+    """``text`` with every line break as LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _main_line_break(content: str) -> str:
+    """The line break most of ``content``'s lines end with (LF on a tie)."""
+    crlf = content.count("\r\n")
+    counts = {"\n": content.count("\n") - crlf, "\r\n": crlf, "\r": content.count("\r") - crlf}
+    return max(counts, key=lambda brk: (counts[brk], brk == "\n"))
+
+
 @register_tool(
     category=ToolCategory.WRITE,
     capabilities=[Capability("filesystem.write", target_arg="path")],
@@ -149,8 +167,9 @@ def edit_file(
     it unique, or pass replace_all=True to replace every occurrence. Supports
     regex patterns via use_regex=True (the same rule applies to its matches).
 
-    The file must be UTF-8 text. It is written back as UTF-8 with its own
-    line endings: a file whose lines end in CRLF keeps them.
+    The file must be UTF-8 text, and keeps its line endings: each line break
+    in old_text matches the file's own (CRLF, LF or CR), and new lines take
+    the ending of the text they replace.
 
     For creating new files or full rewrites, use write_file instead.
 
@@ -222,15 +241,6 @@ def _edit(
             "path": str(file_path),
         }
 
-    # A file whose every line ends in CRLF is matched with LF endings, as the
-    # model writes text, and written back with CRLF. Any other file (LF, or
-    # mixed) is edited as it is, so no line outside the edit changes.
-    crlf = "\r\n" in content and content.count("\r\n") == content.count("\n")
-    if crlf:
-        content = content.replace("\r\n", "\n")
-        old_text = old_text.replace("\r\n", "\n")
-        new_text = new_text.replace("\r\n", "\n")
-
     if use_regex:
         try:
             pattern = re.compile(old_text)
@@ -239,9 +249,20 @@ def _edit(
                 "success": False,
                 "error": f"Invalid regex pattern: {e}",
             }
+        # A file whose every line ends in CRLF is searched with LF endings, as
+        # a regex written for its text expects, and written back with CRLF.
+        crlf = "\r\n" in content and content.count("\r\n") == content.count("\n")
+        if crlf:
+            content = content.replace("\r\n", "\n")
         count = sum(1 for _ in pattern.finditer(content))
     else:
-        count = content.count(old_text)
+        # read_file shows every line ending as LF, so each line break in
+        # old_text matches whichever ending the file has there.
+        pattern = re.compile(
+            _LINE_BREAK.join(re.escape(line) for line in _lf(old_text).split("\n"))
+        )
+        # Overlapping occurrences count too: "end\nend" is twice in three "end" lines.
+        count = sum(1 for _ in re.finditer(f"(?={pattern.pattern})", content))
 
     if count == 0:
         return {
@@ -265,17 +286,27 @@ def _edit(
 
     if use_regex:
         try:
-            new_content = pattern.sub(new_text, content)
-        except re.error as e:
+            if crlf:
+                new_content, count = pattern.subn(lambda m: _lf(m.expand(new_text)), content)
+                new_content = new_content.replace("\n", "\r\n")
+            else:
+                new_content, count = pattern.subn(new_text, content)
+        except (re.error, IndexError) as e:  # IndexError: an unknown group name
             return {
                 "success": False,
                 "error": f"Invalid regex replacement text: {e}",
                 "path": str(file_path),
             }
     else:
-        new_content = content.replace(old_text, new_text)
-    if crlf:
-        new_content = new_content.replace("\n", "\r\n")
+        default_break = _main_line_break(content)
+        lines = _lf(new_text).split("\n")
+
+        def replacement(match: re.Match[str]) -> str:
+            # The new lines take the ending of the text they replace.
+            found = _LINE_BREAK_RE.search(match.group())
+            return (found.group() if found else default_break).join(lines)
+
+        new_content, count = pattern.subn(replacement, content)
 
     # Write the modified content
     try:
