@@ -8,15 +8,18 @@ session hooks from the checkpointer:
 - a session exists when its root thread holds a message;
 - listing keeps one app and one user, newest first, one ``SessionInfo`` row
   each: the first prompt as its title, the turns the user ran (a job's
-  notification is none), its last checkpoint's time; it leaves out sub-agent
-  checkpoints (namespace ``tools:<task-id>``) and threads that are not ours,
-  and ``limit`` keeps the newest; one conversation's row is ``info``;
-- deleting removes the whole thread, sub-agents included, and reports an
-  unknown one;
+  notification is none), its last checkpoint's time; it leaves out the
+  sub-agent checkpoints an older version stored (namespace
+  ``tools:<task-id>``) and threads that are not ours, and ``limit`` keeps the
+  newest; one conversation's row is ``info``;
+- deleting removes the whole thread, sub-agents' checkpoints included, and
+  reports an unknown one;
 - recent messages are the user's and the assistant's text.
 
 Conversations are written by real agent trees on scripted models, into a real
-``InMemorySaver`` and ``AsyncSqliteSaver``. The last classes run whole
+``InMemorySaver`` and ``AsyncSqliteSaver``, without the index the manager
+writes as each turn ends: these rows come from the scan a first listing makes
+(``test_session_index.py`` covers the index). The last classes run whole
 managers: two apps on one file, awkward identities (Review Focus 4), and ADK
 and Deep Agents sharing one sqlite file (Review Focus 3).
 """
@@ -32,7 +35,7 @@ pytest.importorskip("deepagents")
 
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 
-from agentic_cli.workflow.checkpointers import open_checkpointer  # noqa: E402
+from agentic_cli.workflow.checkpointers import open_checkpointer, open_store  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
@@ -62,11 +65,27 @@ def ref(user: str = "alice", session: str = "s1", app: str = "app") -> SessionRe
 
 
 @pytest.fixture(params=["memory", "sqlite"])
-async def saver(request, tmp_path):
+def kind(request) -> str:
+    return request.param
+
+
+@pytest.fixture
+async def saver(kind, tmp_path):
     """A real checkpointer of each kind the backend opens."""
-    saver, cm = await open_checkpointer(request.param, sqlite_path=tmp_path / "c.db")
+    saver, cm = await open_checkpointer(kind, sqlite_path=tmp_path / "c.db")
     try:
         yield saver
+    finally:
+        if cm is not None:
+            await cm.__aexit__(None, None, None)
+
+
+@pytest.fixture
+async def store(kind, tmp_path):
+    """The session index opened beside it, as the manager opens it."""
+    store, cm = await open_store(kind, sqlite_path=tmp_path / "c.db")
+    try:
+        yield store
     finally:
         if cm is not None:
             await cm.__aexit__(None, None, None)
@@ -102,6 +121,20 @@ async def delegate(saver, session: SessionRef) -> None:
         worker=[ai("Worked.")],
     )
     await root.ainvoke({"messages": [HumanMessage("Delegate.")]}, run_config(session))
+
+
+async def older_sub_agent_checkpoint(saver, session: SessionRef, *texts: str) -> None:
+    """A checkpoint in a sub-agent's namespace holding ``texts``, as the
+    versions that compiled sub-agents onto the root's saver stored them."""
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"messages": [HumanMessage(text) for text in texts]}
+    checkpoint["channel_versions"] = {"messages": "1"}
+    config = {"configurable": {"thread_id": thread_id(session), "checkpoint_ns": "tools:t1"}}
+    metadata = {"app_name": session.app_name, "user_id": session.user_id,
+                "session_id": session.session_id, "source": "loop", "step": 1}
+    await saver.aput(config, checkpoint, metadata, {"messages": "1"})
 
 
 async def threads(saver) -> list[tuple[str, str]]:
@@ -176,17 +209,17 @@ class TestRunConfig:
 
 
 class TestExists:
-    async def test_a_session_exists_once_it_holds_a_message(self, saver):
-        sessions = CheckpointSessions(saver)
+    async def test_a_session_exists_once_it_holds_a_message(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
         assert await sessions.exists(ref()) is False
 
         await say(saver, ref())
 
         assert await sessions.exists(ref()) is True
 
-    async def test_the_same_id_of_another_user_or_app_does_not(self, saver):
+    async def test_the_same_id_of_another_user_or_app_does_not(self, saver, store):
         await say(saver, ref())
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         assert await sessions.exists(ref(user="bob")) is False
         assert await sessions.exists(ref(app="other")) is False
@@ -194,37 +227,37 @@ class TestExists:
 
 
 class TestList:
-    async def test_this_app_and_user_only_newest_first(self, saver):
+    async def test_this_app_and_user_only_newest_first(self, saver, store):
         await say(saver, ref(session="s1"))
         await say(saver, ref(session="s2"))
         await say(saver, ref(user="bob", session="s3"))
         await say(saver, ref(app="other", session="s4"))
 
-        listed = await CheckpointSessions(saver).list("app", "alice")
+        listed = await CheckpointSessions(saver, store).list("app", "alice")
 
         assert [entry.session_id for entry in listed] == ["s2", "s1"]
         assert all(entry.updated.tzinfo is not None for entry in listed)
         assert listed[0].updated > listed[1].updated
         assert [(entry.title, entry.turns) for entry in listed] == [("Hello.", 1)] * 2
 
-    async def test_a_later_turn_moves_a_session_first(self, saver):
+    async def test_a_later_turn_moves_a_session_first(self, saver, store):
         await say(saver, ref(session="s1"))
         await say(saver, ref(session="s2"))
         await say(saver, ref(session="s1"), "Again.")
 
-        listed = await CheckpointSessions(saver).list("app", "alice")
+        listed = await CheckpointSessions(saver, store).list("app", "alice")
 
         assert [(entry.session_id, entry.turns) for entry in listed] == [("s1", 2), ("s2", 1)]
 
-    async def test_a_row_is_the_first_prompt_and_the_turns(self, saver):
+    async def test_a_row_is_the_first_prompt_and_the_turns(self, saver, store):
         await say(saver, ref(), "  Plan the\ntrip to   Lisbon ")
         await say(saver, ref(), "And the budget?")
 
-        (row,) = await CheckpointSessions(saver).list("app", "alice")
+        (row,) = await CheckpointSessions(saver, store).list("app", "alice")
 
         assert row == SessionInfo("s1", "Plan the trip to Lisbon", 2, row.updated)
 
-    async def test_a_job_notification_is_no_turn(self, saver):
+    async def test_a_job_notification_is_no_turn(self, saver, store):
         await say(saver, ref(), "Build it.")
         record = SimpleNamespace(
             job_id="j1", tool="build", name="build", call_id="c1", call_name="build",
@@ -236,32 +269,34 @@ class TestList:
             {"messages": [job_notification(record, "ok")]}, run_config(ref())
         )
 
-        (row,) = await CheckpointSessions(saver).list("app", "alice")
+        (row,) = await CheckpointSessions(saver, store).list("app", "alice")
 
         assert (row.title, row.turns) == ("Build it.", 1)
 
-    async def test_the_limit_keeps_the_newest(self, saver):
+    async def test_the_limit_keeps_the_newest(self, saver, store):
         await say(saver, ref(session="s1"))
         await say(saver, ref(session="s2"))
 
-        listed = await CheckpointSessions(saver).list("app", "alice", limit=1)
+        listed = await CheckpointSessions(saver, store).list("app", "alice", limit=1)
 
         assert [entry.session_id for entry in listed] == ["s2"]
 
-    async def test_sub_agent_checkpoints_are_not_sessions(self, saver):
+    async def test_sub_agent_checkpoints_are_not_sessions(self, saver, store):
         await delegate(saver, ref())
-        assert any(ns.startswith("tools:") for _, ns in await threads(saver))
+        # Sub-agents store none now; a thread an older version wrote holds some.
+        assert await threads(saver) == [(thread_id(ref()), "")]
+        await older_sub_agent_checkpoint(saver, ref(), "Do it.")
 
-        listed = await CheckpointSessions(saver).list("app", "alice")
+        listed = await CheckpointSessions(saver, store).list("app", "alice")
 
         # The root conversation: one question; the worker's brief is no turn.
         assert [(e.session_id, e.title, e.turns) for e in listed] == [("s1", "Delegate.", 1)]
 
     async def test_a_sub_agents_later_checkpoint_does_not_stand_for_the_session(
-        self, saver
+        self, saver, store
     ):
-        """A turn that failed inside the sub-agent leaves the thread's newest
-        checkpoint in the sub-agent's namespace."""
+        """A turn that failed inside the sub-agent left the thread's newest
+        checkpoint in the sub-agent's namespace, when sub-agents stored them."""
         root = _tree(
             saver,
             [COORDINATOR, WORKER],
@@ -270,13 +305,14 @@ class TestList:
         )
         with pytest.raises(RuntimeError):
             await root.ainvoke({"messages": [HumanMessage("Delegate.")]}, run_config(ref()))
+        await older_sub_agent_checkpoint(saver, ref(), "Do it.", "And this.")
 
-        listed = await CheckpointSessions(saver).list("app", "alice")
+        listed = await CheckpointSessions(saver, store).list("app", "alice")
 
         # The question and the task call; the worker's brief is not the session's.
         assert [(e.session_id, e.turns) for e in listed] == [("s1", 1)]
 
-    async def test_a_thread_that_is_not_ours_is_left_out(self, saver):
+    async def test_a_thread_that_is_not_ours_is_left_out(self, saver, store):
         """Metadata alone does not make a session: the thread id must name it."""
         root = _tree(saver, [SOLO], solo=[ai("Hi."), ai("Hi.")])
         claims_alice = {"app_name": "app", "user_id": "alice", "session_id": "s1"}
@@ -290,12 +326,12 @@ class TestList:
              "metadata": claims_alice},
         )
 
-        assert await CheckpointSessions(saver).list("app", "alice") == []
+        assert await CheckpointSessions(saver, store).list("app", "alice") == []
 
-    async def test_nothing_stored_lists_nothing(self, saver):
-        assert await CheckpointSessions(saver).list("app", "alice") == []
+    async def test_nothing_stored_lists_nothing(self, saver, store):
+        assert await CheckpointSessions(saver, store).list("app", "alice") == []
 
-    async def test_a_thread_with_no_message_is_no_conversation(self, saver):
+    async def test_a_thread_with_no_message_is_no_conversation(self, saver, store):
         """A turn cancelled before its first step leaves only LangGraph's
         input checkpoint: as ``info`` and ``exists`` say, no conversation."""
         from langgraph.checkpoint.base import empty_checkpoint
@@ -304,52 +340,53 @@ class TestList:
         metadata = {"app_name": "app", "user_id": "alice", "session_id": "s1",
                     "source": "input", "step": -1}
         await saver.aput(config, empty_checkpoint(), metadata, {})
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         assert await sessions.list("app", "alice") == []
         assert await sessions.info(ref()) is None
 
 
 class TestInfo:
-    async def test_it_is_the_conversations_row(self, saver):
+    async def test_it_is_the_conversations_row(self, saver, store):
         await say(saver, ref(), "Hello there.")
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         (listed,) = await sessions.list("app", "alice")
 
         assert await sessions.info(ref()) == listed
         assert listed.title == "Hello there."
 
-    async def test_none_for_a_conversation_that_is_not_stored(self, saver):
+    async def test_none_for_a_conversation_that_is_not_stored(self, saver, store):
         await say(saver, ref())
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         assert await sessions.info(ref(session="s2")) is None
         assert await sessions.info(ref(user="bob")) is None
 
 
 class TestDelete:
-    async def test_it_removes_the_thread_with_its_sub_agents(self, saver):
+    async def test_it_removes_the_thread_with_its_sub_agents(self, saver, store):
         await delegate(saver, ref())
-        sessions = CheckpointSessions(saver)
+        await older_sub_agent_checkpoint(saver, ref(), "Do it.")
+        sessions = CheckpointSessions(saver, store)
 
         assert await sessions.delete(ref()) is True
 
         assert await sessions.exists(ref()) is False
         assert [t for t, _ in await threads(saver) if t == thread_id(ref())] == []
 
-    async def test_an_unknown_session_is_not_deleted(self, saver):
+    async def test_an_unknown_session_is_not_deleted(self, saver, store):
         await say(saver, ref())
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         assert await sessions.delete(ref(session="nope")) is False
         assert await sessions.delete(ref(user="bob")) is False
         assert await sessions.exists(ref()) is True
 
-    async def test_other_sessions_are_left_alone(self, saver):
+    async def test_other_sessions_are_left_alone(self, saver, store):
         await say(saver, ref())
         await say(saver, ref(user="bob"))
-        sessions = CheckpointSessions(saver)
+        sessions = CheckpointSessions(saver, store)
 
         await sessions.delete(ref())
 
@@ -357,7 +394,7 @@ class TestDelete:
 
 
 class TestRecent:
-    async def test_the_users_and_the_assistants_text(self, saver):
+    async def test_the_users_and_the_assistants_text(self, saver, store):
         thinking_then_text = AIMessage(content=[
             {"type": "reasoning", "reasoning": "Let me think."},
             {"type": "text", "text": "Part one."},
@@ -365,17 +402,17 @@ class TestRecent:
         ])
         await say(saver, ref(), "Tell me.", thinking_then_text)
 
-        recent = await CheckpointSessions(saver).recent(ref(), 20)
+        recent = await CheckpointSessions(saver, store).recent(ref(), 20)
 
         assert recent == [
             {"role": "user", "content": "Tell me."},
             {"role": "assistant", "content": "Part one. Part two."},
         ]
 
-    async def test_tool_traffic_and_empty_answers_are_left_out(self, saver):
+    async def test_tool_traffic_and_empty_answers_are_left_out(self, saver, store):
         await delegate(saver, ref())
 
-        recent = await CheckpointSessions(saver).recent(ref(), 20)
+        recent = await CheckpointSessions(saver, store).recent(ref(), 20)
 
         # The task call carries no text and its result is a tool message;
         # the worker's own messages are in its namespace, not the conversation.
@@ -384,17 +421,17 @@ class TestRecent:
             {"role": "assistant", "content": "Done, says the worker."},
         ]
 
-    async def test_the_limit_keeps_the_newest(self, saver):
+    async def test_the_limit_keeps_the_newest(self, saver, store):
         await say(saver, ref(), "One.", ai("Two."))
         await say(saver, ref(), "Three.", ai("Four."))
 
-        recent = await CheckpointSessions(saver).recent(ref(), 3)
+        recent = await CheckpointSessions(saver, store).recent(ref(), 3)
 
         assert [m["content"] for m in recent] == ["Two.", "Three.", "Four."]
 
-    async def test_an_unknown_session_has_none(self, saver):
+    async def test_an_unknown_session_has_none(self, saver, store):
         await say(saver, ref())
-        assert await CheckpointSessions(saver).recent(ref(user="bob"), 20) == []
+        assert await CheckpointSessions(saver, store).recent(ref(user="bob"), 20) == []
 
 
 # --- whole managers ---------------------------------------------------------------------
@@ -529,6 +566,8 @@ class TestSharedFileWithAdk:
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )}
                 assert {"sessions", "events", "checkpoints", "writes"} <= tables
+                # Deep Agents' session index: tables ADK has none of.
+                assert {"store", "store_migrations"} <= tables
 
                 assert [r.session_id for r in await adk.list_sessions(user_id="u")] == ["s"]
                 assert _ids(await deep.list_sessions(user_id="u")) == ["s"]

@@ -2,7 +2,8 @@
 
 ``workflow/checkpointers.py`` opens a LangGraph checkpointer for a
 ``session_store`` kind and returns it with the context manager that owns its
-connection. Each backend says where its sqlite file is: LangGraph keeps its
+connection, and ``open_store`` the store Deep Agents keeps its session index
+in, beside it, the same way. Each backend says where its sqlite file is: LangGraph keeps its
 own path (``{workspace}/checkpoints.db``, ``sqlite_uri`` taken as a file name)
 through ``create_checkpointer``, and ``deepagents_sqlite_path`` puts Deep
 Agents' file next to ADK's ``sessions.db``, reading ``sqlite_uri`` the way
@@ -23,9 +24,11 @@ pytest.importorskip("langgraph.checkpoint.memory")
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
+from agentic_cli.workflow import checkpointers  # noqa: E402
 from agentic_cli.workflow.checkpointers import (  # noqa: E402
     deepagents_sqlite_path,
     open_checkpointer,
+    open_store,
     sqlite_file,
 )
 
@@ -156,6 +159,179 @@ class TestOpenCheckpointer:
     async def test_an_unknown_kind_is_an_error(self):
         with pytest.raises(ValueError, match="Unknown checkpointer type: redis"):
             await open_checkpointer("redis")  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def fake_postgres_store(monkeypatch):
+    """Stand in for ``langgraph.store.postgres.aio`` (no server, no libpq)."""
+    opened: list[tuple[str, _FakeConnection]] = []
+    state = {"fail_setup": False}
+
+    class AsyncPostgresStore:
+        @staticmethod
+        def from_conn_string(uri: str) -> _FakeConnection:
+            connection = _FakeConnection(_FakeSaver(fail_setup=state["fail_setup"]))
+            opened.append((uri, connection))
+            return connection
+
+    module = types.ModuleType("langgraph.store.postgres.aio")
+    module.AsyncPostgresStore = AsyncPostgresStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.postgres.aio", module)
+    return types.SimpleNamespace(opened=opened, state=state)
+
+
+class _RacingStore:
+    """A store whose first ``setup()`` calls fail as another process's
+    migration of the same new file makes them fail."""
+
+    def __init__(self, errors: list[BaseException]) -> None:
+        self.errors = errors
+        self.setups = 0
+
+    async def setup(self) -> None:
+        self.setups += 1
+        if self.errors:
+            raise self.errors.pop(0)
+
+
+@pytest.fixture
+def racing_sqlite_store(monkeypatch):
+    """Stand in for ``langgraph.store.sqlite.aio``: ``state["errors"]`` are
+    what the store's setups raise, in turn."""
+    opened: list[_FakeConnection] = []
+    state: dict = {"errors": []}
+
+    class AsyncSqliteStore:
+        @staticmethod
+        def from_conn_string(path: str) -> _FakeConnection:
+            connection = _FakeConnection(_RacingStore(state["errors"]))
+            opened.append(connection)
+            return connection
+
+    module = types.ModuleType("langgraph.store.sqlite.aio")
+    module.AsyncSqliteStore = AsyncSqliteStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.sqlite.aio", module)
+    return types.SimpleNamespace(opened=opened, state=state)
+
+
+class TestStoreSetupRace:
+    """Processes opening one new sqlite file at once race through the store's
+    migrations, each read-the-version-then-apply in autocommit: the loser
+    records a version already recorded, or adds a column already added. Its
+    setup is run again after a pause, from the version the winner left (a
+    run too soon can lose again: one in 32 did, run once more at once)."""
+
+    @pytest.fixture(autouse=True)
+    def no_pause(self, monkeypatch):
+        monkeypatch.setattr(checkpointers, "_SETUP_PAUSE", 0)
+
+    @pytest.mark.parametrize("error", [
+        sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v"),
+        sqlite3.OperationalError("duplicate column name: expires_at"),
+    ])
+    async def test_a_lost_migration_race_is_set_up_again(self, racing_sqlite_store, error):
+        racing_sqlite_store.state["errors"] = [error]
+
+        store, cm = await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert store is connection.saver and store.setups == 2
+        assert cm is connection and not connection.exited
+
+    async def test_a_race_lost_again_is_set_up_again(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [
+            sqlite3.OperationalError("duplicate column name: expires_at"),
+            sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v"),
+        ]
+
+        store, _ = await open_store("sqlite", sqlite_path="/data/c.db")
+
+        assert store.setups == 3
+
+    async def test_it_gives_up_after_its_retries(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [
+            sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v")
+        ] * (checkpointers._SETUP_RETRIES + 1)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert connection.saver.setups == checkpointers._SETUP_RETRIES + 1
+        assert connection.exited
+
+    async def test_any_other_error_is_not_retried(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [sqlite3.OperationalError("disk I/O error")]
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert connection.saver.setups == 1 and connection.exited
+
+
+class TestOpenStore:
+    """The store beside the checkpointer (Deep Agents' session index)."""
+
+    async def test_memory_is_an_in_memory_store_with_nothing_to_close(self):
+        from langgraph.store.memory import InMemoryStore
+
+        store, cm = await open_store("memory")
+
+        assert isinstance(store, InMemoryStore)
+        assert cm is None
+
+    async def test_sqlite_shares_the_checkpointers_file_on_a_connection_of_its_own(
+        self, tmp_path
+    ):
+        pytest.importorskip("langgraph.store.sqlite.aio")
+        from langgraph.store.sqlite.aio import AsyncSqliteStore
+
+        path = tmp_path / "checkpoints.db"
+        saver, saver_cm = await open_checkpointer("sqlite", sqlite_path=path)
+        store, cm = await open_store("sqlite", sqlite_path=path)
+        try:
+            assert isinstance(store, AsyncSqliteStore)
+            assert store.conn is not saver.conn
+            assert {"checkpoints", "writes", "store", "store_migrations"} <= _tables(path)
+            await store.aput(("ns",), "key", {"v": 1})
+            assert (await store.aget(("ns",), "key")).value == {"v": 1}
+        finally:
+            await cm.__aexit__(None, None, None)
+            await saver_cm.__aexit__(None, None, None)
+
+        with pytest.raises(ValueError, match="no active connection"):
+            await store.conn.execute("select 1")
+
+    async def test_sqlite_without_a_path_is_an_error(self):
+        with pytest.raises(ValueError, match="sqlite_path"):
+            await open_store("sqlite")
+
+    async def test_postgres_without_a_uri_names_the_setting(self, fake_postgres_store):
+        with pytest.raises(ValueError, match="postgres_uri"):
+            await open_store("postgres")
+        assert fake_postgres_store.opened == []
+
+    async def test_postgres_opens_enters_and_sets_up(self, fake_postgres_store):
+        store, cm = await open_store("postgres", postgres_uri="postgresql://db/x")
+
+        [(uri, connection)] = fake_postgres_store.opened
+        assert uri == "postgresql://db/x"
+        assert cm is connection and connection.entered and not connection.exited
+        assert store is connection.saver and store.set_up
+
+    async def test_a_failed_setup_closes_the_connection_it_opened(self, fake_postgres_store):
+        fake_postgres_store.state["fail_setup"] = True
+
+        with pytest.raises(RuntimeError, match="relation already exists"):
+            await open_store("postgres", postgres_uri="postgresql://db/x")
+
+        [(_, connection)] = fake_postgres_store.opened
+        assert connection.entered and connection.exited
+
+    async def test_an_unknown_kind_is_an_error(self):
+        with pytest.raises(ValueError, match="Unknown store type: redis"):
+            await open_store("redis")  # type: ignore[arg-type]
 
 
 class TestSqliteFile:

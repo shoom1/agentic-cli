@@ -201,13 +201,12 @@ class TestTheTree:
         await _turn(root)
 
         assert created["coordinator"]["checkpointer"] is saver
-        assert created["researcher"]["checkpointer"] is None
+        assert created["researcher"]["checkpointer"] is False
         assert root.checkpointer is saver
-        # The sub-agent inherits it: its checkpoints sit in the same thread,
-        # under its task's namespace.
+        # The sub-agent is compiled without one (not left to inherit the
+        # root's): its run ends when its task returns, and it stores nothing.
         namespaces = {c.config["configurable"]["checkpoint_ns"] async for c in saver.alist(None)}
-        assert "" in namespaces
-        assert any(ns.startswith("tools:") for ns in namespaces)
+        assert namespaces == {""}
 
 
 class TestDelegation:
