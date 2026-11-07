@@ -13,10 +13,14 @@ parameter and a tool-call round trip all meet the real API. The catalog lists
 each provider for real, as on a first start, and caches nothing.
 
 Override a model with LIVE_ADK_GEMINI_MODEL, LIVE_ADK_CLAUDE_ADAPTIVE_MODEL,
-LIVE_ADK_CLAUDE_BUDGET_MODEL, LIVE_ADK_GPT_MODEL or LIVE_ADK_OPENROUTER_MODEL
-(a ``provider:model`` reference). The vLLM case runs only when
-LIVE_VLLM_BASE_URL names a server (its model: LIVE_VLLM_MODEL, a Qwen3-style
-model whose chat template switches thinking).
+LIVE_ADK_CLAUDE_BUDGET_MODEL, LIVE_ADK_GPT_MODEL, LIVE_ADK_OPENROUTER_MODEL or
+LIVE_ADK_OPENROUTER_CLAUDE_MODEL (a ``provider:model`` reference). The
+openrouter case's model reasons in plain text; the openrouter-claude case's
+(an ``openrouter:anthropic/claude-…`` model that takes a reasoning effort)
+sends its signed thinking as ``reasoning_details``, which must go back with
+the tool result for the step after the call to succeed. The vLLM case runs
+only when LIVE_VLLM_BASE_URL names a server (its model: LIVE_VLLM_MODEL, a
+Qwen3-style model whose chat template switches thinking).
 
 The Synthetic case runs when SYNTHETIC_API_KEY is set: Synthetic
 (synthetic.new) is an OpenAI-compatible service that needs a key, defined as
@@ -110,6 +114,12 @@ CASES = [
     _case(
         "openrouter",
         os.getenv("LIVE_ADK_OPENROUTER_MODEL", "openrouter:qwen/qwen3.7-plus"),
+        "OPENROUTER_API_KEY",
+        shows_thinking=True,
+    ),
+    _case(
+        "openrouter-claude",
+        os.getenv("LIVE_ADK_OPENROUTER_CLAUDE_MODEL", "openrouter:anthropic/claude-sonnet-4.5"),
         "OPENROUTER_API_KEY",
         shows_thinking=True,
     ),

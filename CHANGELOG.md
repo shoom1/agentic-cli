@@ -1780,6 +1780,23 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **On ADK, an OpenRouter model's reasoning details go back to it with the
+  tool results, as on Deep Agents.** Beside its reasoning text OpenRouter
+  sends `reasoning_details` (Claude's signed thinking, Gemini's thought
+  signatures, OpenAI's encrypted reasoning), which the model needs back on
+  the assistant message that called a tool. ADK's adapter
+  (`OpenAICompatibleLlm`) kept only the text and left every thought out of
+  the next request, so `openrouter:anthropic/claude-…` or
+  `openrouter:google/gemini-3…` with thinking on could fail at the second
+  step of a tool loop, or lose its reasoning there. The details, streamed
+  pieces merged as ChatOpenRouter merges them, are now kept on the thought
+  part (its `thought_signature`, with the model that wrote them), so the
+  session holds them, also across a restart, and go back on that turn's
+  assistant message with every later request to that model, OpenAI's `rs_`
+  item ids left out as ChatOpenRouter leaves them out; never to another
+  model, also after a `/settings` switch within OpenRouter. The thought text
+  still stays out of the request, and a server that sends only reasoning
+  text (vLLM, Synthetic) gets the requests it got before.
 - **Listing Deep Agents conversations no longer reads every checkpoint.**
   `--continue`, `/resume` and `/sessions` listed conversations by reading
   every checkpoint of the app and user, sub-agents' included, each of which
