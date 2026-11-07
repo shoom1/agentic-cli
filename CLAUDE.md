@@ -144,7 +144,7 @@ agentic-cli/
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer; UnsafeKnowledgeBase: a symlinked documents/embeddings/files/concepts folder or .lock, or a link between `within=` and the knowledge base (checked at open and in every transaction)
-│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one (open leaves an unsafe scope out), and the ingestion pipeline (ingest_text, ingest_bytes)
+│   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one (open leaves out a scope that is unsafe or fails to open, raising only when none opens; a model that does not load: keyword search), and the ingestion pipeline (ingest_text, ingest_bytes; the manager's calls from async methods on a worker thread)
 │   │       ├── enrich.py      # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py     # Document, SearchResult, SourceType
 │   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), own _charset.py

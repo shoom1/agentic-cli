@@ -1787,6 +1787,43 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **An app starts when a knowledge base scope, the embedding model or an
+  index cannot be opened.** Opening the knowledge base was all or nothing: a
+  scope that could not open (a read-only working directory, a document header
+  naming a source type the knowledge base does not know), an embedding model
+  that did not load (the first run with the `kb` extra while offline: the
+  model is not cached yet), or an `index.faiss` FAISS cannot read (a git-LFS
+  pointer) or its mappings in another shape, raised out of service
+  construction, so an app whose agents use the kb or memory tools did not
+  start. A scope that fails to open is now left out with a
+  `kb_scope_unavailable` warning (the other scope takes the writes, and the
+  one left out is not written to; `KnowledgeBase.open` raises only when no
+  scope opens); a model that does not load leaves the knowledge base
+  searching by keyword and the memory store by substring for the session,
+  with one warning each (`kb_keyword_search_only`,
+  `memory_substring_search_only`); and an unreadable index counts as none, so
+  the stored text is embedded again (`kb_vector_index_unreadable`).
+
+- **Ingesting into the knowledge base no longer freezes the app.**
+  `kb_ingest_text`, `kb_ingest_file` and `ingest_arxiv_paper` embedded every
+  chunk on the event loop (only conversion ran on a worker thread), and
+  `kb_read`, `kb_write_concept`, `kb_search_concepts`,
+  `KnowledgeBase.sidecar` and `backfill_sidecars` read the knowledge base
+  there, so the spinner, Ctrl+C and every other task stopped for the whole
+  embedding (0.87 s for 363 chunks at 2 ms each) and for as long as another
+  process held the knowledge base's folder lock (one re-embedding a large
+  knowledge base on open holds it for minutes). Every synchronous
+  knowledge-base call those make, and `kb_ingest_file`'s read of the file,
+  now runs on a worker thread; concept pages are still written one at a
+  time.
+
+- **Ingesting works with nltk installed without its data.** With nltk
+  importable, chunking split sentences with `nltk.sent_tokenize`, which
+  raises `LookupError` ("Resource punkt_tab not found") until the punkt data
+  is downloaded, the state nltk installs in (Anaconda's base environment
+  ships it so), and every ingest failed. Chunking now falls back to its own
+  sentence split, as it does without nltk.
+
 - **Two terminals of one app no longer erase each other's model listings.**
   Each model catalog rewrote the whole model cache from what it had read at
   startup, so a listing another process (another terminal, another project of

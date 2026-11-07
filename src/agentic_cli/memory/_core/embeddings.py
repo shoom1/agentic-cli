@@ -235,14 +235,16 @@ class EmbeddingService:
     def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences.
 
-        Uses nltk.sent_tokenize if available, falls back to regex.
+        Uses nltk.sent_tokenize if available, falls back to regex. nltk
+        installed without its punkt data (its default state) raises
+        ``LookupError``, which falls back too.
         """
         if not text.strip():
             return []
         try:
             import nltk
             return nltk.sent_tokenize(text)
-        except ImportError:
+        except (ImportError, LookupError):
             pass
         # Regex fallback
         parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)

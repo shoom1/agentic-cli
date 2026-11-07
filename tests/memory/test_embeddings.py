@@ -156,6 +156,25 @@ class TestEmbeddingServiceChunking:
         """Test _merge_sentences with empty list returns empty."""
         assert EmbeddingService._merge_sentences([], chunk_size=100, overlap=10) == []
 
+    def test_nltk_without_its_data_falls_back_to_the_regex_split(self, svc, monkeypatch):
+        """nltk installed without its punkt data (its default state) raises
+        LookupError from sent_tokenize, which failed every ingest."""
+        import sys
+        import types
+
+        def sent_tokenize(text):
+            raise LookupError("Resource punkt_tab not found. Please use the NLTK Downloader")
+
+        monkeypatch.setitem(sys.modules, "nltk", types.SimpleNamespace(sent_tokenize=sent_tokenize))
+
+        assert svc._split_sentences("Otters nest in burrows. Herons wade at dawn.") == [
+            "Otters nest in burrows.",
+            "Herons wade at dawn.",
+        ]
+        assert MockEmbeddingService().chunk_document("Otters nest. Herons wade.") == [
+            "Otters nest. Herons wade."
+        ]
+
 
 class TestResolveEmbeddingDevice:
     """Tests for the device-resolution autodetect helper."""

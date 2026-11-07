@@ -14,9 +14,14 @@ arguments in, one call, a ``{"success": ...}`` dict out. It comes in two
 flavors that share one implementation: the ``@register_tool`` module
 functions find the knowledge base in the service registry
 (``tools._knowledge_base.current_knowledge_base``), and the closures in
-``tools.factories.make_kb_tools`` capture it.
+``tools.factories.make_kb_tools`` capture it. An async tool runs each
+synchronous knowledge-base call, and its file reads, on a worker thread: a
+call waits for the knowledge base's folder lock, which another process can
+hold for as long as it re-embeds, and the event loop must not wait with it.
 """
 
+import asyncio
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -198,31 +203,10 @@ async def _ingest_file(
     if not path:
         return {"success": False, "error": "path is required"}
 
-    try:
-        source_path = resolve_path(path)
-        if not source_path.is_file():
-            return {"success": False, "error": f"File not found: {path}"}
-        file_bytes = source_path.read_bytes()
-    except ValueError:
-        return {"success": False, "error": f"Not a valid path: {path!r}"}
-    except OSError as e:
-        return {"success": False, "error": f"Cannot read file {path}: {e.strerror or e}"}
-
-    try:
-        folder = saved_pages_dir(get_settings().app_name)
-    except OSError:
-        # saved_pages_dir reads Path.cwd(); a deleted working directory
-        # must not stop an absolute-path ingest. Treat the file as local.
-        folder = None
-
-    saved = None
-    if folder is not None:
-        if is_saved_page_metadata(source_path, folder):
-            return {
-                "success": False,
-                "error": f"{path} is a saved page's metadata; pass the page itself",
-            }
-        saved = read_saved_page_meta(source_path, folder)
+    source = await asyncio.to_thread(_read_source, path)
+    if isinstance(source, dict):
+        return source
+    source_path, file_bytes, saved = source
 
     st = None
     if source_type:
@@ -249,6 +233,37 @@ async def _ingest_file(
     if saved is not None and saved.truncated and result.get("success"):
         result["truncated"] = True
     return result
+
+
+def _read_source(path: str) -> dict[str, Any] | tuple[Path, bytes, Any]:
+    """The file at ``path``, its bytes and its saved-page record (None for a
+    local file), or the tool's error dict. Blocking: run on a worker thread."""
+    try:
+        source_path = resolve_path(path)
+        if not source_path.is_file():
+            return {"success": False, "error": f"File not found: {path}"}
+        file_bytes = source_path.read_bytes()
+    except ValueError:
+        return {"success": False, "error": f"Not a valid path: {path!r}"}
+    except OSError as e:
+        return {"success": False, "error": f"Cannot read file {path}: {e.strerror or e}"}
+
+    try:
+        folder = saved_pages_dir(get_settings().app_name)
+    except OSError:
+        # saved_pages_dir reads Path.cwd(); a deleted working directory
+        # must not stop an absolute-path ingest. Treat the file as local.
+        folder = None
+
+    saved = None
+    if folder is not None:
+        if is_saved_page_metadata(source_path, folder):
+            return {
+                "success": False,
+                "error": f"{path} is a saved page's metadata; pass the page itself",
+            }
+        saved = read_saved_page_meta(source_path, folder)
+    return source_path, file_bytes, saved
 
 
 def _read_scope(kb, found) -> str:
@@ -280,12 +295,12 @@ async def _read(
 async def _read_document(kb, doc_id_or_title: str, full: bool, max_chars: int) -> dict[str, Any]:
     from agentic_cli.memory.kb import DocumentNotFound
 
-    found = kb.find_document(doc_id_or_title)
+    found = await asyncio.to_thread(kb.find_document, doc_id_or_title)
     if found is None:
         return {"success": False, "error": f"Document not found: {doc_id_or_title}"}
     doc = found.document
     if full:
-        content, truncated = kb.read_text(found, max_chars=max_chars)
+        content, truncated = await asyncio.to_thread(kb.read_text, found, max_chars=max_chars)
         return {
             "success": True,
             "full": True,
@@ -339,7 +354,7 @@ def _list(kb, query: str = "", source_type: str = "", limit: int = 20) -> dict[s
 async def _write_concept(kb, title: str, body: str, sources: list[str], slug: str = "") -> dict[str, Any]:
     """Shared implementation for kb_write_concept (the first scope's concept pages)."""
     try:
-        return kb.write_concept(title, body, sources, slug=slug)
+        return await asyncio.to_thread(kb.write_concept, title, body, sources, slug=slug)
     except Exception as e:
         return {"success": False, "error": f"write_concept failed: {e}"}
 
@@ -347,7 +362,7 @@ async def _write_concept(kb, title: str, body: str, sources: list[str], slug: st
 async def _search_concepts(kb, query: str, limit: int = 10) -> dict[str, Any]:
     """Shared implementation for kb_search_concepts."""
     try:
-        hits = kb.search_concepts(query, limit=limit)
+        hits = await asyncio.to_thread(kb.search_concepts, query, limit=limit)
     except Exception as e:
         return {"success": False, "error": f"search_concepts failed: {e}"}
     return {"success": True, "concepts": hits, "count": len(hits)}

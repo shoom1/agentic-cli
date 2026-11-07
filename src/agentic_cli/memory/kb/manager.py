@@ -173,6 +173,30 @@ def _faiss_available() -> bool:
     return True
 
 
+def _loaded_or_keyword(service: Any) -> Any:
+    """``service`` with its model loaded, or a mock service for keyword search.
+
+    Reading ``embedding_dim`` loads an ``EmbeddingService``'s model. Whatever
+    stops it (an offline first run with the model not cached, a broken
+    install, a device that fails) is logged once, and the knowledge base
+    searches by keyword, as when re-embedding fails, rather than not opening.
+    """
+    if isinstance(service, MockEmbeddingService):
+        return service
+    try:
+        service.embedding_dim
+    except Exception as e:
+        model = getattr(service, "model_name", "unknown")
+        logger.warning(
+            "kb_keyword_search_only",
+            reason="the embedding model did not load",
+            model=model,
+            error=f"{type(e).__name__}: {e}",
+        )
+        return MockEmbeddingService(model_name=model, batch_size=getattr(service, "batch_size", 32))
+    return service
+
+
 class KnowledgeBaseManager:
     """Main interface for knowledge base operations.
 
@@ -180,13 +204,18 @@ class KnowledgeBaseManager:
 
     Concurrency model
     -----------------
-    Two lock surfaces with different semantics:
+    Three lock surfaces with different semantics:
 
     * ``_lock`` (``threading.Lock``) — guards every mutation to the
-      in-memory document/chunk/vector/BM25 state and the check-and-set
-      of ``_backfill_running``. The sync mutation API
+      in-memory document/chunk/vector/BM25 state. The sync mutation API
       (``ingest_document``, ``search``, ``delete_document``, ``clear``)
-      is safe to call from any thread.
+      is safe to call from any thread. It is held while waiting for the
+      folder lock (see :meth:`_transaction`), which another process can
+      hold for minutes, so the event loop never takes it: async callers
+      run these calls on a worker thread.
+    * ``_quick_lock`` (``threading.Lock``) — guards what the event loop
+      itself touches: the ``_sidecar_locks`` inserts and the
+      check-and-set of ``_backfill_running``. Never held across I/O.
     * ``_sidecar_locks`` (``dict[str, asyncio.Lock]``) — per-doc locks
       that serialize concurrent LLM-backed sidecar generation for the
       same document. Always obtain these through
@@ -243,6 +272,7 @@ class KnowledgeBaseManager:
 
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
+        self._quick_lock = threading.Lock()
         self._backfill_running: bool = False
         self._concepts_store: "ConceptStore | None" = None
         self._summarizer = summarizer
@@ -423,24 +453,26 @@ class KnowledgeBaseManager:
         A given ``embedding_service`` is used (a mock one with the mock
         store); otherwise one is built from ``embedding`` when
         sentence-transformers is installed. A real service needs FAISS:
-        without it, with ``use_mock``, or with no service at all, the
-        knowledge base uses the mock service and store and searches by
-        keyword.
+        without it, with ``use_mock``, with no service at all, or with one
+        whose model does not load, the knowledge base uses the mock service
+        and store and searches by keyword.
         """
         from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 
         if not self._use_mock:
-            if isinstance(embedding_service, MockEmbeddingService):
-                return embedding_service, MockVectorStore(
-                    index_path=self.embeddings_dir / "index.mock",
-                    embedding_dim=embedding_service.embedding_dim,
-                )
             service = embedding_service
             if service is None and EmbeddingService.is_available():
                 service = EmbeddingService(
                     model_name=embedding.model_name,
                     batch_size=embedding.batch_size,
                     device=embedding.device,
+                )
+            if service is not None and _faiss_available():
+                service = _loaded_or_keyword(service)
+            if isinstance(service, MockEmbeddingService):
+                return service, MockVectorStore(
+                    index_path=self.embeddings_dir / "index.mock",
+                    embedding_dim=service.embedding_dim,
                 )
             if service is not None and _faiss_available():
                 try:
@@ -486,19 +518,19 @@ class KnowledgeBaseManager:
     def _reconcile_index(self) -> None:
         """Make the index on disk one the current model built.
 
-        With chunks and no index, every chunk is embedded. A record that names
-        the current model, with an index of its dimension, loads as it is;
-        any other record means re-embedding. With no record (a knowledge base
-        from 0.6.3), an index of the model's dimension whose mappings name
-        exactly the stored chunks is adopted; anything else is re-embedded.
-        A new knowledge base (no chunks, no index) gets its record with its
-        first save.
+        With chunks and no index (or one the store could not read), every
+        chunk is embedded. A record that names the current model, with an
+        index of its dimension, loads as it is; any other record means
+        re-embedding. With no record (a knowledge base from 0.6.3), an index
+        of the model's dimension whose mappings name exactly the stored chunks
+        is adopted; anything else is re-embedded. A new knowledge base (no
+        chunks, no index) gets its record with its first save.
         """
         current = self._current_record()
         store = self._vector_store
-        if not is_regular_file(store.index_path):  # a symlink counts as no index
+        if store.unreadable or not is_regular_file(store.index_path):  # a symlink counts as no index
             if self._chunks:
-                self._reembed(current, "no_index")
+                self._reembed(current, "unreadable_index" if store.unreadable else "no_index")
             return
         recorded = read_model_record(self._model_record_path)
         dimension = store.index.d
@@ -724,14 +756,16 @@ class KnowledgeBaseManager:
         so ``backfill_sidecars`` and the lazy ``kb_read`` fallback cannot
         double-generate a sidecar for the same document.
 
-        The dict insert is guarded by ``_lock`` so two threads racing to
-        create the lock for a new doc will not produce two distinct
-        ``asyncio.Lock`` instances.
+        The dict insert is guarded by ``_quick_lock`` so two threads racing
+        to create the lock for a new doc will not produce two distinct
+        ``asyncio.Lock`` instances (not by ``_lock``, which a thread holds
+        while it waits for another process's folder lock: the event loop
+        calls this).
         """
         existing = self._sidecar_locks.get(doc_id)
         if existing is not None:
             return existing
-        with self._lock:
+        with self._quick_lock:
             return self._sidecar_locks.setdefault(doc_id, asyncio.Lock())
 
     def _index_md_path(self) -> Path:
@@ -1389,7 +1423,9 @@ class KnowledgeBaseManager:
         Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
         call is already in progress on this manager. The in-progress flag
         is set and cleared synchronously (before/after any ``await``), so
-        two concurrent callers cannot both acquire it.
+        two concurrent callers cannot both acquire it. Reads and writes of
+        the knowledge base run on a worker thread: each waits for the
+        folder's lock.
 
         Skips ingest_log/index updates — they're already current; only
         the sidecar files are out of date.
@@ -1404,51 +1440,54 @@ class KnowledgeBaseManager:
         Returns:
             Number of sidecars written this call.
         """
-        # Check-and-set the running flag and snapshot the work list under
-        # one lock acquisition so a second thread cannot slip past the
-        # guard between the read and the write.
-        with self._transaction():
+        # Check-and-set the running flag under one lock acquisition so a
+        # second thread cannot slip past the guard between the read and the
+        # write.
+        with self._quick_lock:
             if self._backfill_running:
                 raise BackfillAlreadyRunning(
                     "backfill_sidecars is already running on this KB"
                 )
             self._backfill_running = True
-            todo = [
-                doc
-                for doc in self._documents.values()
-                if not self._has_sidecar(doc.id)
-            ]
         try:
+            todo = await asyncio.to_thread(self._documents_without_sidecar)
             written = 0
             total = len(todo)
             for i, doc in enumerate(todo):
                 # Guard against delete-during-backfill — doc may have
-                # been removed since the snapshot was taken. Checked
-                # under the lock so a concurrent delete_document cannot
-                # interleave between the check and use.
-                with self._transaction():
-                    if doc.id not in self._documents:
-                        continue
+                # been removed since the snapshot was taken.
+                if not await asyncio.to_thread(self._needs_sidecar, doc.id):
+                    continue
                 lock = self.get_or_create_sidecar_lock(doc.id)
                 async with lock:
                     # Double-check inside the lock — another task may
                     # have written it (e.g. lazy kb_read fallback).
-                    if self._has_sidecar(doc.id):
+                    if not await asyncio.to_thread(self._needs_sidecar, doc.id):
                         continue
-                    with self._transaction():
-                        if doc.id not in self._documents:
-                            continue
                     if progress_cb is not None:
                         progress_cb(i, total, doc)
                     payload = await self.generate_sidecar_payload(
                         doc.content, title=doc.title
                     )
-                    if self.write_sidecar_if_present(doc, payload):
+                    if await asyncio.to_thread(self.write_sidecar_if_present, doc, payload):
                         written += 1
             return written
         finally:
-            with self._lock:
+            with self._quick_lock:
                 self._backfill_running = False
+
+    def _documents_without_sidecar(self) -> list[Document]:
+        """The documents that have no sidecar, as the knowledge base is now."""
+        with self._transaction():
+            return [doc for doc in self._documents.values() if not self._has_sidecar(doc.id)]
+
+    def _needs_sidecar(self, doc_id: str) -> bool:
+        """Whether the document is still there, still without a sidecar.
+
+        A delete after this check is caught by ``write_sidecar_if_present``.
+        """
+        with self._transaction():
+            return doc_id in self._documents and not self._has_sidecar(doc_id)
 
 
 class BackfillAlreadyRunning(RuntimeError):
