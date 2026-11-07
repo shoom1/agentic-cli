@@ -1772,12 +1772,14 @@ step; each entry says what to use instead.
   longer with every turn. Each conversation's row (its title, turns and
   time) is now kept in a LangGraph store beside the checkpointer (in the
   same sqlite file, tables `store` and `store_migrations`, or the same
-  Postgres database), written as each turn ends, however it ends, and after
-  `/compact`, so a listing reads one small row per conversation, and
-  `session_info` one. A database written before is scanned once per app and
-  user, on its first listing. Sub-agents no longer store checkpoints of
-  their own: nothing read them, and a forked one stored the whole
-  conversation at every step.
+  Postgres database), so a listing reads one small row per conversation,
+  and `session_info` one. The row is written as each turn starts, its input
+  counted, so a process killed mid-turn still lists its conversation, and
+  again from the checkpoint as the turn ends, however it ends, and after
+  `/compact`. A database written before is scanned once per app and user,
+  on its first listing. Sub-agents no longer store checkpoints of their
+  own: nothing read them, and a forked one stored the whole conversation at
+  every step.
 - **On ADK, a main agent's reply that is no answer ends the turn with an
   error.** A reply with nothing but thoughts or blank text raises nothing on
   ADK: Gemini's `SAFETY`, `MALFORMED_FUNCTION_CALL` or `MAX_TOKENS` (every

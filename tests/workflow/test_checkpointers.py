@@ -24,6 +24,7 @@ pytest.importorskip("langgraph.checkpoint.memory")
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
+from agentic_cli.workflow import checkpointers  # noqa: E402
 from agentic_cli.workflow.checkpointers import (  # noqa: E402
     deepagents_sqlite_path,
     open_checkpointer,
@@ -177,6 +178,96 @@ def fake_postgres_store(monkeypatch):
     module.AsyncPostgresStore = AsyncPostgresStore
     monkeypatch.setitem(sys.modules, "langgraph.store.postgres.aio", module)
     return types.SimpleNamespace(opened=opened, state=state)
+
+
+class _RacingStore:
+    """A store whose first ``setup()`` calls fail as another process's
+    migration of the same new file makes them fail."""
+
+    def __init__(self, errors: list[BaseException]) -> None:
+        self.errors = errors
+        self.setups = 0
+
+    async def setup(self) -> None:
+        self.setups += 1
+        if self.errors:
+            raise self.errors.pop(0)
+
+
+@pytest.fixture
+def racing_sqlite_store(monkeypatch):
+    """Stand in for ``langgraph.store.sqlite.aio``: ``state["errors"]`` are
+    what the store's setups raise, in turn."""
+    opened: list[_FakeConnection] = []
+    state: dict = {"errors": []}
+
+    class AsyncSqliteStore:
+        @staticmethod
+        def from_conn_string(path: str) -> _FakeConnection:
+            connection = _FakeConnection(_RacingStore(state["errors"]))
+            opened.append(connection)
+            return connection
+
+    module = types.ModuleType("langgraph.store.sqlite.aio")
+    module.AsyncSqliteStore = AsyncSqliteStore
+    monkeypatch.setitem(sys.modules, "langgraph.store.sqlite.aio", module)
+    return types.SimpleNamespace(opened=opened, state=state)
+
+
+class TestStoreSetupRace:
+    """Processes opening one new sqlite file at once race through the store's
+    migrations, each read-the-version-then-apply in autocommit: the loser
+    records a version already recorded, or adds a column already added. Its
+    setup is run again after a pause, from the version the winner left (a
+    run too soon can lose again: one in 32 did, run once more at once)."""
+
+    @pytest.fixture(autouse=True)
+    def no_pause(self, monkeypatch):
+        monkeypatch.setattr(checkpointers, "_SETUP_PAUSE", 0)
+
+    @pytest.mark.parametrize("error", [
+        sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v"),
+        sqlite3.OperationalError("duplicate column name: expires_at"),
+    ])
+    async def test_a_lost_migration_race_is_set_up_again(self, racing_sqlite_store, error):
+        racing_sqlite_store.state["errors"] = [error]
+
+        store, cm = await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert store is connection.saver and store.setups == 2
+        assert cm is connection and not connection.exited
+
+    async def test_a_race_lost_again_is_set_up_again(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [
+            sqlite3.OperationalError("duplicate column name: expires_at"),
+            sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v"),
+        ]
+
+        store, _ = await open_store("sqlite", sqlite_path="/data/c.db")
+
+        assert store.setups == 3
+
+    async def test_it_gives_up_after_its_retries(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [
+            sqlite3.IntegrityError("UNIQUE constraint failed: store_migrations.v")
+        ] * (checkpointers._SETUP_RETRIES + 1)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert connection.saver.setups == checkpointers._SETUP_RETRIES + 1
+        assert connection.exited
+
+    async def test_any_other_error_is_not_retried(self, racing_sqlite_store):
+        racing_sqlite_store.state["errors"] = [sqlite3.OperationalError("disk I/O error")]
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            await open_store("sqlite", sqlite_path="/data/c.db")
+
+        [connection] = racing_sqlite_store.opened
+        assert connection.saver.setups == 1 and connection.exited
 
 
 class TestOpenStore:

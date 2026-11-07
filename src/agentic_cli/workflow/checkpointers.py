@@ -28,9 +28,11 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import sqlite3
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from agentic_cli.logging import Loggers
 
@@ -48,6 +50,12 @@ CheckpointerKind = Literal["memory", "sqlite", "postgres"]
 # ``sqlite_file`` too). What follows the prefix is the file, as SQLAlchemy reads it:
 # ``sqlite:///rel.db`` is relative, ``sqlite:////abs/x.db`` absolute.
 _SQLITE_URI_PREFIXES = ("sqlite:///", "sqlite+aiosqlite:///")
+
+# How many times a setup that lost a race is run again, and the pause before
+# each run, in seconds: the other process's migrations take milliseconds, but
+# a run that comes too soon can lose to them again.
+_SETUP_RETRIES = 3
+_SETUP_PAUSE = 0.1
 
 
 async def open_checkpointer(
@@ -128,7 +136,9 @@ async def open_store(
     For sqlite it is the checkpointer's file, on a connection of its own: the
     saver's connection runs transactions it commits itself, the store's runs
     in autocommit. Its tables (``store``, ``store_migrations``) are neither
-    the saver's nor ADK's, which may share the file.
+    the saver's nor ADK's, which may share the file. A setup that lost a
+    race with another process migrating the same new file is run again
+    (``_lost_migration_race``).
 
     Args:
         kind: ``"memory"``, ``"sqlite"`` or ``"postgres"``.
@@ -179,7 +189,10 @@ async def open_store(
                 "The SQLite store requires langgraph-checkpoint-sqlite. "
                 "Install with: pip install langgraph-checkpoint-sqlite"
             ) from e
-        store, cm = await _enter(AsyncSqliteStore.from_conn_string(str(sqlite_path)))
+        store, cm = await _enter(
+            AsyncSqliteStore.from_conn_string(str(sqlite_path)),
+            again=_lost_migration_race,
+        )
         logger.debug("sqlite_store_created", path=str(sqlite_path))
         return store, cm
 
@@ -200,16 +213,46 @@ def _memory_saver() -> "BaseCheckpointSaver":
     return InMemorySaver()
 
 
-async def _enter(cm: Any) -> tuple[Any, "AbstractAsyncContextManager"]:
+def _lost_migration_race(error: BaseException) -> bool:
+    """Whether a sqlite store's setup failed as another process migrated the file.
+
+    ``AsyncSqliteStore.setup`` reads the schema's version, then applies each
+    later migration and records it, statement by statement in autocommit. Two
+    processes opening a new file at once can both apply one: the second
+    records a version already recorded (``UNIQUE constraint failed:
+    store_migrations.v``) or adds a column already added (``duplicate column
+    name``). Run again, its setup reads the version the other left.
+    """
+    return isinstance(error, sqlite3.IntegrityError) or (
+        isinstance(error, sqlite3.OperationalError) and "duplicate column" in str(error)
+    )
+
+
+async def _enter(
+    cm: Any, *, again: Callable[[BaseException], bool] | None = None
+) -> tuple[Any, "AbstractAsyncContextManager"]:
     """Enter ``cm`` and create the tables of the saver or store it yields.
 
     If ``setup()`` fails, the connection just opened is closed before the
     error propagates: the caller never received ``cm``, so nothing else could
     close it.
+
+    Args:
+        cm: The context manager that opens the connection.
+        again: Whether a setup that failed with this error is run again,
+            after a pause (``_SETUP_RETRIES`` times at most).
     """
     saver = await cm.__aenter__()
     try:
-        await saver.setup()
+        for retry in range(_SETUP_RETRIES + 1):
+            try:
+                await saver.setup()
+                break
+            except Exception as error:
+                if again is None or retry == _SETUP_RETRIES or not again(error):
+                    raise
+                logger.debug("setup_run_again", error=str(error))
+                await asyncio.sleep(_SETUP_PAUSE)
     except BaseException:
         try:
             await cm.__aexit__(None, None, None)

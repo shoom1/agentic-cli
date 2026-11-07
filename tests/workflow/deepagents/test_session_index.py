@@ -1,8 +1,9 @@
 """The session index on Deep Agents (``workflow/deepagents/sessions.py``).
 
 A conversation's row (its title, its turns, when it last changed) is kept in
-a LangGraph store beside the checkpointer, written as each turn ends,
-however it ends, and after ``/compact``. A listing reads those rows, one
+a LangGraph store beside the checkpointer, written as each turn starts (the
+row the turn will leave, so a turn the process does not survive still lists
+its conversation) and as it ends, however it ends, and after ``/compact``. A listing reads those rows, one
 small value per conversation, instead of every checkpoint of the user, each
 of which holds the whole conversation; ``session_info`` reads one. A
 database written before the index is scanned once per app and user, then
@@ -17,7 +18,9 @@ gives.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -296,21 +299,47 @@ class TestTheRowAfterEveryTurn:
         scripted(monkeypatch, solo=his(1))
         manager = managers(_manager(ctx.settings))
         await manager.initialize_services()
-        slow = SlowStore(manager._sessions._store)
-        manager._sessions._store = slow
 
-        consumer = asyncio.create_task(turn(manager, "Hello."))
-        await asyncio.wait_for(slow.writing.wait(), 5)
-        consumer.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(consumer, 5)
-        slow.release.set()
-        await asyncio.wait_for(slow.written.wait(), 5)
-        manager._sessions._store = slow.store
+        # Write 1 as the turn starts, write 2 (held) as it ends.
+        slow = await stopped_while_writing(manager, turn(manager, "Hello."), hold=2)
+        await slow.settled(2)
 
         (row,) = await listed(manager)
         assert row == await truth(manager)
         assert (row.title, row.turns) == ("Hello.", 1)
+
+    async def test_a_turn_stopped_as_it_starts_leaves_the_checkpoints_row(
+        self, ctx, monkeypatch, managers
+    ):
+        """The row written as the turn starts counts an input the stopped
+        turn never stored; the end's row, from the checkpoint, is written
+        after it, however late it lands."""
+        scripted(monkeypatch, solo=his(1))
+        manager = managers(_manager(ctx.settings))
+        await turn(manager, "Hello.")
+
+        # Write 1 (held) as the second turn starts, write 2 as it ends.
+        slow = await stopped_while_writing(manager, turn(manager, "Again?"), hold=1)
+        await slow.settled(2)
+
+        assert slow.done == ["put", "put"]
+        (row,) = await listed(manager)
+        assert row == await truth(manager)
+        assert (row.title, row.turns) == ("Hello.", 1)
+
+    async def test_a_first_turn_stopped_as_it_starts_lists_nothing(
+        self, ctx, monkeypatch, managers
+    ):
+        scripted(monkeypatch, solo=[])
+        manager = managers(_manager(ctx.settings))
+        await manager.initialize_services()
+
+        slow = await stopped_while_writing(manager, turn(manager, "Hello."), hold=1)
+        await slow.settled(2)
+
+        assert slow.done == ["put", "delete"]
+        assert await listed(manager) == []
+        assert await manager.session_exists("s", user_id="u") is False
 
     async def test_a_job_told_to_the_conversation(self, ctx, monkeypatch, managers):
         scripted(monkeypatch, solo=[ai("Building."), ai("Built.")])
@@ -339,6 +368,92 @@ class TestTheRowAfterEveryTurn:
         (row,) = await listed(manager)
         assert row == await truth(manager)
         assert row.turns == 3 and row.updated > before.updated
+
+
+# --- the row while a turn runs ---------------------------------------------------------
+
+
+async def listed_in_flight(manager, chat: GatedChat, run) -> list[SessionInfo]:
+    """The list while ``run`` (a turn) waits in its held model call; then
+    the turn is stopped."""
+    consumer = asyncio.create_task(run)
+    try:
+        await asyncio.wait_for(chat._started.wait(), 5)
+        return await listed(manager)
+    finally:
+        consumer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
+        chat._release.set()
+
+
+def gated(monkeypatch, script: list, gate_at: int) -> GatedChat:
+    chat = GatedChat(label="solo", script=script, gate_at=gate_at)
+    models = ScriptedModels()
+    models.chats["solo"] = chat
+    monkeypatch.setattr(manager_module, "build_chat_model", models)
+    return chat
+
+
+async def drain(events) -> None:
+    async for _ in events:
+        pass
+
+
+class TestTheRowWhileATurnRuns:
+    """Written as the turn starts too: a process killed mid-turn (SIGKILL, the
+    terminal closed, out of memory) runs no end of turn, and its
+    conversation must still be listed, and counted."""
+
+    async def test_a_new_conversation_is_listed_as_its_first_turn_starts(
+        self, store_kind, monkeypatch, managers
+    ):
+        chat = gated(monkeypatch, [ai("Late.")], gate_at=1)
+        manager = managers(_manager(store_kind))
+        await manager.initialize_services()
+        await manager.list_sessions(user_id="u")
+        started = datetime.now(timezone.utc)
+
+        rows = await listed_in_flight(
+            manager, chat, drain(manager.process("  Brand\nnew. ", "u", session_id="new"))
+        )
+
+        assert [(r.session_id, r.title, r.turns) for r in rows] == [("new", "Brand new.", 1)]
+        assert rows[0].updated >= started
+
+    async def test_a_later_turn_is_counted_as_it_starts(
+        self, store_kind, monkeypatch, managers
+    ):
+        chat = gated(monkeypatch, [ai("Hi."), ai("Other."), ai("Late.")], gate_at=3)
+        manager = managers(_manager(store_kind))
+        await turn(manager, "Hello.")
+        await turn(manager, "Elsewhere.", session="other")
+        await manager.list_sessions(user_id="u")
+        (_, before) = await listed(manager)
+
+        rows = await listed_in_flight(manager, chat, turn(manager, "Second question."))
+
+        assert [(r.session_id, r.title, r.turns) for r in rows] == [
+            ("s", "Hello.", 2), ("other", "Elsewhere.", 1)
+        ]
+        assert rows[0].updated > before.updated
+        # The turn's end (here its cancel) writes the row from the checkpoint.
+        assert (await listed(manager))[0] == await truth(manager)
+
+    async def test_a_job_told_to_the_conversation_is_no_turn_as_it_starts(
+        self, ctx, monkeypatch, managers
+    ):
+        chat = gated(monkeypatch, [ai("Building."), ai("Late.")], gate_at=2)
+        manager = managers(_manager(ctx.settings))
+        await turn(manager, "Build it.")
+        (before,) = await listed(manager)
+
+        (row,) = await listed_in_flight(
+            manager, chat, drain(manager.resume_with_job_result(_record(), result="ok"))
+        )
+
+        assert (row.title, row.turns) == ("Build it.", 1)
+        assert row.updated > before.updated
 
 
 # --- info and delete --------------------------------------------------------------------
@@ -463,22 +578,54 @@ class TestBackfill:
 
 
 class SlowStore:
-    """A store whose writes wait for ``release``, as a slow disk would."""
+    """A store whose ``hold``-th write waits for ``release``, as a slow disk
+    would; ``done`` names each write and delete as it completes."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, hold: int) -> None:
         self.store = store
+        self.hold = hold
+        self.puts = 0
         self.writing = asyncio.Event()
         self.release = asyncio.Event()
-        self.written = asyncio.Event()
+        self.done: list[str] = []
 
     async def aput(self, *args, **kwargs):
-        self.writing.set()
-        await self.release.wait()
+        self.puts += 1
+        if self.puts == self.hold:
+            self.writing.set()
+            await self.release.wait()
         await self.store.aput(*args, **kwargs)
-        self.written.set()
+        self.done.append("put")
+
+    async def adelete(self, *args, **kwargs):
+        await self.store.adelete(*args, **kwargs)
+        self.done.append("delete")
+
+    async def settled(self, count: int) -> None:
+        """Wait until ``count`` writes and deletes completed."""
+        async def wait() -> None:
+            while len(self.done) < count:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait(), 5)
 
     def __getattr__(self, name: str):
         return getattr(self.store, name)
+
+
+async def stopped_while_writing(manager, run, hold: int) -> SlowStore:
+    """``run`` (a turn) cancelled while the ``hold``-th write of the index
+    waits; the write then lands (a cancelled turn waits for its writes)."""
+    slow = SlowStore(manager._sessions._store, hold)
+    manager._sessions._store = slow
+    consumer = asyncio.create_task(run)
+    await asyncio.wait_for(slow.writing.wait(), 5)
+    consumer.cancel()
+    await asyncio.sleep(0.05)
+    slow.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, 5)
+    return slow
 
 
 class TurnDuringScan:

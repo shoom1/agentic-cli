@@ -701,7 +701,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 await self._root.aupdate_state(
                     config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
                 )
-                await self._record(session)
+                await asyncio.shield(self._recording(session))
                 result = CompactResult(
                     messages_summarized=cut,
                     tokens_before=middleware.token_counter(sent),
@@ -737,8 +737,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         the run callback reports from inside a node (a summary that starts,
         its usage, the summary it made) is merged into the stream as it
         happens, so it shows while the node still runs, before the node's
-        own output. However the turn ends, the conversation's row in the
-        session index is written from what it left (``_record``).
+        own output. The conversation's row in the session index is written
+        as the turn starts, the input counted, and, however the turn ends,
+        from what it left (``_recording``).
         """
         processor = DeepAgentsEventProcessor(
             root=self._root_name,
@@ -761,7 +762,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             subgraphs=True,
         )
         count = 0
+        # Listed and counted before anything runs: a process killed in the
+        # turn runs no finally.
+        started = self._recording(ref, graph_input["messages"])
         try:
+            await asyncio.shield(started)
             # aclosing: a cancelled turn closes the merge, which closes the
             # stream, and its tasks, now, in the task that iterates it.
             async with contextlib.aclosing(merged(stream, live)) as items:
@@ -794,19 +799,39 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 yield event
             return
         finally:
-            await self._record(ref)
+            await asyncio.shield(self._recording(ref, after=started))
         # Every call of the turn has its result in the checkpoint now.
         self._open_calls.clear()
         logger.info("message_processed", event_count=count)
 
-    async def _record(self, ref: "SessionRef") -> None:
-        """Write ``ref``'s row in the session index (``CheckpointSessions.record``).
+    def _recording(
+        self,
+        ref: "SessionRef",
+        adding: list[Any] | None = None,
+        *,
+        after: "asyncio.Future[None] | None" = None,
+    ) -> "asyncio.Future[None]":
+        """A task writing ``ref``'s row in the session index.
 
-        Shielded: a cancel landing meanwhile (Ctrl+C pressed again) leaves the
-        write to finish.
+        The row is ``CheckpointSessions.record``'s. Its caller awaits it
+        shielded, so a cancel landing meanwhile (Ctrl+C pressed again) leaves
+        the write to finish.
+
+        Args:
+            ref: The conversation.
+            adding: The input of the turn starting, counted in the row.
+            after: The write the turn started with, finished first: however
+                the turn is stopped, the row written last is its end's.
         """
-        if self._sessions is not None:
-            await asyncio.shield(self._sessions.record(ref))
+        sessions = self._sessions
+
+        async def write() -> None:
+            if after is not None:
+                await asyncio.wait([after])
+            if sessions is not None:
+                await sessions.record(ref, adding or ())
+
+        return asyncio.ensure_future(write())
 
     def _raw_llm_log(self) -> LLMLogWriter | None:
         """The raw LLM log when ``raw_llm_logging`` is on, read for each turn.

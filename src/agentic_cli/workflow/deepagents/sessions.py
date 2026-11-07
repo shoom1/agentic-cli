@@ -15,8 +15,10 @@ their task's namespace (``tools:<task-id>``): a scan keeps the root namespace
 A conversation's row (``SessionInfo``) is kept in an index, a LangGraph store
 beside the checkpointer (``checkpointers.open_store``), under
 ``("agentic_cli", "sessions", <app>, <user>)``, keyed by the session id. The
-manager writes it from the conversation's latest root checkpoint as each turn
-ends, however it ends, and after ``/compact`` (``record``), so a listing reads
+manager writes it as each turn starts, the row the turn will leave (its input
+counted), so a turn the process does not survive still lists its
+conversation; and from the conversation's latest root checkpoint as each turn
+ends, however it ends, and after ``/compact`` (``record``). A listing reads
 one small row per conversation rather than every checkpoint of the user, each
 of which holds the whole conversation. A database written before the index is
 scanned once per app and user, on its first listing (the backfill), which then
@@ -33,7 +35,8 @@ how many they typed.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -178,23 +181,33 @@ class CheckpointSessions:
         checkpoint = await self._root(ref)
         return _row(ref.session_id, checkpoint) if _messages(checkpoint) else None
 
-    async def record(self, ref: SessionRef) -> None:
+    async def record(self, ref: SessionRef, adding: Sequence[BaseMessage] = ()) -> None:
         """Write ``ref``'s row from its latest root checkpoint. Never raises.
 
-        The manager calls it as each turn ends, however it ends, and after
-        ``/compact``. A conversation without a message gets none. A failed
-        write is logged at debug and costs nothing else: the conversation's
-        next turn writes its row again.
+        The manager calls it as each turn starts, with the turn's input as
+        ``adding``: the row is then the one the turn will leave, those
+        messages counted after the checkpoint's (a typed prompt is a turn, a
+        job's notice none) and the time now. A process killed in the turn
+        (SIGKILL, the terminal closed) runs no end of turn, and its
+        conversation is still listed. The manager calls it again as each turn
+        ends, however it ends, and after ``/compact``, without ``adding``,
+        which corrects that row. A conversation without a message has none:
+        a first turn stopped before its input was stored takes its row back.
+        A failed write is logged at debug and costs nothing else: the
+        conversation's next turn writes its row again.
         """
+        namespace = _rows_of(ref.app_name, ref.user_id)
         try:
             item = await self._root(ref)
-            if not _messages(item):
+            if adding:
+                messages = [*_messages(item), *adding]
+                row = _row_of(ref.session_id, messages, datetime.now(timezone.utc))
+            elif _messages(item):
+                row = _row(ref.session_id, item)
+            else:
+                await self._store.adelete(namespace, ref.session_id)
                 return
-            row = _row(ref.session_id, item)
-            await self._store.aput(
-                _rows_of(ref.app_name, ref.user_id), ref.session_id, _value(row),
-                index=False,
-            )
+            await self._store.aput(namespace, ref.session_id, _value(row), index=False)
         except Exception:  # noqa: BLE001 - the turn is not the index's to fail
             logger.debug(
                 "session_row_not_written", session_id=ref.session_id, exc_info=True
@@ -414,14 +427,21 @@ def _updated(item: "CheckpointTuple") -> datetime:
 
 def _row(session_id: str, item: "CheckpointTuple") -> SessionInfo:
     """A conversation's row from its latest root checkpoint."""
+    return _row_of(session_id, _messages(item), _updated(item))
+
+
+def _row_of(
+    session_id: str, messages: Sequence[BaseMessage], updated: datetime
+) -> SessionInfo:
+    """A conversation's row: its first typed prompt, how many, and ``updated``."""
     typed = [
         text
-        for message in _messages(item)
+        for message in messages
         if isinstance(message, HumanMessage) and not is_job_notification(message)
         if (text := _text(message))
     ]
     title = session_title(typed[0]) if typed else ""
-    return SessionInfo(session_id, title, len(typed), _updated(item))
+    return SessionInfo(session_id, title, len(typed), updated)
 
 
 def _text(message: BaseMessage) -> str:
