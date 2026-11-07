@@ -36,6 +36,30 @@ logger = get_logger("agentic_cli.memory.store")
 _SENTINEL = object()
 
 
+def _loaded(service: Any) -> Any:
+    """``service`` with its model loaded, or None when it does not load.
+
+    Reading ``embedding_dim`` loads an ``EmbeddingService``'s model (a
+    service without one is taken as it is). Whatever stops it (an offline
+    first run with the model not cached, a broken install) is logged once,
+    and the store searches by substring rather than failing to open, or
+    failing each save and search.
+    """
+    if service is None:
+        return None
+    try:
+        getattr(service, "embedding_dim", None)
+    except Exception as e:
+        logger.warning(
+            "memory_substring_search_only",
+            reason="the embedding model did not load",
+            model=getattr(service, "model_name", "unknown"),
+            error=f"{type(e).__name__}: {e}",
+        )
+        return None
+    return service
+
+
 @dataclass
 class MemoryItem:
     """A single memory entry."""
@@ -116,10 +140,12 @@ class MemoryStore:
         Args:
             base_dir: Directory holding ``memories.json``.
             embedding_service: Optional; anything with ``embed_text`` and
-                ``embed_batch``. Without it, search is by substring.
+                ``embed_batch``. Without it, or when its model does not load
+                (an offline first run, say: one warning), search is by
+                substring.
         """
         base_dir = Path(base_dir)
-        self._embedding_service = embedding_service
+        self._embedding_service = _loaded(embedding_service)
         base_dir.mkdir(parents=True, exist_ok=True)
         self._path = base_dir / "memories.json"
         self._embeddings_path = base_dir / "memories_embeddings.json"

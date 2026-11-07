@@ -15,9 +15,33 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from agentic_cli.memory._core.io import atomic_write_json, open_if_regular, read_if_regular
+from agentic_cli.memory._core.log import get_logger
 
 if TYPE_CHECKING:
     import faiss
+
+logger = get_logger("agentic_cli.memory.kb")
+
+
+def _parse_mappings(raw: bytes) -> tuple[dict[int, str], dict[str, int], int]:
+    """The ID mappings saved beside an index.
+
+    Raises:
+        Exception: ``raw`` is not in the shape this store writes (bad JSON,
+            a missing key, the wrong types).
+    """
+    mappings = json.loads(raw)
+    id_map = {int(k): v for k, v in mappings["id_map"].items()}
+    chunk_to_faiss = mappings["chunk_to_faiss"]
+    next_id = mappings["next_id"]
+    if (
+        not all(isinstance(v, str) for v in id_map.values())
+        or not isinstance(chunk_to_faiss, dict)
+        or not all(isinstance(k, str) and type(v) is int for k, v in chunk_to_faiss.items())
+        or type(next_id) is not int
+    ):
+        raise ValueError("the mappings are not of the expected types")
+    return id_map, chunk_to_faiss, next_id
 
 
 class VectorStore:
@@ -45,6 +69,8 @@ class VectorStore:
         self._id_map: dict[int, str] = {}  # FAISS internal ID -> chunk_id
         self._chunk_to_faiss: dict[str, int] = {}  # chunk_id -> FAISS internal ID
         self._next_id: int = 0
+        # Whether load() found an index it could not read (see load).
+        self.unreadable = False
 
         # Load existing index if available
         if self.index_path.exists():
@@ -264,23 +290,37 @@ class VectorStore:
 
         Neither is read through a symlink, nor unless it is a regular file:
         a project can ship its knowledge base. One that is counts as missing.
+
+        An index FAISS cannot read (a git-LFS pointer, a foreign file) or
+        mappings not in the shape this store writes count as no index, with
+        a warning: the store is left empty and ``unreadable`` set, and the
+        knowledge base embeds its chunks again rather than failing to open.
+        Well-formed mappings that name other chunks, or none beside the
+        index, still load as they are.
         """
         import faiss
 
+        self.unreadable = False
         index_file = open_if_regular(self.index_path)
         if index_file is None:
             return
         with self._lock, index_file:
-            # Load FAISS index (faiss would open a path itself, following links)
-            self._index = faiss.read_index(faiss.PyCallbackIOReader(index_file.read))
-
-            # Load ID mappings
-            raw = read_if_regular(self.index_path.with_suffix(".mappings.json"))
-            if raw is not None:
-                mappings = json.loads(raw)
-                self._id_map = {int(k): v for k, v in mappings["id_map"].items()}
-                self._chunk_to_faiss = mappings["chunk_to_faiss"]
-                self._next_id = mappings["next_id"]
+            try:
+                # faiss would open a path itself, following links
+                index = faiss.read_index(faiss.PyCallbackIOReader(index_file.read))
+                raw = read_if_regular(self.index_path.with_suffix(".mappings.json"))
+                mappings = None if raw is None else _parse_mappings(raw)
+            except Exception as e:
+                logger.warning(
+                    "kb_vector_index_unreadable", path=str(self.index_path), error=f"{type(e).__name__}: {e}"
+                )
+                self.unreadable = True
+                self._index = None
+                self._id_map, self._chunk_to_faiss, self._next_id = {}, {}, 0
+                return
+            self._index = index
+            if mappings is not None:
+                self._id_map, self._chunk_to_faiss, self._next_id = mappings
 
     def clear(self) -> None:
         """Clear all vectors from the index."""
