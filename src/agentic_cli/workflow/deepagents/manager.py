@@ -793,7 +793,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 error=truncate(str(error), _MAX_LOGGED_ERROR),
                 exc_info=error,
             )
-            self._open_calls.clear()
+            # The failed step's writes are gone: its calls that returned keep
+            # their results for the next run, which answers the others.
+            self._open_calls.failed(ref)
             event = self._apply_event_hook(processor.turn_failed(error))
             if event is not None:
                 yield event
@@ -801,7 +803,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         finally:
             await asyncio.shield(self._recording(ref, after=started))
         # Every call of the turn has its result in the checkpoint now.
-        self._open_calls.clear()
+        self._open_calls.clear(ref)
         logger.info("message_processed", event_count=count)
 
     def _recording(

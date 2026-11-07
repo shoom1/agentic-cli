@@ -1084,7 +1084,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                         raise cause from None
             finally:
                 # Every call of the turn is answered now, sealed or returned.
-                self._open_calls.clear()
+                # One a failure left open is answered at the next turn
+                # (left_open) as interrupted: the state it changed, which
+                # ADK stores with its result, is gone.
+                self._open_calls.clear(self.session_ref(session_id, user_id))
 
         # Final drain — catches progress from the last tool call
         if self._task_progress_plugin:

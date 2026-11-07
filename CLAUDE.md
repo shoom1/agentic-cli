@@ -47,7 +47,7 @@ agentic-cli/
 │   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
 │   │   ├── live_events.py    # LiveEvents, merged: events reported inside a turn (reporting/report) reach its stream as they happen; on_stop: a consumer that stops early, before the source is cancelled
-│   │   ├── interrupts.py     # What a call a cancel or a crash left open is answered with; OpenCalls (each manager's record)
+│   │   ├── interrupts.py     # What a call a cancel or a crash left open is answered with; OpenCalls (each manager's record, kept by conversation: only that conversation's turns clear it); job_for_call: a job of the turn's conversation only
 │   │   ├── config.py         # AgentConfig
 │   │   ├── settings.py       # Workflow/tool settings schema; models, model_providers, model_roles and permissions in Annotated form (an app's override warns nothing); _merge_shipped_entries: the app's models and model_providers, then the sources', field by field, and the app's permissions before the sources' (at load only); permissions: the union of every trusted source's rules, each list concatenated, a duplicate once (_source_sections reads each source's value as the sources hook filed it)
 │   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); is_context_overflow, overflow_message
