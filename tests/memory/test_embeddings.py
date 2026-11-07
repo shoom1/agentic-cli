@@ -156,6 +156,25 @@ class TestEmbeddingServiceChunking:
         """Test _merge_sentences with empty list returns empty."""
         assert EmbeddingService._merge_sentences([], chunk_size=100, overlap=10) == []
 
+    def test_nltk_without_its_data_falls_back_to_the_regex_split(self, svc, monkeypatch):
+        """nltk installed without its punkt data (its default state) raises
+        LookupError from sent_tokenize, which failed every ingest."""
+        import sys
+        import types
+
+        def sent_tokenize(text):
+            raise LookupError("Resource punkt_tab not found. Please use the NLTK Downloader")
+
+        monkeypatch.setitem(sys.modules, "nltk", types.SimpleNamespace(sent_tokenize=sent_tokenize))
+
+        assert svc._split_sentences("Otters nest in burrows. Herons wade at dawn.") == [
+            "Otters nest in burrows.",
+            "Herons wade at dawn.",
+        ]
+        assert MockEmbeddingService().chunk_document("Otters nest. Herons wade.") == [
+            "Otters nest. Herons wade."
+        ]
+
 
 class TestResolveEmbeddingDevice:
     """Tests for the device-resolution autodetect helper."""
@@ -248,3 +267,32 @@ class TestResolveEmbeddingDevice:
         monkeypatch.setattr(emb_mod, "resolve_embedding_device", lambda p: "cpu")
         svc = EmbeddingService(device="auto")
         assert svc.device == "cpu"
+
+
+class TestAModelThatDoesNotLoad:
+    """A failed load is remembered: the memory store and the knowledge base
+    each probed the shared service, and every probe tried the network again."""
+
+    def test_a_failed_load_is_not_tried_again(self, monkeypatch):
+        import sys
+        import types
+
+        loads: list[str] = []
+
+        class SentenceTransformer:
+            def __init__(self, name, device=None):
+                loads.append(name)
+                raise OSError("We couldn't connect to 'https://huggingface.co'")
+
+        monkeypatch.setitem(
+            sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=SentenceTransformer)
+        )
+        service = EmbeddingService(model_name="all-MiniLM-L6-v2", device="cpu")
+
+        for _ in range(3):
+            with pytest.raises(OSError, match="huggingface"):
+                service.embedding_dim
+        with pytest.raises(OSError, match="huggingface"):
+            service.embed_text("otters")
+
+        assert loads == ["all-MiniLM-L6-v2"]

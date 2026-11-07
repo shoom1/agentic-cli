@@ -62,6 +62,11 @@ class EmbeddingService:
 
     Uses sentence-transformers models for semantic embedding generation.
     Supports lazy loading to avoid loading the model until needed.
+
+    A model that fails to load is not tried again: every later use raises
+    that error at once. One service is shared by the knowledge base and the
+    memory store, and each probes it; an offline first run would otherwise
+    wait on the network for each of them.
     """
 
     @staticmethod
@@ -96,6 +101,7 @@ class EmbeddingService:
         self.device = resolve_embedding_device(device)
         self._model: SentenceTransformer | None = None
         self._embedding_dim: int | None = None
+        self._load_error: Exception | None = None
         # One service is shared by both knowledge-base scopes and the memory
         # store, and called from worker threads; a SentenceTransformer is not
         # safe to call from two threads at once. Reentrant: encoding loads
@@ -104,13 +110,24 @@ class EmbeddingService:
 
     @property
     def model(self) -> SentenceTransformer:
-        """Get the sentence transformer model (loaded once, on first use)."""
+        """Get the sentence transformer model (loaded once, on first use).
+
+        Raises:
+            Exception: the model did not load, now or on an earlier use.
+        """
         with self._lock:
             if self._model is None:
-                from sentence_transformers import SentenceTransformer
+                if self._load_error is not None:
+                    raise self._load_error.with_traceback(None)
+                try:
+                    from sentence_transformers import SentenceTransformer
 
-                self._model = SentenceTransformer(self.model_name, device=self.device)
-                self._embedding_dim = self._model.get_sentence_embedding_dimension()
+                    model = SentenceTransformer(self.model_name, device=self.device)
+                    dimension = model.get_sentence_embedding_dimension()
+                except Exception as e:
+                    self._load_error = e
+                    raise
+                self._model, self._embedding_dim = model, dimension
             return self._model
 
     @property
@@ -235,14 +252,16 @@ class EmbeddingService:
     def _split_sentences(self, text: str) -> list[str]:
         """Split text into sentences.
 
-        Uses nltk.sent_tokenize if available, falls back to regex.
+        Uses nltk.sent_tokenize if available, falls back to regex. nltk
+        installed without its punkt data (its default state) raises
+        ``LookupError``, which falls back too.
         """
         if not text.strip():
             return []
         try:
             import nltk
             return nltk.sent_tokenize(text)
-        except ImportError:
+        except (ImportError, LookupError):
             pass
         # Regex fallback
         parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)

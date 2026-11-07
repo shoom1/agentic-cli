@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,14 @@ from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingServic
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb import convert as _convert
 from agentic_cli.memory.kb import enrich
-from agentic_cli.memory.kb.manager import KnowledgeBaseManager, UnsafeKnowledgeBase, _printable
+from agentic_cli.memory.kb.manager import (
+    KnowledgeBaseManager,
+    UnsafeKnowledgeBase,
+    _faiss_available,
+    _Threads,
+    _loaded_or_keyword,
+    _printable,
+)
 from agentic_cli.memory.kb.models import Document, SourceType
 
 logger = get_logger("agentic_cli.memory.kb")
@@ -167,7 +175,8 @@ class KnowledgeBase:
     Scope order is lookup precedence, and the first scope takes writes.
     Two names for one directory are one scope, named by the first; the
     other name still works with :meth:`manager` and ``scope=``. ``open``
-    leaves out a scope whose folder is unsafe (see ``UnsafeKnowledgeBase``).
+    leaves out a scope whose folder is unsafe (see ``UnsafeKnowledgeBase``)
+    or that fails to open.
 
     In ``search`` and ``list_documents``, an error in the first scope
     raises; an error in a later scope is logged and that scope skipped.
@@ -176,6 +185,7 @@ class KnowledgeBase:
     def __init__(self, managers: Mapping[str, KnowledgeBaseManager]) -> None:
         self._managers: dict[str, KnowledgeBaseManager] = {}
         self._aliases: dict[str, str] = {}
+        self._concept_lock = threading.Lock()
         for name, manager in managers.items():
             _check_scope(name, manager)
             same = next((n for n, m in self._managers.items() if _same_store(m, manager)), None)
@@ -218,17 +228,22 @@ class KnowledgeBase:
                 directory. A scope not named here may be a symlink itself.
 
         With the ``kb`` extra and no ``use_mock``, this builds one embedding
-        service; the model loads once, when the first real index is opened,
-        to size or reconcile it.
+        service; the model loads once, before the first real index is opened,
+        to size or reconcile it. A model that does not load (an offline first
+        run, say) leaves every scope searching by keyword, with one warning
+        (``kb_keyword_search_only``).
 
         A directory whose own folders or lock file are symlinks (a project
         can ship its knowledge base), or that is reached through one from its
-        ``within`` folder, is left out, with a warning (``kb_scope_refused``):
-        the knowledge base opens with the other scopes, the first of them
-        taking writes.
+        ``within`` folder, is left out, with a warning (``kb_scope_refused``);
+        so is one that fails to open for any other reason (a folder it cannot
+        create, a document header it cannot read: ``kb_scope_unavailable``).
+        The knowledge base opens with the other scopes, the first of them
+        taking writes, and never reads or writes a scope left out.
 
         Raises:
-            UnsafeKnowledgeBase: every directory was left out.
+            Exception: the first scope's error, when every directory was left
+                out (``UnsafeKnowledgeBase`` for an unsafe one).
         """
         if not dirs:
             raise ValueError("a knowledge base needs at least one scope")
@@ -240,9 +255,12 @@ class KnowledgeBase:
             service = EmbeddingService(
                 model_name=config.model_name, batch_size=config.batch_size, device=config.device
             )
+        if service is not None and not use_mock and _faiss_available():
+            # Loaded here, once: each scope would otherwise try it, and warn.
+            service = _loaded_or_keyword(service)
         opened: list[KnowledgeBaseManager] = []
         managers: dict[str, KnowledgeBaseManager] = {}
-        refused: list[UnsafeKnowledgeBase] = []
+        errors: list[Exception] = []
         for name, directory in dirs.items():
             path = Path(directory)
             manager = next((m for m in opened if _same_dir(m.kb_dir, path)), None)
@@ -258,12 +276,18 @@ class KnowledgeBase:
                     )
                 except UnsafeKnowledgeBase as e:
                     logger.warning("kb_scope_refused", scope=name, error=str(e))
-                    refused.append(e)
+                    errors.append(e)
+                    continue
+                except Exception as e:
+                    logger.warning(
+                        "kb_scope_unavailable", scope=name, path=str(path), error=f"{type(e).__name__}: {e}"
+                    )
+                    errors.append(e)
                     continue
                 opened.append(manager)
             managers[name] = manager
         if not managers:
-            raise refused[0]
+            raise errors[0]
         return cls(managers)
 
     # -- scopes --------------------------------------------------------------
@@ -517,7 +541,12 @@ class KnowledgeBase:
         source_url: str | None,
         metadata: dict[str, Any],
     ) -> ScopedDocument:
-        """Enrich (one summarizer call) and store through the scope's manager."""
+        """Enrich (one summarizer call) and store through the scope's manager.
+
+        Storing runs on a worker thread: it embeds every chunk and waits
+        for the folder's lock, which another process can hold for as long
+        as it re-embeds.
+        """
         if not text and not data:
             raise EmptyDocument("no text and no bytes to ingest")
         manager = self._managers[name]
@@ -529,7 +558,8 @@ class KnowledgeBase:
             # e.g. a summarizer that answered with something other than text
             logger.debug("kb_sidecar_payload_failed", exc_info=True)
             payload = {"summary": enrich.preview(text), "claims": [], "entities": {}}
-        document = manager.ingest_document(
+        document = await asyncio.to_thread(
+            manager.ingest_document,
             content=text,
             title=title,
             source_type=source_type,
@@ -562,7 +592,9 @@ class KnowledgeBase:
         """The document's sidecar, written first when it is missing.
 
         The summarizer is called under the document's sidecar lock, so two
-        first reads make one call.
+        first reads make one call. Reads and writes run on a worker thread
+        (they wait for the folder's lock; a PDF's text is extracted); a
+        cancelled call keeps the lock until the one its thread is in ends.
 
         A sidecar that is a symlink counts as missing: it is never read
         through, and the one written replaces it.
@@ -573,19 +605,24 @@ class KnowledgeBase:
         """
         manager = self.manager(doc.scope)
         doc_id = doc.document.id
-        sidecar = manager.read_sidecar(doc_id)
+        sidecar = await asyncio.to_thread(manager.read_sidecar, doc_id)
         if sidecar is None:
-            async with manager.get_or_create_sidecar_lock(doc_id):
-                sidecar = manager.read_sidecar(doc_id)
+            lock = manager.get_or_create_sidecar_lock(doc_id)
+            await lock.acquire()
+            threads = _Threads()
+            try:
+                sidecar = await threads.run(manager.read_sidecar, doc_id)
                 if sidecar is None:
-                    live = manager.get_document(doc_id)
+                    live = await threads.run(manager.get_document, doc_id)
                     if live is None:
                         raise DocumentNotFound(doc_id)
-                    text, _ = self.read_text(ScopedDocument(live, doc.scope))
+                    text, _ = await threads.run(self.read_text, ScopedDocument(live, doc.scope))
                     payload = await manager.generate_sidecar_payload(text, title=live.title)
-                    if not manager.write_sidecar_if_present(live, payload):
+                    if not await threads.run(manager.write_sidecar_if_present, live, payload):
                         raise DocumentNotFound(doc_id)
-                    sidecar = manager.read_sidecar(doc_id)
+                    sidecar = await threads.run(manager.read_sidecar, doc_id)
+            finally:
+                threads.release_after(lock.release)
         if sidecar is None:
             raise DocumentNotFound(doc_id)
         return sidecar
@@ -597,16 +634,19 @@ class KnowledgeBase:
     ) -> dict[str, Any]:
         """Write a concept page to the first scope; each source must exist in some scope.
 
-        Returns what ``ConceptStore.write`` returns.
+        Returns what ``ConceptStore.write`` returns. One page is written at a
+        time: a free slug is picked, then written, and a write from another
+        thread in between would take the same slug.
         """
         _, first = self._first()
 
         def exists(doc_id: str) -> bool:
             return any(m.get_document(doc_id) is not None for m in self._managers.values())
 
-        return first.concepts.write(
-            title=title, body=body, sources=sources, slug=slug, valid_ids_check=exists
-        )
+        with self._concept_lock:
+            return first.concepts.write(
+                title=title, body=body, sources=sources, slug=slug, valid_ids_check=exists
+            )
 
     def search_concepts(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
         """Search the first scope's concept pages."""
