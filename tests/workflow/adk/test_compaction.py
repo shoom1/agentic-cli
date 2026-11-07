@@ -866,17 +866,19 @@ class TestTheADKItRestsOn:
         parameters = inspect.signature(method).parameters
 
         assert inspect.iscoroutinefunction(method)
-        assert list(parameters) == ["self", "session"]
-        assert parameters["session"].kind is inspect.Parameter.KEYWORD_ONLY
+        # session before google-adk 2.14, invocation_context from it.
+        (name,) = list(parameters)[1:]
+        assert name in ("session", "invocation_context")
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
 
     async def test_the_runner_runs_that_pass_after_every_turn(self):
         """Overriding it is how the after-turn pass goes: ADK must still call it."""
         after: list[str] = []
 
         class Recording(Runner):
-            async def _run_post_invocation_compaction(self, *, session) -> None:
-                after.append(session.id)
-                return await super()._run_post_invocation_compaction(session=session)
+            async def _run_post_invocation_compaction(self, **kwargs) -> None:
+                after.append("pass")
+                return await super()._run_post_invocation_compaction(**kwargs)
 
         summarizer = Counting()
         await one_turn(Recording, summarizer)

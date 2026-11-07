@@ -152,10 +152,12 @@ class NoAfterTurnCompactionRunner(Runner):
     the turn, before ``run_async`` ends: the user would wait for a summary
     after the answer. The pass before the next model call does the same work
     while the turn waits anyway. The method is private ADK; a contract test
-    pins it, and if ADK renamed it, only that wait would come back.
+    pins it, and if ADK renamed it, only that wait would come back. Its one
+    keyword argument is ``session`` before google-adk 2.14 and
+    ``invocation_context`` from it.
     """
 
-    async def _run_post_invocation_compaction(self, *, session: "Session") -> None:
+    async def _run_post_invocation_compaction(self, **_: Any) -> None:
         return None
 
 
