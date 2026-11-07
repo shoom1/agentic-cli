@@ -651,14 +651,23 @@ class BaseWorkflowManager(ABC):
         a knowledge base document; fact extraction: the session's last
         messages) could be longer than the model's window: a context
         overflow, or a very expensive call. One over the room the model
-        leaves with ``max_tokens`` to write (``context.prompt_room``; the
-        128k floor before initialization) keeps its start and its end, where
-        the instructions are, and leaves out the middle.
+        leaves (``context.prompt_room``, with the ``max_tokens`` the call is
+        resolved to; the 128k floor before initialization) keeps its start
+        and its end, where the instructions are, and leaves out the middle.
+        A room under ``MIN_PROMPT_ROOM`` holds no useful prompt: the prompt
+        goes as it is, and the provider answers.
         """
-        from agentic_cli.workflow.context import cut_middle, prompt_room
+        from agentic_cli.workflow.context import (
+            MIN_PROMPT_ROOM,
+            cut_middle,
+            prompt_room,
+        )
 
-        room = prompt_room(self._default_model, max_tokens)
-        if len(prompt) <= room:
+        model = None
+        if self._default_model is not None:
+            model = self._simple_model(max_tokens)
+        room = prompt_room(model, max_tokens)
+        if len(prompt) <= room or room < MIN_PROMPT_ROOM:
             return prompt
         logger.debug("side_call_prompt_cut", chars=len(prompt), room=room)
         return cut_middle(prompt, room)

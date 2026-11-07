@@ -107,7 +107,7 @@ async def test_a_type_that_is_not_saved_has_no_saved_path(summarizer):
 async def test_a_result_without_the_raw_body_is_not_saved(summarizer):
     result = await _web_fetch(FetchResult(success=True, content="<p>x</p>", content_type="text/html"))
 
-    assert result["success"] is True
+    assert result["success"] is False  # no body: no text to summarize
     assert "saved_path" not in result
     assert not _folder().exists()
 

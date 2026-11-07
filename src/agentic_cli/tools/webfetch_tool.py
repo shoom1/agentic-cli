@@ -24,7 +24,7 @@ from agentic_cli.tools.webfetch import (
     RobotsTxtChecker,
     build_summarize_prompt,
 )
-from agentic_cli.tools.webfetch.converter import page_text
+from agentic_cli.tools.webfetch.converter import page_text, text_extension
 from agentic_cli.tools.webfetch.saved import (
     SaveError,
     cleanup_saved_pages,
@@ -178,8 +178,10 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
     The summary is written from the whole page converted to text, cut at
     ``webfetch_max_content_bytes`` (``converter.page_text``, in a worker
     thread: pypdf and the HTML converters take a while on a large page).
-    ``truncated`` says the text was cut, or the download was. A type that is
-    not saved (an image, an archive) has no text: an error, not a summary.
+    ``truncated`` says the text was cut, or the download was. A page with no
+    text to summarize is an error, not a summary of nothing: a type that is
+    not text (an image, an archive), a PDF cut at ``webfetch_max_pdf_bytes``
+    (unreadable), or a page whose conversion holds no text.
     """
     fetcher = get_or_create_fetcher()
     fetch_result = await fetcher.fetch(url, timeout=timeout, authorize=_redirect_check(prompt))
@@ -203,15 +205,27 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
     saved = await asyncio.to_thread(save_fetched_page, url, fetch_result)
 
     content_type = fetch_result.content_type or "text/html"
-    extension = saved_page_extension(content_type)
+    extension = text_extension(content_type)
     if extension is None:
         return {
             "success": False,
             "error": (
                 f"Not a text page: {url} is {content_type}. web_fetch summarizes "
-                "HTML, text, Markdown, JSON, XML and PDF pages."
+                "HTML, text (Markdown, CSV, ...), JSON, XML and PDF pages."
             ),
             "url": url,
+        }
+    if extension == ".pdf" and fetch_result.raw_truncated:
+        limit = get_settings().webfetch_max_pdf_bytes
+        return {
+            "success": False,
+            "error": (
+                f"The PDF is larger than webfetch_max_pdf_bytes ({limit:,} bytes): "
+                "only its start was read, and a cut PDF cannot be read. Raise the "
+                "setting to read it."
+            ),
+            "url": url,
+            **saved,
         }
     try:
         text, cut = await asyncio.to_thread(
@@ -227,6 +241,16 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
         return {
             "success": False,
             "error": f"Could not convert the page ({type(e).__name__})",
+            "url": url,
+            **saved,
+        }
+    if not text:
+        return {
+            "success": False,
+            "error": (
+                f"No text in the page: {url} ({content_type}) converts to no text "
+                "to summarize (an empty page, one its scripts build, or a scanned PDF)."
+            ),
             "url": url,
             **saved,
         }

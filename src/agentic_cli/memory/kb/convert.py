@@ -1,7 +1,9 @@
 """Turn a file's bytes into the text the knowledge base stores.
 
-Ingestion owns this converter; ``web_fetch`` writes its summaries from the
-same text (``tools/webfetch/converter.py::page_text``).
+Ingestion owns this converter; ``web_fetch`` writes its summaries from its
+text too (``tools/webfetch/converter.py::page_text``), with links kept, no
+metadata read and a large page converted by html2text (the keyword options
+below; their defaults are ingestion's).
 
 - HTML goes through trafilatura when it is installed (the ``kb`` extra): it
   keeps a page's main text as Markdown, drops menus, sidebars, footers, links
@@ -55,6 +57,9 @@ def convert_document(
     extension: str,
     charset: str | None = None,
     url: str | None = None,
+    links: bool = False,
+    metadata: bool = True,
+    main_text: bool = True,
 ) -> ConvertedDocument:
     """Convert ``data`` to the text the knowledge base stores.
 
@@ -66,6 +71,12 @@ def convert_document(
             with it and undecodable bytes are replaced. None means a local
             file, which must be UTF-8 unless it is a PDF.
         url: The page's URL, which helps trafilatura.
+        links: Keep an HTML page's link URLs in the text (``[text](url)``).
+        metadata: Read an HTML page's title, author, date and description.
+            trafilatura's metadata pass is most of its time on a large page.
+        main_text: Extract an HTML page's main text with trafilatura; False
+            converts the whole page with html2text, whose time grows with the
+            page where trafilatura's grows faster.
 
     Raises:
         UnsupportedDocument: a local file that is neither a PDF nor UTF-8.
@@ -77,7 +88,9 @@ def convert_document(
 
     text = _decode(data, charset)
     if media in _HTML_TYPES or ext in _HTML_EXTENSIONS:
-        return _convert_html(text, url)
+        return _convert_html(
+            text, url, links=links, metadata=metadata, main_text=main_text
+        )
     return ConvertedDocument(text=text, extractor="text")
 
 
@@ -117,12 +130,17 @@ def _decode(data: bytes, charset: str | None) -> str:
         return data.decode("utf-8", errors="replace")
 
 
-def _convert_html(html: str, url: str | None) -> ConvertedDocument:
-    try:
-        import trafilatura
-    except ImportError:
-        reason = "not_installed"
-    else:
+def _convert_html(
+    html: str, url: str | None, *, links: bool, metadata: bool, main_text: bool
+) -> ConvertedDocument:
+    trafilatura = None
+    reason = "not_asked"
+    if main_text:
+        try:
+            import trafilatura
+        except ImportError:
+            reason = "not_installed"
+    if trafilatura is not None:
         try:
             # trafilatura's own loader, not lxml.html.fromstring directly: it
             # handles an XML declaration (typical for XHTML, which
@@ -148,12 +166,12 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
                     cell.attrib.pop("rowspan", None)
                 # trafilatura may modify the tree it is given, so metadata
                 # extraction gets its own copy taken before extract() runs.
-                tree_for_meta = copy.deepcopy(tree)
+                tree_for_meta = copy.deepcopy(tree) if metadata else None
                 main = trafilatura.extract(
                     tree,
                     url=url,
                     output_format="markdown",
-                    include_links=False,
+                    include_links=links,
                     include_images=False,
                     include_tables=True,
                     include_formatting=True,
@@ -161,7 +179,7 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
                 )
                 meta = (
                     trafilatura.extract_metadata(tree_for_meta, default_url=url)
-                    if main and main.strip() else None
+                    if metadata and main and main.strip() else None
                 )
                 reason = "no_main_text"
         except Exception as e:  # a third-party parser; fall back rather than fail ingestion
@@ -179,11 +197,12 @@ def _convert_html(html: str, url: str | None) -> ConvertedDocument:
             )
     logger.info("kb_convert_html", extractor="html2text", reason=reason)
     try:
-        text = _html2text(html)
+        text = _html2text(html, links=links)
     except Exception as e:  # html2text is a third-party parser; never raise out of ingestion
         logger.warning("kb_convert_html_failed", error=type(e).__name__)
         raise UnsupportedDocument("could not convert this HTML page") from e
-    return ConvertedDocument(text=text, title=_html_title(html), extractor="html2text")
+    title = _html_title(html) if metadata else None
+    return ConvertedDocument(text=text, title=title, extractor="html2text")
 
 
 def _clean(value: str | None) -> str | None:
@@ -195,11 +214,11 @@ def _split_authors(value: str | None) -> tuple[str, ...]:
     return tuple(name for name in (_clean(part) for part in (value or "").split(";")) if name)
 
 
-def _html2text(html: str) -> str:
+def _html2text(html: str, *, links: bool) -> str:
     import html2text
 
     converter = html2text.HTML2Text()
-    converter.ignore_links = True
+    converter.ignore_links = not links
     converter.ignore_images = True
     converter.body_width = 0
     converter.single_line_break = True

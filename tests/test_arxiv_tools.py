@@ -794,19 +794,27 @@ def _pdf(text: str, size: int = 0) -> bytes:
 
 class _ArxivOrg:
     """arxiv.org, faked behind web_fetch's real fetcher: ``pdfs`` maps a path to
-    its PDF, ``status`` a path to the status it answers instead; any other path
-    is a 404. ``requests`` holds each path asked for."""
+    its PDF, ``bodies`` to another answer (bytes, content type), ``status`` to
+    the status it answers instead, ``errors`` to the error the request fails
+    with; any other path is a 404. ``requests`` holds each path asked for."""
 
     def __init__(self) -> None:
         self.pdfs: dict[str, bytes] = {}
+        self.bodies: dict[str, tuple[bytes, str]] = {}
         self.status: dict[str, int] = {}
+        self.errors: dict[str, Exception] = {}
         self.requests: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.requests.append(path)
+        if path in self.errors:
+            raise self.errors[path]
         if path in self.status:
             return httpx.Response(self.status[path], text="refused")
+        if path in self.bodies:
+            body, content_type = self.bodies[path]
+            return httpx.Response(200, content=body, headers={"content-type": content_type})
         if path in self.pdfs:
             return httpx.Response(200, content=self.pdfs[path], headers={"content-type": "application/pdf"})
         return httpx.Response(404, text="not found")
@@ -938,3 +946,63 @@ class TestTheDownloadedPdf:
         assert result["success"] is False
         assert f"HTTP {status}" in result["error"]
         assert kb.list_documents() == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error", [httpx.ReadTimeout("no answer"), httpx.ConnectError("connection refused")],
+        ids=["timeout", "connection"],
+    )
+    async def test_a_pdf_download_that_does_not_get_through_fails_the_call(
+        self, ingest_ctx, arxiv_org, error
+    ):
+        """A timeout or a connection failure passes: the paper is not stored
+        as its abstract alone."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        arxiv_org.errors[PDF_PATH] = error
+
+        result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is False
+        assert kb.list_documents() == []
+
+    @pytest.mark.asyncio
+    async def test_a_rate_limited_pdf_download_holds_off_the_next_call(self, ingest_ctx, arxiv_org):
+        """As a refused API request does: the next call fails at once, saying
+        when to try again, without asking arXiv."""
+        source, kb = ingest_ctx
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        arxiv_org.status[PDF_PATH] = 429
+
+        first = await ingest_arxiv_paper(PAPER_ID)
+        asked = len(arxiv_org.requests)
+        second = await ingest_arxiv_paper(PAPER_ID)
+
+        assert first["success"] is False
+        assert second["success"] is False
+        assert "try again in" in second["error"]
+        assert len(arxiv_org.requests) == asked
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_is_no_pdf_is_not_called_a_large_pdf(self, ingest_ctx, arxiv_org):
+        """An HTML page cut at the download limit is no PDF over its limit:
+        the abstract is stored, and the result says what arXiv answered."""
+        source, kb = ingest_ctx
+        from agentic_cli.config import BaseSettings, SettingsContext
+        from agentic_cli.tools.arxiv_tools import ingest_arxiv_paper
+
+        _store_paper(source)
+        page = b"<html><body>" + b"The PDF is being generated. " * 100 + b"</body></html>"
+        arxiv_org.bodies[PDF_PATH] = (page, "text/html; charset=utf-8")
+
+        with SettingsContext(BaseSettings(webfetch_max_download_bytes=1000, webfetch_max_content_bytes=1000)):
+            result = await ingest_arxiv_paper(PAPER_ID)
+
+        assert result["success"] is True
+        assert result["pdf_downloaded"] is False
+        assert "not a PDF" in result["pdf_download_error"]
+        assert kb.get_document(result["document_id"]).content == "The abstract."

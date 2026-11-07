@@ -396,11 +396,14 @@ class ArxivSearchSource(SearchSource):
             Raw PDF bytes.
 
         Raises:
-            ArxivRequestError: A refusal that passes: the source fails calls
+            ArxivRequestError: A failure that passes: the source fails calls
                 for a while after arXiv's refusals (``_take_turn``), or
-                arxiv.org answered HTTP 429 or 503.
+                arxiv.org answered HTTP 429 or 503 or did not answer (a
+                timeout, a connection error). Those last refuse the calls
+                after it for a while too, as an API request's do.
             PdfTooLargeError: The PDF is larger than ``arxiv_max_pdf_bytes``.
-            RuntimeError: If the fetch is blocked or fails otherwise. The
+            RuntimeError: If arxiv.org answered with something that is not a
+                PDF, or the fetch is blocked or fails otherwise. The
                 ``pdf_url`` is taken from a remote Atom feed, so it is
                 attacker-influenceable; routing the download through the shared
                 ``ContentFetcher`` reuses the SSRF guard (private-IP/redirect
@@ -430,21 +433,33 @@ class ArxivSearchSource(SearchSource):
             )
         if not result.success:
             if result.status_code in _RATE_LIMITED:
+                self._refuse(_REFUSED_FOR, "ArXiv is rate limiting requests")
                 raise ArxivRequestError(
-                    f"ArXiv refused the PDF download (HTTP {result.status_code}); "
-                    "try again later"
+                    f"ArXiv rate limited the PDF download (HTTP {result.status_code}); "
+                    f"try again in {_REFUSED_FOR:.0f} s"
+                )
+            if result.transient:
+                self._refuse(_UNANSWERED_FOR, "ArXiv could not be reached")
+                raise ArxivRequestError(
+                    f"The PDF download did not get through: {result.error}"
                 )
             raise RuntimeError(f"PDF fetch blocked or failed: {result.error}")
+
+        content = result.content
+        if content is None:
+            raise RuntimeError("PDF fetch returned no content")
+        if isinstance(content, str):
+            content = content.encode("utf-8", "replace")
+        # A PDF starts with its header, within its first kilobyte.
+        if b"%PDF-" not in content[:1024]:
+            answer = result.content_type or "a body"
+            raise RuntimeError(f"ArXiv answered {answer}, not a PDF")
         if result.raw_truncated:
             raise PdfTooLargeError(
                 f"The PDF is larger than arxiv_max_pdf_bytes ({limit:,} bytes): "
                 "the paper is not ingested. Raise the setting to ingest it."
             )
-
-        content = result.content
-        if content is None:
-            raise RuntimeError("PDF fetch returned no content")
-        return content if isinstance(content, bytes) else content.encode("utf-8", "replace")
+        return content
 
     _API_BASE_URL = ARXIV_API_URL
 

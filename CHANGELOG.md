@@ -327,6 +327,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `webfetch_max_pdf_bytes`, 5 MB). A project's settings file may set it,
   within those bounds. `ContentFetcher.fetch(max_pdf_bytes=)` gives one call
   its own PDF limit; such a call neither reads nor fills the fetcher's cache.
+- **`convert_document(links=, metadata=, main_text=)`**: keyword options whose
+  defaults keep the knowledge base's conversion. `links=True` keeps an HTML
+  page's link URLs, `metadata=False` skips trafilatura's metadata pass (most
+  of its time on a large page), and `main_text=False` converts the whole page
+  with html2text; `web_fetch` uses all three.
 - **`agentic_cli.models`** (provisional: its names and signatures may change
   in 0.7.x) holds what agentic-cli knows about models, as data and logic with
   no provider SDK. It parses model references (`provider:model`, split on the
@@ -972,6 +977,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set 50 GiB or a negative value. `web_fetch` no longer uses `HTMLToMarkdown`,
   and `ContentFetcher`'s `FetchResult.content` is no longer what the summary
   is written from.
+- **`web_fetch` answers an error, not a summary, for a page with nothing to
+  summarize, and `URLValidator.resolve_and_validate` is a coroutine.** A page
+  whose type is not text (an image, an archive, `application/octet-stream`), a
+  PDF cut at `webfetch_max_pdf_bytes` (a cut PDF cannot be read: the error
+  names the limit and the setting) and a page that converts to no text (an
+  empty page, one its scripts build, a scanned PDF) return `success: False`
+  without a summarizer call; before, the summarizer was given `[Binary
+  content: …]` or nothing, and its answer came back as the page's summary.
+  `URLValidator.resolve_and_validate(host, port)`, which `PinnedTransport`
+  calls to resolve and check a host, must now be awaited: it resolves in a
+  worker thread.
 - **`edit_file` changes one place or nothing: text found more than once needs
   `replace_all=True`.** Without `replace_all` it replaced the first match and
   reported success, so when the text was in two places (`return None` in two
@@ -1819,8 +1835,7 @@ step; each entry says what to use instead.
   fetches waited on each other's lookups. The lookup now runs in a worker
   thread (the loop's `getaddrinfo`, as httpx's own transport resolves); every
   A and AAAA address is still checked, any unsafe one refuses the host, and
-  the connection is pinned as before. `URLValidator.resolve_and_validate` is
-  now a coroutine.
+  the connection is pinned as before.
 - **`web_fetch` summarizes the page's text, whatever its type, within the
   limit.** `webfetch_max_content_bytes` (100 KB) cut the raw HTML before it
   was converted, so on a page whose head, scripts and menus fill the first 100
@@ -1829,26 +1844,34 @@ step; each entry says what to use instead.
   the summarizer as `[Binary content: …]`, and a PDF's text reached it
   uncapped (1.87 million characters for a 300-page PDF: a context overflow or
   a very expensive call), extracted on the event loop. The whole page is now
-  converted in a worker thread, as the knowledge base converts it
-  (`convert_document`: an HTML page's main text through trafilatura, else
-  html2text; a PDF's text; any other type `web_fetch` saves as its text), and
-  the text is then cut at the limit with a marker naming it; `truncated` says
-  the text, or the download, was cut. A page that is not text (an image, an
-  archive) is an error rather than a summary of nothing. As a backstop,
+  converted in a worker thread, then the text is cut at the limit with a
+  marker naming it; `truncated` says the text, or the download, was cut. An
+  HTML page goes in as its main text with its links kept (trafilatura with the
+  `kb` extra, without its metadata pass; html2text for a page over 1 MB, or
+  without trafilatura: trafilatura's time grows faster than the page, 87 s for
+  5 MB of link-dense text, and a worker thread cannot be stopped), a PDF with
+  its `--- Page N ---` markers, and any other text type (Markdown, JSON, XML,
+  CSV, scripts, any `text/*`) as it is. As a backstop,
   `BaseWorkflowManager.summarize` (web_fetch's summaries and the knowledge
   base's) and session fact extraction cut a prompt longer than the default
-  model takes in the middle, keeping its start and its end.
+  model takes in the middle, keeping its start and its end; the room is
+  counted with the `max_tokens` the call is resolved to (clamped to the
+  model's max output), and a room under 4,000 characters sends the prompt as
+  it is.
 - **`ingest_arxiv_paper` stores a paper only from its whole PDF, and says why
   when it has none.** The download went through `web_fetch`'s 5 MB PDF limit,
   and the cut bytes were stored as the paper (pypdf reads no page of them)
   with `pdf_downloaded: True`; any other download failure, a rate-limit
-  refusal included, stored the abstract alone with `success: True` and the
-  reason only in the document's metadata. The PDF is now read up to its own
-  limit, `arxiv_max_pdf_bytes` (50 MB): a larger one fails the call, naming
-  the setting, and nothing is stored. While arXiv refuses requests (the source
-  failing calls after arXiv's refusals, or HTTP 429 or 503 for the PDF) the
-  call fails too, so it can be made again later; any other failure (no PDF, a
-  404) stores the abstract and returns the reason as `pdf_download_error`.
+  refusal or a timeout included, stored the abstract alone with `success:
+  True` and the reason only in the document's metadata. The PDF is now read up
+  to its own limit, `arxiv_max_pdf_bytes` (50 MB): a larger one fails the
+  call, naming the setting, and nothing is stored. A failure that passes fails
+  the call too, so it can be made again later: the source failing calls after
+  arXiv's refusals, HTTP 429 or 503 for the PDF, a timeout or a connection
+  error (each of these last holds off the calls after it for a while, as a
+  refused or unanswered API request does). Any other failure (no PDF, a 404,
+  an answer that is not a PDF) stores the abstract and returns the reason as
+  `pdf_download_error`.
 - **`edit_file` keeps a file's line endings and encoding, and the file tools
   read UTF-8 whatever the locale.** `edit_file` read a file with the locale's
   encoding and universal newlines and wrote it back as UTF-8: every CRLF

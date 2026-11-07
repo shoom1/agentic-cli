@@ -35,7 +35,9 @@ class FetchResult:
     ``final_url`` after same-host redirects: ``web_fetch`` converts it whole
     and caps the text. ``content`` is the body for a caller that wants it as
     it is: for text, the first ``max_content_bytes`` decoded, with a marker
-    when cut (``truncated``); for a PDF, the bytes.
+    when cut (``truncated``); for a PDF, the bytes. A failure is
+    ``transient`` when the request did not get through (a timeout, a
+    connection error): the same fetch may work later.
     """
 
     success: bool
@@ -50,6 +52,7 @@ class FetchResult:
     charset: str | None = None
     final_url: str | None = None
     raw_truncated: bool = False
+    transient: bool = False
 
 
 @dataclass
@@ -210,9 +213,11 @@ class ContentFetcher:
         except BlockedAddressError as e:
             return FetchResult(success=False, error=f"Blocked (SSRF): {e}")
         except httpx.TimeoutException:
-            return FetchResult(success=False, error=f"Request timeout after {timeout}s")
+            error = f"Request timeout after {timeout}s"
+            return FetchResult(success=False, error=error, transient=True)
         except httpx.RequestError as e:
-            return FetchResult(success=False, error=f"Request failed: {e}")
+            error = f"Request failed: {e}"
+            return FetchResult(success=False, error=error, transient=True)
 
     def _result(
         self, cached: CachedResponse, *, from_cache: bool, status_code: int | None = None,

@@ -221,11 +221,12 @@ async def _ingest_arxiv_paper_with_services(
     4. Ingest the PDF through ``KnowledgeBase.ingest_bytes``, citing the
        abstract page, with the abstract as fallback text; one summarizer
        call writes the summary and the sidecar.
-    5. A PDF over the limit, or a refusal that passes (arXiv rate limiting),
-       fails the call: nothing is stored, and a later call can store the
-       paper. Any other download failure (no PDF, a 404) ingests the
-       abstract as text so the agent at least has searchable content, and
-       the result says why (``pdf_download_error``).
+    5. A PDF over the limit, or a failure that passes (arXiv rate limiting,
+       a timeout, a connection error), fails the call: nothing is stored,
+       and a later call can store the paper. Any other download failure (no
+       PDF, a 404, an answer that is not a PDF) ingests the abstract as text
+       so the agent at least has searchable content, and the result says why
+       (``pdf_download_error``).
     """
     from agentic_cli.memory.kb import SourceType
 
@@ -262,7 +263,7 @@ async def _ingest_arxiv_paper_with_services(
 
     # 2. PDF download via the source's encapsulated downloader (shared rate
     # limiter, shared httpx import). A PDF too large to read whole, or a
-    # refusal that passes, fails the call; on any other failure the abstract
+    # failure that passes, fails the call; on any other failure the abstract
     # goes in.
     file_bytes: bytes | None = None
     if pdf_url:
@@ -338,7 +339,7 @@ async def ingest_arxiv_paper(
         pdf_downloaded flag (False if PDF fetch failed and the abstract
         was used as fallback content, with the reason in
         pdf_download_error). A PDF over arxiv_max_pdf_bytes, or arXiv
-        refusing requests for a while, is an error: nothing is stored.
+        refusing or not answering requests, is an error: nothing is stored.
     """
     source = require_service(ARXIV_SOURCE)
     if isinstance(source, dict):

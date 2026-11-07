@@ -25,6 +25,7 @@ import pytest
 
 from agentic_cli.config import BaseSettings, SettingsContext
 from agentic_cli.tools.webfetch import saved
+from tests.memory.kb_extra import require_kb_module
 from tests.memory.pdf_bytes import pdf_with_text
 
 URL = "https://example.com/page"
@@ -53,7 +54,8 @@ def no_trafilatura(monkeypatch):
     monkeypatch.setitem(sys.modules, "trafilatura", None)
 
 
-def _fetcher(monkeypatch, body: bytes, content_type: str):
+def _fetcher(monkeypatch, body: bytes, content_type: str, settings: BaseSettings | None = None):
+    """A fetcher serving ``body``, with ``settings``' limits as ``get_or_create_fetcher`` sets them."""
     from agentic_cli.tools.webfetch.fetcher import ContentFetcher
     from agentic_cli.tools.webfetch.robots import RobotsTxtChecker
     from agentic_cli.tools.webfetch.transport import PinnedTransport
@@ -66,7 +68,13 @@ def _fetcher(monkeypatch, body: bytes, content_type: str):
     validator = URLValidator()
     transport = PinnedTransport(validator, inner=httpx.MockTransport(
         lambda req: httpx.Response(200, content=body, headers={"content-type": content_type})))
-    fetcher = ContentFetcher(validator=validator, robots_checker=RobotsTxtChecker(), transport=transport)
+    settings = settings or BaseSettings()
+    fetcher = ContentFetcher(
+        validator=validator, robots_checker=RobotsTxtChecker(), transport=transport,
+        max_content_bytes=settings.webfetch_max_content_bytes,
+        max_pdf_bytes=settings.webfetch_max_pdf_bytes,
+        max_download_bytes=settings.webfetch_max_download_bytes,
+    )
     fetcher._robots.can_fetch = AsyncMock(return_value=True)
     return fetcher
 
@@ -76,8 +84,9 @@ async def _fetch(monkeypatch, body: bytes, content_type: str, **settings):
     from agentic_cli.tools.webfetch_tool import fetch_and_summarize
 
     summarizer = _Summarizer()
-    fetcher = _fetcher(monkeypatch, body, content_type)
-    with SettingsContext(BaseSettings(**settings)), \
+    settings = BaseSettings(**settings)
+    fetcher = _fetcher(monkeypatch, body, content_type, settings)
+    with SettingsContext(settings), \
             patch("agentic_cli.tools.webfetch_tool.get_or_create_fetcher", return_value=fetcher):
         result = await fetch_and_summarize(URL, "What is this page about?", 30, summarizer)
     return result, summarizer.contents
@@ -189,7 +198,7 @@ async def test_a_pdf_over_the_limit_reaches_the_summarizer_capped(monkeypatch):
     assert result["truncated"] is True
     assert contents[0].endswith(marker)
     assert len(contents[0].encode()) <= limit + len(marker.encode())
-    assert contents[0].startswith("Page 0 of the report")
+    assert contents[0].startswith("--- Page 1 ---\nPage 0 of the report")
 
 
 async def test_a_long_text_is_cut_on_a_character_boundary(monkeypatch):
@@ -232,3 +241,114 @@ async def test_converting_a_pdf_does_not_stall_the_event_loop(monkeypatch):
 
     assert "Slow to read" in contents[0]
     assert max(b - a for a, b in zip(ticks, ticks[1:])) < 0.1
+
+
+LINK = '<a href="https://docs.example.org/eruptions">the eruption records</a>'
+
+
+@pytest.mark.parametrize("converter", ["trafilatura", "html2text"])
+async def test_the_summarizer_sees_where_a_page_links(monkeypatch, converter):
+    """A link's URL stays in the text a summary is written from, so the agent
+    can follow it (the knowledge base leaves links out of what it stores)."""
+    if converter == "trafilatura":
+        require_kb_module("trafilatura")
+    else:
+        monkeypatch.setitem(sys.modules, "trafilatura", None)
+    html = f"<html><body><article><h1>Volcanoes</h1><p>{ARTICLE * 8} See {LINK}.</p></article></body></html>"
+
+    result, contents = await _fetch(monkeypatch, html.encode(), "text/html")
+
+    assert result["success"] is True
+    assert "https://docs.example.org/eruptions" in contents[0]
+
+
+async def test_a_pdf_s_pages_are_marked(monkeypatch):
+    """Page markers, as web_fetch gave them before, so a summary can cite a page."""
+    result, contents = await _fetch(
+        monkeypatch, _pdf(["First page text", "Second page text"]), "application/pdf",
+    )
+
+    assert "--- Page 1 ---\nFirst page text" in contents[0]
+    assert "--- Page 2 ---\nSecond page text" in contents[0]
+
+
+async def test_web_fetch_reads_no_page_metadata(monkeypatch):
+    """trafilatura's metadata pass took most of a large page's time (17.7 s of
+    18.8 s at 2 MB), for a title, author and date web_fetch never uses."""
+    trafilatura = require_kb_module("trafilatura")
+    calls = []
+    monkeypatch.setattr(trafilatura, "extract_metadata", lambda *a, **k: calls.append(a))
+    html = f"<html><body><article><h1>Volcanoes</h1><p>{ARTICLE * 20}</p></article></body></html>"
+
+    result, contents = await _fetch(monkeypatch, html.encode(), "text/html")
+
+    assert ARTICLE in contents[0]
+    assert calls == []
+
+
+async def test_a_page_over_a_megabyte_is_converted_by_html2text(monkeypatch):
+    """trafilatura's time grows faster than the page (5 MB of link-dense text:
+    87 s) and a worker thread cannot be stopped: a page over 1 MB is
+    converted whole by html2text (1.4 s for 5 MB)."""
+    trafilatura = require_kb_module("trafilatura")
+    extracted = []
+    extract = trafilatura.extract
+
+    def recording(*args, **kwargs):
+        extracted.append(1)
+        return extract(*args, **kwargs)
+
+    monkeypatch.setattr(trafilatura, "extract", recording)
+    small = f"<html><body><article><p>{ARTICLE * 20}</p></article></body></html>".encode()
+    large = ("<html><body>" + f"<p>{ARTICLE}</p>\n" * 22_000 + "</body></html>").encode()
+    assert len(small) < 1024 * 1024 < len(large)
+
+    await _fetch(monkeypatch, small, "text/html")
+    result, contents = await _fetch(monkeypatch, large, "text/html")
+
+    assert extracted == [1]  # the small page only
+    assert contents[0].startswith(ARTICLE)
+    assert result["truncated"] is True
+
+
+async def test_a_pdf_cut_at_the_download_limit_is_an_error(monkeypatch):
+    """A cut PDF cannot be read: the error names the limit and its setting,
+    rather than a summary of no text."""
+    pdf = _pdf([f"Page {n}: lava flows and tephra layers" for n in range(200)])
+    limit = len(pdf) // 2
+
+    result, contents = await _fetch(monkeypatch, pdf, "application/pdf", webfetch_max_pdf_bytes=limit)
+
+    assert result["success"] is False
+    assert "webfetch_max_pdf_bytes" in result["error"]
+    assert f"{limit:,} bytes" in result["error"]
+    assert contents == []
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"", "text/html"),
+        (b"<html><head><script>document.write('x')</script></head><body><div id=app></div></body></html>",
+         "text/html"),
+        (b"   \n", "text/plain"),
+        (_pdf([""]), "application/pdf"),
+    ],
+    ids=["empty", "script-only", "blank-text", "pdf-without-text"],
+)
+async def test_a_page_with_no_text_is_an_error(monkeypatch, body, content_type):
+    result, contents = await _fetch(monkeypatch, body, content_type)
+
+    assert result["success"] is False
+    assert "no text" in result["error"].lower()
+    assert contents == []
+
+
+@pytest.mark.parametrize(
+    "content_type", ["text/csv", "text/javascript", "text/x-python", "application/javascript"],
+)
+async def test_any_text_type_is_summarized_as_text(monkeypatch, content_type):
+    result, contents = await _fetch(monkeypatch, b"Needle in the page,1,2\n", content_type)
+
+    assert result["success"] is True
+    assert "Needle in the page" in contents[0]

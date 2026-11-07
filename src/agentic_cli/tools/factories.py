@@ -498,7 +498,7 @@ def make_ingest_arxiv_tool(arxiv_source, knowledge_base) -> Callable:
             pdf_downloaded flag (False if PDF fetch failed and the
             abstract was used as fallback content, with the reason in
             pdf_download_error). A PDF over arxiv_max_pdf_bytes, or arXiv
-            refusing requests for a while, is an error: nothing is stored.
+            refusing or not answering requests, is an error: nothing is stored.
         """
         return await _ingest_arxiv_paper_with_services(
             arxiv_source, kb, arxiv_id, tags=tags

@@ -42,7 +42,7 @@ agentic-cli/
 │   │   ├── settings_introspection.py # Pydantic field → thinking-prompt form field (built complete: they are frozen)
 │   │   └── usage_tracker.py        # Token usage / status bar: ctx = the main agent's last prompt over its context_trigger (sub-agent and summary calls never move it)
 │   ├── workflow/
-│   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly; context_budget/root_agent_name; compact/supports_compact: summarize now, NotImplementedError on the base; summarize and fact extraction: a prompt over the default model's room cut in the middle, _fit_prompt)
+│   │   ├── base_manager.py   # BaseWorkflowManager (abstract; service detection, tool assembly; context_budget/root_agent_name; compact/supports_compact: summarize now, NotImplementedError on the base; summarize and fact extraction: a prompt over the default model's room, at the resolved max_tokens, cut in the middle, never under MIN_PROMPT_ROOM, _fit_prompt)
 │   │   ├── factory.py        # create_workflow_manager_from_settings (_BACKENDS: orchestrator → "module:Class" + extra, imported when chosen)
 │   │   ├── service_registry.py # get_service/require_service + ContextVar registry
 │   │   ├── events.py         # WorkflowEvent, EventType
@@ -50,7 +50,7 @@ agentic-cli/
 │   │   ├── interrupts.py     # What a call a cancel or a crash left open is answered with; OpenCalls (each manager's record, kept by conversation: only that conversation's turns clear it); job_for_call: a job of the turn's conversation only
 │   │   ├── config.py         # AgentConfig
 │   │   ├── settings.py       # Workflow/tool settings schema; models, model_providers, model_roles and permissions in Annotated form (an app's override warns nothing); _merge_shipped_entries: the app's models and model_providers, then the sources', field by field, and the app's permissions before the sources' (at load only); permissions: the union of every trusted source's rules, each list concatenated, a duplicate once (_source_sections reads each source's value as the sources hook filed it)
-│   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); FailedSummaries: a range whose summary failed is skipped for the rest of its turn (keyed by its live events, weakly) until it grows by MIN_SAVING of the trigger; is_context_overflow, overflow_message; prompt_room/cut_middle: a side call's prompt in characters its model takes
+│   │   ├── context.py        # ContextBudget/context_budget: when to summarize (window or the 128k floor, budget, trigger, keep; both backends, the CLI); FailedSummaries: a range whose summary failed is skipped for the rest of its turn (keyed by its live events, weakly) until it grows by MIN_SAVING of the trigger; is_context_overflow, overflow_message; prompt_room/cut_middle/MIN_PROMPT_ROOM: a side call's prompt in characters its model takes
 │   │   ├── retry.py          # Rate-limit retry helpers
 │   │   ├── tool_summaries.py
 │   │   ├── memory_services.py # Settings → agentic_cli.memory arguments (KBs, memory store); the project KB opened within=Path.cwd()
@@ -112,8 +112,8 @@ agentic-cli/
 │   │   ├── execution_tools.py # execute_python
 │   │   ├── _knowledge_base.py # current_knowledge_base(): the knowledge_base key
 │   │   ├── knowledge_tools.py # kb_* tools: adapters over KnowledgeBase
-│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper (a PDF over arxiv_max_pdf_bytes or a refusal that passes fails it, nothing stored; another download failure stores the abstract, pdf_download_error in the result)
-│   │   ├── arxiv_source.py   # ArxivSearchSource (asearch, fetch_by_id, download_pdf; search: the synchronous form): one request at a time per event loop, 3 s apart, a 429/503 retried after Retry-After (else 3, 6, 12 s) holding the turn, queued calls failing at once after the retries ran out or no answer; the reply parsed from bytes (a string can name a file to feedparser), off the loop; download_pdf: web_fetch's fetcher up to arxiv_max_pdf_bytes (PdfTooLargeError), a 429/503 an ArxivRequestError; ArxivRequestError
+│   │   ├── arxiv_tools.py    # search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper (a PDF over arxiv_max_pdf_bytes or a failure that passes, a refusal, timeout or connection error, fails it, nothing stored; another download failure stores the abstract, pdf_download_error in the result)
+│   │   ├── arxiv_source.py   # ArxivSearchSource (asearch, fetch_by_id, download_pdf; search: the synchronous form): one request at a time per event loop, 3 s apart, a 429/503 retried after Retry-After (else 3, 6, 12 s) holding the turn, queued calls failing at once after the retries ran out or no answer; the reply parsed from bytes (a string can name a file to feedparser), off the loop; download_pdf: web_fetch's fetcher up to arxiv_max_pdf_bytes (PdfTooLargeError; a body without a PDF header a RuntimeError), a 429/503, timeout or connection error an ArxivRequestError that refuses the calls after it for a while; ArxivRequestError
 │   │   ├── search_sources.py # SearchSource, SearchSourceResult
 │   │   ├── pdf_utils.py      # extract_pdf_text
 │   │   ├── interaction_tools.py # ask_clarification
@@ -122,7 +122,7 @@ agentic-cli/
 │   │   ├── glob_tool.py      # glob (brace patterns expanded: expand_braces)
 │   │   ├── grep_tool.py      # grep (file_pattern's braces expanded; ripgrep gets one --glob each)
 │   │   ├── search.py         # web_search (Tavily/Brave backends)
-│   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator); the summary from the whole page converted in a worker thread (converter.page_text: convert_document, then the text cut at webfetch_max_content_bytes); a type not saved is an error
+│   │   ├── webfetch_tool.py  # web_fetch + get_or_create_fetcher (orchestrator); the summary from the whole page converted in a worker thread (converter.page_text: HTML through convert_document with links, no metadata, html2text over MAIN_TEXT_MAX_BYTES; a PDF with page markers; then the text cut at webfetch_max_content_bytes); not text (text_extension), a cut PDF or no text is an error
 │   │   ├── memory_tools.py   # save_memory, search_memory, update_memory, delete_memory (store: agentic_cli.memory)
 │   │   ├── _core/           # Backend-neutral tool logic
 │   │   │   ├── planning.py  # save_plan/get_plan core (+ checkbox parsing)
@@ -137,7 +137,7 @@ agentic-cli/
 │   │   │   └── resume.py    # job_result_payload, JOB_NOTICE_HEADER: what a finished job tells the agent
 │   │   ├── sandbox/         # Stateful code-execution sandbox (sandbox_execute); stage_inputs and the docker backend's _collect_outputs copy through descriptors of inputs/ and outputs/ (the kernel can swap either for a symlink); an input whose path runs through the session's directory is refused, on docker any session's (sandbox_root_for(settings): <workspace_dir>/sandbox); calls on one session run one at a time (SandboxManager: a lock per session; a reset or cleanup during a call stops its cell, SandboxBackend.stop, and leaves the kernel's shutdown to that call)
 │   │   ├── os_sandbox/      # The OS sandbox execute_python runs in: seatbelt (macOS), bubblewrap (Linux), else NoOpSandbox; policy.py builds its lists from protected_paths
-│   │   └── webfetch/        # Fetcher (fetch(max_pdf_bytes=): a call's own PDF limit, uncached), converter (page_text), validator (DNS in a worker thread: the loop's getaddrinfo), robots, summarizer, saved pages
+│   │   └── webfetch/        # Fetcher (fetch(max_pdf_bytes=): a call's own PDF limit, uncached; FetchResult.transient), converter (page_text, text_extension), validator (DNS in a worker thread: the loop's getaddrinfo), robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
 │   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py (atomic writes; reads and appends of regular files only, never through a symlink), log.py, model_record.py
@@ -147,7 +147,7 @@ agentic-cli/
 │   │       ├── knowledge_base.py  # KnowledgeBase (provisional): the scopes as one (open leaves an unsafe scope out), and the ingestion pipeline (ingest_text, ingest_bytes)
 │   │       ├── enrich.py      # The summary/sidecar prompts and parser: one summarizer call per document
 │   │       ├── models.py     # Document, SearchResult, SourceType
-│   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf), web_fetch's summaries too; own _charset.py
+│   │       ├── convert.py    # convert_document (HTML main text via trafilatura, html2text fallback; pypdf; links=/metadata=/main_text= for web_fetch, defaults ingestion's), web_fetch's summaries too; own _charset.py
 │   │       ├── vector_store.py, bm25_index.py (+ _bm25_backends.py), concepts.py, sidecar.py
 │   │       └── _mock_vector_store.py, _mock_bm25.py
 │   ├── models/               # Model knowledge (provisional); imports nothing else from agentic_cli, no provider SDK
