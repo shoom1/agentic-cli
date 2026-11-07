@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 from typing import Any, Literal
 
-from agentic_cli.file_utils import glob_pattern_escapes_root, path_is_within
+from agentic_cli.file_utils import expand_braces, glob_pattern_escapes_root, path_is_within
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import (
     ToolCategory,
@@ -75,6 +75,12 @@ def glob(
             "path": str(search_path),
         }
 
+    # Path.glob has no braces: "*.{js,ts}" is searched as "*.js" and "*.ts".
+    try:
+        patterns = expand_braces(pattern)
+    except ValueError as e:
+        return {"success": False, "error": str(e), "path": str(search_path)}
+
     # The permission engine authorizes only `path`; a pattern like "../*" or an
     # absolute pattern would escape that authorized root, so reject it.
     if glob_pattern_escapes_root(pattern):
@@ -85,10 +91,15 @@ def glob(
         }
 
     # Find matching files, capping how many we materialize (a pathological
-    # pattern like "**/*" over a huge tree must not exhaust memory).
+    # pattern like "**/*" over a huge tree must not exhaust memory). A file
+    # two alternatives match is listed once.
     matches = []
+    seen = set()
     scan_truncated = False
-    for p in search_path.glob(pattern):
+    for p in (p for alternative in patterns for p in search_path.glob(alternative)):
+        if p in seen:
+            continue
+        seen.add(p)
         matches.append(p)
         if len(matches) >= _MAX_SCAN:
             scan_truncated = True
