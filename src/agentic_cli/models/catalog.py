@@ -53,7 +53,8 @@ from an older version, or an entry for another address or kind is ignored
 and listed again. A listing writes its own provider's entry and leaves every
 other entry as the file then holds it: several catalogs share the file (two
 terminals, two projects of one app), and a catalog's own copy of an entry may
-be older than the file's. A failed listing never replaces a listing.
+be older than the file's. A failed listing never replaces a listing of the
+provider's address and kind.
 """
 
 from __future__ import annotations

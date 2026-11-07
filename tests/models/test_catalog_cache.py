@@ -298,7 +298,7 @@ async def test_a_write_keeps_the_entries_another_catalog_wrote(cache):
     assert read(cache)["providers"]["openrouter"] == written
 
 
-async def test_a_listing_read_from_the_file_is_never_written_back(cache):
+async def test_a_listing_read_from_the_file_never_replaces_a_newer_one(cache):
     clock = Clock()
     await make(cache, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock).load()
     clock.now += 2 * DAY
@@ -311,6 +311,22 @@ async def test_a_listing_read_from_the_file_is_never_written_back(cache):
     await first.refresh(["anthropic"])
 
     assert read(cache)["providers"]["google"]["fetched_at"] == clock.now
+
+
+async def test_a_failed_refresh_keeps_its_earlier_listing_when_the_file_lost_it(cache):
+    """With no listing in the file (deleted, or a failure written since), a
+    failed refresh writes the listing this catalog had, not the failure."""
+    clock = Clock()
+    await make(cache, google=KEYS["google"], clock=clock).load()
+    good = read(cache)["providers"]["google"]
+    clock.now += 2 * DAY
+    catalog = make(cache, ProviderAPI(google=500), google=KEYS["google"], clock=clock)
+    await catalog.load()
+    cache.unlink()
+
+    await catalog.start_background_refresh()
+
+    assert read(cache)["providers"]["google"] == good
 
 
 async def test_a_failed_listing_never_replaces_one_another_catalog_wrote(cache):

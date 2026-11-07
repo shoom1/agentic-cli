@@ -1786,8 +1786,9 @@ step; each entry says what to use instead.
   the same app) wrote since was dropped at its next write, and that process's
   next start waited on the network to list it again. A listing now writes only
   its own provider's entry and leaves the rest of the file as it is, a failed
-  listing never replaces a listing in the file, and the entry of a provider
-  this project does not define is kept for the projects that do.
+  listing never replaces the file's listing of the provider's address and
+  kind, and the entry of a provider this project does not define is kept for
+  the projects that do.
 
 - **Listing Deep Agents conversations no longer reads every checkpoint.**
   `--continue`, `/resume` and `/sessions` listed conversations by reading
