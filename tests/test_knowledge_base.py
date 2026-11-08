@@ -59,7 +59,7 @@ class TestDocumentChunk:
         assert chunk.content == "This is chunk content."
         assert chunk.chunk_index == 0
         assert chunk.metadata == {"page": 1}
-        assert chunk.embedding is None
+        assert not hasattr(chunk, "embedding")  # vectors live only in the database
         assert chunk.id  # Should have generated ID
 
     def test_create_chunk_minimal(self):
@@ -71,7 +71,7 @@ class TestDocumentChunk:
         )
 
         assert chunk.metadata == {}
-        assert chunk.embedding is None
+        assert not hasattr(chunk, "embedding")  # vectors live only in the database
 
     def test_chunk_to_dict(self):
         """Test chunk serialization."""
@@ -80,7 +80,6 @@ class TestDocumentChunk:
             document_id="doc-1",
             content="Test content",
             chunk_index=0,
-            embedding=[0.1, 0.2, 0.3],
             metadata={"key": "value"},
         )
 
@@ -91,7 +90,6 @@ class TestDocumentChunk:
         assert data["content"] == "Test content"
         assert data["chunk_index"] == 0
         assert data["metadata"] == {"key": "value"}
-        # Embedding is not serialized
         assert "embedding" not in data
 
     def test_chunk_from_dict(self):
@@ -111,7 +109,7 @@ class TestDocumentChunk:
         assert chunk.content == "Test content"
         assert chunk.chunk_index == 2
         assert chunk.metadata == {"key": "value"}
-        assert chunk.embedding is None
+        assert not hasattr(chunk, "embedding")  # vectors live only in the database
 
     def test_chunk_roundtrip(self):
         """Test serialization roundtrip."""
