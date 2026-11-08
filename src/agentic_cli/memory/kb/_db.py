@@ -10,8 +10,9 @@ leaves the database as it was before the change or after it.
 A project can ship its knowledge base, database included, so the file is
 opened as untrusted: never through a symlink, nor its ``-wal``, ``-shm`` and
 ``-journal`` companions (through a link there SQLite itself would write to a
-file elsewhere); in SQLite's defensive mode, with triggers and views off; and
-only when its schema is exactly this module's.
+file elsewhere), nor with a rollback journal SQLite would play back; in
+SQLite's defensive mode, with triggers and views off; and only when its
+schema is exactly this module's, checked before anything is written to it.
 
 Deleted text does not stay on disk (``secure_delete``, the FTS5 table's own
 ``secure-delete``, and the manager's checkpoint after a delete).
@@ -26,9 +27,11 @@ import os
 import re
 import sqlite3
 import stat
+import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +46,9 @@ COMPANION_SUFFIXES = ("-wal", "-shm", "-journal")
 FORMAT = "1"
 # How long a change waits for another session's change before giving up.
 BUSY_TIMEOUT_S = 60.0
+# How long an open waits for a rollback journal to go: another session
+# switching a new database to WAL keeps one for a moment.
+JOURNAL_WAIT_S = 2.0
 
 # Every document ID the framework assigns is a UUID; a row whose ID is not a
 # plain name is never read, so never turned into a path.
@@ -99,24 +105,107 @@ class KnowledgeBaseBusy(TimeoutError):
     """Another session kept the knowledge base's write lock past ``BUSY_TIMEOUT_S``."""
 
 
+class _RollbackJournal(UnsafeKnowledgeBase):
+    """A non-empty ``kb.sqlite-journal``: SQLite would play it back."""
+
+
 def refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
     found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
     return UnsafeKnowledgeBase(f"{path} is {found}: a knowledge base works only in its own folders")
 
 
 def check_files(db_path: Path) -> None:
-    """Refuse a database file or companion that is not a regular file (a link, a folder).
+    """Refuse a database file or companion that is not a regular file (a link,
+    a folder), and a rollback journal that is not empty.
+
+    SQLite plays a hot rollback journal back at its first read, and a crafted
+    one names a "super-journal" that SQLite then deletes, wherever it is. A
+    WAL database never leaves a journal behind, so a non-empty one was put
+    there.
 
     Raises:
         UnsafeKnowledgeBase: one of them is.
     """
     for path in (db_path, *(db_path.with_name(db_path.name + s) for s in COMPANION_SUFFIXES)):
         try:
-            mode = os.lstat(path).st_mode
+            found = os.lstat(path)
         except FileNotFoundError:
             continue
-        if not stat.S_ISREG(mode):
-            raise refuse(path, mode, "a regular file")
+        if not stat.S_ISREG(found.st_mode):
+            raise refuse(path, found.st_mode, "a regular file")
+        if path.name.endswith("-journal") and found.st_size:
+            raise _RollbackJournal(
+                f"{path} is a rollback journal, which a knowledge base never leaves: "
+                "SQLite would play it back, so the knowledge base is not opened"
+            )
+
+
+def _check_files_at_open(db_path: Path) -> None:
+    """``check_files``, giving a rollback journal ``JOURNAL_WAIT_S`` to go:
+    another session switching a new database to WAL holds one for a moment."""
+    deadline = time.monotonic() + JOURNAL_WAIT_S
+    while True:
+        try:
+            check_files(db_path)
+            return
+        except _RollbackJournal:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _is_busy(error: sqlite3.Error) -> bool:
+    """Whether ``error`` is SQLite's "busy" or "locked" (extended codes included)."""
+    code = getattr(error, "sqlite_errorcode", None)
+    return code is not None and code & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def _busy_error(path: Path) -> KnowledgeBaseBusy:
+    return KnowledgeBaseBusy(f"{path}: another session kept the knowledge base locked for {BUSY_TIMEOUT_S:g} s")
+
+
+def _check_opened(conn: sqlite3.Connection, path: Path) -> None:
+    """Refuse a connection whose database is not the regular file at ``path``.
+
+    SQLite has no option that refuses a symlink for the database itself (it
+    does for ``-wal`` and ``-shm``), so a link put there after
+    ``check_files`` would be followed: the file SQLite opened (``PRAGMA
+    database_list``) must be the very file at ``path``.
+    """
+    opened = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    try:
+        theirs, ours = os.stat(opened), os.lstat(path)
+    except OSError:
+        theirs = ours = None
+    if theirs is None or not stat.S_ISREG(ours.st_mode) or (theirs.st_dev, theirs.st_ino) != (ours.st_dev, ours.st_ino):
+        raise UnsafeKnowledgeBase(f"{path} is not the file SQLite opened ({opened}): a knowledge base works only in its own folders")
+
+
+def _use_wal(conn: sqlite3.Connection, path: Path) -> None:
+    """Switch to WAL, waiting for other sessions up to ``BUSY_TIMEOUT_S``.
+
+    SQLite's busy timeout does not cover this switch: on a new or
+    rollback-mode file another session switching it at once makes it fail at
+    once, so it is tried again until the timeout.
+
+    Raises:
+        KnowledgeBaseBusy: other sessions kept it locked that long.
+        sqlite3.OperationalError: the file stays in another mode (a
+            filesystem without the shared memory WAL needs).
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_S
+    while True:
+        try:
+            mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            break
+        except sqlite3.OperationalError as e:
+            if not _is_busy(e):
+                raise
+            if time.monotonic() >= deadline:
+                raise _busy_error(path) from e
+            time.sleep(0.01)
+    if str(mode).lower() != "wal":
+        raise sqlite3.OperationalError(f"{path} stays in journal mode {mode!r}: a knowledge base needs WAL")
 
 
 def fts5_available(conn: sqlite3.Connection) -> bool:
@@ -147,6 +236,22 @@ def _normalized(sql: str | None) -> str | None:
     return None if sql is None else " ".join(sql.split())
 
 
+@cache
+def _fts_shadow_tables() -> dict[str, str | None]:
+    """The tables FTS5 makes for ``chunk_terms``, each with the definition this
+    SQLite gives it (made in a scratch database to see). Without FTS5, only
+    their names are known (such a session never reads them)."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(FTS_DDL)
+        rows = conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name != 'chunk_terms'")
+        return {str(name): _normalized(sql) for name, sql in rows}
+    except sqlite3.OperationalError:
+        return dict.fromkeys(_FTS_SHADOWS)
+    finally:
+        conn.close()
+
+
 class Database:
     """One knowledge base folder's ``kb.sqlite``, through one connection."""
 
@@ -155,41 +260,48 @@ class Database:
         self.path = path
         self._fts_module = fts_module
         self._fts_table = False
+        # False when this SQLite cannot read the index (the format FTS5's
+        # secure-delete writes is unreadable before SQLite 3.44).
+        self._fts_readable = True
         # Before SQLite 3.44 FTS5 has no secure-delete: merge the index after a delete instead.
         self.optimize_after_delete = False
         self._reported: set[str] = set()
 
     @property
     def fts(self) -> bool:
-        """Whether keyword search can use the FTS5 index: its module loads and the table exists."""
-        return self._fts_module and self._fts_table
+        """Whether keyword search can use the FTS5 index: its module loads,
+        the table exists and this SQLite reads its format."""
+        return self._fts_module and self._fts_table and self._fts_readable
 
     # -- opening -----------------------------------------------------------
 
     @classmethod
-    def open(cls, path: Path, *, wal: bool = True) -> "Database":
+    def open(cls, path: Path) -> "Database":
         """Open the knowledge base database at ``path``, creating it when missing.
 
-        ``wal=False`` keeps SQLite's rollback journal (the 0.6 import builds a
-        file that is renamed into place once complete).
+        The file is checked (``check_files``, the schema, the format) before
+        anything is written to it, the switch to WAL included.
 
         Raises:
             UnsafeKnowledgeBase: the file or a companion is a link or not a
-                regular file, or the schema is not this module's.
+                regular file, a rollback journal is there, or the schema is
+                not this module's.
             ValueError: the database is of a format this version does not read.
+            KnowledgeBaseBusy: other sessions kept it locked past ``BUSY_TIMEOUT_S``.
             sqlite3.DatabaseError: the file is not a database (a git-LFS
                 pointer) or is corrupt.
         """
-        check_files(path)
+        _check_files_at_open(path)
         create_private_file(path)
         conn = sqlite3.connect(
-            path.absolute().as_uri() + "?mode=rw&nofollow=1",
+            path.absolute().as_uri() + "?mode=rw",
             uri=True,
             timeout=BUSY_TIMEOUT_S,
             isolation_level=None,
             check_same_thread=False,
         )
         try:
+            _check_opened(conn, path)
             for name, value in _DEFENSIVE:
                 option = getattr(sqlite3, name, None)
                 if option is not None:
@@ -197,28 +309,41 @@ class Database:
             conn.execute("PRAGMA trusted_schema = OFF")
             conn.execute("PRAGMA mmap_size = 0")
             conn.execute("PRAGMA secure_delete = ON")
+            conn.execute("PRAGMA cell_size_check = ON")
             conn.create_function("kb_casefold", 1, _casefold, deterministic=True)
-            if wal:
-                conn.execute("PRAGMA journal_mode = WAL")
             db = cls(conn, path, fts_module=fts5_available(conn))
+            db._check()
+            _use_wal(conn, path)
             db._prepare()
             return db
         except BaseException:
             conn.close()
             raise
 
+    def _check(self) -> set[str]:
+        """The schema's names, after checking the schema and the format (none in a new file).
+
+        Raises:
+            UnsafeKnowledgeBase: see :meth:`_check_schema`.
+            ValueError: a format this version does not read.
+        """
+        names = self._check_schema()
+        if names:
+            found = self.info().get("format")
+            if found != FORMAT:
+                raise ValueError(f"{self.path} is a knowledge base of format {found!r}; this version reads format {FORMAT}")
+        return names
+
     def _prepare(self) -> None:
-        """Create the schema in a new database, or check an existing one; then the keyword index."""
+        """Create the schema in a new database (checked again: another session
+        may have created it meanwhile); then the keyword index."""
         with self.write():
-            names = self._check_schema()
+            names = self._check()
             if not names:
                 for ddl in (INFO_DDL, DOCUMENTS_DDL, CHUNKS_DDL, CHUNKS_INDEX_DDL):
                     self.conn.execute(ddl)
                 self.set_info(format=FORMAT, generation="0", keyword_index="current")
                 names = set(_OWN)
-            found = self.info().get("format")
-            if found != FORMAT:
-                raise ValueError(f"{self.path} is a knowledge base of format {found!r}; this version reads format {FORMAT}")
             self._fts_table = "chunk_terms" in names
             if not self._fts_module:
                 logger.warning("kb_fts5_unavailable", path=str(self.path))
@@ -227,12 +352,26 @@ class Database:
                 self.conn.execute(FTS_DDL)
                 self._fts_table = True
                 self.rebuild_keyword_index()
+            elif not self._keyword_index_readable():
+                self._fts_readable = False
+                logger.warning("kb_fts5_unavailable", path=str(self.path),
+                               reason="this SQLite cannot read the keyword index's format; a newer one rebuilds it")
+                return
             elif self.info().get("keyword_index") == "stale":
                 self.rebuild_keyword_index()
-            try:
+            if sqlite3.sqlite_version_info >= (3, 44, 0):
                 self.conn.execute("INSERT INTO chunk_terms (chunk_terms, rank) VALUES ('secure-delete', 1)")
-            except sqlite3.OperationalError:
+            else:
                 self.optimize_after_delete = True
+
+    def _keyword_index_readable(self) -> bool:
+        """Whether this SQLite reads the keyword index: the format FTS5's
+        secure-delete writes (from SQLite 3.44) is one an older SQLite refuses."""
+        try:
+            self.conn.execute("SELECT rowid FROM chunk_terms WHERE chunk_terms MATCH '\"kb\"' LIMIT 1").fetchall()
+        except sqlite3.OperationalError:
+            return False
+        return True
 
     def _check_schema(self) -> set[str]:
         """The schema's names, after checking each one is this module's.
@@ -241,6 +380,7 @@ class Database:
             UnsafeKnowledgeBase: anything else (a trigger, a view, another
                 table or index, one of ours defined otherwise), or ours missing.
         """
+        shadows = _fts_shadow_tables()
         names: set[str] = set()
         for kind, name, table, sql in self.conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_master"):
             names.add(name)
@@ -249,13 +389,16 @@ class Database:
                 continue
             if name == "chunk_terms" and kind == "table" and _normalized(sql) == _normalized(FTS_DDL):
                 continue
-            if name in _FTS_SHADOWS and kind == "table" and table == name:
+            if name in shadows and kind == "table" and table == name and shadows[name] in (None, _normalized(sql)):
                 continue
             if kind == "index" and sql is None and name.startswith("sqlite_autoindex_") and table in ("info", "documents", "chunks"):
                 continue
             raise UnsafeKnowledgeBase(f"{self.path}: its {kind} {name!r} is not part of a knowledge base")
         if names and not set(_OWN) <= names:
             raise UnsafeKnowledgeBase(f"{self.path} is not a knowledge base: {sorted(set(_OWN) - names)} missing")
+        present = names & set(shadows)
+        if present != (set(shadows) if "chunk_terms" in names else set()):
+            raise UnsafeKnowledgeBase(f"{self.path}: its keyword index tables do not match its keyword index")
         return names
 
     def close(self) -> None:
@@ -275,10 +418,8 @@ class Database:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as e:
-            if getattr(e, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-                raise KnowledgeBaseBusy(
-                    f"{self.path}: another session kept the knowledge base locked for {BUSY_TIMEOUT_S:g} s"
-                ) from e
+            if _is_busy(e):
+                raise _busy_error(self.path) from e
             raise
         try:
             yield self

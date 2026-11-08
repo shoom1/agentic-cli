@@ -11,6 +11,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import struct
+import subprocess
+import sys
+import textwrap
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +23,7 @@ import pytest
 
 from agentic_cli.memory.kb import _db
 from agentic_cli.memory.kb._db import Database, KnowledgeBaseBusy, UnsafeKnowledgeBase
+from agentic_cli.memory.kb._search import keyword_ranked
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 from tests.memory.kb_storage import A, B, C, LogRecorder, raw_write, read_rows
 
@@ -149,3 +155,140 @@ def test_without_fts5_the_database_opens_and_marks_the_index_stale(tmp_path, mon
     db = Database.open(tmp_path / "kb.sqlite")
     assert db.fts is True and db.info()["keyword_index"] == "current"
     assert read_rows(tmp_path, "SELECT count(*) FROM chunk_terms WHERE chunk_terms MATCH '\"herons\"'") == [(2,)]
+
+
+def _hot_journal(super_journal: Path) -> bytes:
+    """A rollback journal SQLite takes for a hot one, naming ``super_journal``
+    as its super-journal: playing it back, SQLite deletes that file."""
+    name = str(super_journal).encode()
+    magic = bytes([0xD9, 0xD5, 0x05, 0xF9, 0x20, 0xA1, 0x63, 0xD7])
+    return (b"\x01" * 512 + struct.pack(">I", 0) + name + struct.pack(">I", len(name))
+            + struct.pack(">I", sum(name) & 0xFFFFFFFF) + magic)
+
+
+def test_a_shipped_rollback_journal_is_refused_before_sqlite_plays_it_back(tmp_path):
+    victim = tmp_path / "outside" / "notes.txt"
+    victim.parent.mkdir()
+    victim.write_text("keep me\n")
+    folder = tmp_path / "kb"
+    folder.mkdir()
+    Database.open(folder / "kb.sqlite").close()
+    (folder / "kb.sqlite-journal").write_bytes(_hot_journal(victim))
+
+    with pytest.raises(UnsafeKnowledgeBase, match="journal"):
+        Database.open(folder / "kb.sqlite")
+    assert victim.read_text() == "keep me\n"
+
+
+def test_an_empty_rollback_journal_is_left_alone(tmp_path):
+    Database.open(tmp_path / "kb.sqlite").close()
+    (tmp_path / "kb.sqlite-journal").write_bytes(b"")
+
+    Database.open(tmp_path / "kb.sqlite").close()
+
+
+def test_a_database_swapped_for_a_link_after_the_check_is_refused(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "elsewhere.sqlite"
+    Database.open(elsewhere).close()
+    folder = tmp_path / "kb"
+    folder.mkdir()
+    (folder / "kb.sqlite").symlink_to(elsewhere)
+    monkeypatch.setattr(_db, "check_files", lambda path: None)  # the link appears after the check
+
+    with pytest.raises(UnsafeKnowledgeBase):
+        Database.open(folder / "kb.sqlite")
+
+
+def test_a_knowledge_base_reached_through_a_linked_folder_opens(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real")
+
+    Database.open(tmp_path / "linked" / "kb.sqlite").close()
+
+
+def test_a_keyword_index_table_defined_otherwise_is_refused(tmp_path):
+    Database.open(tmp_path / "kb.sqlite").close()
+    raw_write(tmp_path, "DROP TABLE chunk_terms_data",
+              "CREATE TABLE 'chunk_terms_data'(id INTEGER PRIMARY KEY, block BLOB CHECK (length(block) < 0))")
+
+    with pytest.raises(UnsafeKnowledgeBase):
+        Database.open(tmp_path / "kb.sqlite")
+
+
+def test_keyword_index_tables_without_their_index_are_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(_db, "fts5_available", lambda conn: False)
+    Database.open(tmp_path / "kb.sqlite").close()
+    monkeypatch.undo()
+    raw_write(tmp_path, "CREATE TABLE 'chunk_terms_data'(id INTEGER PRIMARY KEY, block BLOB)")
+
+    with pytest.raises(UnsafeKnowledgeBase):
+        Database.open(tmp_path / "kb.sqlite")
+
+
+def test_a_refused_database_is_not_written_to(tmp_path):
+    Database.open(tmp_path / "kb.sqlite").close()
+    raw_write(tmp_path, "PRAGMA journal_mode = DELETE", "CREATE VIEW v AS SELECT id FROM documents")
+    before = (tmp_path / "kb.sqlite").read_bytes()
+
+    with pytest.raises(UnsafeKnowledgeBase):
+        Database.open(tmp_path / "kb.sqlite")
+    assert (tmp_path / "kb.sqlite").read_bytes() == before
+
+
+def test_the_connection_is_opened_defensively(tmp_path):
+    db = Database.open(tmp_path / "kb.sqlite")
+    names = ("trusted_schema", "cell_size_check", "secure_delete", "mmap_size", "journal_mode")
+    pragmas = {name: db.conn.execute(f"PRAGMA {name}").fetchone()[0] for name in names}
+    db.close()
+
+    assert pragmas == {"trusted_schema": 0, "cell_size_check": 1, "secure_delete": 1, "mmap_size": 0, "journal_mode": "wal"}
+
+
+def test_a_keyword_index_this_sqlite_cannot_read_is_searched_by_scan_then_rebuilt(tmp_path, monkeypatch):
+    # FTS5's secure-delete raises the index to a format SQLite before 3.44 cannot read.
+    log = LogRecorder().install(monkeypatch, _db)
+    _store(tmp_path, _doc(A, "Otters", "otters")).close()
+    raw_write(tmp_path, "UPDATE chunk_terms_config SET v = 99 WHERE k = 'version'")
+
+    db = _store(tmp_path, _doc(B, "Herons", "herons"))
+    with db.read():
+        found = [doc for _, doc in keyword_ranked(db.conn, ["herons"], fts=db.fts)]
+    assert db.fts is False and found == [B, B]
+    assert db.info()["keyword_index"] == "stale"
+    assert len(log.warnings("kb_fts5_unavailable")) == 1
+    db.close()
+
+    raw_write(tmp_path, "UPDATE chunk_terms_config SET v = 4 WHERE k = 'version'")  # a SQLite that reads it
+    db = Database.open(tmp_path / "kb.sqlite")
+    assert db.fts is True and db.info()["keyword_index"] == "current"
+    db.close()
+    assert read_rows(tmp_path, "SELECT count(*) FROM chunk_terms WHERE chunk_terms MATCH '\"herons\"'") == [(2,)]
+
+
+_OPENER = textwrap.dedent("""
+    import sys, time
+    from pathlib import Path
+    from agentic_cli.memory.kb._db import Database
+    start = float(sys.argv[2])
+    while time.time() < start:
+        time.sleep(0.0005)
+    Database.open(Path(sys.argv[1])).close()
+""")
+
+
+@pytest.mark.parametrize("kind", ["new", "rollback-mode"])
+def test_sessions_opening_one_database_at_once_all_open_it(tmp_path, kind):
+    for attempt in range(2):
+        path = tmp_path / f"{kind}-{attempt}" / "kb.sqlite"
+        path.parent.mkdir()
+        if kind == "rollback-mode":
+            Database.open(path).close()
+            raw_write(path.parent, "PRAGMA journal_mode = DELETE")
+        start = time.time() + 2.0
+        children = [
+            subprocess.Popen([sys.executable, "-c", _OPENER, str(path), str(start)], stderr=subprocess.PIPE, text=True)
+            for _ in range(4)
+        ]
+        results = [(child.wait(60), child.stderr.read()[-300:]) for child in children]
+
+        assert [code for code, _ in results] == [0, 0, 0, 0], results
