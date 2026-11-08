@@ -23,8 +23,8 @@ from typing import Any
 
 import pytest
 
-from agentic_cli.memory import MockEmbeddingService
 from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceType
+from tests.memory.fake_embeddings import FakeEmbeddingService
 
 TICK = 0.01
 # Far below what a blocked loop shows (the whole embedding, or the whole
@@ -37,8 +37,9 @@ MAX_STALL_WHILE_CHUNKING = 0.2
 HOLD = 0.5
 
 
-class _SlowEmbeddings(MockEmbeddingService):
-    """Mock embeddings that take the time a CPU model would."""
+class _SlowEmbeddings(FakeEmbeddingService):
+    """Embeddings (not keyword-only: they are stored and searched) that take
+    the time a CPU model would."""
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         time.sleep(0.002 * len(texts) + 0.3)
@@ -92,7 +93,8 @@ def _hold_write_lock(kb_dir: Path, seconds: float) -> threading.Event:
 
 
 async def test_embedding_runs_off_the_loop(tmp_path):
-    kb = KnowledgeBase.open({"project": tmp_path / "kb"}, embedding_service=_SlowEmbeddings())
+    service = _SlowEmbeddings()
+    kb = KnowledgeBase.open({"project": tmp_path / "kb"}, embedding_service=service)
     text = "\n\n".join(
         " ".join(f"Sentence {i} of paragraph {p} about otters." for i in range(10)) for p in range(100)
     )
@@ -100,6 +102,7 @@ async def test_embedding_runs_off_the_loop(tmp_path):
     stall, found = await _longest_stall(kb.ingest_text(text, title="long"))
 
     assert len(found.document.chunks) > 50
+    assert service.calls == len(found.document.chunks)  # every chunk was embedded
     assert stall < MAX_STALL_WHILE_CHUNKING
 
 

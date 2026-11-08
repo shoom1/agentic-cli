@@ -45,6 +45,7 @@ import httpx
 import pytest
 
 from agentic_cli.config import BaseSettings, SettingsContext
+from agentic_cli.memory import EmbeddingService
 from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceType
 from agentic_cli.tools.arxiv_source import ArxivSearchSource
 from agentic_cli.tools.pdf_utils import extract_pdf_text
@@ -56,6 +57,7 @@ from agentic_cli.workflow.service_registry import (
     set_service_registry,
 )
 from tests.loop_guard import PRIMITIVES, BlockingCallOnLoop, no_blocking_calls
+from tests.memory.fake_embeddings import FakeEmbeddingService
 from tests.memory.kb_extra import require_kb_module
 from tests.memory.pdf_bytes import pdf_with_text
 from tests.tools.arxiv_fakes import ArxivAPI, Paper
@@ -582,7 +584,7 @@ def env(tmp_path, monkeypatch) -> Env:
 
     api = ArxivAPI(papers=[Paper(PAPER_ID, title="Attention Is All You Need", abstract="Attention only.")])
     summarizer = _Summarizer()
-    manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True, summarizer=summarizer)
+    manager = KnowledgeBaseManager(tmp_path / "kb", embedding_service=_embedding_service(), summarizer=summarizer)
     kb = KnowledgeBase({"project": manager})
     herons = manager.ingest_document(
         content="Herons wade at dawn.", title="Herons", source_type=SourceType.USER
@@ -608,6 +610,25 @@ def env(tmp_path, monkeypatch) -> Env:
         herons=herons.id,
         ledger=ledger.id,
     )
+
+
+class _Encoder:
+    """Stands in for a sentence-transformers model: fixed vectors, nothing loaded."""
+
+    def encode(self, texts, **kwargs):
+        import numpy as np
+
+        vectors = np.asarray([FakeEmbeddingService().vector(t) for t in ([texts] if isinstance(texts, str) else texts)])
+        return vectors[0] if isinstance(texts, str) else vectors
+
+
+def _embedding_service() -> EmbeddingService:
+    """An ``EmbeddingService`` whose model is ``_Encoder``: the knowledge base
+    embeds through the guarded ``EmbeddingService.embed_batch`` (a keyword-only
+    knowledge base would embed nothing, and so reach no guarded call)."""
+    service = EmbeddingService(model_name="offline-encoder", device="cpu")
+    service._model, service._embedding_dim = _Encoder(), 8
+    return service
 
 
 Tool = Callable[..., Awaitable[dict[str, Any]]]
