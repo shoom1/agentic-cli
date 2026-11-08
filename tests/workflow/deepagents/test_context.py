@@ -75,6 +75,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
     ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
+    MemoryIndexMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
@@ -356,6 +357,27 @@ class TestTheStack:
         assert (created["helper"]["middleware"][1].kind,
                 created["helper"]["middleware"][1].agent) == (ProviderKind.GOOGLE, "helper")
         assert created["helper"]["middleware"][2].agent == "helper"
+
+    def test_the_root_gets_the_memory_index_middleware(self, created, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        build_agent_tree(
+            TEAM,
+            chat_models={config.name: ScriptedChat(label=config.name) for config in TEAM},
+            resolved={"lead": resolved(SONNET_THINKING, "lead"),
+                      "helper": resolved("google:gemini-2.5-flash", "helper")},
+            tools={},
+            prompts={config.name: "p" for config in TEAM},
+            settings=context(tool_result_max_chars=30_000),
+            checkpointer=None,
+            memory_index=lambda: "",
+            memory_index_cached=lambda: "",
+        )
+        lead = [type(m) for m in created["lead"]["middleware"]]
+        assert lead[2:7] == [
+            ForeignReasoningMiddleware, ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            MemoryIndexMiddleware, AnthropicPromptCachingMiddleware,
+        ]
+        assert MemoryIndexMiddleware not in [type(m) for m in created["helper"]["middleware"]]
 
     def test_every_agent_summarizes_on_its_own_models_budget(self, created):
         # The coordinator on a 1M-token Claude (the ceiling), the helper on a
@@ -962,8 +984,8 @@ class TestSettingsChange:
         triggers = []
         build = agent_builder.build_summarization
 
-        def recorded(model, resolved, settings):
-            middleware = build(model, resolved, settings)
+        def recorded(model, resolved, settings, **kwargs):
+            middleware = build(model, resolved, settings, **kwargs)
             triggers.append(middleware._lc_helper.trigger)
             return middleware
 
