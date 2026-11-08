@@ -144,8 +144,8 @@ def test_the_knowledge_base_shares_the_given_service(tmp_path):
 
     kb = memory_services.open_knowledge_base(settings, summarizer=None, embedding_service=service)
 
-    assert kb.manager("project")._embedding_service is service
-    assert kb.manager("user")._embedding_service is service
+    assert kb.manager("project")._service is service
+    assert kb.manager("user")._service is service
 
 
 def test_one_scope_can_be_opened_alone(settings):

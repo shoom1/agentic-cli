@@ -36,7 +36,6 @@ class DocumentChunk:
     document_id: str
     content: str
     chunk_index: int
-    embedding: list[float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -53,7 +52,6 @@ class DocumentChunk:
             document_id=document_id,
             content=content,
             chunk_index=chunk_index,
-            embedding=None,
             metadata=metadata or {},
         )
 
@@ -65,7 +63,6 @@ class DocumentChunk:
             "content": self.content,
             "chunk_index": self.chunk_index,
             "metadata": self.metadata,
-            # Embedding not serialized (stored separately in vector index)
         }
 
     @classmethod
@@ -79,7 +76,6 @@ class DocumentChunk:
             document_id=data["document_id"],
             content=data.get("content", ""),
             chunk_index=data["chunk_index"],
-            embedding=None,
             metadata=data.get("metadata", {}),
         )
 
@@ -102,6 +98,9 @@ class Document:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     chunks: list[DocumentChunk] = field(default_factory=list)
+    # How many chunks the document has; set when it is read or ingested (a
+    # listing carries no chunks).
+    chunk_count: int = 0
 
     @classmethod
     def create(

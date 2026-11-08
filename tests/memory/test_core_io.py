@@ -157,3 +157,22 @@ def test_an_atomic_write_replaces_a_symlink_instead_of_following_it(tmp_path):
     assert not (tmp_path / "data.bin").is_symlink()
     assert (tmp_path / "data.bin").read_bytes() == b"ours"
     assert stat.S_IMODE((tmp_path / "data.bin").stat().st_mode) == 0o600
+
+
+def test_creating_a_private_file_leaves_an_existing_one_as_it_is(tmp_path):
+    core_io.create_private_file(tmp_path / "kb.sqlite")
+    assert stat.S_IMODE((tmp_path / "kb.sqlite").stat().st_mode) == 0o600
+    assert (tmp_path / "kb.sqlite").read_bytes() == b""
+
+    (tmp_path / "kb.sqlite").write_bytes(b"theirs")
+    core_io.create_private_file(tmp_path / "kb.sqlite")
+    assert (tmp_path / "kb.sqlite").read_bytes() == b"theirs"
+
+
+@posix_only
+def test_creating_a_private_file_never_follows_a_dangling_symlink(tmp_path):
+    (tmp_path / "kb.sqlite").symlink_to(tmp_path / "created")
+
+    core_io.create_private_file(tmp_path / "kb.sqlite")
+
+    assert not (tmp_path / "created").exists()

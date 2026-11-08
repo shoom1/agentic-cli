@@ -13,22 +13,22 @@ from tests.memory.kb_extra import require_kb_module
 
 
 @pytest.fixture
-def without_faiss(monkeypatch):
-    monkeypatch.setitem(sys.modules, "faiss", None)
+def without_trafilatura(monkeypatch):
+    monkeypatch.setitem(sys.modules, "trafilatura", None)
 
 
-def test_a_missing_library_skips_by_default(monkeypatch, without_faiss):
+def test_a_missing_library_skips_by_default(monkeypatch, without_trafilatura):
     monkeypatch.delenv("KB_REQUIRE_EXTRA", raising=False)
 
     with pytest.raises(pytest.skip.Exception):
-        require_kb_module("faiss")
+        require_kb_module("trafilatura")
 
 
-def test_a_missing_library_fails_when_the_extra_is_required(monkeypatch, without_faiss):
+def test_a_missing_library_fails_when_the_extra_is_required(monkeypatch, without_trafilatura):
     monkeypatch.setenv("KB_REQUIRE_EXTRA", "1")
 
-    with pytest.raises(pytest.fail.Exception, match="faiss.*KB_REQUIRE_EXTRA=1"):
-        require_kb_module("faiss")
+    with pytest.raises(pytest.fail.Exception, match="trafilatura.*KB_REQUIRE_EXTRA=1"):
+        require_kb_module("trafilatura")
 
 
 def test_an_installed_library_is_returned(monkeypatch):

@@ -1,23 +1,24 @@
-"""Knowledge Base Manager.
+"""Knowledge Base Manager: the knowledge base kept in one folder.
 
-Main interface for knowledge base operations including document ingestion,
-search, and management.
+The folder:
+    kb.sqlite          the record: documents, chunks, vectors, keyword index (``_db``)
+    documents/<id>.md  each document's sidecar, rendered from the database
+    files/<id>.<ext>   stored originals
+    concepts/          concept pages (``ConceptStore``)
+    index.md           the catalogue, rendered from the database
+    ingest_log.md      one line per ingest and delete
 
-Persistence format (v2):
-    metadata.json    - Document headers and chunk metadata (no content)
-    documents/{id}.json - Per-document content and chunk texts
-    embeddings/      - FAISS index and mappings
-
-Legacy format (v1): All content stored in metadata.json.
-Auto-migrated to v2 on first load.
+A folder 0.6 wrote (``metadata.json``, ``documents/<id>.json``,
+``embeddings/``) is imported into ``kb.sqlite`` when it first opens, and its
+old files are moved into ``pre-0.7.0/`` (``_import_06``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
+import sqlite3
 import stat
 import threading
 import time
@@ -27,46 +28,43 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+import numpy as np
+
+from agentic_cli.memory._core.chunking import chunk_text
 from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingService
-from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
-from agentic_cli.memory.kb import enrich
-from agentic_cli.memory.kb.models import (
-    Document,
-    DocumentChunk,
-    SearchResult,
-    SourceType,
-)
-from agentic_cli.memory.kb.vector_store import VectorStore
-from agentic_cli.memory._core.filelock import file_stamp, folder_lock
 from agentic_cli.memory._core.io import (
     append_text,
     atomic_write_bytes,
-    atomic_write_json,
     atomic_write_text,
     is_regular_file,
     read_if_regular,
 )
-from agentic_cli.memory._core.model_record import ModelRecord, read_model_record, write_model_record
 from agentic_cli.memory._core.log import get_logger
+from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory.kb import _import_06, _search, enrich
+from agentic_cli.memory.kb._db import (  # noqa: F401 - KnowledgeBaseBusy, UnsafeKnowledgeBase: re-exported
+    DB_NAME,
+    Database,
+    KnowledgeBaseBusy,
+    UnsafeKnowledgeBase,
+    check_files,
+    refuse,
+)
+from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
+from agentic_cli.memory.kb._vectors import VectorIndex, normalized, to_blob
+from agentic_cli.memory.kb.models import Document, DocumentChunk, SearchResult, SourceType
+from agentic_cli.memory.kb.sidecar import render_index_md, render_sidecar_markdown
 
 logger = get_logger("agentic_cli.memory.kb")
 
-# Every document ID the framework assigns is a UUID; see _load_metadata.
-_PLAIN_DOC_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# How long the checkpoint after a delete waits for other sessions' reads; one
+# it could not finish is tried again at the next delete and at close.
+CHECKPOINT_WAIT_S = 2.0
 
-# Current persistence format version
-_FORMAT_VERSION = 3
-
-
-class UnsafeKnowledgeBase(OSError):
-    """A knowledge base's folder holds a symlink, or something else, where one
-    of its own folders (``documents``, ``embeddings``, ``files``, ``concepts``)
-    or its lock file belongs.
-
-    A project can ship its knowledge base, and through a link the knowledge
-    base would read, write and delete files elsewhere, so it does not work
-    there: ``KnowledgeBase.open`` leaves that scope out, with a warning.
-    """
+_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_SIDECAR_NAME = re.compile(rf"({_UUID})\.md")
+_ORIGINAL_NAME = re.compile(rf"({_UUID})\.[A-Za-z0-9]{{1,16}}")
+_TEMP_NAME = re.compile(rf"\.(?:{_UUID}\.[A-Za-z0-9]{{1,16}}|index\.md)\..+\.tmp")
 
 
 class Summarizer(Protocol):
@@ -110,11 +108,6 @@ def _folders_below(within: Path, base_dir: Path) -> tuple[Path, ...]:
     return tuple(folders)
 
 
-def _refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
-    found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
-    return UnsafeKnowledgeBase(f"{path} is {found}: a knowledge base works only in its own folders")
-
-
 def _truncate(text: str, max_length: int = 200) -> str:
     """``text`` cut to ``max_length`` characters, with "..." when cut."""
     if len(text) > max_length:
@@ -122,70 +115,9 @@ def _truncate(text: str, max_length: int = 200) -> str:
     return text
 
 
-def matches_document_filters(doc: Document, filters: dict[str, Any]) -> bool:
-    """Check if a document matches the given filters.
-
-    Standalone function for reuse outside the manager.
-
-    Args:
-        doc: Document to check.
-        filters: Filter dict with optional keys:
-            - source_type: SourceType or string
-            - date_from: ISO date string (inclusive lower bound)
-            - date_to: ISO date string (inclusive upper bound)
-            - keywords: list of strings (all must be present, case-insensitive)
-
-    Returns:
-        True if document matches all filters.
-    """
-    if "source_type" in filters:
-        expected = filters["source_type"]
-        if isinstance(expected, str):
-            expected = SourceType(expected)
-        if doc.source_type != expected:
-            return False
-
-    if "date_from" in filters:
-        date_from = datetime.fromisoformat(filters["date_from"])
-        if doc.created_at < date_from:
-            return False
-
-    if "date_to" in filters:
-        date_to = datetime.fromisoformat(filters["date_to"])
-        if doc.created_at > date_to:
-            return False
-
-    if "keywords" in filters:
-        content_lower = doc.content.lower()
-        for keyword in filters["keywords"]:
-            if keyword.lower() not in content_lower:
-                return False
-
-    return True
-
-
-def _faiss_available() -> bool:
-    """Whether FAISS can be imported (the real vector store needs it)."""
-    try:
-        import faiss  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-class _KeywordFallback(MockEmbeddingService):
-    """The mock service of a knowledge base whose model is unavailable.
-
-    Unlike one chosen (``use_mock``, no ``kb`` extra), it stands in for a
-    model whose real index stays on disk: what this session writes, that
-    index lacks (see ``_save_vectors``).
-    """
-
-
-# The prefixes of a model record that names no model: the next open with a
-# working model re-embeds every chunk.
-_REBUILDING = "rebuilding:"
-_KEYWORD_WRITES = "keyword-writes:"
+def _terms_of(text: str) -> str:
+    """A chunk's terms as stored: the tokenizer's terms, space-separated."""
+    return " ".join(tokenize(text))
 
 
 def _loaded_or_keyword(service: Any) -> Any:
@@ -194,7 +126,7 @@ def _loaded_or_keyword(service: Any) -> Any:
     Reading ``embedding_dim`` loads an ``EmbeddingService``'s model. Whatever
     stops it (an offline first run with the model not cached, a broken
     install, a device that fails) is logged once, and the knowledge base
-    searches by keyword, as when re-embedding fails, rather than not opening.
+    searches by keyword rather than not opening.
     """
     if isinstance(service, MockEmbeddingService):
         return service
@@ -202,13 +134,9 @@ def _loaded_or_keyword(service: Any) -> Any:
         service.embedding_dim
     except Exception as e:
         model = getattr(service, "model_name", "unknown")
-        logger.warning(
-            "kb_keyword_search_only",
-            reason="the embedding model did not load",
-            model=model,
-            error=f"{type(e).__name__}: {e}",
-        )
-        return _KeywordFallback(model_name=model, batch_size=getattr(service, "batch_size", 32))
+        logger.warning("kb_keyword_search_only", reason="the embedding model did not load", model=model,
+                       error=f"{type(e).__name__}: {e}")
+        return MockEmbeddingService(model_name=model, batch_size=getattr(service, "batch_size", 32))
     return service
 
 
@@ -246,36 +174,27 @@ class _Threads:
 
 
 class KnowledgeBaseManager:
-    """Main interface for knowledge base operations.
+    """One knowledge base folder: ingestion, hybrid search, documents, sidecars.
 
-    Provides document ingestion, semantic search, and document management.
-
-    Concurrency model
-    -----------------
-    Three lock surfaces with different semantics:
-
-    * ``_lock`` (``threading.Lock``) — guards every mutation to the
-      in-memory document/chunk/vector/BM25 state. The sync mutation API
-      (``ingest_document``, ``search``, ``delete_document``, ``clear``)
-      is safe to call from any thread. It is held while waiting for the
-      folder lock (see :meth:`_transaction`), which another process can
-      hold for minutes, so the async methods here and in ``KnowledgeBase``
-      run these calls on a worker thread. A synchronous caller on the
-      event loop (a CLI command listing documents) still waits with it.
-    * ``_quick_lock`` (``threading.Lock``) — guards what the event loop
-      itself touches: the ``_sidecar_locks`` inserts and the
-      check-and-set of ``_backfill_running``. Never held across I/O.
-    * ``_sidecar_locks`` (``dict[str, asyncio.Lock]``) — per-doc locks
-      that serialize concurrent LLM-backed sidecar generation for the
-      same document. Always obtain these through
-      :meth:`get_or_create_sidecar_lock`; never index the dict directly.
-
-    The async sidecar path (``backfill_sidecars`` and the lazy
-    ``kb_read`` fallback in ``tools/knowledge_tools``) is safe within a
-    single asyncio event loop. Sharing a manager across multiple event
-    loops is NOT supported — the per-doc ``asyncio.Lock`` is bound to
-    the loop it was created on.
+    Concurrency
+    -----------
+    * ``_lock`` (``threading.Lock``) keeps this manager's threads apart
+      around every use of its database connection and of its search
+      vectors. Changes from other processes are kept apart by SQLite's write
+      lock (``Database.write``), which a change waits for up to
+      ``BUSY_TIMEOUT_S``; a read never waits. Embedding happens before a
+      change takes the write lock, so a change holds it briefly.
+    * ``_quick_lock`` guards what the event loop itself touches: the
+      ``_sidecar_locks`` inserts and the check-and-set of
+      ``_backfill_running``. Never held across I/O.
+    * ``_sidecar_locks`` (``dict[str, asyncio.Lock]``): per-document locks
+      that keep two sidecar generations for one document apart; obtained
+      through :meth:`get_or_create_sidecar_lock`. Bound to the event loop
+      they were made on.
     """
+
+    _EMBED_BATCH = 256
+    _TERMS_BATCH = 1000
 
     def __init__(
         self,
@@ -285,25 +204,21 @@ class KnowledgeBaseManager:
         summarizer: "Summarizer | None" = None,
         use_mock: bool = False,
         embedding_service: Any = None,
-        vector_store: Any = None,
         within: Path | str | None = None,
     ) -> None:
         """Open (or create) the knowledge base kept in ``base_dir``.
 
         Args:
-            base_dir: Directory holding the knowledge base (``documents/``,
-                ``embeddings/``, ``files/``, ``concepts/`` and ``metadata.json``).
-            embedding: Model to load when the knowledge base builds its own
-                embedding service. Defaults to ``EmbeddingConfig()``.
+            base_dir: Its folder (``kb.sqlite``, ``documents/``, ``files/``,
+                ``concepts/``).
+            embedding: The model to load when it builds its own embedding
+                service. Defaults to ``EmbeddingConfig()``.
             summarizer: Called to write summaries and sidecars. Without one,
                 the summary is the document's first ~500 characters.
-            use_mock: Use the mock embedding service and vector store (no ML
-                libraries needed).
-            embedding_service: A ready embedding service, for example one
-                shared with another knowledge base. Without ``vector_store``,
-                the knowledge base builds its vector store at the service's
-                dimension.
-            vector_store: A ready vector store (with ``embedding_service``).
+            use_mock: Search by keyword only: nothing is embedded.
+            embedding_service: A ready service, for example one shared with
+                another knowledge base. A ``MockEmbeddingService`` means
+                keyword-only too.
             within: A folder the caller trusts, which ``base_dir`` lies in
                 (for a project's knowledge base, the working directory).
                 Every folder from it down to ``base_dir`` must then be a real
@@ -313,113 +228,99 @@ class KnowledgeBaseManager:
                 base kept on another disk).
 
         Raises:
-            ValueError: ``base_dir`` is not inside ``within``.
+            ValueError: ``base_dir`` is not inside ``within``, its database
+                is of a format this version does not read, or the
+                ``metadata.json`` of a 0.6 folder is not JSON (not imported
+                yet: a git-LFS pointer, say).
             UnsafeKnowledgeBase: see :meth:`_check_layout`.
+            KnowledgeBaseBusy: other sessions (an older version's too) kept
+                it locked past ``BUSY_TIMEOUT_S``.
+            sqlite3.DatabaseError: its database is not one (a git-LFS
+                pointer) or is corrupt.
         """
         base_dir = Path(base_dir)
         self._root_folders = () if within is None else _folders_below(Path(within), base_dir)
-
         self._lock = threading.Lock()
         self._sidecar_locks: dict[str, asyncio.Lock] = {}
         self._quick_lock = threading.Lock()
-        self._backfill_running: bool = False
+        self._backfill_running = False
         self._concepts_store: "ConceptStore | None" = None
         self._summarizer = summarizer
-        self._use_mock = use_mock
-        # The keyword index follows the argument, not the fallback to mock
-        # embeddings _create_services may make.
-        self._mock_bm25 = use_mock
+        # A checkpoint after a delete that could not empty the log (see _after_delete).
+        self._checkpoint_pending = False
+        self._closed = False
 
         self.kb_dir = base_dir
         self.documents_dir = base_dir / "documents"
-        self.embeddings_dir = base_dir / "embeddings"
-
-        self.metadata_path = self.kb_dir / "metadata.json"
-        self.files_dir = self.kb_dir / "files"
-        self.concepts_dir = self.kb_dir / "concepts"
-        self._model_record_path = self.embeddings_dir / "model.json"
-        self._lock_path = self.kb_dir / ".lock"
+        self.files_dir = base_dir / "files"
+        self.concepts_dir = base_dir / "concepts"
+        self.db_path = base_dir / DB_NAME
+        self._lock_path = base_dir / ".lock"
         self._check_layout()
+        for folder in (self.kb_dir, self.documents_dir, self.files_dir):
+            folder.mkdir(parents=True, exist_ok=True)
 
-        # Ensure directories exist
-        self.kb_dir.mkdir(parents=True, exist_ok=True)
-        self.documents_dir.mkdir(parents=True, exist_ok=True)
-        self.embeddings_dir.mkdir(parents=True, exist_ok=True)
-        self.files_dir.mkdir(parents=True, exist_ok=True)
-
-        # Use injected services or create them
-        if embedding_service is not None and vector_store is not None:
-            self._embedding_service = embedding_service
-            self._vector_store = vector_store
-        else:
-            self._embedding_service, self._vector_store = self._create_services(
-                embedding or EmbeddingConfig(), embedding_service
-            )
-
-        self._documents: dict[str, Document] = {}
-        self._chunks: dict[str, DocumentChunk] = {}
-        self._bm25_index = None
-        # Every CLI session of an application opens the same knowledge bases,
-        # so the state is read, and each read or change made, holding the
-        # folder's lock (see _transaction). metadata.json as this knowledge
-        # base last read or wrote it:
-        self._stamp: tuple[int, int, int] | None = None
-        with self._lock, folder_lock(self._lock_path):
-            self._read_state()
-            self._stamp = file_stamp(self.metadata_path)
-
-    def _read_state(self) -> None:
-        """Read the documents and the keyword index from disk.
-
-        The vector store has read its own index already. A real index must
-        have been built by the model this knowledge base has now (see
-        _reconcile_index).
-        """
-        self._documents = {}
-        self._chunks = {}
-        self._load_metadata()
-
-        if self._has_real_index():
-            self._reconcile_index()
-
-        # BM25 index for hybrid search
-        self._bm25_index = None
+        self._service, self._semantic = self._choose_service(embedding or EmbeddingConfig(), embedding_service, use_mock)
+        self._model_name = str(getattr(self._service, "model_name", "unknown"))
+        self._vectors: VectorIndex | None = None
+        if _import_06.needs_import(self.kb_dir):
+            _import_06.run(self.kb_dir)
+        self._db = Database.open(self.db_path)
         try:
-            from agentic_cli.memory.kb.bm25_index import create_bm25_index
-            self._bm25_index = create_bm25_index(use_mock=self._mock_bm25)
-            if self.embeddings_dir.exists():
-                try:
-                    self._bm25_index.load(self.embeddings_dir)
-                except Exception:
-                    # Unreadable: start empty so the chunks are indexed again
-                    # below, rather than leaving keyword search with nothing.
-                    logger.warning("bm25_index_unreadable", path=str(self.embeddings_dir))
-                    self._bm25_index = create_bm25_index(use_mock=self._mock_bm25)
-            if self._bm25_index.size != len(self._chunks):
-                # Each backend keeps its own index file, so one saved by
-                # another backend (a library installed or removed since) is
-                # not loaded: index the chunks again, and drop the old file,
-                # which would keep the text of documents deleted later.
-                self._remove_bm25_files()
-                self._bm25_index.rebuild(
-                    list(self._chunks),
-                    [chunk.content for chunk in self._chunks.values()],
-                )
-                self._bm25_index.save(self.embeddings_dir)
-        except Exception:
-            logger.debug("bm25_init_skipped")
+            with self._lock:
+                # Before the sweep, which would delete the files of documents the import skipped.
+                moved = _import_06.tidy(self.kb_dir, self._db)
+                self._reconcile_terms()
+                self._sweep()
+                self._ensure_index_md(rewrite=moved)
+                if self._semantic:
+                    self._vectors = self._reconcile_vectors()
+        except BaseException:
+            self._db.close()
+            raise
+
+    @staticmethod
+    def _choose_service(embedding: EmbeddingConfig, given: Any, use_mock: bool) -> tuple[Any, bool]:
+        """The embedding service, and whether this knowledge base searches by meaning."""
+        if use_mock:
+            if isinstance(given, MockEmbeddingService):
+                return given, False
+            return MockEmbeddingService(model_name=embedding.model_name, batch_size=embedding.batch_size), False
+        service = given
+        if service is None and EmbeddingService.is_available():
+            service = EmbeddingService(model_name=embedding.model_name, batch_size=embedding.batch_size, device=embedding.device)
+        if service is None:
+            return MockEmbeddingService(model_name=embedding.model_name, batch_size=embedding.batch_size), False
+        service = _loaded_or_keyword(service)
+        return service, not isinstance(service, MockEmbeddingService)
+
+    def close(self) -> None:
+        """Close the database connection, emptying the write-ahead log first
+        if a delete could not (see :meth:`_after_delete`). Idempotent; the
+        manager is not used after it."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._checkpoint_pending:
+                self._checkpoint()
+            self._closed = True
+            self._db.close()
 
     def _check_layout(self) -> None:
-        """Refuse a knowledge base whose own folders or lock file are not what they should be.
+        """Refuse a knowledge base whose own folders, database or lock file are not what they should be.
 
-        A subfolder or the lock file that is a symlink would put its reads,
-        writes and deletes in a folder elsewhere (or create the file a
-        dangling link names). The knowledge base's folder itself may be a
-        symlink, unless it was opened ``within`` a folder: then each folder
-        from there down to it must be a real one, so a repository cannot
-        point ``.{app}`` or ``.{app}/knowledge_base`` elsewhere. Checked when
-        the knowledge base opens and before each read or change, since a
-        ``git pull`` can replace a folder while a session runs.
+        A subfolder (``documents``, ``files``, ``concepts``, ``pre-0.7.0``)
+        that is a symlink would put its reads, writes and deletes in a folder
+        elsewhere, and so would the database or one of its companions
+        (``kb.sqlite``, ``-wal``, ``-shm``, ``-journal``) or the lock file
+        (or create the file a dangling link names); a rollback journal that
+        names a super-journal is refused too (see ``_db.check_files``). The knowledge
+        base's folder itself may be a symlink, unless it was opened
+        ``within`` a folder: then each folder from there down to it must be a
+        real one, so a repository cannot point ``.{app}`` or
+        ``.{app}/knowledge_base`` elsewhere. Checked when the knowledge base
+        opens and before each read or change, since a ``git pull`` can
+        replace a folder while a session runs.
 
         Each check is an ``lstat`` and the open comes after it. That holds
         while nothing swaps these folders in between: a repository's files
@@ -441,11 +342,10 @@ class KnowledgeBaseManager:
                     f"{folder} is not in a folder: a knowledge base works only in its own folders"
                 ) from None
             if not stat.S_ISDIR(mode):
-                raise _refuse(folder, mode, "a folder")
-        expected = [
-            (folder, stat.S_ISDIR, "a folder")
-            for folder in (self.documents_dir, self.embeddings_dir, self.files_dir, self.concepts_dir)
-        ]
+                raise refuse(folder, mode, "a folder")
+        # pre-0.7.0: where the 0.6 import moves the old files (_import_06.LEGACY_DIR)
+        folders = (self.documents_dir, self.files_dir, self.concepts_dir, self.kb_dir / "pre-0.7.0")
+        expected = [(folder, stat.S_ISDIR, "a folder") for folder in folders]
         expected.append((self._lock_path, stat.S_ISREG, "a regular file"))
         for path, is_expected, kind in expected:
             try:
@@ -453,33 +353,23 @@ class KnowledgeBaseManager:
             except FileNotFoundError:
                 continue
             if not is_expected(mode):
-                raise _refuse(path, mode, kind)
+                raise refuse(path, mode, kind)
+        check_files(self.db_path)
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
-        """Hold the knowledge base for one read or change, as every process sees it.
-
-        The thread lock keeps this manager's threads apart and the folder
-        lock every process that opened the folder. What another process
-        wrote since this one last read or wrote ``metadata.json`` (every
-        change writes it) is read again first, vectors and keyword index
-        included, so a change applies to the knowledge base as it is now:
-        each kept its documents from when it opened and rewrote the index
-        from them, dropping what another session had added since.
-
-        Raises:
-            UnsafeKnowledgeBase: a folder of the knowledge base has become a
-                symlink since it opened (see :meth:`_check_layout`).
-        """
+    def _write(self) -> Iterator[Database]:
+        """One change, as every process sees it (see the class docstring)."""
         with self._lock:
             self._check_layout()
-            with folder_lock(self._lock_path):
-                if file_stamp(self.metadata_path) != self._stamp:
-                    self._vector_store.clear()
-                    self._vector_store.load()
-                    self._read_state()
-                    self._stamp = file_stamp(self.metadata_path)
-                yield
+            with self._db.write():
+                yield self._db
+
+    @contextmanager
+    def _read(self) -> Iterator[Database]:
+        with self._lock:
+            self._check_layout()
+            with self._db.read():
+                yield self._db
 
     @property
     def concepts(self) -> "ConceptStore":
@@ -494,255 +384,149 @@ class KnowledgeBaseManager:
             self._concepts_store = ConceptStore(self.concepts_dir)
         return self._concepts_store
 
-    def _create_services(
-        self, embedding: EmbeddingConfig, embedding_service: Any = None
-    ) -> tuple[Any, Any]:
-        """The embedding service and vector store this knowledge base uses.
+    # -- opening ---------------------------------------------------------------
 
-        A given ``embedding_service`` is used (a mock one with the mock
-        store); otherwise one is built from ``embedding`` when
-        sentence-transformers is installed. A real service needs FAISS:
-        without it, with ``use_mock``, with no service at all, or with one
-        whose model does not load, the knowledge base uses the mock service
-        and store and searches by keyword.
+    def _reconcile_terms(self) -> None:
+        """Make every chunk's terms this version's tokenizer's (once after it changes).
+
+        The terms are computed outside the write lock, a batch at a time, and
+        each batch is written in its own short transaction (the keyword index
+        kept in step), as long as the database still records the tokenizer
+        this run started from: another session may have finished the change
+        meanwhile, or made another. The last transaction takes the chunks
+        added meanwhile and records this tokenizer.
         """
-        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
-
-        if not self._use_mock:
-            service = embedding_service
-            if service is None and EmbeddingService.is_available():
-                service = EmbeddingService(
-                    model_name=embedding.model_name,
-                    batch_size=embedding.batch_size,
-                    device=embedding.device,
-                )
-            if service is not None and _faiss_available():
-                service = _loaded_or_keyword(service)
-            if isinstance(service, MockEmbeddingService):
-                return service, MockVectorStore(
-                    index_path=self.embeddings_dir / "index.mock",
-                    embedding_dim=service.embedding_dim,
-                )
-            if service is not None and _faiss_available():
-                try:
-                    vs = VectorStore(
-                        index_path=self.embeddings_dir / "index.faiss",
-                        embedding_dim=service.embedding_dim,
-                    )
-                    return service, vs
-                except ImportError:
-                    pass
-            if service is not None and not _faiss_available():
-                logger.info(
-                    "kb_keyword_search_only",
-                    reason="faiss not installed",
-                    model=getattr(service, "model_name", "unknown"),
-                )
-        self._use_mock = True
-
-        emb = MockEmbeddingService(
-            model_name=embedding.model_name,
-            batch_size=embedding.batch_size,
-        )
-        vs = MockVectorStore(
-            index_path=self.embeddings_dir / "index.mock",
-            embedding_dim=emb.embedding_dim,
-        )
-        return emb, vs
-
-    _REEMBED_BATCH = 256
-
-    def _has_real_index(self) -> bool:
-        """A FAISS index with a real (not mock) embedding service."""
-        return isinstance(self._vector_store, VectorStore) and not isinstance(
-            self._embedding_service, MockEmbeddingService
-        )
-
-    def _current_record(self) -> ModelRecord:
-        return ModelRecord(
-            getattr(self._embedding_service, "model_name", "unknown"),
-            self._embedding_service.embedding_dim,
-        )
-
-    def _reconcile_index(self) -> None:
-        """Make the index on disk one the current model built.
-
-        With chunks and no index (or one the store could not read), every
-        chunk is embedded. A record that names the current model, with an
-        index of its dimension, loads as it is; any other record (one a
-        session without its model left among them: see ``_save_vectors``)
-        means re-embedding. With no record (a knowledge base from 0.6.3), an index
-        of the model's dimension whose mappings name exactly the stored chunks
-        is adopted; anything else is re-embedded. A new knowledge base (no
-        chunks, no index) gets its record with its first save.
-        """
-        current = self._current_record()
-        store = self._vector_store
-        if store.unreadable or not is_regular_file(store.index_path):  # a symlink counts as no index
-            if self._chunks:
-                self._reembed(current, "unreadable_index" if store.unreadable else "no_index")
-            return
-        recorded = read_model_record(self._model_record_path)
-        dimension = store.index.d
-        if recorded is not None:
-            if recorded == current and dimension == current.embedding_dim:
+        while True:
+            started = self._db.info().get("tokenizer")
+            if started == TOKENIZER or self._recompute_terms(started):
                 return
-            keyword_writes = recorded.model_name.startswith(_KEYWORD_WRITES)
-            self._reembed(current, "keyword_writes" if keyword_writes else "model_changed")
-            return
-        try:
-            covers = store.chunk_ids() == set(self._chunks)
-        except (TypeError, ValueError):
-            covers = False  # malformed mappings: rebuild rather than fail the open
-        if dimension == current.embedding_dim and covers and store.size == len(self._chunks):
-            self._write_record_on_open(current)
-            logger.info("kb_index_adopted", model=current.model_name, chunks=len(self._chunks))
-            return
-        self._reembed(current, "no_record")
 
-    def _write_record_on_open(self, current: ModelRecord) -> None:
-        """Write the record while opening; failing to must not fail the open."""
-        try:
-            write_model_record(self._model_record_path, current)
-        except OSError as e:
-            logger.warning("kb_model_record_write_failed", error=str(e))
+    def _recompute_terms(self, started: str | None) -> bool:
+        """One pass of :meth:`_reconcile_terms`; False when another session
+        changed the recorded tokenizer meanwhile."""
+        last = 0
+        while True:
+            with self._db.read():
+                batch = self._db.chunk_texts(after=last, limit=self._TERMS_BATCH)
+            if not batch:
+                break
+            rows = [(rowid, chunk_id, _terms_of(text)) for rowid, chunk_id, text in batch]
+            with self._db.write():
+                if self._db.info().get("tokenizer") != started:
+                    return False
+                self._db.set_terms(rows)
+            last = batch[-1][0]
+        with self._db.write():
+            if self._db.info().get("tokenizer") != started:
+                return False
+            self._db.set_terms([(rowid, chunk_id, _terms_of(text)) for rowid, chunk_id, text in self._db.chunk_texts(after=last)])
+            self._db.set_info(tokenizer=TOKENIZER)
+        return True
 
-    def _reembed(self, current: ModelRecord, reason: str) -> None:
-        """Embed every chunk again and swap the new index in when it is complete.
+    def _sweep(self) -> None:
+        """Remove what a crash left: a sidecar or stored file whose document has
+        no row, and the temporary file of an unfinished write.
 
-        The new index is built beside the old one and replaces it by rename;
-        the record is written last, so an interrupted run is redone on the
-        next open. If embedding fails, the old index stays on disk and this
-        session searches by keyword.
+        Runs as the knowledge base opens (and after ``clear``), holding the
+        write lock: every other session writes its files inside its own
+        write transaction, so none is half way through one. Only names the
+        knowledge base gives its files are touched, and a link is removed,
+        never followed.
         """
-        started = time.monotonic()
-        old = self._vector_store
-        new_index = old.index_path.with_name("index.rebuild.faiss")
-        new_mappings = new_index.with_suffix(".mappings.json")
-        chunk_ids = list(self._chunks)
-        logger.info("kb_reembedding", reason=reason, model=current.model_name, chunks=len(chunk_ids))
-        try:
-            new_index.unlink(missing_ok=True)
-            new_mappings.unlink(missing_ok=True)
-            fresh = VectorStore(index_path=new_index, embedding_dim=current.embedding_dim)
-            _ = fresh.index  # an empty knowledge base still saves an (empty) index
-            for start in range(0, len(chunk_ids), self._REEMBED_BATCH):
-                batch = chunk_ids[start : start + self._REEMBED_BATCH]
-                vectors = self._embedding_service.embed_batch([self._chunks[c].content for c in batch])
-                fresh.add_embeddings(batch, vectors)
-            fresh.save()
-            # Matches no model: an interruption after the swap, before the real
-            # record, forces a re-embedding on the next open.
-            write_model_record(
-                self._model_record_path,
-                ModelRecord(f"{_REBUILDING}{current.model_name}", current.embedding_dim),
-            )
-            os.replace(new_mappings, old.index_path.with_suffix(".mappings.json"))
-            os.replace(new_index, old.index_path)
-        except Exception as e:
-            for leftover in (new_index, new_mappings):
-                try:
-                    leftover.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            logger.warning("kb_reembed_failed", reason=reason, error=str(e), exc_info=True)
-            self._search_by_keyword()
-            return
-        fresh.index_path = old.index_path
-        self._vector_store = fresh
-        self._write_record_on_open(current)
-        logger.info(
-            "kb_reembedded",
-            model=current.model_name,
-            chunks=len(chunk_ids),
-            seconds=round(time.monotonic() - started, 2),
-        )
+        removed = 0
+        with self._db.write():
+            ids = self._db.document_ids()
+            for folder, pattern in ((self.documents_dir, _SIDECAR_NAME), (self.files_dir, _ORIGINAL_NAME), (self.kb_dir, None)):
+                with os.scandir(folder) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            continue
+                        match = pattern.fullmatch(entry.name) if pattern is not None else None
+                        if _TEMP_NAME.fullmatch(entry.name) or (match is not None and match.group(1) not in ids):
+                            Path(entry.path).unlink(missing_ok=True)
+                            removed += 1
+        if removed:
+            logger.info("kb_leftovers_removed", path=str(self.kb_dir), files=removed)
 
-    def _search_by_keyword(self) -> None:
-        """Use the mock service and store for this session; the real index stays on disk."""
-        from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+    def _ensure_index_md(self, *, rewrite: bool = False) -> None:
+        """Render ``index.md`` when asked (after an import) or when it is missing."""
+        if rewrite or not self._index_md_path().exists():
+            with self._db.write():
+                if rewrite or self._db.document_ids():
+                    self._write_index_md(self._db)
 
-        self._embedding_service = _KeywordFallback(
-            model_name=getattr(self._embedding_service, "model_name", "mock-model"),
-            batch_size=getattr(self._embedding_service, "batch_size", 32),
-        )
-        self._vector_store = MockVectorStore(
-            index_path=self.embeddings_dir / "index.mock",
-            embedding_dim=self._embedding_service.embedding_dim,
-        )
-        self._use_mock = True
+    def _reconcile_vectors(self) -> VectorIndex | None:
+        """Make every chunk's vector one this session's model made, then load them.
 
-    def _save_vectors(self) -> None:
-        """Save the vector store and, for a real index, the record of its model.
-
-        Rewritten on every save: when two sessions with different models save
-        one knowledge base, the record names the model of the index last saved.
-
-        A session whose model is unavailable (``_KeywordFallback``) leaves the
-        real index as it was, without the chunks it writes, so it makes the
-        record name no model, as an interrupted re-embedding does: the next
-        open with a working model embeds every chunk again, rather than
-        keeping an index that lacks them. Each change does it, since another
-        process may have re-embedded in between.
+        A database that names another model, or none, has its vectors cleared
+        and this model recorded, in one transaction. Then every chunk without
+        a vector is embedded, a batch at a time outside the write lock, each
+        batch saved in its own transaction, so an interrupted run is
+        continued by the next open. If embedding fails, or another session
+        records another model meanwhile, this session searches by keyword.
         """
-        self._vector_store.save()
-        if self._has_real_index():
-            write_model_record(self._model_record_path, self._current_record())
-        elif isinstance(self._embedding_service, _KeywordFallback):
-            self._invalidate_record()
+        model, dim = self._model_name, int(self._service.embedding_dim)
+        with self._db.write():
+            info = self._db.info()
+            if (info.get("embedding_model"), info.get("embedding_dim")) != (model, str(dim)):
+                self._db.clear_vectors()
+                self._db.set_info(embedding_model=model, embedding_dim=str(dim))
+                self._db.bump_generation()
+            elif self._db.clear_vectors_of_wrong_size(dim * 4):
+                self._db.bump_generation()
+            missing = self._db.count_without_vector()
+        if missing:
+            logger.info("kb_reembedding", path=str(self.kb_dir), model=model, chunks=missing)
+        started, done, last = time.monotonic(), 0, 0
+        while True:
+            with self._db.read():
+                batch = self._db.chunks_without_vector(after=last, limit=self._EMBED_BATCH)
+            if not batch:
+                break
+            try:
+                vectors = normalized(self._service.embed_batch([text for _, _, text in batch]))
+            except Exception as e:
+                logger.warning("kb_reembed_failed", path=str(self.kb_dir), error=f"{type(e).__name__}: {e}", exc_info=True)
+                return self._keyword_only()
+            with self._db.write():
+                if self._db.info().get("embedding_model") != model:
+                    logger.warning("kb_model_changed_elsewhere", path=str(self.kb_dir), model=model)
+                    return self._keyword_only()
+                self._db.set_vectors(
+                    [(rowid, chunk_id, to_blob(vector)) for (rowid, chunk_id, _), vector in zip(batch, vectors)]
+                )
+                self._db.bump_generation()
+            done += len(batch)
+            last = batch[-1][0]
+        if done:
+            logger.info("kb_reembedded", path=str(self.kb_dir), model=model, chunks=done,
+                        seconds=round(time.monotonic() - started, 2))
+        index = VectorIndex(dim)
+        with self._db.read():
+            index.load(self._db.vectors(), self._db.generation())
+        return index
 
-    def _invalidate_record(self) -> None:
-        """Make the model record name no model (see ``_save_vectors``)."""
-        recorded = read_model_record(self._model_record_path)
-        if recorded is None or recorded.model_name.startswith((_REBUILDING, _KEYWORD_WRITES)):
-            return  # no record: the next open checks the index covers the chunks
-        try:
-            write_model_record(
-                self._model_record_path,
-                ModelRecord(f"{_KEYWORD_WRITES}{recorded.model_name}", recorded.embedding_dim),
-            )
-        except OSError as e:
-            logger.warning("kb_model_record_write_failed", error=str(e))
+    def _keyword_only(self) -> None:
+        """Search by keyword for the rest of this session (the stored vectors stay)."""
+        self._semantic = False
+        self._vectors = None
+        return None
 
-    # ------------------------------------------------------------------
-    # Persistence — v2/v3 format (content in per-document files)
-    # ------------------------------------------------------------------
-
-    def _document_content_path(self, doc_id: str) -> Path:
-        """Get the path for a document's content file."""
-        return self.documents_dir / f"{doc_id}.json"
-
-    def _save_document_content(self, doc: Document) -> None:
-        """Save document content to its individual file."""
-        chunk_contents = {c.id: c.content for c in doc.chunks}
-        data = {
-            "content": doc.content,
-            "chunks": chunk_contents,
-        }
-        atomic_write_json(self._document_content_path(doc.id), data)
-
-    def _load_document_content(self, doc_id: str) -> dict[str, Any] | None:
-        """Load document content from its individual file.
-
-        Returns:
-            Dict with 'content' and 'chunks' keys, or None if not found.
-        """
-        try:
-            data = read_if_regular(self._document_content_path(doc_id))
-            return None if data is None else json.loads(data)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(
-                "failed_to_load_document_content",
-                doc_id=doc_id,
-                error=str(e),
-            )
+    def _current_vectors(self, db: Database) -> VectorIndex | None:
+        """This session's vectors, reloaded when another session changed them."""
+        if self._vectors is None:
             return None
+        info = db.info()
+        if info.get("embedding_model") != self._model_name:
+            logger.warning("kb_model_changed_elsewhere", path=str(self.kb_dir), model=self._model_name,
+                           recorded=info.get("embedding_model"))
+            return self._keyword_only()
+        generation = db.generation()
+        if self._vectors.generation != generation:
+            self._vectors.load(db.vectors(), generation)
+        return self._vectors
 
-    def _delete_document_content(self, doc_id: str) -> None:
-        """Delete a document's content file."""
-        path = self._document_content_path(doc_id)
-        if path.exists():
-            path.unlink()
+    # -- rendered files --------------------------------------------------------
 
     def sidecar_path(self, doc_id: str) -> Path:
         """Path to a document's markdown sidecar, whether or not it exists.
@@ -751,76 +535,8 @@ class KnowledgeBaseManager:
         """
         return self.documents_dir / f"{doc_id}.md"
 
-    def read_sidecar(self, doc_id: str) -> str | None:
-        """A document's sidecar, or None when it has none.
-
-        Public so a host can read a sidecar without generating one, the
-        lazy-sidecar pattern ``kb_read`` uses. A sidecar that is a symlink, or
-        not a regular file, counts as none (with a warning): writing the
-        sidecar replaces it.
-
-        Raises:
-            UnsafeKnowledgeBase: see :meth:`_check_layout`.
-        """
-        self._check_layout()
-        data = read_if_regular(self.sidecar_path(doc_id))
-        return None if data is None else data.decode("utf-8")
-
     def _has_sidecar(self, doc_id: str) -> bool:
         return is_regular_file(self.sidecar_path(doc_id))
-
-    def _write_sidecar(
-        self, doc: Document, payload: dict[str, Any] | None = None
-    ) -> Path:
-        """Write the per-document markdown sidecar.
-
-        If ``payload`` is None, falls back to a summary-only payload built
-        from ``doc.summary``. Idempotent — overwrites existing sidecar.
-        """
-        from agentic_cli.memory.kb.sidecar import render_sidecar_markdown
-
-        if payload is None:
-            payload = {"summary": doc.summary or "", "claims": [], "entities": {}}
-        path = self.sidecar_path(doc.id)
-        atomic_write_text(path, render_sidecar_markdown(doc, payload))
-        return path
-
-    def write_sidecar_if_present(
-        self, doc: Document, payload: dict[str, Any]
-    ) -> bool:
-        """Write a sidecar payload a host built outside the lock, unless the
-        document is gone.
-
-        Public for hosts that generate the payload themselves (an LLM call
-        made without holding ``_lock``, derived from the document's text) and
-        then need to write it back safely — the pattern ``kb_read`` uses: a
-        ``delete_document`` (or ``clear``) during that call must not be
-        followed by the write. Both hold the knowledge base (``_transaction``)
-        while removing a document, and so does this check and write, so they
-        cannot interleave, in this process or another. The document is looked
-        up by its id: reading the knowledge base again makes new objects.
-
-        Returns:
-            True if the sidecar was written.
-        """
-        with self._transaction():
-            current = self._documents.get(doc.id)
-            if current is None:
-                return False
-            self._write_sidecar(current, payload)
-            return True
-
-    def _delete_sidecar(self, doc_id: str) -> None:
-        path = self.sidecar_path(doc_id)
-        if path.exists():
-            path.unlink()
-
-    def _remove_bm25_files(self) -> None:
-        """Remove every backend's keyword index file (they hold chunk text)."""
-        from agentic_cli.memory.kb.bm25_index import INDEX_FILES
-
-        for name in INDEX_FILES:
-            (self.embeddings_dir / name).unlink(missing_ok=True)
 
     def get_or_create_sidecar_lock(self, doc_id: str) -> asyncio.Lock:
         """Return the per-doc async lock used to serialize sidecar writes.
@@ -832,7 +548,7 @@ class KnowledgeBaseManager:
         The dict insert is guarded by ``_quick_lock`` so two threads racing
         to create the lock for a new doc will not produce two distinct
         ``asyncio.Lock`` instances (not by ``_lock``, which a thread holds
-        while it waits for another process's folder lock: the event loop
+        while it waits for another session's write lock: the event loop
         calls this).
         """
         existing = self._sidecar_locks.get(doc_id)
@@ -844,15 +560,20 @@ class KnowledgeBaseManager:
     def _index_md_path(self) -> Path:
         return self.kb_dir / "index.md"
 
-    def _rebuild_index_md(self) -> None:
-        """Rebuild index.md from current in-memory documents."""
-        from agentic_cli.memory.kb.sidecar import render_index_md
+    def _write_rendered(self, path: Path, text: str, event: str) -> None:
+        """Write a rendered file; failing to must not fail the change (the database has it)."""
+        try:
+            atomic_write_text(path, text)
+        except OSError as e:
+            logger.warning(event, path=str(path), error=str(e))
 
-        text = render_index_md(
-            list(self._documents.values()),
-            updated_at_iso=_utc_iso_now(),
+    def _write_index_md(self, db: Database) -> None:
+        self._write_rendered(
+            self._index_md_path(), render_index_md(db.headers(), updated_at_iso=_utc_iso_now()), "kb_index_md_not_written"
         )
-        atomic_write_text(self._index_md_path(), text)
+
+    def _delete_sidecar(self, doc_id: str) -> None:
+        self.sidecar_path(doc_id).unlink(missing_ok=True)
 
     def _ingest_log_path(self) -> Path:
         return self.kb_dir / "ingest_log.md"
@@ -889,91 +610,6 @@ class KnowledgeBaseManager:
         except OSError as e:
             logger.warning("kb_ingest_log_not_written", path=str(path), error=str(e))
 
-    def _load_metadata(self) -> None:
-        """Load document metadata from disk.
-
-        Handles v1 (content in metadata.json), v2 (content in per-document
-        files, no summary), and v3 (content in per-document files, with
-        summary) formats. Auto-migrates older formats to v3.
-        """
-        raw = read_if_regular(self.metadata_path)  # a symlink counts as none
-        if raw is None:
-            return
-
-        try:
-            data = json.loads(raw)
-            version = data.get("version", 1)
-
-            for doc_data in data.get("documents", []):
-                # A document's ID names its files (documents/{id}.json,
-                # documents/{id}.md). metadata.json can arrive with the
-                # project, so an ID that is not a plain name is skipped
-                # before anything turns it into a path.
-                if not _PLAIN_DOC_ID.fullmatch(str(doc_data.get("id", ""))):
-                    logger.warning("kb_document_id_refused", doc_id=repr(doc_data.get("id")))
-                    continue
-                if version >= 2:
-                    # v2/v3: Load header from index, content from per-doc file
-                    doc = Document.from_dict(doc_data)
-                    content_data = self._load_document_content(doc.id)
-                    if content_data:
-                        doc.content = content_data["content"]
-                        chunk_contents = content_data.get("chunks", {})
-                        for chunk in doc.chunks:
-                            if chunk.id in chunk_contents:
-                                chunk.content = chunk_contents[chunk.id]
-                else:
-                    # v1: Everything is in metadata.json
-                    doc = Document.from_dict(doc_data)
-
-                self._documents[doc.id] = doc
-                for chunk in doc.chunks:
-                    self._chunks[chunk.id] = chunk
-
-            # Migrate older formats → v3
-            if version < _FORMAT_VERSION and self._documents:
-                logger.info(
-                    "migrating_metadata_format",
-                    from_version=version,
-                    to_version=_FORMAT_VERSION,
-                    document_count=len(self._documents),
-                )
-                if version < 2:
-                    for doc in self._documents.values():
-                        self._save_document_content(doc)
-                self._save_metadata()
-
-            # Ensure index.md exists for legacy KBs (no extra cost; ~ms)
-            if self._documents and not self._index_md_path().exists():
-                self._rebuild_index_md()
-
-        except (json.JSONDecodeError, KeyError) as e:
-            # Log error but continue with empty state
-            logger.warning(
-                "failed_to_load_metadata",
-                error=str(e),
-                path=str(self.metadata_path),
-            )
-
-    def _save_metadata(self) -> None:
-        """Save document metadata index to disk (without content)."""
-        doc_headers = []
-        for doc in self._documents.values():
-            header = doc.to_dict()
-            # Strip content from index — stored in per-document files
-            header.pop("content", None)
-            for chunk_header in header.get("chunks", []):
-                chunk_header.pop("content", None)
-            doc_headers.append(header)
-
-        data = {
-            "version": _FORMAT_VERSION,
-            "documents": doc_headers,
-            "updated_at": datetime.now().isoformat(),
-        }
-        atomic_write_json(self.metadata_path, data)
-        self._stamp = file_stamp(self.metadata_path)
-
     # ------------------------------------------------------------------
     # File storage
     # ------------------------------------------------------------------
@@ -1002,7 +638,7 @@ class KnowledgeBaseManager:
         """The stored file's name, if ``file_path`` names a file directly
         inside ``files_dir``.
 
-        ``file_path`` comes from metadata.json, which a project can ship with
+        ``file_path`` comes from the database, which a project can ship with
         its knowledge base, so any other path is refused.
         """
         if not doc.file_path:
@@ -1031,7 +667,8 @@ class KnowledgeBaseManager:
             The resolved Path if the stored file is inside the knowledge base,
             None otherwise.
         """
-        doc = self._documents.get(doc_id)
+        with self._read() as db:
+            doc = db.header(doc_id)
         name = self._stored_file_name(doc) if doc else None
         if name is None:
             return None
@@ -1043,9 +680,7 @@ class KnowledgeBaseManager:
         except (OSError, RuntimeError):  # a symlink loop, or unreadable
             return None
         if not inside:
-            logger.warning(
-                "kb_stored_file_outside_kb_dir", doc_id=doc_id, resolved=str(resolved)
-            )
+            logger.warning("kb_stored_file_outside_kb_dir", doc_id=doc_id, resolved=str(resolved))
         return None
 
     def _delete_stored_file(self, doc: Document) -> None:
@@ -1090,9 +725,7 @@ class KnowledgeBaseManager:
         """
         return await enrich.sidecar_payload(self._summarizer, content, title)
 
-    # ------------------------------------------------------------------
-    # Document ingestion
-    # ------------------------------------------------------------------
+    # -- changes ---------------------------------------------------------------
 
     def ingest_document(
         self,
@@ -1109,6 +742,11 @@ class KnowledgeBaseManager:
         sidecar_payload: dict[str, Any] | None = None,
     ) -> Document:
         """Ingest a new document into the knowledge base.
+
+        Chunking and embedding happen first, outside the write lock; then one
+        transaction stores the original, the document, its chunks and keyword
+        terms (and vectors), and renders its sidecar and ``index.md``. If any
+        of that fails, nothing is stored and the original is removed.
 
         Args:
             content: Document content.
@@ -1129,207 +767,163 @@ class KnowledgeBaseManager:
 
         Returns:
             The created Document object.
+
+        Raises:
+            ValueError: ``chunk_size`` under 1 or ``chunk_overlap`` under 0
+                (nothing is stored).
+            KnowledgeBaseBusy: other sessions kept the knowledge base locked.
         """
         if summary is None:
             summary = self._truncate_summary(content)
-
-        # Create document
-        doc = Document.create(
-            title=title,
-            content=content,
-            source_type=source_type,
-            summary=summary,
-            source_url=source_url,
-            metadata=metadata,
-        )
-
-        # Store file if provided
-        if file_bytes is not None:
-            rel_path = self.store_file(doc.id, file_bytes, file_extension)
-            doc.file_path = rel_path
-
-        # Chunk and embed outside lock (CPU-bound, no shared state yet)
-        chunk_texts = self._embedding_service.chunk_document(
-            content, chunk_size, chunk_overlap
-        )
-
-        for i, chunk_text in enumerate(chunk_texts):
-            chunk = DocumentChunk.create(
-                document_id=doc.id,
-                content=chunk_text,
-                chunk_index=i,
-                metadata={"title": title},
-            )
-            doc.chunks.append(chunk)
-
-        embeddings: list[list[float]] = []
-        if doc.chunks:
-            chunk_texts = [c.content for c in doc.chunks]
-            embeddings = self._embedding_service.embed_batch(chunk_texts)
-            for chunk, embedding in zip(doc.chunks, embeddings):
-                chunk.embedding = embedding
-
-        # Mutate shared state under lock
-        with self._transaction():
-            # Add embeddings first — if this fails, no state is modified
-            if doc.chunks and embeddings:
-                chunk_ids = [c.id for c in doc.chunks]
-                self._vector_store.add_embeddings(chunk_ids, embeddings)
-
-            # Now safe to update in-memory state
-            for chunk in doc.chunks:
-                self._chunks[chunk.id] = chunk
-
-            self._documents[doc.id] = doc
-
-            # Persist (content in per-doc file, headers in metadata index)
-            self._save_document_content(doc)
-            self._write_sidecar(doc, sidecar_payload)
-            self._rebuild_index_md()
-            self._append_ingest_log("ingest", doc)
-            self._save_metadata()
-            self._save_vectors()
-
-            # Add to BM25 index
-            bm25_index = getattr(self, "_bm25_index", None)
-            if bm25_index is not None and doc.chunks:
-                bm25_ids = [c.id for c in doc.chunks]
-                bm25_texts = [c.content for c in doc.chunks]
-                bm25_index.add_documents(bm25_ids, bm25_texts)
-                bm25_index.save(self.embeddings_dir)
-
+        doc = Document.create(title=title, content=content, source_type=source_type, summary=summary,
+                              source_url=source_url, metadata=metadata)
+        texts = chunk_text(content, chunk_size, chunk_overlap)
+        doc.chunks = [DocumentChunk.create(document_id=doc.id, content=text, chunk_index=i, metadata={"title": title})
+                      for i, text in enumerate(texts)]
+        doc.chunk_count = len(doc.chunks)
+        terms = [_terms_of(text) for text in texts]
+        vectors = normalized(self._service.embed_batch(texts)) if self._semantic and texts else None
+        payload = sidecar_payload or {"summary": summary, "claims": [], "entities": {}}
+        stored: Path | None = None
+        blobs: list[bytes] | None = None
+        try:
+            with self._write() as db:
+                if file_bytes is not None:
+                    doc.file_path = self.store_file(doc.id, file_bytes, file_extension)
+                    stored = self.files_dir / doc.file_path
+                if vectors is not None:
+                    if db.info().get("embedding_model") == self._model_name:
+                        blobs = [to_blob(v) for v in vectors]
+                    else:
+                        logger.warning("kb_model_changed_elsewhere", path=str(self.kb_dir), model=self._model_name)
+                        self._keyword_only()
+                # Only a summarizer's output is stored: without one, a missing
+                # sidecar is written by the summarizer later, as before.
+                rowids = db.insert_document(doc, terms, blobs, sidecar_payload)
+                generation = db.bump_generation()
+                self._write_rendered(self.sidecar_path(doc.id), render_sidecar_markdown(doc, payload), "kb_sidecar_not_written")
+                self._write_index_md(db)
+        except BaseException:
+            if stored is not None:
+                stored.unlink(missing_ok=True)
+            raise
+        self._append_ingest_log("ingest", doc)
+        if blobs is not None:
+            with self._lock:
+                if self._vectors is not None:
+                    self._vectors.apply(generation, add=(rowids, [doc.id] * len(rowids), vectors))
         return doc
 
-    def search(
-        self,
-        query: str,
-        filters: dict[str, Any] | None = None,
-        top_k: int = 10,
-    ) -> dict[str, Any]:
-        """Search the knowledge base using hybrid retrieval.
+    def delete_document(self, doc_id: str) -> bool:
+        """Remove a document: its rows in one transaction, then its sidecar and stored file.
 
-        Uses both semantic (vector) and keyword (BM25) search, merged via
-        Reciprocal Rank Fusion. Falls back to semantic-only if BM25 is unavailable.
-
-        With MockEmbeddingService (no ``kb`` extra, or ``use_mock``) the search
-        is keyword-only: its vectors are hashes of the text, so their nearest
-        neighbours are arbitrary chunks that would pad every result list.
+        Returns:
+            True if deleted, False if not found (or its row does not parse).
         """
-        start_time = time.time()
+        with self._write() as db:
+            doc = db.header(doc_id)
+            if doc is None:
+                return False
+            rowids = db.delete_document(doc_id)
+            generation = db.bump_generation()
+            self._write_index_md(db)
+        with self._lock:
+            if self._vectors is not None:
+                self._vectors.apply(generation, remove=rowids)
+        self._sidecar_locks.pop(doc_id, None)
+        self._after_delete()
+        self._delete_sidecar(doc_id)
+        self._delete_stored_file(doc)
+        self._append_ingest_log("delete", doc)
+        return True
 
-        # Semantic search
-        semantic_results: list[tuple[str, float]] = []
-        embed_time = search_time = 0.0
-        query_embedding = None
-        if not isinstance(self._embedding_service, MockEmbeddingService):
-            embed_start = time.time()
-            query_embedding = self._embedding_service.embed_text(query)
-            embed_time = (time.time() - embed_start) * 1000
+    def clear(self) -> None:
+        """Remove every document, then every sidecar and stored file."""
+        with self._write() as db:
+            docs = db.headers()
+            db.delete_all()
+            db.bump_generation()
+            self._write_index_md(db)
+        self._sidecar_locks.clear()
+        self._after_delete()
+        for doc in docs:
+            self._delete_sidecar(doc.id)
+            self._delete_stored_file(doc)
+        with self._lock:
+            self._sweep()
+            if self._vectors is not None:
+                with self._db.read():
+                    self._vectors.load(self._db.vectors(), self._db.generation())
 
-        with self._transaction():  # reads again what another process added
-            chunk_count = len(self._chunks)
+    def _after_delete(self) -> None:
+        """Empty the write-ahead log, so a deleted document's text leaves the disk.
 
-        # One hit per document, the filters applied after ranking: one
-        # document's chunks could fill a ranked list of fixed length and hide
-        # every other document, so the list widens until top_k documents
-        # pass, or every chunk is ranked.
-        candidates = top_k * 2
-        while True:
-            if query_embedding is not None:
-                with self._lock:
-                    search_start = time.time()
-                    semantic_results = self._vector_store.search(query_embedding, candidates)
-                    search_time += (time.time() - search_start) * 1000
+        While another session reads an older snapshot the log cannot be
+        emptied: the checkpoint waits ``CHECKPOINT_WAIT_S`` at most, and one
+        it could not finish is tried again at the next delete and at close.
+        """
+        with self._lock:
+            self._checkpoint()
 
-            # BM25 search
-            bm25_results = []
-            bm25_index = getattr(self, "_bm25_index", None)
-            if bm25_index is not None:
-                bm25_results = bm25_index.search(query, top_k=candidates)
+    def _checkpoint(self) -> None:
+        """The checkpoint of :meth:`_after_delete` (holding ``_lock``); never raises."""
+        try:
+            self._checkpoint_pending = not self._db.checkpoint(CHECKPOINT_WAIT_S)
+        except sqlite3.Error as e:  # never fails the delete it follows
+            self._checkpoint_pending = True
+            logger.debug("kb_checkpoint_failed", error=str(e))
 
-            # Fuse results
-            if bm25_results:
-                fused = self._fuse_results(semantic_results, bm25_results)
-            else:
-                fused = semantic_results
+    # -- reads -----------------------------------------------------------------
 
-            results = self._search_results(fused, filters, top_k)
-            if len(results) >= top_k or candidates >= chunk_count:
-                break
-            candidates *= 4
+    def search(self, query: str, filters: dict[str, Any] | None = None, top_k: int = 10) -> dict[str, Any]:
+        """Hybrid search: every chunk ranked by meaning (with a model) and by
+        keyword (BM25), the rankings fused by reciprocal rank (k = 60), the
+        best chunk of each document kept. Filters apply before ranking.
 
-        total_time = (time.time() - start_time) * 1000
-
+        In keyword-only mode (no ``kb`` extra, ``use_mock``, a model that did
+        not load) the search is by keyword alone.
+        """
+        start = time.time()
+        embed_ms = 0.0
+        query_vector = None
+        if self._semantic:
+            began = time.time()
+            query_vector = normalized([self._service.embed_text(query)])[0]
+            embed_ms = (time.time() - began) * 1000
+        terms = tokenize(query)
+        began = time.time()
+        with self._read() as db:
+            allowed = _search.allowed_documents(db.conn, filters) if filters else None
+            keyword = _search.keyword_ranked(db.conn, terms, fts=db.fts, allowed=allowed)
+            vectors = self._current_vectors(db)
+            rankings: list[np.ndarray] = []
+            owners: list[np.ndarray] = []
+            if vectors is not None and query_vector is not None:
+                rowids, documents = vectors.ranked(query_vector, allowed)
+                rankings.append(rowids)
+                owners.append(documents)
+            rankings.append(np.fromiter((rowid for rowid, _ in keyword), dtype=np.int64, count=len(keyword)))
+            owners.append(np.array([doc_id for _, doc_id in keyword], dtype=str))
+            picked = _search.fuse(rankings, owners=owners, top_k=top_k)
+            found = db.hits([rowid for rowid, _ in picked])
+        search_ms = (time.time() - began) * 1000
+        results = [
+            SearchResult(document=found[rowid][0], chunk=found[rowid][1], score=score, highlight=_truncate(found[rowid][1].content))
+            for rowid, score in picked
+            if rowid in found
+        ]
         return {
             "results": [r.to_dict() for r in results],
             "total_matches": len(results),
-            "query_embedding_time_ms": round(embed_time, 2),
-            "search_time_ms": round(search_time, 2),
-            "total_time_ms": round(total_time, 2),
+            "query_embedding_time_ms": round(embed_ms, 2),
+            "search_time_ms": round(search_ms, 2),
+            "total_time_ms": round((time.time() - start) * 1000, 2),
         }
 
-    def _search_results(
-        self, fused: list[tuple[str, float]], filters: dict[str, Any] | None, top_k: int,
-    ) -> list[SearchResult]:
-        """The ranked chunks as results: the first of each document the filters keep."""
-        results: list[SearchResult] = []
-        seen_docs: set[str] = set()
-        with self._lock:
-            for chunk_id, score in fused:
-                if len(results) >= top_k:
-                    break
-                chunk = self._chunks.get(chunk_id)
-                if not chunk:
-                    continue
-                doc = self._documents.get(chunk.document_id)
-                if not doc:
-                    continue
-                if doc.id in seen_docs:
-                    continue
-                if filters and not self._matches_filters(doc, filters):
-                    continue
-                seen_docs.add(doc.id)
-                highlight = _truncate(chunk.content)
-                results.append(
-                    SearchResult(
-                        document=doc,
-                        chunk=chunk,
-                        score=score,
-                        highlight=highlight,
-                    )
-                )
-        return results
-
-    @staticmethod
-    def _fuse_results(
-        semantic_results: list[tuple[str, float]],
-        bm25_results: list[tuple[str, float]],
-        k: int = 60,
-    ) -> list[tuple[str, float]]:
-        """Merge ranked lists using Reciprocal Rank Fusion."""
-        from collections import defaultdict
-        scores: dict[str, float] = defaultdict(float)
-        for rank, (chunk_id, _) in enumerate(semantic_results):
-            scores[chunk_id] += 1.0 / (k + rank + 1)
-        for rank, (chunk_id, _) in enumerate(bm25_results):
-            scores[chunk_id] += 1.0 / (k + rank + 1)
-        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
-
-    def _matches_filters(self, doc: Document, filters: dict[str, Any]) -> bool:
-        """Check if document matches the given filters."""
-        return matches_document_filters(doc, filters)
-
     def get_document(self, doc_id: str) -> Document | None:
-        """Retrieve a specific document by ID.
-
-        Args:
-            doc_id: Document ID.
-
-        Returns:
-            Document if found, None otherwise.
-        """
-        with self._transaction():
-            return self._documents.get(doc_id)
+        """The whole document (text and chunks), or None."""
+        with self._read() as db:
+            return db.document(doc_id)
 
     def find_document(self, id_or_title: str) -> Document | None:
         """Find a document by exact ID, ID prefix, or title substring.
@@ -1339,97 +933,21 @@ class KnowledgeBaseManager:
         2. ID prefix match
         3. Case-insensitive title substring match
 
-        Args:
-            id_or_title: Document ID (or prefix) or title substring.
-
         Returns:
-            Document if found, None otherwise.
+            The whole document (text and chunks) if found, None otherwise.
         """
-        with self._transaction():
-            documents = dict(self._documents)
+        with self._read() as db:
+            return db.find(id_or_title)
 
-        # Exact ID
-        doc = documents.get(id_or_title)
-        if doc:
-            return doc
-
-        # ID prefix
-        for doc_id, d in documents.items():
-            if doc_id.startswith(id_or_title):
-                return d
-
-        # Title substring (case-insensitive)
-        query_lower = id_or_title.lower()
-        for d in documents.values():
-            if query_lower in d.title.lower():
-                return d
-
-        return None
-
-    def list_documents(
-        self,
-        source_type: SourceType | None = None,
-        limit: int | None = 100,
-    ) -> list[Document]:
-        """List documents with optional filtering, newest first.
+    def list_documents(self, source_type: SourceType | None = None, limit: int | None = 100) -> list[Document]:
+        """Documents without their text or chunks (``chunk_count`` set), the latest change first.
 
         Args:
             source_type: Optional source type filter.
             limit: Maximum number of documents to return; None for all.
-
-        Returns:
-            List of documents.
         """
-        with self._transaction():
-            docs = list(self._documents.values())
-
-        if source_type:
-            docs = [d for d in docs if d.source_type == source_type]
-
-        # Sort by updated_at descending
-        docs.sort(key=lambda d: d.updated_at, reverse=True)
-
-        return docs if limit is None else docs[:limit]
-
-    def delete_document(self, doc_id: str) -> bool:
-        """Remove a document from the knowledge base.
-
-        Args:
-            doc_id: Document ID.
-
-        Returns:
-            True if deleted, False if not found.
-        """
-        with self._transaction():
-            doc = self._documents.get(doc_id)
-            if not doc:
-                return False
-
-            # Remove chunks from vector store
-            chunk_ids = [c.id for c in doc.chunks]
-            self._vector_store.remove_embeddings(chunk_ids)
-
-            bm25_index = getattr(self, "_bm25_index", None)
-            if bm25_index is not None:
-                bm25_index.remove_documents(chunk_ids)
-                bm25_index.save(self.embeddings_dir)
-
-            # Remove from memory
-            for chunk_id in chunk_ids:
-                self._chunks.pop(chunk_id, None)
-            del self._documents[doc_id]
-            self._sidecar_locks.pop(doc_id, None)
-
-            # Persist
-            self._delete_document_content(doc_id)
-            self._delete_sidecar(doc_id)
-            self._delete_stored_file(doc)
-            self._rebuild_index_md()
-            self._append_ingest_log("delete", doc)
-            self._save_metadata()
-            self._save_vectors()
-
-        return True
+        with self._read() as db:
+            return db.headers(source_type=source_type, limit=limit)
 
     def get_stats(self) -> dict[str, Any]:
         """Get knowledge base statistics.
@@ -1437,46 +955,66 @@ class KnowledgeBaseManager:
         Returns:
             Dict with document count, chunk count, and other stats.
         """
-        with self._transaction():
-            documents = list(self._documents.values())
-            chunk_count = len(self._chunks)
-            vector_count = self._vector_store.size
-        source_counts: dict[str, int] = {}
-        for doc in documents:
-            source = doc.source_type.value
-            source_counts[source] = source_counts.get(source, 0) + 1
-
-        embedding_model = getattr(self._embedding_service, "model_name", "unknown")
-
+        with self._read() as db:
+            counts = db.counts()
         return {
-            "document_count": len(documents),
-            "chunk_count": chunk_count,
-            "vector_count": vector_count,
-            "source_counts": source_counts,
-            "embedding_model": embedding_model,
-            "embedding_dim": self._embedding_service.embedding_dim,
+            "document_count": counts["documents"],
+            "chunk_count": counts["chunks"],
+            "vector_count": counts["vectors"],
+            "source_counts": counts["sources"],
+            "embedding_model": self._model_name,
+            "embedding_dim": self._service.embedding_dim,
         }
 
-    def clear(self) -> None:
-        """Clear all documents from the knowledge base."""
-        with self._transaction():
-            # Delete per-document content files, sidecars and stored files
-            for doc_id, doc in list(self._documents.items()):
-                self._delete_document_content(doc_id)
-                self._delete_sidecar(doc_id)
-                self._delete_stored_file(doc)
+    # -- sidecars --------------------------------------------------------------
 
-            self._documents = {}
-            self._chunks = {}
-            self._sidecar_locks.clear()
-            self._vector_store.clear()
-            bm25_index = getattr(self, "_bm25_index", None)
-            if bm25_index is not None:
-                bm25_index.rebuild([], [])
-            self._remove_bm25_files()
-            self._save_metadata()
-            self._save_vectors()
-            self._rebuild_index_md()
+    def read_sidecar(self, doc_id: str) -> str | None:
+        """A document's sidecar, or None when it has none.
+
+        Public so a host can read a sidecar without generating one, the
+        lazy-sidecar pattern ``kb_read`` uses. A sidecar file that is
+        missing (or a symlink, or not a regular file) is rendered from the
+        summarizer's output stored with the document, when there is one,
+        without calling the model; the file written replaces a link.
+
+        Raises:
+            UnsafeKnowledgeBase: see :meth:`_check_layout`.
+        """
+        self._check_layout()
+        data = read_if_regular(self.sidecar_path(doc_id))
+        if data is not None:
+            return data.decode("utf-8")
+        with self._write() as db:
+            doc = db.header(doc_id)
+            payload = db.enrichment(doc_id) if doc is not None else None
+            if doc is None or payload is None:
+                return None
+            text = render_sidecar_markdown(doc, payload)
+            atomic_write_text(self.sidecar_path(doc_id), text)
+            return text
+
+    def write_sidecar_if_present(self, doc: Document, payload: dict[str, Any]) -> bool:
+        """Store a sidecar payload a host built outside the lock and render
+        it, unless the document is gone.
+
+        Public for hosts that generate the payload themselves (an LLM call
+        made without holding ``_lock``, derived from the document's text) and
+        then need to write it back safely — the pattern ``kb_read`` uses: a
+        ``delete_document`` (or ``clear``) during that call must not be
+        followed by the write. Both remove a document in a write transaction,
+        and this check and write are one too, so they cannot interleave, in
+        this process or another. The document is looked up by its id.
+
+        Returns:
+            True if the sidecar was written.
+        """
+        with self._write() as db:
+            current = db.header(doc.id)
+            if current is None:
+                return False
+            db.set_enrichment(doc.id, payload)
+            atomic_write_text(self.sidecar_path(doc.id), render_sidecar_markdown(current, payload))
+            return True
 
     async def backfill_sidecars(
         self,
@@ -1484,20 +1022,21 @@ class KnowledgeBaseManager:
     ) -> int:
         """Generate missing sidecars for all documents in the KB.
 
-        Iterates the in-memory document set, generates a sidecar payload
-        via the knowledge base's summarizer for any doc that doesn't have a
-        sidecar file, and writes it. Returns the count of sidecars written.
-        Existing sidecars are not touched.
+        Iterates the documents, generates a sidecar payload via the
+        knowledge base's summarizer for any doc that doesn't have a sidecar
+        file, and writes it. A document whose summarizer output is stored
+        gets its sidecar rendered from it, with no model call. Returns the
+        count of sidecars written. Existing sidecars are not touched.
 
         Per-doc locks (``_sidecar_locks``) coordinate with the lazy
-        sidecar-generation path in ``kb_read`` (Task 8): concurrent
+        sidecar-generation path in ``KnowledgeBase.sidecar``: concurrent
         backfill + read on the same doc never double-LLM.
 
         Raises ``BackfillAlreadyRunning`` if another ``backfill_sidecars``
         call is already in progress on this manager. The in-progress flag
         is set synchronously (before any ``await``), so two concurrent
         callers cannot both acquire it. Reads and writes of the knowledge
-        base run on a worker thread: each waits for the folder's lock. A
+        base run on a worker thread: a change waits for SQLite's write lock. A
         cancelled backfill keeps the flag, and the document's sidecar lock,
         until the call its thread is in ends.
 
@@ -1540,12 +1079,16 @@ class KnowledgeBaseManager:
                     # have written it (e.g. lazy kb_read fallback).
                     if not await threads.run(self._needs_sidecar, doc.id):
                         continue
+                    if await threads.run(self.read_sidecar, doc.id) is not None:
+                        written += 1  # rendered from the stored summarizer output
+                        continue
                     if progress_cb is not None:
                         progress_cb(i, total, doc)
-                    payload = await self.generate_sidecar_payload(
-                        doc.content, title=doc.title
-                    )
-                    if await threads.run(self.write_sidecar_if_present, doc, payload):
+                    full = await threads.run(self.get_document, doc.id)  # the listing has no text
+                    if full is None:
+                        continue
+                    payload = await self.generate_sidecar_payload(full.content, title=full.title)
+                    if await threads.run(self.write_sidecar_if_present, full, payload):
                         written += 1
                 finally:
                     threads.release_after(lock.release)
@@ -1558,17 +1101,19 @@ class KnowledgeBaseManager:
             self._backfill_running = False
 
     def _documents_without_sidecar(self) -> list[Document]:
-        """The documents that have no sidecar, as the knowledge base is now."""
-        with self._transaction():
-            return [doc for doc in self._documents.values() if not self._has_sidecar(doc.id)]
+        """The documents that have no sidecar, as the knowledge base is now, in the order they were added."""
+        with self._read() as db:
+            headers = sorted(db.headers(), key=lambda doc: (doc.created_at, doc.id))
+        return [doc for doc in headers if not self._has_sidecar(doc.id)]
 
     def _needs_sidecar(self, doc_id: str) -> bool:
         """Whether the document is still there, still without a sidecar.
 
         A delete after this check is caught by ``write_sidecar_if_present``.
         """
-        with self._transaction():
-            return doc_id in self._documents and not self._has_sidecar(doc_id)
+        with self._read() as db:
+            present = db.header(doc_id) is not None
+        return present and not self._has_sidecar(doc_id)
 
 
 class BackfillAlreadyRunning(RuntimeError):

@@ -5,8 +5,8 @@ project's and the user's). Each kept the documents it read when it opened and
 rewrote ``metadata.json``, the vector index and the keyword index from them
 on every change, so whichever session wrote last dropped what the others had
 added since: with A and B open, a document ingested through A, then one
-through B, left only B's. Each read or change now holds the folder's lock and
-reads again first what another process wrote.
+through B, left only B's. Each session now changes the folder's one
+database a transaction at a time, and reads what the others wrote.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import pytest
 from agentic_cli.memory import EmbeddingService
 from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 from tests.memory.fake_embeddings import FakeEmbeddingService
-from tests.memory.kb_extra import require_kb_module
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +96,6 @@ def test_no_sidecar_is_written_for_a_document_another_deleted(tmp_path):
 
 
 def test_the_vector_index_keeps_both_knowledge_bases_vectors(tmp_path):
-    require_kb_module("faiss")
     a = _kb(tmp_path, embedding_service=FakeEmbeddingService(embedding_dim=8))
     b = _kb(tmp_path, embedding_service=FakeEmbeddingService(embedding_dim=8))
 

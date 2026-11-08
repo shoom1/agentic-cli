@@ -16,8 +16,9 @@ functions find the knowledge base in the service registry
 (``tools._knowledge_base.current_knowledge_base``), and the closures in
 ``tools.factories.make_kb_tools`` capture it. An async tool runs each
 synchronous knowledge-base call, and its file reads, on a worker thread: a
-call waits for the knowledge base's folder lock, which another process can
-hold for as long as it re-embeds, and the event loop must not wait with it.
+call may wait for the knowledge base (a change for another session's, up to
+the busy timeout, and any call for this process's other calls), and the
+event loop must not wait with it.
 """
 
 import asyncio
@@ -68,7 +69,7 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         "summary": d.summary,
         "source_type": d.source_type.value,
         "created_at": d.created_at.isoformat(),
-        "chunks": len(d.chunks),
+        "chunks": d.chunk_count,
         "scope": scope,
     }
     if d.metadata.get("authors"):

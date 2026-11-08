@@ -339,7 +339,6 @@ class TestKnowledgeBaseScenario:
 
     @pytest.fixture(autouse=True)
     def _require_embeddings(self):
-        require_kb_module("faiss")
         require_kb_module("sentence_transformers")
 
     async def test_bounded_ingest_then_bounded_readback(self, research_settings):

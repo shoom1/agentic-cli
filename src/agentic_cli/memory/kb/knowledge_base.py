@@ -26,10 +26,10 @@ from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingServic
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb import convert as _convert
 from agentic_cli.memory.kb import enrich
+from agentic_cli.memory.kb._search import fuse
 from agentic_cli.memory.kb.manager import (
     KnowledgeBaseManager,
     UnsafeKnowledgeBase,
-    _faiss_available,
     _Threads,
     _loaded_or_keyword,
     _printable,
@@ -37,9 +37,6 @@ from agentic_cli.memory.kb.manager import (
 from agentic_cli.memory.kb.models import Document, SourceType
 
 logger = get_logger("agentic_cli.memory.kb")
-
-# Reciprocal rank fusion constant: the standard 60.
-RRF_K = 60
 
 ProgressCallback = Callable[[str, int, int, Document], None]
 
@@ -143,26 +140,17 @@ def _matches(doc: Document, query: str) -> bool:
 
 
 def _fuse(ranked: list[list[dict[str, Any]]], top_k: int) -> list[dict[str, Any]]:
-    """Merge ranked hit lists by reciprocal rank fusion.
-
-    Scores from separate indexes are on different scales, so the merge uses
-    rank positions: each list adds ``1 / (RRF_K + rank + 1)`` to a document's
-    score. A document in several lists keeps the first list's hit, and every
-    rank it has adds to its score.
-    """
+    """Merge the scopes' hit lists by reciprocal rank fusion (``_search.fuse``),
+    one hit per document: the first list's, with every rank it has added in."""
     hits: dict[str, dict[str, Any]] = {}
-    scores: dict[str, float] = {}
     for results in ranked:
-        for rank, hit in enumerate(results):
-            doc_id = hit.get("document_id", "")
-            if not doc_id:
-                continue
-            hits.setdefault(doc_id, hit)
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+        for hit in results:
+            if hit.get("document_id"):
+                hits.setdefault(hit["document_id"], hit)
     merged = []
-    for doc_id in sorted(scores, key=lambda d: scores[d], reverse=True)[:top_k]:
+    for doc_id, score in fuse([[h["document_id"] for h in results if h.get("document_id")] for results in ranked], top_k=top_k):
         hit = hits[doc_id]
-        hit["score"] = round(scores[doc_id], 4)
+        hit["score"] = round(score, 4)
         merged.append(hit)
     return merged
 
@@ -221,23 +209,26 @@ class KnowledgeBase:
             embedding: The model to build a service for; default
                 ``EmbeddingConfig()``.
             summarizer: Passed to every scope (see ``KnowledgeBaseManager``).
-            use_mock: Mock embeddings and vector store in every scope.
+            use_mock: Keyword search only, nothing embedded, in every scope.
             within: Scope name → a folder that scope's directory must lie in,
                 every folder between them a real one (see
                 ``KnowledgeBaseManager``): for a project's scope, the working
                 directory. A scope not named here may be a symlink itself.
 
         With the ``kb`` extra and no ``use_mock``, this builds one embedding
-        service; the model loads once, before the first real index is opened,
-        to size or reconcile it. A model that does not load (an offline first
-        run, say) leaves every scope searching by keyword, with one warning
-        (``kb_keyword_search_only``).
+        service; the model loads once, before the first scope opens, so each
+        scope can check which model its stored vectors belong to. A model
+        that does not load (an offline first run, say) leaves every scope
+        searching by keyword, with one warning (``kb_keyword_search_only``).
 
-        A directory whose own folders or lock file are symlinks (a project
-        can ship its knowledge base), or that is reached through one from its
+        A directory whose own folders, database or lock file are symlinks, or
+        whose database holds more than a knowledge base (a project can ship
+        its knowledge base), or that is reached through a link from its
         ``within`` folder, is left out, with a warning (``kb_scope_refused``);
         so is one that fails to open for any other reason (a folder it cannot
-        create, a document header it cannot read: ``kb_scope_unavailable``).
+        create, a database that is not one or that a newer version wrote, a
+        0.6 ``metadata.json`` that is not JSON yet, another session holding
+        it past the busy timeout: ``kb_scope_unavailable``).
         The knowledge base opens with the other scopes, the first of them
         taking writes, and never reads or writes a scope left out.
 
@@ -255,7 +246,7 @@ class KnowledgeBase:
             service = EmbeddingService(
                 model_name=config.model_name, batch_size=config.batch_size, device=config.device
             )
-        if service is not None and not use_mock and _faiss_available():
+        if service is not None and not use_mock:
             # Loaded here, once: each scope would otherwise try it, and warn.
             service = _loaded_or_keyword(service)
         opened: list[KnowledgeBaseManager] = []
@@ -543,9 +534,9 @@ class KnowledgeBase:
     ) -> ScopedDocument:
         """Enrich (one summarizer call) and store through the scope's manager.
 
-        Storing runs on a worker thread: it embeds every chunk and waits
-        for the folder's lock, which another process can hold for as long
-        as it re-embeds.
+        Storing runs on a worker thread: it embeds every chunk, and its change
+        may wait for another session's (up to ``BUSY_TIMEOUT_S``) and for
+        this process's other calls on the scope.
         """
         if not text and not data:
             raise EmptyDocument("no text and no bytes to ingest")
@@ -593,7 +584,7 @@ class KnowledgeBase:
 
         The summarizer is called under the document's sidecar lock, so two
         first reads make one call. Reads and writes run on a worker thread
-        (they wait for the folder's lock; a PDF's text is extracted); a
+        (they may wait for the scope's other calls; a PDF's text is extracted); a
         cancelled call keeps the lock until the one its thread is in ends.
 
         A sidecar that is a symlink counts as missing: it is never read
@@ -689,3 +680,8 @@ class KnowledgeBase:
     def stats(self) -> dict[str, dict[str, Any]]:
         """Each scope's ``get_stats()``, by scope name."""
         return {name: manager.get_stats() for name, manager in self._managers.items()}
+
+    def close(self) -> None:
+        """Close every scope's database. Idempotent."""
+        for manager in self._managers.values():
+            manager.close()

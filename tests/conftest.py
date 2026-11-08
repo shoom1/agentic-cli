@@ -5,14 +5,14 @@ Provides:
 - Temporary workspace fixtures
 - Settings fixtures with various configurations
 
-Mock services (MockEmbeddingService, MockVectorStore) are in tests/mocks.py.
+The mock embedding service (MockEmbeddingService) is exported by agentic_cli.memory.
 """
 
 import os
 
-# torch (the `kb` extra) ships libiomp5 while faiss-cpu ships libomp; loading
-# both OpenMP runtimes in one process aborts the interpreter (SIGABRT) when the
-# real-FAISS and torch-backed tests run together in the full suite. Allow the
+# torch (the `kb` extra) ships libiomp5 while faiss-cpu (in the extra before
+# 0.7.0, and still in older environments) ships libomp; loading both OpenMP
+# runtimes in one process aborts the interpreter (SIGABRT). Allow the
 # duplicate load — safe for CPU faiss + torch. Must be set before either is
 # imported, so it lives at the very top of conftest.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")

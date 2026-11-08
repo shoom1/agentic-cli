@@ -2,15 +2,16 @@
 
 ``kb_read`` looked the document up, and read a PDF's text, on the loop;
 ``kb_write_concept`` checked its sources there; ``kb_ingest_file`` read the
-file there. Each lookup holds the knowledge base's folder lock, so while
-another process held it (re-embedding on open, say) the whole loop waited:
-the spinner, Ctrl+C and every other task. They now run on a worker thread.
+file there. Each call takes the knowledge base's lock, which a thread
+starting a change holds while it waits for another process's change, so
+while that lasted the whole loop waited: the spinner, Ctrl+C and every
+other task. They now run on a worker thread.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -22,7 +23,6 @@ from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceTyp
 from agentic_cli.memory.kb import concepts as concepts_module
 from agentic_cli.tools.factories import make_kb_tools
 
-fcntl = pytest.importorskip("fcntl")
 
 TICK = 0.01
 MAX_STALL = 0.05
@@ -52,27 +52,37 @@ async def _longest_stall(work) -> tuple[float, Any]:
     return max(stalls), result
 
 
-def _hold_folder_lock(kb_dir: Path, seconds: float) -> None:
-    """Hold the folder lock from another thread for ``seconds``, as another process would."""
+def _hold_the_knowledge_base(manager: KnowledgeBaseManager, seconds: float) -> None:
+    """Keep ``manager`` busy for ``seconds``: another connection holds its
+    database's write lock, as another process would, and a thread starting a
+    change holds the manager's lock while it waits for it."""
     held = threading.Event()
 
     def hold() -> None:
-        fd = os.open(kb_dir / ".lock", os.O_RDWR)
+        conn = sqlite3.connect(manager.db_path, isolation_level=None)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            conn.execute("BEGIN IMMEDIATE")
             held.set()
             time.sleep(seconds)
+            conn.execute("ROLLBACK")
         finally:
-            os.close(fd)
+            conn.close()
 
     threading.Thread(target=hold, daemon=True).start()
-    held.wait(5)
+    assert held.wait(5)
+    threading.Thread(target=manager.delete_document, args=("no-such-document",), daemon=True).start()
+    time.sleep(0.05)  # that thread now holds the manager's lock, waiting
 
 
 @pytest.fixture
-def tools(tmp_path) -> dict[str, Any]:
+def manager(tmp_path) -> KnowledgeBaseManager:
     manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
     manager.ingest_document(content="Herons wade at dawn.", title="Herons", source_type=SourceType.USER)
+    return manager
+
+
+@pytest.fixture
+def tools(manager) -> dict[str, Any]:
     return {t.__name__: t for t in make_kb_tools(KnowledgeBase({"project": manager}))}
 
 
@@ -92,14 +102,16 @@ def _doc_id(tools) -> str:
         pytest.param(lambda tools, path: tools["kb_ingest_file"](str(path)), id="kb_ingest_file"),
     ],
 )
-async def test_a_tool_waits_for_another_process_off_the_loop(tools, tmp_path, call):
+async def test_a_tool_waits_for_another_process_off_the_loop(tools, manager, tmp_path, call):
     notes = tmp_path / "notes.md"
     notes.write_text("Otters nest in burrows.\n")
     work = call(tools, notes)  # the coroutine; nothing has run yet
-    _hold_folder_lock(tmp_path / "kb", HOLD)
+    _hold_the_knowledge_base(manager, HOLD)
+    started = time.perf_counter()
 
     stall, result = await _longest_stall(work)
 
+    assert time.perf_counter() - started > HOLD / 2  # it did wait for the knowledge base
     assert result["success"] is True, result
     assert stall < MAX_STALL
 

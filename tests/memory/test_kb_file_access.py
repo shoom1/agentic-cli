@@ -8,7 +8,12 @@ writes replace a link rather than write through it. This scan fails when code
 in ``memory/kb/`` opens a path some other way: ``Path.read_text`` and its
 kin, the ``open`` builtin, ``os.open``, ``json.load`` on an open file, or a
 library that opens the path itself (``faiss.read_index`` given a path rather
-than a reader over a file ``_core.io`` opened).
+than a reader over a file ``_core.io`` opened, ``sqlite3.connect``).
+
+SQLite opens the database itself: ``sqlite3.connect`` is allowed in
+``_db.py`` only, which refuses a link or a non-regular file before it and
+checks after it that SQLite opened that very file. Everything else opens
+the database through ``Database.open``.
 """
 
 from __future__ import annotations
@@ -21,7 +26,9 @@ KB = Path(__file__).resolve().parents[2] / "src" / "agentic_cli" / "memory" / "k
 # Methods that open the path they are called on (``Path`` and its kin).
 PATH_METHODS = {"open", "read_text", "read_bytes", "write_text", "write_bytes"}
 # module.function calls that open a path they are given.
-OPENING_CALLS = {("os", "open"), ("io", "open"), ("json", "load"), ("faiss", "read_index")}
+OPENING_CALLS = {("os", "open"), ("io", "open"), ("json", "load"), ("faiss", "read_index"), ("sqlite3", "connect")}
+# The one module that opens the database (see the module docstring).
+DATABASE_MODULE = "_db.py"
 
 
 def _reads_a_stream(call: ast.Call) -> bool:
@@ -48,6 +55,10 @@ def _openings(path: Path) -> list[str]:
             owner = func.value.id if isinstance(func.value, ast.Name) else None
             if (owner, func.attr) == ("faiss", "read_index") and _reads_a_stream(node):
                 continue
+            if (owner, func.attr) == ("sqlite3", "connect") and path.name == DATABASE_MODULE:
+                continue
+            if (owner, func.attr) == ("Database", "open"):
+                continue
             if (owner, func.attr) in OPENING_CALLS:
                 found.append(f"{where} {owner}.{func.attr}()")
             elif func.attr in PATH_METHODS and owner not in ("self", "cls"):
@@ -73,8 +84,11 @@ def test_the_scan_sees_each_way_of_opening(tmp_path):
         "faiss.read_index(str(p))\n"
         "self.read_text(doc)\n"
         "faiss.read_index(faiss.PyCallbackIOReader(f.read))\n"
+        "sqlite3.connect(p)\n"
+        "Database.open(p)\n"
     )
 
     assert [hit.split(" ", 1)[1] for hit in _openings(sample)] == [
         ".read_text()", ".write_bytes()", "open()", "os.open()", "json.load()", "faiss.read_index()",
+        "sqlite3.connect()",
     ]

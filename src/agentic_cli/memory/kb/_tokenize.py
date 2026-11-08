@@ -1,11 +1,12 @@
-"""How the keyword indexes split text into terms.
+"""How the knowledge base splits text into keyword terms.
 
-Every keyword index (MockBM25Index and the bm25s / rank_bm25 backends) uses
-:func:`tokenize`, so a query and the indexed text are split the same way.
-Indexes save their tokenized text, so each saved index records ``TOKENIZER``;
-one saved with a different tokenizer loads empty, and the knowledge base then
-re-indexes its chunks. A run of Chinese, Japanese or Korean characters, which
-spaces do not divide into words, is indexed as overlapping two-character terms.
+Each chunk's terms are stored with it (``chunks.terms`` in ``kb.sqlite``),
+and the keyword index (FTS5) indexes them, so a query split by
+:func:`tokenize` and the indexed text are split the same way. The database
+records ``TOKENIZER``; one recorded with a different tokenizer has every
+chunk's terms recomputed when it opens. A run of Chinese, Japanese or Korean
+characters, which spaces do not divide into words, is indexed as overlapping
+two-character terms.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import unicodedata
 from collections.abc import Iterator
 from functools import cache
 
-# Bump when tokenize() changes, so indexes saved by the old version are rebuilt.
+# Bump when tokenize() changes, so terms stored by the old version are recomputed.
 TOKENIZER = "words-v3"
 
 

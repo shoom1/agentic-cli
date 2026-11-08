@@ -1,4 +1,4 @@
-"""Import a library from the ``kb`` extra (faiss, bm25s, trafilatura, ...).
+"""Import a library from the ``kb`` extra (sentence_transformers, trafilatura).
 
 Without the extra, the test skips, as ``pytest.importorskip`` would. CI's kb
 job sets ``KB_REQUIRE_EXTRA=1``: there a missing or broken install fails the

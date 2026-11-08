@@ -969,6 +969,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The knowledge base keeps each folder in one SQLite file, `kb.sqlite`.**
+  It holds the documents, their chunks, each chunk's keyword terms and
+  vector, and a keyword index, and every change is one transaction. Search
+  ranks by meaning with numpy over the stored vectors and by keyword with
+  SQLite's FTS5 (BM25), so the `kb` extra no longer installs faiss-cpu, bm25s
+  or rank-bm25 (torch, sentence-transformers and trafilatura stay), and a
+  test's or an app's own embedding service searches by meaning without it. A
+  0.6 folder is imported when it first opens: its documents are chunked
+  again, and their vectors are embedded at the first open that has the model
+  (the log gives the count and the time); its old files move to
+  `pre-0.7.0/`, which can be deleted once the knowledge base looks right,
+  and `embeddings/` is deleted (a `metadata.json` that is not JSON, such as
+  a git-LFS pointer not pulled yet, leaves that scope out until it is). 0.6
+  cannot read the new format: going back means restoring `pre-0.7.0/` by
+  hand, and what a 0.6 session still running writes afterwards is moved
+  into `pre-0.7.0/after-import-<time>/`, not into the knowledge base. `list_documents` returns documents
+  without their text or chunks, with `Document.chunk_count`; `use_mock`
+  means keyword-only, nothing embedded; a change that waits more than 60 s
+  for another session raises `KnowledgeBaseBusy`. WAL mode needs shared
+  memory, so a knowledge base on a network filesystem is unsupported.
 - **`webfetch_max_content_bytes` limits a page's converted text, not its raw
   bytes.** It is how much of a page's text the summarizer sees, in bytes of
   UTF-8 (default 100 KB), counted after the whole page is converted, for every
@@ -1617,6 +1637,11 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **The knowledge base's FAISS and BM25 classes.** `VectorStore`,
+  `MockVectorStore`, `create_bm25_index` and `matches_document_filters` are
+  no longer exported, `KnowledgeBaseManager` takes no `vector_store` and has
+  no `embeddings_dir` or `metadata_path`, and `DocumentChunk.embedding` is
+  gone: the vectors live in `kb.sqlite` (see Changed).
 - **The token-drop warning.** A prompt smaller than the last was taken for
   a trimmed context: "Context window trimmed: 10k → 5k tokens
   (token_drop_heuristic)", and the status bar's `ctx:` segment was marked
@@ -1827,6 +1852,44 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Knowledge base: one header that cannot be read no longer loses the
+  documents after it.** `metadata.json` was read in one step, so a header
+  that did not parse (a missing field, a source type another version wrote)
+  stopped loading there, and the next save rewrote the file from what had
+  loaded: every later document was gone. The import into `kb.sqlite` reads
+  each header on its own and skips one that does not parse, with a warning
+  naming its position, and leaves it in `pre-0.7.0/metadata.json` with its
+  stored file and sidecar. In the database a row that does not parse is
+  skipped with a warning (`kb_row_unreadable`), and no write touches it.
+- **Knowledge base: a crash no longer leaves vectors that belong to other
+  chunks.** The headers, the FAISS index and its mappings were written one
+  after another: a crash between them left chunks that were never embedded
+  again, or shifted every later vector onto the wrong chunk, so a search by
+  meaning returned the wrong document. A change is now one transaction, and
+  a model change re-embeds in batches, each saved on its own and continued
+  at the next open.
+- **Knowledge base: keyword-only mode no longer writes vectors.** Without
+  the `kb` extra, with `use_mock` or with a model that did not load, every
+  chunk still got a hash "vector", written to `embeddings/index.mock` (about
+  10 kB a chunk) and rewritten in full on every change. Such a session now
+  embeds nothing and stores its chunks without a vector; the next session
+  with the model embeds exactly those.
+- **Knowledge base: a failed ingest no longer leaves its file behind.** The
+  original (a PDF) was stored before the document was chunked and embedded,
+  and stayed in `files/` when either failed. It is now stored in the same
+  transaction as the document and removed if that transaction fails, and a
+  chunk size under 1 fails before anything is written.
+- **Knowledge base: `date_to` keeps the day it names, and a date with a time
+  zone filters.** A date-only `date_to` meant midnight at its start, so it
+  left out the day it named, and a date with an offset failed the search
+  (comparing an aware time with the stored naive ones). The filter keeps that
+  whole day now, and a time with an offset is compared as local time.
+- **Knowledge base: a search ranks once.** The filters were applied after
+  ranking a candidate list, which widened and ran again (up to five times)
+  until enough documents passed; a document with many matching chunks could
+  push others out. The filters now pick the documents first, both rankings
+  are complete, and each document's best chunk is kept, so a filtered
+  search's scores are its hits' ranks among the documents the filters keep.
 - **Knowledge base: text in Russian, Greek, Chinese and other scripts is
   chunked properly and found by keyword.** A sentence ended only at `.`, `!`
   or `?` before a capital A-Z, and nothing cut a sentence that ran long, so a
@@ -1846,8 +1909,8 @@ step; each entry says what to use instead.
   included) is now indexed, and a query split, as overlapping two-character
   terms. A one-character query finds only a one-character run, and Thai, Lao,
   Khmer and Burmese, also written without spaces, are not split into words.
-  Keyword indexes rebuild on the next open; documents ingested before keep
-  their chunks.
+  Keyword terms are recomputed on the next open, and documents ingested
+  before are chunked again by the import into `kb.sqlite`.
 - **The memory store no longer loses every memory when one cannot be read.**
   `memories.json` was parsed in one step, so a memory missing a field (a hand
   edit, a file another version wrote) emptied the store, and the next save

@@ -1,14 +1,15 @@
-"""A document ID from ``metadata.json`` is a plain name, never a path.
+"""A document ID from the database is a plain name, never a path.
 
-Each document's ID names its files: ``documents/{id}.json`` (its text, read when
-the knowledge base opens) and ``documents/{id}.md`` (its summary, which
-``kb_read`` returns, or builds and writes when it is missing). The project
-knowledge base lives in the project, so a cloned repository can ship
-``metadata.json``, and an ID such as ``../../elsewhere/notes`` made ``kb_read``
-return the text of a Markdown or JSON file elsewhere on disk and create new
-files outside the knowledge base; deleting that document would have removed
-them. A document whose ID is not 1-64 letters, digits, ``-`` or ``_`` (every ID
-the framework has ever assigned is a UUID) is now skipped when loading.
+Each document's ID names its files: ``documents/{id}.md`` (its summary, which
+``kb_read`` returns, or builds and writes when it is missing) and, in 0.6,
+``documents/{id}.json`` (its text). The project knowledge base lives in the
+project, so a cloned repository can ship its database (``metadata.json`` in
+0.6), and an ID such as ``../../elsewhere/notes`` made ``kb_read`` return the
+text of a Markdown or JSON file elsewhere on disk and create new files outside
+the knowledge base; deleting that document would have removed them. A row
+whose ID is not 1-64 letters, digits, ``-`` or ``_`` (every ID the framework
+has ever assigned is a UUID) is skipped when read. (The 0.6 import skips such
+a header: test_kb_import_06.py.)
 
 A name can lead elsewhere without a ``..`` too: git keeps symlinks, so the
 repository can ship ``documents/{id}.md`` linked to a file elsewhere (which
@@ -16,7 +17,8 @@ repository can ship ``documents/{id}.md`` linked to a file elsewhere (which
 delete appended a line holding the title there), or a whole ``documents/``
 folder linked elsewhere. The knowledge base now reads and appends its files
 only when they are regular files, never through a symlink, and does not open a
-scope whose own folders (or lock file) are symlinks.
+scope whose own folders, database (or a companion of it) or lock file are
+symlinks.
 """
 
 from __future__ import annotations
@@ -30,13 +32,12 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb import KnowledgeBase
-from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType
 from agentic_cli.tools.knowledge_tools import kb_list, kb_read
 from agentic_cli.workflow.service_registry import set_service_registry
+from tests.memory.kb_storage import raw_write
 
 OUTSIDE = "outside notes"  # only in files outside the knowledge base
 CRAFTED = "../../../../elsewhere/notes"  # from documents/ up to tmp_path
@@ -55,30 +56,23 @@ def elsewhere(tmp_path) -> Path:
 
 
 def _open_kb(kb_dir: Path) -> KnowledgeBaseManager:
-    return KnowledgeBaseManager(
-        base_dir=kb_dir,
-        embedding_service=MockEmbeddingService(),
-        vector_store=MockVectorStore(index_path=kb_dir / "embeddings" / "index.mock"),
-    )
+    return KnowledgeBaseManager(kb_dir, use_mock=True)
 
 
-def _ship_document_with_id(kb_dir: Path, doc_id: str, *, version: int | None = None) -> None:
-    """Write a knowledge base whose metadata.json gives a document ``doc_id``,
+def _ship_document_with_id(kb_dir: Path, doc_id: str) -> None:
+    """Write a knowledge base whose database gives a document ``doc_id``,
     as a repository could ship it, next to an ordinary document."""
     kb = _open_kb(kb_dir)
     crafted = kb.ingest_document(content="a plan", title="Plan", source_type=SourceType.USER)
     kb.ingest_document(content="a sensible plan", title="Balloons", source_type=SourceType.USER)
+    kb.close()
     for leftover in (kb_dir / "documents").glob(f"{crafted.id}.*"):
         leftover.unlink()
-    metadata = json.loads((kb_dir / "metadata.json").read_text())
-    for entry in metadata["documents"]:
-        if entry["id"] == crafted.id:
-            entry["id"] = doc_id
-            if version == 1:
-                entry["content"] = "a plan"
-    if version is not None:
-        metadata["version"] = version
-    (kb_dir / "metadata.json").write_text(json.dumps(metadata))
+    raw_write(
+        kb_dir,
+        ("UPDATE documents SET id = ? WHERE id = ?", [doc_id, crafted.id]),
+        ("UPDATE chunks SET document_id = ? WHERE document_id = ?", [doc_id, crafted.id]),
+    )
 
 
 async def _read(kb: KnowledgeBaseManager, title: str, **kwargs) -> str:
@@ -111,14 +105,6 @@ async def test_an_outside_json_file_is_not_loaded_as_the_text(kb_dir, elsewhere)
     assert OUTSIDE not in await _read(_open_kb(kb_dir), "Plan", full=True)
 
 
-def test_migrating_an_old_format_does_not_write_outside(kb_dir, elsewhere):
-    _ship_document_with_id(kb_dir, CRAFTED, version=1)
-
-    _open_kb(kb_dir)
-
-    assert list(elsewhere.iterdir()) == []
-
-
 def test_deleting_does_not_remove_outside_files(kb_dir, elsewhere):
     (elsewhere / "notes.md").write_text(OUTSIDE)
     (elsewhere / "notes.json").write_text("{}")
@@ -142,12 +128,14 @@ def test_the_other_documents_still_load(kb_dir, doc_id):
 
 # -- symlinks: a name in the knowledge base never reaches a file elsewhere ----
 
-FOLDERS = ["documents", "embeddings", "files", "concepts"]
+FOLDERS = ["documents", "files", "concepts", "pre-0.7.0"]
 
 
 def _ship(kb_dir: Path) -> str:
     """A knowledge base holding one document, "Plan", as a repository could ship it; its ID."""
-    doc = _open_kb(kb_dir).ingest_document(content="a plan", title="Plan", source_type=SourceType.USER)
+    kb = _open_kb(kb_dir)
+    doc = kb.ingest_document(content="a plan", title="Plan", source_type=SourceType.USER)
+    kb.close()  # as shipped: no session holds it
     return doc.id
 
 
@@ -190,18 +178,22 @@ async def test_a_text_file_that_links_elsewhere_is_not_loaded(kb_dir, elsewhere)
     assert OUTSIDE not in await _read(_open_kb(kb_dir), "Plan", full=True)
 
 
-def test_a_metadata_file_that_links_elsewhere_is_not_read(kb_dir, elsewhere):
+@pytest.mark.parametrize("name", ["kb.sqlite", "kb.sqlite-wal"])
+def test_a_database_file_that_links_elsewhere_is_not_opened(kb_dir, elsewhere, tmp_path, name):
     _ship(kb_dir)
-    shipped = elsewhere / "metadata.json"
-    shutil.move(kb_dir / "metadata.json", shipped)
+    shipped = elsewhere / name
+    if (kb_dir / name).exists():
+        shutil.move(kb_dir / name, shipped)
+    else:
+        shipped.write_bytes(b"")
     before = shipped.read_bytes()
-    (kb_dir / "metadata.json").symlink_to(shipped)
+    (kb_dir / name).symlink_to(shipped)
 
-    kb = _open_kb(kb_dir)
-    listed = [d.title for d in kb.list_documents()]
-    kb.ingest_document(content="a sensible plan", title="Balloons", source_type=SourceType.USER)
+    with pytest.raises(OSError, match="symbolic link"):
+        _open_kb(kb_dir)
+    kb = _open_scopes(kb_dir, tmp_path)
 
-    assert listed == []
+    assert kb.scopes == ("user",)
     assert shipped.read_bytes() == before
 
 
@@ -328,21 +320,6 @@ def test_a_concept_page_that_links_elsewhere_is_not_read(kb_dir, elsewhere):
 
     assert OUTSIDE not in json.dumps(found)
     assert [c["slug"] for c in listed] == ["idea"]
-
-
-def test_a_keyword_index_that_links_elsewhere_is_not_loaded(kb_dir, elsewhere):
-    KnowledgeBaseManager(kb_dir, use_mock=True).ingest_document(
-        content="a plan", title="Plan", source_type=SourceType.USER
-    )
-    index = kb_dir / "embeddings" / "bm25_index.json"
-    shipped = json.loads(index.read_text())
-    shipped["documents"] = [["zeppelin"] for _ in shipped["documents"]]
-    (elsewhere / "index.json").write_text(json.dumps(shipped))
-    _link(index, elsewhere / "index.json")
-
-    reopened = KnowledgeBaseManager(kb_dir, use_mock=True)
-
-    assert reopened.search("zeppelin")["results"] == []
 
 
 @pytest.mark.parametrize("base", ["elsewhere/knowledge_base", "project/.app/../../elsewhere/knowledge_base"])

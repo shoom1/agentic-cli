@@ -1,12 +1,11 @@
 """Regression: a reopened mock knowledge base must not resurrect vector noise.
 
-MockVectorStore only ever pairs with MockEmbeddingService in production,
-whose "embeddings" are the MD5 hash of the chunk text — meaningless noise,
-not real semantic vectors. Search still works on a reopened mock knowledge
-base because BM25 (keyword) matching is precise; before this test existed,
-MockVectorStore auto-loaded its saved index on construction, so the noise
-vectors came back too and got fused into results via Reciprocal Rank
-Fusion, pulling in documents the query never mentioned.
+MockEmbeddingService's "embeddings" are the MD5 hash of the chunk text —
+meaningless noise, not real semantic vectors. The mock vector store once
+auto-loaded its saved index on construction, so the noise vectors came back
+too and got fused into results via Reciprocal Rank Fusion, pulling in
+documents the query never mentioned. A keyword-only knowledge base now
+stores no vectors at all, and searches by keyword (BM25) alone.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ def test_reopening_a_mock_kb_search_returns_only_the_matching_document(tmp_path)
         session.ingest_document(content=content, title=title, source_type=SourceType.USER)
 
     # A new manager over the same directory: the only path most installs
-    # without the `kb` extra (no sentence-transformers / faiss) ever take.
+    # without the `kb` extra (no sentence-transformers) ever take.
     reopened = KnowledgeBaseManager(kb_dir, use_mock=True)
 
     hits = reopened.search("volcanoes", top_k=10)["results"]
