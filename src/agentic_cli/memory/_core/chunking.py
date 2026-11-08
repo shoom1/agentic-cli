@@ -11,9 +11,11 @@ at the limit; a code block is cut between lines. So no chunk is longer than
 
 A sentence ends at ``.``, ``!``, ``?`` or ``…`` followed by whitespace,
 whatever comes next (a Cyrillic or Greek capital, a lower-case letter), and
-at the Chinese and Japanese full stops ``。！？``, which need no space after
-them. The rule is the same on every install: nltk, which chunked differently
-wherever it happened to be installed, is not used.
+likewise at the full stops and question marks of Devanagari, Arabic and Urdu,
+Armenian, Ethiopic and Burmese; at the Chinese and Japanese full stops
+``。！？``, ``．`` and half-width ``｡``, which need no space after them. The
+rule is the same on every install: nltk, which chunked differently wherever
+it happened to be installed, is not used.
 """
 
 from __future__ import annotations
@@ -21,11 +23,28 @@ from __future__ import annotations
 import re
 
 _HEADING = re.compile(r"#{1,6}\s")
-_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？])\s*")
+# Marks that end a sentence when whitespace follows: Latin, Devanagari danda
+# and double danda (U+0964-0965), Urdu full stop (U+06D4), Arabic question mark
+# (U+061F), Armenian full stop (U+0589), Ethiopic full stop (U+1362) and Burmese
+# sentence mark (U+104B); then those that need no whitespace: the Chinese and
+# Japanese ones, full-width full stop (U+FF0E) and half-width ideographic full
+# stop (U+FF61).
+_SENTENCE_END = re.compile(
+    r"(?<=[.!?…\u0964\u0965\u06d4\u061f\u0589\u1362\u104b])\s+"
+    r"|(?<=[。！？\uff0e\uff61])\s*"
+)
 
 
 def chunk_text(content: str, chunk_size: int = 512, overlap: int = 50) -> list[str]:
-    """``content`` in chunks of at most ``chunk_size + overlap`` characters."""
+    """``content`` in chunks of at most ``chunk_size + overlap`` characters.
+
+    Raises ``ValueError`` for a ``chunk_size`` under 1 (nothing could be cut
+    to that size) or a negative ``overlap``.
+    """
+    if chunk_size < 1:
+        raise ValueError(f"chunk_size must be at least 1, not {chunk_size}")
+    if overlap < 0:
+        raise ValueError(f"overlap must not be negative, not {overlap}")
     if not content or not content.strip():
         return []
     chunks: list[str] = []
@@ -96,11 +115,13 @@ def _cut_lines(block: str, limit: int) -> list[str]:
     lines; a line longer than that is cut on its own (see :func:`_cut`)."""
     pieces: list[str] = []
     current: list[str] = []
+    size = 0  # len("\n".join(current)), kept so a long block is not joined again and again
     for line in block.split("\n"):
         for part in _cut(line, limit) if len(line) > limit else [line]:
-            if current and len("\n".join([*current, part])) > limit:
+            if current and size + 1 + len(part) > limit:
                 pieces.append("\n".join(current))
                 current = []
+            size = size + 1 + len(part) if current else len(part)
             current.append(part)
     if current:
         pieces.append("\n".join(current))
@@ -113,15 +134,18 @@ def _merge(sentences: list[str], chunk_size: int, overlap: int) -> list[str]:
     most ``overlap`` characters with the space that follows them."""
     chunks: list[str] = []
     current: list[str] = []
+    size = 0  # len(" ".join(current)), kept so a long chunk is not joined again and again
     for sentence in sentences:
-        if current and len(" ".join([*current, sentence])) > chunk_size:
+        if current and size + 1 + len(sentence) > chunk_size:
             chunks.append(" ".join(current))
-            kept: list[str] = []
-            for previous in reversed(current):
-                if len(" ".join([previous, *kept])) + 1 > overlap:
+            start, size = len(current), 0
+            while start:
+                joined = len(current[start - 1]) + (size + 1 if start < len(current) else 0)
+                if joined + 1 > overlap:
                     break
-                kept.insert(0, previous)
-            current = kept
+                start, size = start - 1, joined
+            current = current[start:]
+        size = size + 1 + len(sentence) if current else len(sentence)
         current.append(sentence)
     if current:
         chunks.append(" ".join(current))
