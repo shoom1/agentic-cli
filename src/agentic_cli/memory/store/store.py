@@ -17,7 +17,7 @@ from pathlib import Path
 
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory._core.secrets import looks_like_secret
-from agentic_cli.memory.store import _files, _inbox
+from agentic_cli.memory.store import _files, _import_06, _inbox
 from agentic_cli.memory.store._inbox import Inbox
 from agentic_cli.memory.store._index import render_index
 from agentic_cli.memory.store._scope import INBOX, PROJECT_NOTE, Entry, ScopeFolder, resolve_duplicates
@@ -88,6 +88,9 @@ class MemoryStore:
         self._import_problems: list[Problem] = []
         for folder in self._folders.values():
             folder.check()
+        if _import_06.needs_import(self._folders["user"].path):
+            with self._lock:
+                self._import_problems = _import_06.run(self, self._folders["user"])
         self._tidy()
 
     @property
