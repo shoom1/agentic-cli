@@ -228,10 +228,13 @@ class KnowledgeBaseManager:
                 base kept on another disk).
 
         Raises:
-            ValueError: ``base_dir`` is not inside ``within``, or its database
-                is of a format this version does not read.
+            ValueError: ``base_dir`` is not inside ``within``, its database
+                is of a format this version does not read, or the
+                ``metadata.json`` of a 0.6 folder is not JSON (not imported
+                yet: a git-LFS pointer, say).
             UnsafeKnowledgeBase: see :meth:`_check_layout`.
-            KnowledgeBaseBusy: other sessions kept its database locked.
+            KnowledgeBaseBusy: other sessions (an older version's too) kept
+                it locked past ``BUSY_TIMEOUT_S``.
             sqlite3.DatabaseError: its database is not one (a git-LFS
                 pointer) or is corrupt.
         """
@@ -407,16 +410,16 @@ class KnowledgeBaseManager:
                 batch = self._db.chunk_texts(after=last, limit=self._TERMS_BATCH)
             if not batch:
                 break
-            pairs = [(rowid, _terms_of(text)) for rowid, text in batch]
+            rows = [(rowid, chunk_id, _terms_of(text)) for rowid, chunk_id, text in batch]
             with self._db.write():
                 if self._db.info().get("tokenizer") != started:
                     return False
-                self._db.set_terms(pairs)
+                self._db.set_terms(rows)
             last = batch[-1][0]
         with self._db.write():
             if self._db.info().get("tokenizer") != started:
                 return False
-            self._db.set_terms([(rowid, _terms_of(text)) for rowid, text in self._db.chunk_texts(after=last)])
+            self._db.set_terms([(rowid, chunk_id, _terms_of(text)) for rowid, chunk_id, text in self._db.chunk_texts(after=last)])
             self._db.set_info(tokenizer=TOKENIZER)
         return True
 
@@ -481,7 +484,7 @@ class KnowledgeBaseManager:
             if not batch:
                 break
             try:
-                vectors = normalized(self._service.embed_batch([text for _, text in batch]))
+                vectors = normalized(self._service.embed_batch([text for _, _, text in batch]))
             except Exception as e:
                 logger.warning("kb_reembed_failed", path=str(self.kb_dir), error=f"{type(e).__name__}: {e}", exc_info=True)
                 return self._keyword_only()
@@ -489,7 +492,9 @@ class KnowledgeBaseManager:
                 if self._db.info().get("embedding_model") != model:
                     logger.warning("kb_model_changed_elsewhere", path=str(self.kb_dir), model=model)
                     return self._keyword_only()
-                self._db.set_vectors([(rowid, to_blob(vector)) for (rowid, _), vector in zip(batch, vectors)])
+                self._db.set_vectors(
+                    [(rowid, chunk_id, to_blob(vector)) for (rowid, chunk_id, _), vector in zip(batch, vectors)]
+                )
                 self._db.bump_generation()
             done += len(batch)
             last = batch[-1][0]

@@ -522,3 +522,102 @@ def test_a_stored_vector_of_another_size_is_embedded_again(tmp_path):
 
     assert service.calls == 1
     assert _vectors_match_their_chunks(tmp_path, service)
+
+
+# -- review of the whole PR: rowid reuse, model changes, a WAL switch elsewhere --
+
+
+def test_a_re_embedding_never_writes_onto_a_reused_rowid(tmp_path):
+    """chunks.rowid is reused once the newest chunk is deleted: a batch
+    embedded before that must not land on the chunk that took its rowid."""
+    keyword = KnowledgeBaseManager(tmp_path, use_mock=True)
+    _ingest(keyword, "Otters", "Otters nest in burrows.")
+    herons = _ingest(keyword, "Herons", "Herons wade at dawn.")
+
+    class Racing(FakeEmbeddingService):
+        def embed_batch(self, texts):
+            vectors = super().embed_batch(texts)
+            if not getattr(self, "raced", False):
+                self.raced = True  # meanwhile another session deletes the newest document and ingests one
+                keyword.delete_document(herons.id)
+                _ingest(keyword, "Kingfishers", "Kingfishers dive for fish.")
+            return vectors
+
+    fake = Racing()
+    KnowledgeBaseManager(tmp_path, embedding_service=fake)
+
+    rows = read_rows(tmp_path, "SELECT content, vector FROM chunks WHERE vector IS NOT NULL")
+    assert all(np.allclose(np.frombuffer(v, dtype="<f4"), normalized([fake.vector(t)])[0], atol=1e-6) for t, v in rows)
+    KnowledgeBaseManager(tmp_path, embedding_service=fake)  # the next open embeds the rest
+    assert _vectors_match_their_chunks(tmp_path, fake)
+
+
+def test_a_tokenizer_change_never_writes_onto_a_reused_rowid(tmp_path, monkeypatch):
+    other = KnowledgeBaseManager(tmp_path, use_mock=True)
+    _ingest(other, "Otters", "Otters nest in burrows.")
+    herons = _ingest(other, "Herons", "Herons wade at dawn.")
+    raw_write(tmp_path, "UPDATE info SET value = 'words-v2' WHERE key = 'tokenizer'")
+    real = manager_module.tokenize
+    raced: list[bool] = []
+
+    def tokenize(text):
+        if not raced:
+            raced.append(True)  # meanwhile another session deletes the newest document and ingests one
+            other.delete_document(herons.id)
+            _ingest(other, "Kingfishers", "Kingfishers dive for fish.")
+        return real(text)
+
+    monkeypatch.setattr(manager_module, "tokenize", tokenize)
+    KnowledgeBaseManager(tmp_path, use_mock=True)
+
+    rows = read_rows(tmp_path, "SELECT content, terms FROM chunks")
+    assert [(text, terms) for text, terms in rows if terms != " ".join(real(text))] == []
+
+
+def test_a_model_recorded_elsewhere_mid_re_embedding_stops_this_session(tmp_path, monkeypatch):
+    log = LogRecorder().install(monkeypatch, manager_module)
+    first = KnowledgeBaseManager(tmp_path, use_mock=True)
+    for i in range(3):
+        _ingest(first, f"Note {i}", f"Herons wade at dawn number {i}. " * 1700)  # more than one batch
+
+    class Interrupted(FakeEmbeddingService):
+        def embed_batch(self, texts):
+            if not getattr(self, "interrupted", False):
+                self.interrupted = True  # another session records its own model, then cannot embed
+                KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-c", 16, fail_after=0))
+            return super().embed_batch(texts)
+
+    session = KnowledgeBaseManager(tmp_path, embedding_service=Interrupted("model-b", 8))
+
+    assert read_rows(tmp_path, "SELECT value FROM info WHERE key = 'embedding_model'") == [("model-c",)]
+    assert read_rows(tmp_path, "SELECT count(*) FROM chunks WHERE vector IS NOT NULL") == [(0,)]
+    assert len(log.warnings("kb_model_changed_elsewhere")) == 1
+    assert session.search("herons")["results"]  # by keyword
+
+
+def test_a_model_recorded_elsewhere_before_an_ingest_stores_no_vector(tmp_path, monkeypatch):
+    log = LogRecorder().install(monkeypatch, manager_module)
+    first = KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8))
+    KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-c", 16, fail_after=0))
+
+    herons = _ingest(first, "Herons", "Herons wade at dawn.")
+
+    assert read_rows(tmp_path, "SELECT vector FROM chunks WHERE document_id = ?", [herons.id]) == [(None,)]
+    assert len(log.warnings("kb_model_changed_elsewhere")) == 1
+
+
+def test_a_knowledge_base_opens_while_another_session_switches_it_to_wal(tmp_path):
+    """A rollback journal another session is writing (a new file switching to
+    WAL) is no reason to refuse the knowledge base."""
+    KnowledgeBaseManager(tmp_path, use_mock=True).close()
+    raw_write(tmp_path, "PRAGMA journal_mode = DELETE")
+    other = sqlite3.connect(tmp_path / "kb.sqlite", isolation_level=None, check_same_thread=False)
+    other.execute("BEGIN IMMEDIATE")
+    other.execute("UPDATE info SET value = value WHERE key = 'format'")
+    other.execute("INSERT INTO info VALUES ('switching', 'yes')")
+    assert (tmp_path / "kb.sqlite-journal").stat().st_size > 0
+    threading.Timer(0.3, lambda: (other.execute("COMMIT"), other.close())).start()
+
+    kb = KnowledgeBaseManager(tmp_path, use_mock=True)
+
+    assert kb.get_stats()["document_count"] == 0

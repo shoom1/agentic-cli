@@ -170,7 +170,7 @@ def test_when_no_scope_opens_the_first_scopes_error_is_raised(tmp_path, log):
     (tmp_path / "user").mkdir()
     (tmp_path / "user" / "kb.sqlite").write_bytes(b"version https://git-lfs.github.com/spec/v1\n")
 
-    with pytest.raises(ValueError, match="project.*format '9'"):
+    with pytest.raises(ValueError, match="project.*newer version.*format 9"):
         KnowledgeBase.open({"project": tmp_path / "project", "user": tmp_path / "user"}, use_mock=True)
 
 

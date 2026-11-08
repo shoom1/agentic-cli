@@ -35,7 +35,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from agentic_cli.memory._core.io import create_private_file
+from agentic_cli.memory._core.io import create_private_file, open_regular_file
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 
@@ -46,9 +46,10 @@ COMPANION_SUFFIXES = ("-wal", "-shm", "-journal")
 FORMAT = "1"
 # How long a change waits for another session's change before giving up.
 BUSY_TIMEOUT_S = 60.0
-# How long an open waits for a rollback journal to go: another session
-# switching a new database to WAL keeps one for a moment.
-JOURNAL_WAIT_S = 2.0
+# What ends a rollback journal that names a super-journal: SQLite reads its
+# last 16 bytes (the name's length, a checksum, this magic) and then deletes
+# the file the name gives, wherever it is.
+_JOURNAL_MAGIC = bytes.fromhex("d9d505f920a163d7")
 
 # Every document ID the framework assigns is a UUID; a row whose ID is not a
 # plain name is never read, so never turned into a path.
@@ -105,10 +106,6 @@ class KnowledgeBaseBusy(TimeoutError):
     """Another session kept the knowledge base's write lock past ``BUSY_TIMEOUT_S``."""
 
 
-class _RollbackJournal(UnsafeKnowledgeBase):
-    """A non-empty ``kb.sqlite-journal``: SQLite would play it back."""
-
-
 def refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
     found = "a symbolic link" if stat.S_ISLNK(mode) else f"not {kind}"
     return UnsafeKnowledgeBase(f"{path} is {found}: a knowledge base works only in its own folders")
@@ -116,12 +113,15 @@ def refuse(path: Path, mode: int, kind: str) -> UnsafeKnowledgeBase:
 
 def check_files(db_path: Path) -> None:
     """Refuse a database file or companion that is not a regular file (a link,
-    a folder), and a rollback journal that is not empty.
+    a folder), and a rollback journal that names a super-journal.
 
-    SQLite plays a hot rollback journal back at its first read, and a crafted
-    one names a "super-journal" that SQLite then deletes, wherever it is. A
-    WAL database never leaves a journal behind, so a non-empty one was put
-    there.
+    SQLite plays a hot rollback journal back at its first read; a journal
+    that ends with a super-journal's name (multi-file transactions, which a
+    knowledge base never makes) gets that file deleted, wherever it is, so a
+    crafted one deletes a file outside the folder. Any other journal is
+    SQLite's to handle: one another session holds while it switches a new
+    file to WAL, or one a crash left (SQLite rolls it back, or deletes it
+    beside an empty file).
 
     Raises:
         UnsafeKnowledgeBase: one of them is.
@@ -133,25 +133,23 @@ def check_files(db_path: Path) -> None:
             continue
         if not stat.S_ISREG(found.st_mode):
             raise refuse(path, found.st_mode, "a regular file")
-        if path.name.endswith("-journal") and found.st_size:
-            raise _RollbackJournal(
-                f"{path} is a rollback journal, which a knowledge base never leaves: "
-                "SQLite would play it back, so the knowledge base is not opened"
+        if path.name.endswith("-journal") and _names_a_super_journal(path, found.st_size):
+            raise UnsafeKnowledgeBase(
+                f"{path} names another file for SQLite to delete (a super-journal), which a knowledge "
+                f"base never writes: delete {path.name} to open the knowledge base"
             )
 
 
-def _check_files_at_open(db_path: Path) -> None:
-    """``check_files``, giving a rollback journal ``JOURNAL_WAIT_S`` to go:
-    another session switching a new database to WAL holds one for a moment."""
-    deadline = time.monotonic() + JOURNAL_WAIT_S
-    while True:
-        try:
-            check_files(db_path)
-            return
-        except _RollbackJournal:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.01)
+def _names_a_super_journal(path: Path, size: int) -> bool:
+    """Whether the rollback journal at ``path`` ends with a super-journal's name."""
+    if size < len(_JOURNAL_MAGIC):
+        return False
+    try:
+        with open_regular_file(path) as journal:
+            journal.seek(size - len(_JOURNAL_MAGIC))
+            return journal.read(len(_JOURNAL_MAGIC)) == _JOURNAL_MAGIC
+    except FileNotFoundError:
+        return False  # its session finished meanwhile
 
 
 def _is_busy(error: sqlite3.Error) -> bool:
@@ -291,7 +289,7 @@ class Database:
             sqlite3.DatabaseError: the file is not a database (a git-LFS
                 pointer) or is corrupt.
         """
-        _check_files_at_open(path)
+        check_files(path)
         create_private_file(path)
         conn = sqlite3.connect(
             path.absolute().as_uri() + "?mode=rw",
@@ -312,7 +310,8 @@ class Database:
             conn.execute("PRAGMA cell_size_check = ON")
             conn.create_function("kb_casefold", 1, _casefold, deterministic=True)
             db = cls(conn, path, fts_module=fts5_available(conn))
-            db._check()
+            with db.read():  # one snapshot: another session may be creating the schema
+                db._check()
             _use_wal(conn, path)
             db._prepare()
             return db
@@ -321,18 +320,40 @@ class Database:
             raise
 
     def _check(self) -> set[str]:
-        """The schema's names, after checking the schema and the format (none in a new file).
+        """The schema's names, after checking the format and the schema (none in a new file).
+
+        The format comes first: a newer version may have changed the schema,
+        and its knowledge base is then named as such rather than refused as
+        unsafe. Reading it is safe before the schema check, with triggers
+        and views off.
 
         Raises:
-            UnsafeKnowledgeBase: see :meth:`_check_schema`.
             ValueError: a format this version does not read.
+            UnsafeKnowledgeBase: see :meth:`_check_schema`.
         """
+        found = self._stored_format()
+        if found is not None and found != FORMAT:
+            if found.isdigit() and int(found) > int(FORMAT):
+                raise ValueError(
+                    f"{self.path} was written by a newer version of agentic-cli (knowledge base format {found}); "
+                    f"this version reads format {FORMAT}"
+                )
+            raise ValueError(f"{self.path} is a knowledge base of format {found!r}; this version reads format {FORMAT}")
         names = self._check_schema()
-        if names:
-            found = self.info().get("format")
-            if found != FORMAT:
-                raise ValueError(f"{self.path} is a knowledge base of format {found!r}; this version reads format {FORMAT}")
+        if names and found is None:
+            raise ValueError(f"{self.path} records no knowledge base format; this version reads format {FORMAT}")
         return names
+
+    def _stored_format(self) -> str | None:
+        """``info``'s format, if ``info`` is a table holding one."""
+        row = self.conn.execute("SELECT type FROM sqlite_master WHERE name = 'info'").fetchone()
+        if row is None or row[0] != "table":
+            return None
+        try:
+            found = self.conn.execute("SELECT value FROM info WHERE key = 'format'").fetchone()
+        except sqlite3.OperationalError:  # an info table of another shape: the schema check refuses it
+            return None
+        return None if found is None else str(found[0])
 
     def _prepare(self) -> None:
         """Create the schema in a new database (checked again: another session
@@ -519,11 +540,17 @@ class Database:
     def set_enrichment(self, doc_id: str, payload: dict[str, Any]) -> None:
         self.conn.execute("UPDATE documents SET enrichment = ? WHERE id = ?", (json.dumps(payload), doc_id))
 
-    def set_vectors(self, pairs: Iterable[tuple[int, bytes]]) -> None:
-        """Store vectors for chunks that still have none (another session may have embedded them)."""
+    def set_vectors(self, rows: Iterable[tuple[int, str, bytes]]) -> None:
+        """Store (rowid, chunk ID, vector) for chunks that still have none
+        (another session may have embedded them).
+
+        The chunk ID must match too: a rowid is reused once the newest chunk
+        is deleted, and a vector embedded before that would land on the chunk
+        that took it.
+        """
         self.conn.executemany(
-            "UPDATE chunks SET vector = ? WHERE rowid = ? AND vector IS NULL",
-            [(blob, rowid) for rowid, blob in pairs],
+            "UPDATE chunks SET vector = ? WHERE rowid = ? AND id = ? AND vector IS NULL",
+            [(blob, rowid, chunk_id) for rowid, chunk_id, blob in rows],
         )
 
     def clear_vectors(self) -> None:
@@ -536,18 +563,18 @@ class Database:
             (size,),
         ).rowcount
 
-    def set_terms(self, pairs: Sequence[tuple[int, str]]) -> None:
-        """Replace chunks' terms (a new tokenizer), keeping the keyword index in
-        step: each chunk's old terms leave it as its new ones enter. A chunk
-        deleted meanwhile is left out."""
-        if not pairs:
+    def set_terms(self, rows: Sequence[tuple[int, str, str]]) -> None:
+        """Replace (rowid, chunk ID, terms) of chunks (a new tokenizer), keeping
+        the keyword index in step: each chunk's old terms leave it as its new
+        ones enter. A chunk deleted meanwhile is left out, and so is one that
+        took its rowid (see :meth:`set_vectors`)."""
+        if not rows:
             return
-        marks = ",".join("?" * len(pairs))
-        old = self.conn.execute(
-            f"SELECT rowid, terms FROM chunks WHERE rowid IN ({marks})", [int(rowid) for rowid, _ in pairs]
-        ).fetchall()
-        present = {int(rowid) for rowid, _ in old}
-        new = [(int(rowid), terms) for rowid, terms in pairs if int(rowid) in present]
+        wanted = {int(rowid): (chunk_id, terms) for rowid, chunk_id, terms in rows}
+        marks = ",".join("?" * len(wanted))
+        found = self.conn.execute(f"SELECT rowid, id, terms FROM chunks WHERE rowid IN ({marks})", list(wanted)).fetchall()
+        old = [(int(rowid), terms) for rowid, chunk_id, terms in found if wanted[int(rowid)][0] == chunk_id]
+        new = [(rowid, wanted[rowid][1]) for rowid, _ in old]
         if self.fts:
             self.conn.executemany("INSERT INTO chunk_terms (chunk_terms, rowid, terms) VALUES ('delete', ?, ?)", old)
         self.conn.executemany("UPDATE chunks SET terms = ? WHERE rowid = ?", [(terms, rowid) for rowid, terms in new])
@@ -672,19 +699,23 @@ class Database:
     def file_names(self) -> set[str]:
         return {str(row[0]) for row in self.conn.execute("SELECT file_name FROM documents WHERE file_name IS NOT NULL")}
 
-    def chunk_texts(self, *, after: int, limit: int | None = None) -> list[tuple[int, str]]:
-        """Chunks as (rowid, text) after rowid ``after``, in rowid order (a text
-        that is not text reads as empty)."""
-        sql, params = "SELECT rowid, content FROM chunks WHERE rowid > ? ORDER BY rowid", [after]
+    def chunk_texts(self, *, after: int, limit: int | None = None) -> list[tuple[int, str, str]]:
+        """Chunks as (rowid, chunk ID, text) after rowid ``after``, in rowid
+        order (a text that is not text reads as empty)."""
+        sql, params = "SELECT rowid, id, content FROM chunks WHERE rowid > ? ORDER BY rowid", [after]
         if limit is not None:
             sql, params = sql + " LIMIT ?", [after, limit]
-        return [(int(rowid), text if isinstance(text, str) else "") for rowid, text in self.conn.execute(sql, params)]
-
-    def chunks_without_vector(self, *, after: int, limit: int) -> list[tuple[int, str]]:
         return [
-            (int(rowid), text)
-            for rowid, text in self.conn.execute(
-                "SELECT rowid, content FROM chunks WHERE vector IS NULL AND rowid > ? AND typeof(content) = 'text' "
+            (int(rowid), str(chunk_id), text if isinstance(text, str) else "")
+            for rowid, chunk_id, text in self.conn.execute(sql, params)
+        ]
+
+    def chunks_without_vector(self, *, after: int, limit: int) -> list[tuple[int, str, str]]:
+        """Chunks without a vector as (rowid, chunk ID, text) after rowid ``after``."""
+        return [
+            (int(rowid), str(chunk_id), text)
+            for rowid, chunk_id, text in self.conn.execute(
+                "SELECT rowid, id, content FROM chunks WHERE vector IS NULL AND rowid > ? AND typeof(content) = 'text' "
                 "ORDER BY rowid LIMIT ?",
                 (after, limit),
             )

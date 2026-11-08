@@ -104,6 +104,14 @@ def test_a_file_that_is_not_a_database_does_not_open(tmp_path):
         Database.open(tmp_path / "kb.sqlite")
 
 
+def test_a_knowledge_base_a_newer_version_wrote_is_named_so(tmp_path):
+    Database.open(tmp_path / "kb.sqlite").close()
+    raw_write(tmp_path, "UPDATE info SET value = '2' WHERE key = 'format'", "CREATE TABLE sources (x)")
+
+    with pytest.raises(ValueError, match="newer version"):
+        Database.open(tmp_path / "kb.sqlite")
+
+
 def test_a_database_of_another_format_does_not_open(tmp_path):
     Database.open(tmp_path / "kb.sqlite").close()
     raw_write(tmp_path, "UPDATE info SET value = '2' WHERE key = 'format'")
@@ -175,9 +183,35 @@ def test_a_shipped_rollback_journal_is_refused_before_sqlite_plays_it_back(tmp_p
     Database.open(folder / "kb.sqlite").close()
     (folder / "kb.sqlite-journal").write_bytes(_hot_journal(victim))
 
-    with pytest.raises(UnsafeKnowledgeBase, match="journal"):
+    with pytest.raises(UnsafeKnowledgeBase, match="delete kb.sqlite-journal"):
         Database.open(folder / "kb.sqlite")
     assert victim.read_text() == "keep me\n"
+
+
+def _journal_without_a_super_journal() -> bytes:
+    """A rollback journal as SQLite starts one (magic, counts, page size), no super-journal after it."""
+    header = bytes.fromhex("d9d505f920a163d7") + struct.pack(">IIIII", 0, 7, 0, 512, 4096)
+    return header + bytes(512 - len(header)) + b"\x01" * 4096
+
+
+def test_a_journal_a_killed_first_open_left_beside_an_empty_file_opens(tmp_path):
+    (tmp_path / "kb.sqlite").write_bytes(b"")
+    (tmp_path / "kb.sqlite-journal").write_bytes(_journal_without_a_super_journal())
+
+    db = Database.open(tmp_path / "kb.sqlite")
+
+    assert db.info()["format"] == "1"
+    db.close()
+
+
+def test_a_hot_journal_without_a_super_journal_is_left_to_sqlite(tmp_path):
+    _store(tmp_path, _doc(A, "Otters", "otters")).close()
+    (tmp_path / "kb.sqlite-journal").write_bytes(b"\x07" * 3000)  # no journal header: SQLite discards it
+
+    db = Database.open(tmp_path / "kb.sqlite")
+    with db.read():
+        assert [d.title for d in db.headers()] == ["Otters"]
+    db.close()
 
 
 def test_an_empty_rollback_journal_is_left_alone(tmp_path):
