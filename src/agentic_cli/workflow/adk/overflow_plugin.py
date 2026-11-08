@@ -11,6 +11,8 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   as every later call will be: the summary, then the turns it kept
   (``WrittenSummary.kept_turns``, ``fit_guard_plugin.keep_newest_turns``). A
   summary that fails is one warning a turn, as one before a model call is.
+  The memory index that opens the request stays first in the retry, with
+  the summary, and both are folded into its first user text.
 - **A sub-agent** never summarizes the shared session; nor does the main
   agent when the summary covers nothing the request holds. The request is
   then retried with its oldest whole turns left out down to half the budget
@@ -60,6 +62,7 @@ from agentic_cli.workflow.adk.compaction import SUMMARY_FAILED, SUMMARY_FAILED_C
 from agentic_cli.workflow.adk.fit_guard_plugin import (
     drop_turns,
     fold_summary,
+    is_memory_index,
     is_summary,
     keep_newest_turns,
     overhead_tokens,
@@ -148,6 +151,8 @@ class OverflowPlugin(BasePlugin):
         if summary is not None:
             contents = _with_summary(contents, summary.text)
         report_trim(len(request.contents), len(contents), agent, dropped)
+        # The index and a summary that open the retry join the next user text.
+        contents = fold_summary(contents)
         retry = request.model_copy(update={"contents": contents})
         model = callback_context.get_invocation_context().agent.canonical_model
         try:
@@ -227,16 +232,17 @@ class OverflowPlugin(BasePlugin):
 
 
 def _with_summary(contents: list[types.Content], summary: str) -> list[types.Content]:
-    """``contents`` with ``summary`` first, folded into the first kept user content.
+    """``contents`` with ``summary`` in place of the one they open with, after the index.
 
-    It takes the place of the summary they open with, which it stands for
-    too; folded as the fit guard folds (``fold_summary``), so no provider sees
-    one more user message in a row.
+    The memory index, when the contents open with it, stays first. The summary
+    stands for the one they open with, and is folded as the fit guard folds
+    (``fold_summary``), so no provider sees one more user message in a row.
     """
-    rest = list(contents)
+    index = contents[:1] if contents and is_memory_index(contents[0]) else []
+    rest = list(contents[len(index):])
     if rest and is_summary(rest[0]):
         remainder = list(rest[0].parts or [])[1:]
-        rest = [rest[0].model_copy(update={"parts": remainder})] if remainder else []
-        rest += contents[1:]
-    return fold_summary([types.Content(role="user", parts=[types.Part.from_text(text=summary)]),
-                         *rest])
+        rest = ([rest[0].model_copy(update={"parts": remainder})] if remainder else []) + rest[1:]
+    return fold_summary(
+        [*index, types.Content(role="user", parts=[types.Part.from_text(text=summary)]), *rest]
+    )

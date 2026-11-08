@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -195,6 +196,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         source: What ``CONTEXT_TRIMMED`` names as the summary's cause:
             ``"compact"`` when ``manual``, else ``"summarization"``, unless given
             (a summary an overflow asked for is ``"summarization"``).
+        on_written: Called once a summary is written (the conversation's
+            prompt prefix changes with it): the manager drops the
+            conversation's memory index snapshot, so the next request takes
+            a new one.
 
     Attributes:
         last_result: What the last summary written did; None until one is.
@@ -221,6 +226,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         manual: bool = False,
         focus: str | None = None,
         source: str | None = None,
+        on_written: Callable[[], None] | None = None,
     ) -> None:
         self.root = root
         self.model = model
@@ -228,6 +234,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         self.manual = manual
         self.focus = focus
         self.source = source or ("compact" if manual else "summarization")
+        self._on_written = on_written
         self.last_result: CompactResult | None = None
         self.last_kept_turns = 0
         self.last_error: Exception | None = None
@@ -332,6 +339,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             messages=result.messages_summarized, tokens_before=result.tokens_before,
             tokens_after=result.tokens_after,
         )
+        if self._on_written is not None:
+            # The prompt prefix changes here anyway: the conversation's next
+            # request takes a new memory index.
+            self._on_written()
         return event
 
     def report_stored(self) -> None:

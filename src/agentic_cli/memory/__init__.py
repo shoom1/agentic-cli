@@ -20,6 +20,7 @@ from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory._core.secrets import looks_like_secret
 from agentic_cli.memory.store import (
     ALL_MEMORY_TOOLS,
+    INDEX_OPEN,
     MAX_CANDIDATES,
     MEMORY_TYPES,
     SCOPES,
@@ -48,6 +49,7 @@ __all__ = [
     "EmbeddingConfig",
     "EmbeddingService",
     "FileInTheWay",
+    "INDEX_OPEN",
     "InvalidMemory",
     "MAX_CANDIDATES",
     "MEMORY_TYPES",

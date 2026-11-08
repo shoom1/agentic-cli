@@ -13,19 +13,19 @@ plugins, after ADK has built the request (the summary included):
 - Over the agent's budget B, it drops the oldest whole turns from this
   request (``drop_turns``) until it is under the agent's trigger: a turn
   starts at a user's text, never at a tool result or right after a call, so
-  a call keeps its result; the newest turn stays, and so does a summary that
-  opens the conversation. The first kept user content starts with a note,
-  ``FIT_NOTE``, as a part of its own: no new message, so no provider sees one
-  more user message in a row. The session is untouched: the next request
-  starts from the whole history again.
+  a call keeps its result; the newest turn stays, and so do the memory index
+  and a summary that open the conversation (``protected_head``). The first
+  kept user content starts with a note, ``FIT_NOTE``, as a part of its own:
+  no new message, so no provider sees one more user message in a row. The
+  session is untouched: the next request starts from the whole history again.
 - It reports ``CONTEXT_TRIMMED(source="fit_guard", turns_dropped=n)`` once a
   turn.
 - When the newest turn alone is over the budget, nothing it could drop would
   help: the request goes as it is, and the overflow handler answers.
-- As its last step, a summary that opens the conversation (a user content of
-  its own) is folded into the next content when that is a user's text, as a
-  part before its own (``fold_summary``): a strict chat template refuses two
-  user messages in a row.
+- As its last step, what opens the conversation (the memory index, a summary:
+  each a user content of its own) is folded into the next content when that
+  is a user's text, as parts before its own (``fold_summary``): a strict chat
+  template refuses two user messages in a row.
 
 It keeps each request as it came in, until the call ends
 (``request_as_seen``): the overflow handler retries from that copy, since a
@@ -50,6 +50,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from agentic_cli.logging import Loggers
+from agentic_cli.memory import INDEX_OPEN
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import ESTIMATE_MARGIN, chars_per_token
 from agentic_cli.workflow.events import WorkflowEvent
@@ -201,19 +202,26 @@ def overhead_tokens(llm_request: "LlmRequest", kind: "ProviderKind") -> int:
 
 
 def fold_summary(contents: list[types.Content]) -> list[types.Content]:
-    """``contents`` with a summary that opens them folded into the next one.
+    """``contents`` with what opens them (the index, a summary) folded into the next one.
 
-    When the summary (a user content of its own) is followed by a user's
-    text, that content gets the summary's parts before its own, so no
-    provider sees two user messages in a row. Otherwise (a tool result, a
-    model's turn, nothing) ``contents`` as they are; they are never changed
-    in place.
+    The index and a summary are user contents of their own. Their parts go
+    before those of the user's text that follows, the index's first, so no
+    provider sees two user messages in a row. When no user text follows (a
+    tool result, a model's turn), an index and a summary become one content.
+    A lone index or summary before no user text is left as it is. ``contents``
+    are never changed in place.
     """
-    if len(contents) < 2 or not is_summary(contents[0]) or not _users_text(contents[1]):
+    head = protected_head(contents)
+    if not head:
         return contents
-    summary, first = contents[0], contents[1]
-    merged = first.model_copy(update={"parts": [*(summary.parts or []), *(first.parts or [])]})
-    return [merged, *contents[2:]]
+    rest = contents[len(head):]
+    parts = [part for content in head for part in (content.parts or [])]
+    if rest and _users_text(rest[0]):
+        merged = rest[0].model_copy(update={"parts": [*parts, *(rest[0].parts or [])]})
+        return [merged, *rest[1:]]
+    if len(head) == 1:
+        return contents
+    return [head[0].model_copy(update={"parts": parts}), *rest]
 
 
 def drop_turns(
@@ -225,8 +233,8 @@ def drop_turns(
     content that made no call: so a call and its result stay together. Turns
     go oldest first, the oldest whatever the target (the caller knows the
     request is too big), until the rest, with the note, is under the target;
-    the newest turn always stays, and so does a summary that opens the
-    conversation. The first kept user content gets ``FIT_NOTE`` as a part
+    the newest turn always stays, and so do the index and a summary that open
+    the conversation. The first kept user content gets ``FIT_NOTE`` as a part
     before its own; ``contents`` themselves are left as they are.
 
     Each content is measured once; what goes is subtracted from a running
@@ -236,7 +244,7 @@ def drop_turns(
         The contents to send, and how many turns were left out (0, with
         ``contents`` themselves, when there is only one turn).
     """
-    head = contents[:1] if contents and is_summary(contents[0]) else []
+    head = protected_head(contents)
     body = contents[len(head):]
     starts = [i for i in range(len(body)) if _starts_turn(body, i)]
     if not starts or starts[-1] == 0:
@@ -260,15 +268,15 @@ def keep_newest_turns(
 ) -> tuple[list[types.Content], int]:
     """``contents`` from their ``turns``-th newest turn on, cut as ``drop_turns`` cuts.
 
-    A summary that opens them stays, and the first kept user content gets
-    ``FIT_NOTE``. For a retry after a summary: the turns the summary kept,
-    what every later call sends besides it.
+    The index and a summary that open them stay, and the first kept user
+    content gets ``FIT_NOTE``. For a retry after a summary: the turns the
+    summary kept, what every later call sends besides it.
 
     Returns:
         The contents, and how many turns were left out (0, with ``contents``
         themselves, when they hold no more than ``turns``).
     """
-    head = contents[:1] if contents and is_summary(contents[0]) else []
+    head = protected_head(contents)
     body = contents[len(head):]
     starts = [i for i in range(len(body)) if _starts_turn(body, i)]
     if turns <= 0 or len(starts) <= turns:
@@ -307,6 +315,22 @@ def is_summary(content: types.Content) -> bool:
     return content.role == "user" and bool(first and first.text) and first.text.startswith(
         SUMMARY_PREFIX
     )
+
+
+def is_memory_index(content: types.Content) -> bool:
+    """Whether ``content`` is the memory index the main agent's requests open with."""
+    first = content.parts[0] if content.parts else None
+    return content.role == "user" and bool(first and first.text) and first.text.startswith(INDEX_OPEN)
+
+
+def protected_head(contents: list[types.Content]) -> list[types.Content]:
+    """What opens ``contents`` and is never dropped: the index, then a summary."""
+    count = 0
+    if count < len(contents) and is_memory_index(contents[count]):
+        count += 1
+    if count < len(contents) and is_summary(contents[count]):
+        count += 1
+    return contents[:count]
 
 
 def _config_chars(llm_request: "LlmRequest") -> int:
