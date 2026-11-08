@@ -67,6 +67,42 @@ def test_a_long_first_line_is_cut_at_a_word(tmp_path):
     assert memory.description.endswith("otters…")
 
 
+def test_control_characters_in_the_first_line_become_spaces(tmp_path):
+    _write(tmp_path / "memory", [{"id": "x1", "content": "Name:\tAndrey\x07 Shiryaev\nmore"}])
+    [memory] = MemoryStore(tmp_path / "memory").memories()
+    assert memory.description == "Name: Andrey  Shiryaev"
+
+
+def test_items_with_the_same_first_line_each_get_a_description(tmp_path):
+    items = [{"id": f"n{n}", "content": f"Note:\n{text}"} for n, text in enumerate("ABC")]
+    store = MemoryStore(_import_of(tmp_path, items))
+    assert sorted((m.description, m.content) for m in store.memories()) == [
+        ("Note:", "Note:\nA"), ("Note: (2)", "Note:\nB"), ("Note: (3)", "Note:\nC")]
+
+
+def test_a_derived_description_a_memory_already_has_is_numbered(tmp_path):
+    user = tmp_path / "memory"
+    MemoryStore(user).save("Note:", "saved by hand", "user", scope="user")
+    _write(user, [{"id": "n1", "content": "Note:\nfrom 0.6"}])
+    assert sorted(m.description for m in MemoryStore(user).memories()) == ["Note:", "Note: (2)"]
+
+
+def test_a_number_never_takes_a_description_past_150_characters(tmp_path, monkeypatch):
+    monkeypatch.setattr(_import_06, "DESCRIPTION_CUT", 150)  # a first line cut as long as a description may be
+    first = " ".join(["otters"] * 40)
+    items = [{"id": f"n{n}", "content": f"{first} {n}"} for n in range(3)]
+    descriptions = sorted(m.description for m in MemoryStore(_import_of(tmp_path, items)).memories())
+    assert len(set(descriptions)) == 3
+    assert max(len(d) for d in descriptions) == 150
+    assert [d[-4:] for d in descriptions if d.endswith(")")] == [" (2)", " (3)"]
+
+
+def _import_of(tmp_path, items):
+    user = tmp_path / "memory"
+    _write(user, items)
+    return user
+
+
 def test_a_second_run_adds_nothing(tmp_path):
     user = tmp_path / "memory"
     _write(user, [SAVED, EXTRACTED])

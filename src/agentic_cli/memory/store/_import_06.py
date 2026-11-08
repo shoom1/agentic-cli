@@ -17,13 +17,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.memory._core.io import read_regular_file
 from agentic_cli.memory._core.log import get_logger
-from agentic_cli.memory.store._files import valid_id
+from agentic_cli.memory.store._files import DESCRIPTION_MAX, normalized, valid_id
 from agentic_cli.memory.store._scope import ScopeFolder
 from agentic_cli.memory.store.models import Candidate, MemoryBusy, MemoryStoreError, Problem
 
@@ -35,6 +36,7 @@ logger = get_logger("agentic_cli.memory.store")
 LEGACY_DIR = "pre-0.7.0"
 OLD_FILES = ("memories.json", "memories_embeddings.json", "embedding_model.json")
 DESCRIPTION_CUT = 120
+_BREAKS = frozenset({"Cc", "Zl", "Zp"})  # what a description may not hold
 
 
 class _Unreadable(Exception):
@@ -95,7 +97,10 @@ def _imported_ids(folder: Path) -> set[str]:
 
 
 def _description(content: str) -> str:
-    line = next((part.strip() for part in content.splitlines() if part.strip()), "")
+    """The first non-empty line, its control characters as spaces, cut at a word to ``DESCRIPTION_CUT``."""
+    lines = ("".join(" " if unicodedata.category(ch) in _BREAKS else ch for ch in part).strip()
+             for part in content.splitlines())
+    line = next((one for one in lines if one), "")
     if len(line) <= DESCRIPTION_CUT:
         return line
     cut = line[: DESCRIPTION_CUT - 1]
@@ -103,6 +108,19 @@ def _description(content: str) -> str:
     if space > DESCRIPTION_CUT // 3:
         cut = cut[:space]
     return cut.rstrip() + "…"
+
+
+def _numbered(description: str, taken: set[str]) -> str:
+    """``description``, or with `` (2)``, `` (3)``, … the first that no memory or proposal has.
+
+    The number is kept whole: the description is cut to make room for it.
+    """
+    candidate, number = description, 1
+    while normalized(candidate) in taken:
+        number += 1
+        suffix = f" ({number})"
+        candidate = description[: DESCRIPTION_MAX - len(suffix)].rstrip() + suffix
+    return candidate
 
 
 def _utc(value: Any) -> datetime | None:
@@ -149,7 +167,9 @@ def _one(store: "MemoryStore", folder: ScopeFolder, entry: Any, imported: set[st
     tags = entry.get("tags")
     tags = [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
     text = content.strip() + (f"\n\nTags: {', '.join(tags)}" if tags else "")
-    description = _description(content)
+    taken = {normalized(e.memory.description) for e in store._entries()[0].values()}
+    taken |= {normalized(p.description) for p in store.proposals()}
+    description = _numbered(_description(content), taken)
     if "auto-extracted" in tags:
         candidate = Candidate("new", None, description, text, "user", "user")
         reason = store._candidate_problem(candidate)
