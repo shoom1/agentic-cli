@@ -53,6 +53,7 @@ def generate_seatbelt_profile(
     readable_paths: list[Path],
     deny_read_paths: list[Path],
     allow_network: bool = False,
+    deny_rename_paths: list[Path] | None = None,
 ) -> str:
     """Generate a Seatbelt SBPL profile string.
 
@@ -74,6 +75,10 @@ def generate_seatbelt_profile(
             ``(allow file-read* (subpath "/"))`` covers all reads.
         deny_read_paths: Paths to block from reading.
         allow_network: Whether to allow network access.
+        deny_rename_paths: Paths whose own entry may not be renamed or removed
+            (a ``literal`` rule: what is below them stays as the other rules
+            leave it). Denied after the writes are allowed, as the deny-write
+            paths are.
 
     Returns:
         Complete SBPL profile as a string.
@@ -158,6 +163,14 @@ def generate_seatbelt_profile(
         # Also block unlink/rename to prevent mv-based bypass
         lines.append(_subpath_rule("file-write-unlink", path, allow=False))
     lines.append("")
+
+    # --- Deny rename: a folder's own entry, so it cannot be moved aside ---
+    if deny_rename_paths:
+        lines.append(";; Entries that may not be renamed or removed (their contents may be written)")
+        for path in deny_rename_paths:
+            escaped = _escape_sbpl_path(str(path))
+            lines.append(f'(deny file-write-unlink (literal "{escaped}"))')
+        lines.append("")
 
     # --- Network ---
     lines.append(";; Network access")

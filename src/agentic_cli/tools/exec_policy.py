@@ -22,6 +22,7 @@ alike, and ``sandbox_opt_out`` names where the user turns the sandbox off.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -44,38 +45,95 @@ def _sandbox_strict(settings: Any) -> bool:
 
 def python_sandbox_policy(settings: Any) -> "OSSandboxPolicy | None":
     """The OS-sandbox policy ``execute_python`` runs under, or None when the
-    sandbox is off (``os_sandbox_enabled`` false: the code runs as the user)."""
+    sandbox is off (``os_sandbox_enabled`` false: the code runs as the user).
+
+    The memory folders are written only through the memory tools, so the
+    policy protects them from the code (``_protect_memory_folders``).
+    """
     if not _sandbox_enabled(settings):
         return None
     from agentic_cli.tools.os_sandbox import OSSandboxPolicy
 
-    folders = _memory_folders(settings)
     policy = OSSandboxPolicy(
         enabled=True,
         writable_paths=list(getattr(settings, "os_sandbox_writable_paths", None) or []),
         allow_network=bool(getattr(settings, "os_sandbox_allow_network", False)),
         strict=_sandbox_strict(settings),
         app_name=getattr(settings, "app_name", None),
-        # The memory folders: written only through the memory tools.
-        deny_read_paths=[str(folder) for folder in folders],
     )
-    # Hidden is not enough where a folder sits in a writable place: code could
-    # plant a file the next conversation reads as a memory. Added to the
-    # policy's own list (a list passed to the constructor would replace it),
-    # and only for a folder that exists: the backends bind over a missing
-    # deny-write path to block its creation, which leaves a stray file where
-    # the store makes the folder.
-    policy.deny_write_paths += [str(folder) for folder in folders if folder.exists()]
+    _protect_memory_folders(policy, settings)
     return policy
 
 
-def _memory_folders(settings: Any) -> list[Path]:
-    """The memory folders under ``workspace_dir``: the user scope and the project scopes."""
+def _protect_memory_folders(policy: "OSSandboxPolicy", settings: Any) -> None:
+    """Hide the memory folders from the code, and keep it from writing them.
+
+    Where ``workspace_dir`` sits in a place the sandbox may write (the working
+    directory, an ``os_sandbox_writable_paths`` entry), hiding the folders is
+    not enough: code could plant a file there that the next conversation reads
+    as a memory. So, in this order:
+
+    * The folders exist before the code runs (``<workspace_dir>/memory``,
+      ``<workspace_dir>/projects``, and this project's scope), made 0700 as the
+      store makes them. Code that found one missing could create it.
+    * Both are denied for writes as subpaths: ``projects`` holds every
+      project's scope, and a file planted in another project's folder is read
+      by a later run there.
+    * Seatbelt also denies renaming or removing the workspace and each
+      ancestor the code may write (``deny_rename_paths``), or the code could
+      move ``workspace_dir`` aside, write into the moved folder and move it
+      back. Bubblewrap needs no such rule: a bind mount follows its directory
+      when an ancestor is renamed, so a write through the new name still meets
+      the read-only mount.
+    * A folder that exists is denied for both backends; one that could not be
+      made is denied by seatbelt alone (``deny_write_missing_paths``):
+      bubblewrap binds only what exists, and a bind over a missing path
+      leaves a stray file where the store later makes its folder.
+    """
     workspace = getattr(settings, "workspace_dir", None)
     if workspace is None:
-        return []
+        return
     root = Path(workspace).expanduser().resolve(strict=False)
-    return [root / "memory", root / "projects"]
+    folders = [root / "memory", root / "projects"]
+    for folder in [*folders, _project_scope(settings)]:
+        if folder is not None:
+            _make_private(folder)
+    policy.deny_read_paths += [str(folder) for folder in folders]
+    policy.deny_write_paths += [str(folder) for folder in folders if folder.exists()]
+    policy.deny_write_missing_paths += [str(folder) for folder in folders if not folder.exists()]
+    writable = policy.resolved_writable_paths(Path.cwd())
+    policy.deny_rename_paths += [
+        str(path)
+        for path in (root, *root.parents)
+        if any(path == place or path.is_relative_to(place) for place in writable)
+    ]
+
+
+def _project_scope(settings: Any) -> Path | None:
+    """This project's memory folder, where the store has a project scope."""
+    from agentic_cli.workflow.memory_services import project_memory_dir
+
+    try:
+        return project_memory_dir(settings)
+    except OSError:  # no working directory to name a project by
+        return None
+
+
+def _make_private(path: Path) -> None:
+    """``path`` and any missing folder above it, each 0700, as the store makes
+    them. A folder that cannot be made is left: the policy denies it anyway."""
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current):
+        missing.append(current)
+        current = current.parent
+    for folder in reversed(missing):
+        try:
+            folder.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            return
 
 
 def sandbox_opt_out(settings: Any) -> str:

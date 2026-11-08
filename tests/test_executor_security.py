@@ -216,10 +216,12 @@ class TestExecPolicy:
 
         assert uncontained_exec_capabilities(BaseSettings(**settings)) == uncontained
 
-    def test_the_tool_s_policy_follows_the_same_settings(self):
+    def test_the_tool_s_policy_follows_the_same_settings(self, tmp_path):
         from agentic_cli.config import BaseSettings
         from agentic_cli.tools.exec_policy import python_sandbox_policy
 
-        assert python_sandbox_policy(BaseSettings(os_sandbox_enabled=False)) is None
-        assert python_sandbox_policy(BaseSettings()).strict is True
-        assert python_sandbox_policy(BaseSettings(os_sandbox_strict=False)).strict is False
+        # A policy makes the memory folders in the workspace: not the real home's.
+        where = {"workspace_dir": tmp_path / "workspace"}
+        assert python_sandbox_policy(BaseSettings(os_sandbox_enabled=False, **where)) is None
+        assert python_sandbox_policy(BaseSettings(**where)).strict is True
+        assert python_sandbox_policy(BaseSettings(os_sandbox_strict=False, **where)).strict is False

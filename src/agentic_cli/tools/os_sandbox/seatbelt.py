@@ -119,9 +119,16 @@ class SeatbeltSandbox(OSSandbox):
         Returns:
             SBPL profile string.
         """
+        # A rule names a path, so it holds for one that does not exist yet.
+        deny_write = policy.resolved_deny_write_paths(working_dir)
+        deny_write += [
+            path for path in policy.resolved_deny_write_missing_paths()
+            if path not in deny_write
+        ]
         return generate_seatbelt_profile(
             writable_paths=policy.resolved_writable_paths(working_dir),
-            deny_write_paths=policy.resolved_deny_write_paths(working_dir),
+            deny_write_paths=deny_write,
+            deny_rename_paths=policy.resolved_deny_rename_paths(),
             readable_paths=policy.resolved_readable_paths(),
             deny_read_paths=policy.resolved_deny_read_paths(working_dir),
             allow_network=policy.allow_network,
