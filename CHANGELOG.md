@@ -1827,6 +1827,18 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **The memory store no longer loses every memory when one cannot be read.**
+  `memories.json` was parsed in one step, so a memory missing a field (a hand
+  edit, a file another version wrote) emptied the store, and the next save
+  wrote the file again with only the new memory: the loss was permanent. An
+  entry that was not an object stopped the store from opening at all. Each
+  entry is now read on its own. One that does not parse is logged
+  (`memory_entry_unreadable`, with its position and id), kept exactly as it
+  was and written back by every save, so it costs only itself and can be
+  repaired by hand. A `memories.json` that does not parse at all (not JSON,
+  invalid UTF-8, empty, or neither a list nor `{"items": [...]}`) is renamed
+  to `memories.json.unreadable-<UTC time>` before anything is written, and the
+  store starts empty beside it.
 - **A slow DNS server no longer freezes the app while `web_fetch` runs.** The
   fetcher's SSRF-safe transport resolved each host with `socket.getaddrinfo`
   on the event loop's thread: a fetch makes at least two lookups (robots.txt,

@@ -12,12 +12,13 @@ rewrote the files from what it read earlier, dropping the other's memories.
 
 import json
 import math
+import os
 import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,11 @@ logger = get_logger("agentic_cli.memory.store")
 # ---------------------------------------------------------------------------
 
 _SENTINEL = object()
+
+
+def _entry_id(entry: Any) -> Any:
+    """An unreadable entry's ``id``, if it has one, for the warning."""
+    return entry.get("id") if isinstance(entry, dict) else None
 
 
 def _loaded(service: Any) -> Any:
@@ -152,6 +158,8 @@ class MemoryStore:
         self._model_path = base_dir / "embedding_model.json"
         self._lock_path = base_dir / ".lock"
         self._items: dict[str, MemoryItem] = {}
+        # Entries of memories.json that did not parse, as they were read.
+        self._unreadable: list[Any] = []
         # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
         # concurrently in executor threads, so store/update/delete/search (and
         # the full-file rewrite in _save) must not interleave. The folder lock
@@ -213,20 +221,28 @@ class MemoryStore:
                 logger.warning("memory_model_record_write_failed", error=str(e))
 
     def _load(self) -> None:
+        """Read ``memories.json`` entry by entry, then the vectors.
+
+        An entry that does not parse is kept as it was (``_unreadable``) and
+        written back by every save, so one bad entry costs only itself. A
+        file that does not parse at all is renamed aside first
+        (:meth:`_set_aside`), so no save writes over it.
+        """
+        self._unreadable = []
         if self._path.exists():
-            try:
-                data = json.loads(self._path.read_text())
-                # Support both flat list (new format) and {"items": [...]} (old format)
-                if isinstance(data, dict):
-                    items_list = data.get("items", [])
-                else:
-                    items_list = data
-                for item_data in items_list:
-                    item = MemoryItem.from_dict(item_data)
-                    self._items[item.id] = item
-            except (json.JSONDecodeError, KeyError):
-                logger.warning("corrupted_memory_file", path=str(self._path))
-                self._items = {}
+            for position, entry in enumerate(self._read_entries()):
+                try:
+                    item = MemoryItem.from_dict(entry)
+                    self._items[item.id] = item  # an id that is no key (a list) fails here
+                except (KeyError, TypeError, AttributeError, ValueError) as e:
+                    logger.warning(
+                        "memory_entry_unreadable",
+                        path=str(self._path),
+                        position=position,
+                        id=_entry_id(entry),
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                    self._unreadable.append(entry)
         if self._embeddings_path.exists():
             try:
                 emb_data = json.loads(self._embeddings_path.read_text())
@@ -236,8 +252,33 @@ class MemoryStore:
             except (json.JSONDecodeError, KeyError):
                 logger.warning("corrupted_embeddings_file", path=str(self._embeddings_path))
 
+    def _read_entries(self) -> list[Any]:
+        """The entries of ``memories.json``: a list, or ``{"items": [...]}``."""
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            self._set_aside(f"{type(e).__name__}: {e}")
+            return []
+        entries = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(entries, list):
+            self._set_aside('neither a list of memories nor {"items": [...]}')
+            return []
+        return entries
+
+    def _set_aside(self, reason: str) -> None:
+        """Rename an unreadable ``memories.json`` before anything is written over it.
+
+        Raises:
+            OSError: the rename failed; the store does not open rather than
+                write over the file.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        aside = self._path.with_name(f"{self._path.name}.unreadable-{stamp}")
+        os.replace(self._path, aside)
+        logger.warning("memory_file_unreadable", path=str(aside), reason=reason)
+
     def _save(self) -> None:
-        data = [item.to_dict() for item in self._items.values()]
+        data = [item.to_dict() for item in self._items.values()] + self._unreadable
         atomic_write_json(self._path, data)
         self._stamp = file_stamp(self._path)
         self._save_embeddings()
