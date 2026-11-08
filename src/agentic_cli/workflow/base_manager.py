@@ -544,7 +544,9 @@ class BaseWorkflowManager(ABC):
         if needs_memory:
             from agentic_cli.workflow.memory_services import open_memory_store
 
-            s[MEMORY_STORE] = open_memory_store(self._settings)
+            store = open_memory_store(self._settings)
+            if store is not None:  # None: it cannot open, and the memory tools say so
+                s[MEMORY_STORE] = store
 
         if needs_kb:
             from agentic_cli.workflow.memory_services import open_knowledge_base

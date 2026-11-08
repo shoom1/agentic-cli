@@ -12,10 +12,15 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agentic_cli.logging import Loggers
+
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import EmbeddingConfig, EmbeddingService, MemoryStore
     from agentic_cli.memory.kb import KnowledgeBase
+
+
+logger = Loggers.workflow()
 
 
 def project_kb_dir(settings: "BaseSettings") -> Path:
@@ -116,18 +121,46 @@ def project_memory_dir(settings: "BaseSettings", cwd: Path | None = None) -> Pat
     return settings.workspace_dir / "projects" / project_key(cwd) / "memory"
 
 
-def open_memory_store(settings: "BaseSettings") -> "MemoryStore":
+def open_memory_store(settings: "BaseSettings") -> "MemoryStore | None":
     """The memory store: the user scope in ``workspace_dir/memory``, the
     project scope in ``workspace_dir/projects/<key>/memory`` (none at home,
     ``/`` or above home). It searches by keyword and needs no embedding
-    service."""
-    from agentic_cli.memory import MemoryStore
+    service.
+
+    A memory folder that cannot open never stops the app (a link, which is
+    refused, or a folder that cannot be written). A project scope that fails
+    is left out, with a warning (``memory_project_scope_unavailable``) and
+    the user scope still works; a user scope that fails gives None, with a
+    warning (``memory_store_unavailable``), and the memory tools answer that
+    the store is not available.
+    """
+    from agentic_cli.memory import MemoryStore, MemoryStoreError
 
     cwd = Path.cwd().resolve()
     project_dir = project_memory_dir(settings, cwd)
-    return MemoryStore(
-        settings.workspace_dir / "memory",
-        project_dir,
-        project_name=cwd.name if project_dir is not None else None,
-        project_path=cwd if project_dir is not None else None,
+    user_dir = settings.workspace_dir / "memory"
+    try:
+        return MemoryStore(
+            user_dir,
+            project_dir,
+            project_name=cwd.name if project_dir is not None else None,
+            project_path=cwd if project_dir is not None else None,
+        )
+    except (MemoryStoreError, OSError) as e:
+        failure = e
+    if project_dir is not None:
+        # Which scope failed? The user scope alone says.
+        try:
+            store = MemoryStore(user_dir)
+        except (MemoryStoreError, OSError):
+            pass
+        else:
+            logger.warning(
+                "memory_project_scope_unavailable", path=str(project_dir),
+                error=f"{type(failure).__name__}: {failure}",
+            )
+            return store
+    logger.warning(
+        "memory_store_unavailable", path=str(user_dir), error=f"{type(failure).__name__}: {failure}"
     )
+    return None
