@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -46,6 +46,7 @@ from agentic_cli.workflow.permissions.store import (
     PermissionContext,
     load_project_denies,
     load_project_grants,
+    memory_folder_denies,
     settings_env_file_denies,
     settings_rules,
 )
@@ -157,18 +158,23 @@ class Unstorable(str, Enum):
     WILDCARD = "wildcard"
     #: Code that would run on the host without a sandbox.
     UNCONTAINED = "uncontained"
+    #: A memory write in a conversation that has read outside content.
+    OUTSIDE_CONTENT = "outside_content"
 
 
 def unstorable_reason(
     cap: ResolvedCapability,
     home: Path | None = None,
     uncontained: Collection[str] = (),
+    per_call: Collection[str] = (),
 ) -> Unstorable | None:
     """Why approving ``cap`` may not be remembered as a rule, or None when it may.
 
     The one decision: the engine asks it before storing a grant, and the prompt
     builder before offering one (``is_storable_grant`` is its yes/no).
 
+    * ``OUTSIDE_CONTENT``: ``cap`` is one of ``per_call``, approved for each
+      call (a memory write in a conversation that read outside content).
     * ``UNCONTAINED``: ``cap`` is one of ``uncontained``, the code-execution
       capabilities its owner says would run on the host with the user's
       privileges (``tools/exec_policy.py``). CPython has no in-process
@@ -196,6 +202,8 @@ def unstorable_reason(
     ``home`` is the home directory the grant scope is judged against (the
     process's by default), as in ``broaden_target_for_grant``.
     """
+    if cap.name in per_call:
+        return Unstorable.OUTSIDE_CONTENT
     if cap.name in uncontained:
         return Unstorable.UNCONTAINED
     if cap.target == "*":
@@ -207,10 +215,11 @@ def is_storable_grant(
     cap: ResolvedCapability,
     home: Path | None = None,
     uncontained: Collection[str] = (),
+    per_call: Collection[str] = (),
 ) -> bool:
     """Whether approving ``cap`` may be remembered as a rule: no
     ``unstorable_reason``."""
-    return unstorable_reason(cap, home, uncontained) is None
+    return unstorable_reason(cap, home, uncontained, per_call) is None
 
 
 def _rule_is_literal(cap: ResolvedCapability, home: Path | None) -> bool:
@@ -297,12 +306,17 @@ _NOT_STORED_EVENTS = {
     Unstorable.TARGETLESS: "permission_wildcard_grant_not_stored",
     Unstorable.WILDCARD: "permission_glob_grant_not_stored",
     Unstorable.UNCONTAINED: "permission_uncontained_grant_not_stored",
+    Unstorable.OUTSIDE_CONTENT: "permission_outside_content_grant_not_stored",
 }
 
 #: The sources of a grant's allow rule: an interactive "Allow for this
 #: session", and "Allow always", loaded from the user's
 #: ``project_grants.json`` (a project file's allow rules are never loaded).
 _GRANT_SOURCES = frozenset({RuleSource.SESSION, RuleSource.PROJECT})
+
+#: The sources whose allow rules a per-call capability skips: the builtin ones
+#: and the grants. A ``USER`` allow (the owner's own policy) still applies.
+_PER_CALL_SKIPPED = frozenset({RuleSource.BUILTIN, RuleSource.SESSION, RuleSource.PROJECT})
 
 
 class PermissionEngine:
@@ -322,6 +336,13 @@ class PermissionEngine:
     though one stored earlier, while the code ran contained, still exists. A
     rule the user wrote in their own settings still applies: that is their
     policy. None (the default): no capability is uncontained.
+
+    ``per_call`` is the owner's say on which capabilities must be approved for
+    each call right now (the workflow passes the memory write while the
+    conversation is marked); a ``Mapping`` return gives each one's prompt
+    note. No builtin allow rule and no grant covers such a capability, and the
+    prompt offers no grant; a rule the user wrote in their own settings
+    still applies, and any deny wins. None (the default): none.
     """
 
     def __init__(
@@ -331,11 +352,13 @@ class PermissionEngine:
         ctx: PermissionContext,
         *,
         uncontained: "Callable[[BaseSettings], Collection[str]] | None" = None,
+        per_call: "Callable[[BaseSettings], Collection[str]] | None" = None,
     ) -> None:
         self._settings = settings
         self._workflow = workflow
         self._ctx = ctx
         self._uncontained = uncontained
+        self._per_call = per_call
         self._session_rules: list[Rule] = []
         self._ask_lock = asyncio.Lock()
         self._base_rules: list[Rule] = self._load_all_rules()
@@ -364,6 +387,8 @@ class PermissionEngine:
             )
         # The keys the app was given, wherever its env_file puts them.
         rules += settings_env_file_denies(self._settings, self._ctx)
+        # The memory folders are written only through the memory tools.
+        rules += memory_folder_denies(self._settings, self._ctx)
         # The trusted rules, allow and deny: settings.permissions, the union
         # of the app's class default, the user file, the environment and the
         # constructor. The user file is read once, by the settings.
@@ -410,7 +435,8 @@ class PermissionEngine:
             logger.warning("permission_invalid_target", tool=tool_name, error=str(exc))
             return CheckResult(False, f"invalid target: {exc}")
         uncontained = self._uncontained_now()
-        outcomes = self._evaluate(resolved, uncontained)
+        per_call = self._per_call_now()
+        outcomes = self._evaluate(resolved, uncontained, per_call)
 
         # No capabilities to evaluate (e.g. every cap is optional and its target
         # arg was absent) → nothing to gate, allow.
@@ -429,7 +455,9 @@ class PermissionEngine:
             return CheckResult(True, self._fmt_rule_reason(any_r, any_c))
 
         # Ask flow lands in Task 16.
-        return await self._ask_and_apply(tool_name, resolved, outcomes, args, uncontained)
+        return await self._ask_and_apply(
+            tool_name, resolved, outcomes, args, uncontained, per_call
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -478,28 +506,41 @@ class PermissionEngine:
             return frozenset()
         return frozenset(self._uncontained(self._settings))
 
+    def _per_call_now(self) -> dict[str, str]:
+        """The capabilities approved per call now, with each one's prompt note."""
+        if self._per_call is None:
+            return {}
+        found = self._per_call(self._settings)
+        if isinstance(found, Mapping):
+            return {str(name): str(note) for name, note in found.items()}
+        return {str(name): "" for name in found}
+
     def _evaluate(
         self,
         resolved: list[ResolvedCapability],
         uncontained: Collection[str] = frozenset(),
+        per_call: Collection[str] = frozenset(),
     ) -> list[tuple[ResolvedCapability, Rule | None]]:
         """For each resolved capability, return the strongest matched rule or None.
 
         A grant's allow rule does not cover a capability in ``uncontained``:
-        that code is approved per call.
+        that code is approved per call. Nor does a builtin allow or a grant
+        cover one in ``per_call``; only the user's own allow rules do.
         """
         from agentic_cli.workflow.permissions.matchers import _cap_matches
         all_rules = self.rules
         out: list[tuple[ResolvedCapability, Rule | None]] = []
         for cap in resolved:
             matcher = get_matcher(cap.name)
-            per_call = cap.name in uncontained
+            on_host = cap.name in uncontained
+            asked = cap.name in per_call
             # A deny is matched by its own method: a filesystem deny ignores
             # case, so another spelling of a denied file is denied too.
             matched: list[Rule] = [
                 r for r in all_rules
                 if _cap_matches(r.capability, cap.name)
-                and not (per_call and r.effect is Effect.ALLOW and r.source in _GRANT_SOURCES)
+                and not (on_host and r.effect is Effect.ALLOW and r.source in _GRANT_SOURCES)
+                and not (asked and r.effect is Effect.ALLOW and r.source in _PER_CALL_SKIPPED)
                 and (
                     matcher.matches_deny(r.target, cap.target)
                     if r.effect is Effect.DENY
@@ -526,6 +567,7 @@ class PermissionEngine:
         outcomes: list[tuple[ResolvedCapability, Rule | None]],
         args: dict | None = None,
         uncontained: Collection[str] = frozenset(),
+        per_call: Mapping[str, str] | None = None,
     ) -> CheckResult:
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
@@ -533,7 +575,8 @@ class PermissionEngine:
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
             request = build_request(
-                tool_name, resolved, args, home=self._ctx.home, uncontained=uncontained
+                tool_name, resolved, args, home=self._ctx.home,
+                uncontained=uncontained, per_call=per_call,
             )
             # Fail closed: a prompt nobody can answer is a denial the model can
             # read, not an exception that aborts the turn. Cancellation is not
@@ -564,7 +607,9 @@ class PermissionEngine:
         source = RuleSource.SESSION if scope is AskScope.SESSION else RuleSource.PROJECT
         stored = 0
         for cap in unmatched:
-            reason = unstorable_reason(cap, home=self._ctx.home, uncontained=uncontained)
+            reason = unstorable_reason(
+                cap, home=self._ctx.home, uncontained=uncontained, per_call=per_call or {}
+            )
             if reason is not None:
                 logger.warning(
                     _NOT_STORED_EVENTS[reason], tool=tool_name, capability=cap.name

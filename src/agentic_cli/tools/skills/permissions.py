@@ -41,5 +41,7 @@ def register_skill_tool_permissions() -> None:
             name="run_skill_script",
             capabilities=[Capability("skill.script.exec", target_arg="file_path")],
             category=ToolCategory.EXECUTION,
+            # A script's output is a program's, as execute_python's.
+            outside_content=True,
             description="ADK skill tool: run_skill_script",
         )

@@ -26,6 +26,7 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.langgraph.graph_builder import LangGraphBuilder
+from agentic_cli.workflow.outside_content import LANGGRAPH_MARK, OutsideContentMarks
 from agentic_cli.workflow.sessions import SessionInfo
 from agentic_cli.config import get_settings
 from agentic_cli.logging import Loggers, bind_context
@@ -137,6 +138,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
+        # LangGraph's gate tracks no outside content: every memory write asks.
+        self._outside_marks = OutsideContentMarks(always=LANGGRAPH_MARK)
 
         # LangGraph ignores these AgentConfig fields, which the ADK and Deep
         # Agents backends use; warn once if an app set them while running on

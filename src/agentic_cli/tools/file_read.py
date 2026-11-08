@@ -9,6 +9,7 @@ import difflib
 from typing import Any
 
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools._saved_outputs import reads_saved_output
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -18,6 +19,7 @@ from agentic_cli.workflow.permissions import Capability
 
 @register_tool(
     category=ToolCategory.READ,
+    outside_content=reads_saved_output("path"),
     capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Read the contents of a file at the given path. Use this to examine source code, config files, or any text file. For finding files by name pattern use glob instead; for searching file contents use grep.",
 )
@@ -109,6 +111,7 @@ def read_file(
 
 @register_tool(
     category=ToolCategory.READ,
+    outside_content=reads_saved_output("source_a", "source_b"),
     capabilities=[Capability("filesystem.read", target_arg="source_a"), Capability("filesystem.read", target_arg="source_b")],
     description="Compare two text sources (files or strings) and show differences. Use this to see what changed between two versions of content.",
 )

@@ -80,6 +80,7 @@ from agentic_cli.workflow.deepagents.middleware import (
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
 from agentic_cli.workflow.interrupts import OpenCalls
+from agentic_cli.workflow.outside_content import OutsideContentMarks
 from agentic_cli.workflow.deepagents.summarization import (
     ReportingSummarizationMiddleware,
     build_summarization,
@@ -114,6 +115,7 @@ def build_agent_tree(
     bound: Callable[[object], ToolDefinition | None] = identify_tool,
     summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
     open_calls: OpenCalls | None = None,
+    marks: OutsideContentMarks | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -147,6 +149,9 @@ def build_agent_tree(
             (``compact``).
         open_calls: The manager's record of its calls, for answering those
             a cancelled turn leaves open (``InterruptedCallsMiddleware``).
+        marks: The manager's record of each conversation's mark, which every
+            agent's permission gate marks when it allows a call that brings
+            outside content (``workflow/outside_content.py``).
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -179,7 +184,9 @@ def build_agent_tree(
                     else InterruptedCallsMiddleware(open_calls, root=name == root)
                 ),
                 model_side=model_side,
-                tool_side=_tool_side(config, settings, bound=bound, open_calls=open_calls),
+                tool_side=_tool_side(
+                    config, settings, bound=bound, open_calls=open_calls, marks=marks
+                ),
             ),
             state_schema=AgentCliState,
             name=name,
@@ -225,10 +232,11 @@ def _tool_side(
     *,
     bound: Callable[[object], ToolDefinition | None],
     open_calls: OpenCalls | None = None,
+    marks: OutsideContentMarks | None = None,
 ) -> list["AgentMiddleware"]:
     """What runs each of the agent's tool calls, outermost first."""
     stack: list[AgentMiddleware] = [
-        PermissionMiddleware(config.name, bound=bound, open_calls=open_calls)
+        PermissionMiddleware(config.name, bound=bound, open_calls=open_calls, marks=marks)
     ]
     if settings is not None:
         # Inside the gate, whose denials are short; outside the tool-error

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from agentic_cli.workflow.events import InputType, UserInputRequest
@@ -21,6 +21,9 @@ _CODE_ARGS = ("code", "command", "script")
 #: Why a prompt offers only "Allow once" and "Deny", by the reason a grant
 #: may not be remembered (``unstorable_reason``), in the order shown.
 _ONCE_ONLY_NOTES = {
+    Unstorable.OUTSIDE_CONTENT: (
+        "(This conversation has read outside content, so approval applies to this call only.)"
+    ),
     Unstorable.UNCONTAINED: (
         "(This code runs on your machine without a sandbox, "
         "so approval applies to this call only.)"
@@ -64,6 +67,7 @@ def build_request(
     *,
     home: Path | None = None,
     uncontained: Collection[str] = (),
+    per_call: Mapping[str, str] | None = None,
 ) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
 
@@ -76,10 +80,14 @@ def build_request(
 
     When nothing in the request can be remembered (see ``unstorable_reason``:
     code its owner says runs on the host without a sandbox, named in
-    ``uncontained``; a resource capability whose tool named no target; a
+    ``uncontained``; a capability approved for each call, named in
+    ``per_call`` with its note (a memory write in a conversation that read
+    outside content); a resource capability whose tool named no target; a
     target whose rule would hold a wildcard character), only "Allow once" and
     "Deny" are offered, with a note saying why, and no capability promises a
-    wider scope: there is none to approve.
+    wider scope: there is none to approve. The per-call reason shows the
+    call's arguments in full, as ``*.exec`` shows the code: the arguments
+    are what is being approved.
 
     For code-execution capabilities (``*.exec``) the pending ``code``/``command``
     payload is shown, all of it (the dialog body scrolls): the capability
@@ -87,8 +95,10 @@ def build_request(
     what the user is actually approving.
     """
     lines = [f"Tool `{tool_name}` wants:"]
+    per_call = per_call or {}
     reasons = {
-        unstorable_reason(cap, home=home, uncontained=uncontained) for cap in capabilities
+        unstorable_reason(cap, home=home, uncontained=uncontained, per_call=per_call)
+        for cap in capabilities
     } - {None}
     rememberable = not reasons
     for cap in capabilities:
@@ -99,7 +109,21 @@ def build_request(
         if rememberable and scope != cap.target:
             lines.append(f"    (for this session / always: all of {scope})")
     lines.append("")
-    lines += [note for reason, note in _ONCE_ONLY_NOTES.items() if reason in reasons]
+    for reason, note in _ONCE_ONLY_NOTES.items():
+        if reason not in reasons:
+            continue
+        if reason is Unstorable.OUTSIDE_CONTENT:
+            notes = [per_call[cap.name] for cap in capabilities if per_call.get(cap.name)]
+            lines += list(dict.fromkeys(notes)) or [note]
+        else:
+            lines.append(note)
+    if Unstorable.OUTSIDE_CONTENT in reasons and args:
+        lines.append("Arguments:")
+        lines += [
+            f"{key}: {value}" for key, value in args.items()
+            if value is not None and not str(key).startswith("__")
+        ]
+        lines.append("")
     code = _code_to_approve(capabilities, args)
     if code:
         lines.append("Code to execute:")

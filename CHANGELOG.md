@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A web page can no longer plant a memory unnoticed.** A memory is read in
+  every later conversation, so text in a fetched page, a document, a program's
+  output or an MCP server's answer that told the model to "remember" something
+  persisted it, the published memory-poisoning attack. A conversation is now
+  marked once a tool that brings outside content has been allowed to run in it
+  (`web_fetch`, `web_search`, the arXiv tools, the knowledge base's reading
+  tools and `kb_ingest_file` on a saved page, `sandbox_execute`,
+  `execute_python`, `run_skill_script`, `job_status`, `job_result`,
+  `job_logs`, every MCP tool, a job's notice, and `read_file`, `grep` or
+  `diff_compare` on a saved page or tool output, `grep` also when its path
+  holds the saved folders; a tool declares it with
+  `register_tool(outside_content=...)`). On ADK, a tool the model runs itself
+  marks it too: Google Search, URL context, Vertex AI Search, enterprise web
+  search, and an agent's code executor. The mark is kept in the conversation's
+  state, so a resumed one keeps it; on ADK a conversation from before 0.7.0
+  counts as marked, and on LangGraph every one does. In a marked conversation
+  every memory write (`save_memory`, `update_memory`, `delete_memory`) asks:
+  "Allow once" or "Deny", with the tool that marked it and the memory in full;
+  no builtin allow or grant approves it, while an allow rule in your own
+  settings and any deny still apply. The memory folders
+  (`<workspace_dir>/memory` and `<workspace_dir>/projects`) are denied to
+  `write_file` and `edit_file`, and code `execute_python` runs inside the OS
+  sandbox can neither read nor write them, nor move `workspace_dir` aside,
+  even where it sits in a folder the sandbox may write; code that runs outside
+  the sandbox (it turned off, or `sandbox_execute`'s local kernel) runs with
+  your privileges and is approved call by call.
 - **A filesystem deny rule covers every spelling of its path.** Deny rules
   compared paths case by case, but on a case-insensitive filesystem (macOS's
   default APFS, Windows) `./.ENV` and `./.env` are one file, and the engine

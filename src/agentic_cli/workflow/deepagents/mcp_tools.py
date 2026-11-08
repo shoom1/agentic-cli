@@ -249,6 +249,7 @@ class MCPSessions:
                 description=tool.description,
                 func=None,
                 capabilities=[Capability("mcp", target=name)],
+                outside_content=True,
             ),
         )
         return tool

@@ -31,6 +31,7 @@ logger = structlog.get_logger(__name__)
 
 from agentic_cli.config import get_settings
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools._saved_outputs import reads_saved_output
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -376,6 +377,7 @@ async def _search_concepts(kb, query: str, limit: int = 10) -> dict[str, Any]:
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
     requires="knowledge_base",
@@ -442,6 +444,9 @@ async def kb_ingest_text(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    # Its result carries the document's summary: a page web_fetch saved, or a
+    # tool's full output, is outside content here as it is for read_file.
+    outside_content=reads_saved_output("path"),
     capabilities=[
         Capability("kb.write"),
         Capability("filesystem.read", target_arg="path"),
@@ -493,6 +498,7 @@ async def kb_ingest_file(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description=(
         "Read a stored document by ID or title. Returns the per-document "
@@ -521,6 +527,7 @@ async def kb_read(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
     requires="knowledge_base",
@@ -584,6 +591,7 @@ async def kb_write_concept(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description=(
         "Search concept pages (agent-curated synthesis notes). "

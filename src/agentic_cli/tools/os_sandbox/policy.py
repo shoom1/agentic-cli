@@ -70,6 +70,20 @@ class OSSandboxPolicy:
         deny_write_paths: Paths denied for writing even within writable dirs.
             Defaults to MANDATORY_DENY_WRITE; a caller that passes its own
             list replaces it (the framework never passes one).
+        deny_write_missing_paths: Paths denied for writing that may not exist
+            yet, so the code cannot create them. Seatbelt names a path in a
+            rule, so it denies them all; bubblewrap binds only what exists
+            (a bind over a missing path leaves a stray file behind), so it
+            leaves out those that do not. A path that exists belongs in
+            ``deny_write_paths``, which both backends honor.
+        deny_rename_paths: Paths whose own entry cannot be renamed, moved or
+            removed, though what is below them may still be written (a
+            ``literal`` rule). Code that may write a folder's parent could
+            otherwise move the folder aside, write into it under its new name
+            and move it back. Seatbelt denies them. Bubblewrap needs no rule
+            and ignores the list: a bind mount follows its directory when an
+            ancestor is renamed, so a write through the new name still meets
+            the read-only mount.
         deny_read_paths: Paths to hide entirely from the sandboxed process.
         allow_network: Whether network access is allowed (Phase 2).
         strict: When True (the default), refuse to execute if sandboxing was
@@ -91,6 +105,8 @@ class OSSandboxPolicy:
     deny_write_paths: list[str] = field(
         default_factory=lambda: list(MANDATORY_DENY_WRITE)
     )
+    deny_write_missing_paths: list[str] = field(default_factory=list)
+    deny_rename_paths: list[str] = field(default_factory=list)
     deny_read_paths: list[str] = field(default_factory=list)
     allow_network: bool = False
     strict: bool = True
@@ -138,6 +154,14 @@ class OSSandboxPolicy:
         if working_dir is not None:
             paths += self._in_working_dir(WORKDIR_NEVER_WRITABLE, working_dir)
         return _dedupe(paths)
+
+    def resolved_deny_write_missing_paths(self) -> list[Path]:
+        """Resolve the deny-write paths that may not exist yet (see the field)."""
+        return _dedupe([Path(p).expanduser().resolve() for p in self.deny_write_missing_paths])
+
+    def resolved_deny_rename_paths(self) -> list[Path]:
+        """Resolve the paths that may not be renamed or removed (see the field)."""
+        return _dedupe([Path(p).expanduser().resolve() for p in self.deny_rename_paths])
 
     def resolved_deny_read_paths(self, working_dir: Path | None = None) -> list[Path]:
         """Resolve all deny-read paths to absolute.
