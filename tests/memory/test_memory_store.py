@@ -8,10 +8,11 @@ from datetime import timedelta
 import pytest
 
 from agentic_cli.memory._core.filelock import folder_lock
-from agentic_cli.memory.store import _scope
+from agentic_cli.memory.store import _files, _scope
 from agentic_cli.memory.store import store as store_module
 from agentic_cli.memory.store.models import (
     DuplicateMemory,
+    FileInTheWay,
     InvalidMemory,
     MemoryBusy,
     MemoryStoreFull,
@@ -33,7 +34,9 @@ def store(tmp_path, clock) -> MemoryStore:
 
 
 class TestSave:
-    def test_a_memory_is_a_file_named_by_its_description(self, store, tmp_path):
+    def test_a_memory_is_a_file_named_by_its_description(self, store, tmp_path, monkeypatch):
+        # An id of digits only is written quoted ("84249433" would read as a number), so fix the draw.
+        monkeypatch.setattr(_files.secrets, "token_hex", lambda n: "4f2a9c1e")
         memory = store.save("Prefers pytest fixtures", "Use fixtures.", "feedback",
                             source="user", conversation="c-1")
         assert memory.path == tmp_path / "projects" / "app-0123" / "memory" / f"prefers-pytest-fixtures-{memory.id}.md"
@@ -194,12 +197,46 @@ class TestChanges:
 
 
 def test_a_new_id_avoids_one_that_differs_only_by_case(tmp_path, monkeypatch):
-    from agentic_cli.memory.store import _files
-
     write_memory(tmp_path / "user", "mine-4F2A9C1E.md", memory_text("4F2A9C1E", "Written by hand"))
     draws = iter(["4f2a9c1e", "5a5a5a5a"])
     monkeypatch.setattr(_files.secrets, "token_hex", lambda n: next(draws))
     assert MemoryStore(tmp_path / "user").save("d", "c", "user", scope="user").id == "5a5a5a5a"
+
+
+class TestFilesThatAreNotTheEntrys:
+    """A file the store cannot use is never rewritten, moved or deleted (spec §5.3)."""
+
+    def test_restore_does_not_overwrite_a_file_a_person_broke(self, store):
+        memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+        store.update(memory.id, content="Tabs, width 4.")
+        path = store.read(memory.id).path
+        broken = path.read_text().replace("type: feedback", "type: preference").replace("Tabs, width 4.", "MY EDIT")
+        path.write_text(broken)
+        assert [(p.path, p.kind) for p in store.problems()] == [(path, "bad_field")]
+        [version] = store.history(memory.id)
+        assert version.deleted is False  # the id is still claimed by the file they edited
+        with pytest.raises(FileInTheWay, match=path.name):
+            store.restore(memory.id, version.saved)
+        assert path.read_text() == broken
+
+    def test_restore_does_not_overwrite_a_file_in_its_way(self, store):
+        memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+        store.delete(memory.id)
+        memory.path.write_text("nonsense, my notes\n")
+        [version] = store.history(memory.id)
+        with pytest.raises(FileInTheWay, match=memory.path.name):
+            store.restore(memory.id, version.saved)
+        assert memory.path.read_text() == "nonsense, my notes\n"
+
+    def test_update_does_not_rename_onto_a_file_in_its_way(self, store, tmp_path):
+        alpha = store.save("alpha", "a", "user", scope="user")
+        mine = tmp_path / "user" / f"beta-{alpha.id}.md"
+        mine.write_text("not frontmatter, my notes\n")
+        with pytest.raises(FileInTheWay, match=mine.name):
+            store.update(alpha.id, description="beta")
+        assert mine.read_text() == "not frontmatter, my notes\n"
+        assert store.read(alpha.id).description == "alpha"
+        assert store.history(alpha.id) == []  # nothing was written before it refused
 
 
 class TestLists:

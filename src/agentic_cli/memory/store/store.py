@@ -9,6 +9,7 @@ also serialized within the process (tools run on worker threads).
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable, Collection
 from dataclasses import replace
@@ -30,6 +31,7 @@ from agentic_cli.memory.store.models import (
     SOURCES,
     Candidate,
     DuplicateMemory,
+    FileInTheWay,
     InvalidMemory,
     Memory,
     MemoryBusy,
@@ -171,6 +173,27 @@ class MemoryStore:
             )
         return taken
 
+    @staticmethod
+    def _check_free(path: Path, own: Path | None = None) -> None:
+        """Refuse to write onto ``path`` when a file is there that is not ``own``.
+
+        A file the store cannot use is never rewritten, moved or deleted
+        (spec §5.3): a change that would take its name stops first.
+
+        Raises:
+            FileInTheWay: a file is at ``path`` and it is not the memory's own.
+        """
+        if path != own and os.path.lexists(path):
+            raise FileInTheWay(
+                f"{path} is in the way: it is not this memory's file; move or remove it first"
+            )
+
+    @staticmethod
+    def _claimed(winners: dict[str, Entry], problems: list[Problem]) -> set[str]:
+        """The ids (casefolded) of the live memories and of the files that cannot be used."""
+        ids = {memory_id.casefold() for memory_id in winners}
+        return ids | {p.memory_id.casefold() for p in problems if p.memory_id}
+
     def _count(self, winners: dict[str, Entry], scope: str) -> int:
         return sum(1 for entry in winners.values() if entry.memory.scope == scope)
 
@@ -238,6 +261,7 @@ class MemoryStore:
             )
         now = self._now_s()
         memory_id = memory_id or _files.new_id(self._taken(winners))
+        self._check_free(folder.target(description, memory_id))
         memory = Memory(
             id=memory_id,
             description=description,
@@ -329,6 +353,7 @@ class MemoryStore:
             updated=self._now_s(),
             path=folder.target(new_description, memory_id),
         )
+        self._check_free(changed.path, entry.memory.path)
         folder.keep_version(entry, self._now())
         folder.write(changed, entry.extra)
         if entry.memory.path != changed.path:
@@ -391,7 +416,8 @@ class MemoryStore:
     def history(self, memory_id: str | None = None, *, days: int = 30) -> list[Version]:
         """Versions saved in the last ``days`` days, newest first (of one memory, if given)."""
         with self._lock:
-            winners = self._entries()[0]
+            winners, problems = self._entries()
+            present = self._claimed(winners, problems)
             cutoff = self._now() - timedelta(days=days)
             found: list[tuple[str, datetime, Memory]] = []
             for folder in self._folders.values():
@@ -406,7 +432,7 @@ class MemoryStore:
             newest[one] = max(saved, newest.get(one, saved))
         versions = [
             Version(memory_id=one, saved=saved, memory=memory,
-                    deleted=one not in winners and saved == newest[one])
+                    deleted=one.casefold() not in present and saved == newest[one])
             for one, saved, memory in found
         ]
         return sorted(versions, key=lambda v: (-v.saved.timestamp(), v.memory_id))
@@ -435,8 +461,14 @@ class MemoryStore:
         with self._lock:
             folder, old = self._find_version(memory_id, saved)
             with folder.lock():
-                winners, _ = self._entries()
+                winners, problems = self._entries()
                 current = winners.get(memory_id)
+                if current is None:
+                    for problem in problems:
+                        if problem.memory_id and problem.memory_id.casefold() == memory_id.casefold():
+                            raise FileInTheWay(
+                                f"{problem.path} still holds the id {memory_id}: fix or remove it first"
+                            )
                 self._check_unique(old.memory.description, winners, exclude=memory_id)
                 if current is None and self._count(winners, folder.scope) >= SCOPE_MAX:
                     raise MemoryStoreFull(
@@ -448,6 +480,7 @@ class MemoryStore:
                     updated=self._now_s(),
                     path=folder.target(old.memory.description, memory_id),
                 )
+                self._check_free(restored.path, current.memory.path if current is not None else None)
                 if current is not None:
                     folder.keep_version(current, self._now())
                 folder.write(restored, old.extra)

@@ -212,7 +212,8 @@ class ScopeFolder:
         try:
             memory, extra = memory_from(fields, content, scope=self.scope, path=path, mtime=mtime)
         except FieldError as e:
-            return Problem(path, "bad_field", str(e))
+            claimed = fields.get("id")
+            return Problem(path, "bad_field", str(e), memory_id=claimed if valid_id(claimed) else None)
         return Entry(memory, extra, st.st_mtime_ns)
 
     def write(self, memory: Memory, extra: Mapping[str, str]) -> None:

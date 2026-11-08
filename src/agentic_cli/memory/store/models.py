@@ -85,11 +85,16 @@ class Version:
 
 @dataclass(frozen=True)
 class Problem:
-    """A file the store cannot use, and why. The store never changes it."""
+    """A file the store cannot use, and why. The store never changes it.
+
+    ``memory_id`` is the id its frontmatter holds when that is a valid id (a
+    ``bad_field`` file), so the memory it was is not taken for a deleted one.
+    """
 
     path: Path
     kind: str
     detail: str
+    memory_id: str | None = None
 
 
 class MemoryStoreError(Exception):
@@ -118,6 +123,14 @@ class NoProjectScope(MemoryStoreError):
 
 class MemoryBusy(MemoryStoreError, TimeoutError):
     """Another process held the scope's lock for longer than the store waits."""
+
+
+class FileInTheWay(MemoryStoreError):
+    """A change would write over a file that is not the memory's own.
+
+    The file is one the store cannot use (a person's edit that broke it) or
+    one it does not own; it is never rewritten, moved or deleted.
+    """
 
 
 class UnsafeMemoryStore(MemoryStoreError):
