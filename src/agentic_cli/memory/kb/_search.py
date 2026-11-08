@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Hashable, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any
+
+import numpy as np
 
 from agentic_cli.memory.kb.models import SourceType
 
@@ -21,18 +23,39 @@ RRF_K = 60
 _DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def fuse(rankings: Sequence[Sequence[Hashable]], k: int = RRF_K) -> list[tuple[Hashable, float]]:
-    """Merge ranked lists by reciprocal rank fusion, best first.
+def fuse(
+    rankings: Sequence[Sequence[Any]],
+    *,
+    owners: Sequence[Sequence[Any]] | None = None,
+    top_k: int | None = None,
+    k: int = RRF_K,
+) -> list[tuple[Any, float]]:
+    """Merge ranked lists by reciprocal rank fusion, best first, as (item, score).
 
     Scores from different indexes are on different scales, so only ranks
     count: each list adds ``1 / (k + rank + 1)`` to an item's score. Ties keep
-    the order in which items were first seen.
+    the order in which items were first seen. With ``owners`` (each list's
+    items' owners, in step with it: a chunk's document), only each owner's
+    best item is kept; ``top_k`` cuts the result.
+
+    Vectorized: a search fuses every chunk with a vector and every chunk
+    holding a term, which can be a hundred thousand of each.
     """
-    scores: dict[Hashable, float] = {}
-    for ranking in rankings:
-        for rank, item in enumerate(ranking):
-            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
-    return sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+    present = [i for i, ranking in enumerate(rankings) if len(ranking)]
+    if not present:
+        return []
+    items = np.concatenate([np.asarray(rankings[i]) for i in present])
+    weights = np.concatenate([1.0 / (k + np.arange(len(rankings[i]), dtype=np.float64) + 1) for i in present])
+    unique, first, inverse = np.unique(items, return_index=True, return_inverse=True)
+    scores = np.bincount(inverse.reshape(-1), weights=weights, minlength=len(unique))
+    order = np.lexsort((first, -scores))
+    if owners is not None:
+        owner = np.concatenate([np.asarray(owners[i]) for i in present])[first[order]]
+        _, best = np.unique(owner, return_index=True)
+        order = order[np.sort(best)]
+    if top_k is not None:
+        order = order[:top_k]
+    return list(zip(unique[order].tolist(), scores[order].tolist()))
 
 
 def keyword_ranked(

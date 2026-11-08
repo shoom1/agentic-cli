@@ -13,18 +13,23 @@ def _rows(*pairs):
     return [(rowid, doc, to_blob(normalized([vector])[0])) for rowid, doc, vector in pairs]
 
 
+def _pairs(ranked):
+    rowids, documents = ranked
+    return list(zip(rowids.tolist(), documents.tolist()))
+
+
 def test_the_most_similar_chunk_ranks_first():
     index = VectorIndex(3)
     index.load(_rows((1, "a", [1, 0, 0]), (2, "b", [0, 1, 0]), (3, "c", [1, 1, 0])), generation=1)
 
-    assert [rowid for rowid, _ in index.ranked(normalized([[0, 1, 0.1]])[0])] == [2, 3, 1]
+    assert index.ranked(normalized([[0, 1, 0.1]])[0])[0].tolist() == [2, 3, 1]
 
 
 def test_allowed_documents_filter_the_ranking():
     index = VectorIndex(3)
     index.load(_rows((1, "a", [1, 0, 0]), (2, "b", [0, 1, 0])), generation=1)
 
-    assert index.ranked(normalized([[0, 1, 0]])[0], allowed={"a"}) == [(1, "a")]
+    assert _pairs(index.ranked(normalized([[0, 1, 0]])[0], allowed={"a"})) == [(1, "a")]
 
 
 def test_a_vector_of_another_size_is_left_out():
@@ -51,8 +56,8 @@ def test_removing_rows_keeps_the_rest_in_step():
 
     index.apply(2, remove=[2])
 
-    assert index.ranked(normalized([[0, 0, 1]])[0])[0] == (3, "c")
-    assert {doc for _, doc in index.ranked(normalized([[1, 0, 0]])[0])} == {"a", "c"}
+    assert _pairs(index.ranked(normalized([[0, 0, 1]])[0]))[0] == (3, "c")
+    assert set(index.ranked(normalized([[1, 0, 0]])[0])[1].tolist()) == {"a", "c"}
 
 
 def test_stored_vectors_are_normalized_again_and_unusable_ones_left_out():
@@ -66,4 +71,4 @@ def test_stored_vectors_are_normalized_again_and_unusable_ones_left_out():
         ranked = index.ranked(normalized([[0, 1, 0]])[0])
 
     assert len(index) == 3
-    assert [doc for _, doc in ranked] == ["exact", "long", "other"]  # "long" ties with the exact match, never above it
+    assert ranked[1].tolist() == ["exact", "long", "other"]  # "long" ties with the exact match, never above it

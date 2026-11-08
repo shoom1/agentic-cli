@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pytest
 
 from agentic_cli.memory.kb._db import Database
@@ -42,6 +44,41 @@ def db(tmp_path):
 
 def test_fuse_adds_each_list_s_rank():
     assert [item for item, _ in fuse([["x", "y"], ["y", "z"]])] == ["y", "x", "z"]
+
+
+def _fused_by_dict(rankings, owners, top_k, k=60):
+    """Reciprocal rank fusion item by item, then each owner's best item: what
+    the vectorized ``fuse`` must give exactly."""
+    scores: dict = {}
+    owner_of: dict = {}
+    for ranking, owned in zip(rankings, owners):
+        for rank, (item, owner) in enumerate(zip(ranking, owned)):
+            scores[item] = scores.get(item, 0.0) + 1.0 / (k + rank + 1)
+            owner_of[item] = owner
+    picked, seen = [], set()
+    for item, score in sorted(scores.items(), key=lambda pair: pair[1], reverse=True):
+        if owner_of[item] not in seen:
+            seen.add(owner_of[item])
+            picked.append((item, score))
+    return picked[:top_k]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_fusion_is_the_item_by_item_fusion_ties_included(seed):
+    rnd = random.Random(seed)
+    chunks = list(range(1, rnd.randint(2, 300)))
+    owner = {chunk: f"doc-{rnd.randrange(1 + len(chunks) // 3)}" for chunk in chunks}
+    semantic = rnd.sample(chunks, rnd.randint(0, len(chunks)))
+    keyword = rnd.sample(chunks, rnd.randint(0, len(chunks)))
+    if seed % 4 == 0:  # mirrored ranks: every shared chunk ties with its mirror
+        keyword = list(reversed(semantic))
+    rankings = [semantic, keyword]
+    owners = [[owner[c] for c in semantic], [owner[c] for c in keyword]]
+    top_k = rnd.randint(1, 20)
+
+    got = fuse([np.array(r, dtype=np.int64) for r in rankings], owners=[np.array(o) for o in owners], top_k=top_k)
+
+    assert got == _fused_by_dict(rankings, owners, top_k)
 
 
 @pytest.mark.parametrize("fts", [True, False])

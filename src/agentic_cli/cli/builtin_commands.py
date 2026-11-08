@@ -441,7 +441,7 @@ class PapersCommand(Command):
                 d.id[:8],
                 d.title[:50],
                 d.source_type.value,
-                str(len(d.chunks)),
+                str(d.chunk_count),
                 d.created_at.strftime("%Y-%m-%d"),
             )
 

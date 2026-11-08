@@ -47,7 +47,7 @@ def render_sidecar_markdown(doc: Document, payload: dict[str, Any]) -> str:
     if arxiv_id:
         fm_lines.append(f"arxiv_id: {arxiv_id}")
     fm_lines.append(f"ingested_at: {doc.created_at.isoformat()}")
-    fm_lines.append(f"chunks: {len(doc.chunks)}")
+    fm_lines.append(f"chunks: {doc.chunk_count or len(doc.chunks)}")  # a listing's documents carry no chunks
     if doc.file_path:
         fm_lines.append(f"file: files/{doc.file_path}")
     fm_lines.append("---")

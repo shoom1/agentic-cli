@@ -26,10 +26,10 @@ from agentic_cli.memory._core.embeddings import EmbeddingConfig, EmbeddingServic
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb import convert as _convert
 from agentic_cli.memory.kb import enrich
+from agentic_cli.memory.kb._search import fuse
 from agentic_cli.memory.kb.manager import (
     KnowledgeBaseManager,
     UnsafeKnowledgeBase,
-    _faiss_available,
     _Threads,
     _loaded_or_keyword,
     _printable,
@@ -37,9 +37,6 @@ from agentic_cli.memory.kb.manager import (
 from agentic_cli.memory.kb.models import Document, SourceType
 
 logger = get_logger("agentic_cli.memory.kb")
-
-# Reciprocal rank fusion constant: the standard 60.
-RRF_K = 60
 
 ProgressCallback = Callable[[str, int, int, Document], None]
 
@@ -143,26 +140,17 @@ def _matches(doc: Document, query: str) -> bool:
 
 
 def _fuse(ranked: list[list[dict[str, Any]]], top_k: int) -> list[dict[str, Any]]:
-    """Merge ranked hit lists by reciprocal rank fusion.
-
-    Scores from separate indexes are on different scales, so the merge uses
-    rank positions: each list adds ``1 / (RRF_K + rank + 1)`` to a document's
-    score. A document in several lists keeps the first list's hit, and every
-    rank it has adds to its score.
-    """
+    """Merge the scopes' hit lists by reciprocal rank fusion (``_search.fuse``),
+    one hit per document: the first list's, with every rank it has added in."""
     hits: dict[str, dict[str, Any]] = {}
-    scores: dict[str, float] = {}
     for results in ranked:
-        for rank, hit in enumerate(results):
-            doc_id = hit.get("document_id", "")
-            if not doc_id:
-                continue
-            hits.setdefault(doc_id, hit)
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (RRF_K + rank + 1)
+        for hit in results:
+            if hit.get("document_id"):
+                hits.setdefault(hit["document_id"], hit)
     merged = []
-    for doc_id in sorted(scores, key=lambda d: scores[d], reverse=True)[:top_k]:
+    for doc_id, score in fuse([[h["document_id"] for h in results if h.get("document_id")] for results in ranked], top_k=top_k):
         hit = hits[doc_id]
-        hit["score"] = round(scores[doc_id], 4)
+        hit["score"] = round(score, 4)
         merged.append(hit)
     return merged
 
@@ -255,7 +243,7 @@ class KnowledgeBase:
             service = EmbeddingService(
                 model_name=config.model_name, batch_size=config.batch_size, device=config.device
             )
-        if service is not None and not use_mock and _faiss_available():
+        if service is not None and not use_mock:
             # Loaded here, once: each scope would otherwise try it, and warn.
             service = _loaded_or_keyword(service)
         opened: list[KnowledgeBaseManager] = []
@@ -689,3 +677,8 @@ class KnowledgeBase:
     def stats(self) -> dict[str, dict[str, Any]]:
         """Each scope's ``get_stats()``, by scope name."""
         return {name: manager.get_stats() for name, manager in self._managers.items()}
+
+    def close(self) -> None:
+        """Close every scope's database. Idempotent."""
+        for manager in self._managers.values():
+            manager.close()

@@ -28,7 +28,7 @@ import re
 import sqlite3
 import stat
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from functools import cache
@@ -536,21 +536,41 @@ class Database:
             (size,),
         ).rowcount
 
-    def recompute_terms(self, terms_of: Callable[[str], str]) -> None:
-        """Every chunk's terms again (a new tokenizer), and the keyword index from them."""
-        rows = self.conn.execute("SELECT rowid, content FROM chunks").fetchall()
-        self.conn.executemany(
-            "UPDATE chunks SET terms = ? WHERE rowid = ?",
-            [(terms_of(text if isinstance(text, str) else ""), rowid) for rowid, text in rows],
-        )
+    def set_terms(self, pairs: Sequence[tuple[int, str]]) -> None:
+        """Replace chunks' terms (a new tokenizer), keeping the keyword index in
+        step: each chunk's old terms leave it as its new ones enter. A chunk
+        deleted meanwhile is left out."""
+        if not pairs:
+            return
+        marks = ",".join("?" * len(pairs))
+        old = self.conn.execute(
+            f"SELECT rowid, terms FROM chunks WHERE rowid IN ({marks})", [int(rowid) for rowid, _ in pairs]
+        ).fetchall()
+        present = {int(rowid) for rowid, _ in old}
+        new = [(int(rowid), terms) for rowid, terms in pairs if int(rowid) in present]
         if self.fts:
-            self.rebuild_keyword_index()
-        elif self._fts_table:
+            self.conn.executemany("INSERT INTO chunk_terms (chunk_terms, rowid, terms) VALUES ('delete', ?, ?)", old)
+        self.conn.executemany("UPDATE chunks SET terms = ? WHERE rowid = ?", [(terms, rowid) for rowid, terms in new])
+        if self.fts:
+            self.conn.executemany("INSERT INTO chunk_terms (rowid, terms) VALUES (?, ?)", new)
+        elif new and self._fts_table:
             self.set_info(keyword_index="stale")
 
     def rebuild_keyword_index(self) -> None:
         self.conn.execute("INSERT INTO chunk_terms (chunk_terms) VALUES ('rebuild')")
         self.set_info(keyword_index="current")
+
+    def checkpoint(self, wait: float) -> bool:
+        """Empty the write-ahead log into the database (outside a transaction),
+        waiting ``wait`` seconds at most for other sessions' reads; whether it
+        emptied it. A deleted document's text stays in the log until then."""
+        before = self.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.conn.execute(f"PRAGMA busy_timeout = {int(wait * 1000)}")
+        try:
+            busy, _, _ = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            self.conn.execute(f"PRAGMA busy_timeout = {int(before)}")
+        return not busy
 
     # -- reads ---------------------------------------------------------------
 
@@ -651,6 +671,14 @@ class Database:
 
     def file_names(self) -> set[str]:
         return {str(row[0]) for row in self.conn.execute("SELECT file_name FROM documents WHERE file_name IS NOT NULL")}
+
+    def chunk_texts(self, *, after: int, limit: int | None = None) -> list[tuple[int, str]]:
+        """Chunks as (rowid, text) after rowid ``after``, in rowid order (a text
+        that is not text reads as empty)."""
+        sql, params = "SELECT rowid, content FROM chunks WHERE rowid > ? ORDER BY rowid", [after]
+        if limit is not None:
+            sql, params = sql + " LIMIT ?", [after, limit]
+        return [(int(rowid), text if isinstance(text, str) else "") for rowid, text in self.conn.execute(sql, params)]
 
     def chunks_without_vector(self, *, after: int, limit: int) -> list[tuple[int, str]]:
         return [

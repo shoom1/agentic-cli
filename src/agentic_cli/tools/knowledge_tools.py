@@ -68,7 +68,7 @@ def _build_document_item(d, scope: str) -> dict[str, Any]:
         "summary": d.summary,
         "source_type": d.source_type.value,
         "created_at": d.created_at.isoformat(),
-        "chunks": len(d.chunks),
+        "chunks": d.chunk_count,
         "scope": scope,
     }
     if d.metadata.get("authors"):

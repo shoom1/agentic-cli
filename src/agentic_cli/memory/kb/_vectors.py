@@ -35,11 +35,11 @@ class VectorIndex:
         self.dim = dim
         self.generation: int | None = None
         self._rowids = np.empty(0, dtype=np.int64)
-        self._documents: list[str] = []
+        self._documents = np.empty(0, dtype=str)
         self._matrix = np.empty((0, dim), dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self._documents)
+        return len(self._rowids)
 
     def load(self, rows: Iterable[tuple[int, str, bytes]], generation: int) -> None:
         """Hold exactly ``rows`` (rowid, document ID, vector), normalized again.
@@ -55,7 +55,7 @@ class VectorIndex:
         with np.errstate(over="ignore", invalid="ignore"):
             usable = np.isfinite(np.linalg.norm(matrix, axis=1))
         self._rowids = np.array([rowid for rowid, _, _ in kept], dtype=np.int64)[usable]
-        self._documents = [str(doc) for (_, doc, _), ok in zip(kept, usable) if ok]
+        self._documents = np.array([str(doc) for _, doc, _ in kept], dtype=str)[usable]
         self._matrix = normalized(matrix[usable])
         self.generation = generation
 
@@ -71,25 +71,22 @@ class VectorIndex:
         removed = np.asarray(list(remove), dtype=np.int64)
         if removed.size:
             keep = ~np.isin(self._rowids, removed)
-            self._rowids, self._matrix = self._rowids[keep], self._matrix[keep]
-            self._documents = [doc for doc, k in zip(self._documents, keep) if k]
+            self._rowids, self._documents, self._matrix = self._rowids[keep], self._documents[keep], self._matrix[keep]
         if add is not None:
             rowids, documents, vectors = add
             matrix = np.asarray(vectors, dtype=np.float32).reshape(-1, self.dim)
             usable = np.isfinite(matrix).all(axis=1)
             self._rowids = np.concatenate([self._rowids, np.asarray(rowids, dtype=np.int64)[usable]])
             self._matrix = np.vstack([self._matrix, matrix[usable]])
-            self._documents.extend(str(doc) for doc, ok in zip(documents, usable) if ok)
+            self._documents = np.concatenate([self._documents, np.array([str(doc) for doc in documents], dtype=str)[usable]])
         self.generation = generation
 
-    def ranked(self, query: np.ndarray, allowed: set[str] | None = None) -> list[tuple[int, str]]:
-        """Every chunk as (rowid, document ID), most similar to ``query`` (normalized) first."""
-        if not self._documents:
-            return []
+    def ranked(self, query: np.ndarray, allowed: set[str] | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Every chunk, most similar to ``query`` (normalized) first, as two
+        arrays: the rowids and their document IDs. ``allowed`` keeps only
+        those documents' chunks."""
         scores = self._matrix @ np.asarray(query, dtype=np.float32)
         order = np.argsort(-scores, kind="stable")
-        return [
-            (int(self._rowids[i]), self._documents[i])
-            for i in order
-            if allowed is None or self._documents[i] in allowed
-        ]
+        if allowed is not None:
+            order = order[np.isin(self._documents[order], np.array(list(allowed), dtype=str))]
+        return self._rowids[order], self._documents[order]
