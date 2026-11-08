@@ -17,15 +17,18 @@ from pathlib import Path
 
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory._core.secrets import looks_like_secret
-from agentic_cli.memory.store import _files
+from agentic_cli.memory.store import _files, _inbox
+from agentic_cli.memory.store._inbox import Inbox
 from agentic_cli.memory.store._index import render_index
 from agentic_cli.memory.store._scope import INBOX, PROJECT_NOTE, Entry, ScopeFolder, resolve_duplicates
 from agentic_cli.memory.store._search import ranked
 from agentic_cli.memory.store.models import (
+    ACTIONS,
     ALL_MEMORY_TOOLS,
     MEMORY_TYPES,
     SCOPES,
     SOURCES,
+    Candidate,
     DuplicateMemory,
     InvalidMemory,
     Memory,
@@ -33,6 +36,7 @@ from agentic_cli.memory.store.models import (
     MemoryStoreFull,
     NoProjectScope,
     Problem,
+    Proposal,
     Version,
     newest_first,
 )
@@ -165,7 +169,7 @@ class MemoryStore:
         return sum(1 for entry in winners.values() if entry.memory.scope == scope)
 
     def _tidy(self) -> None:
-        """Prune each existing scope's history; a busy scope is left for the next open."""
+        """Prune each existing scope's history and inbox; a busy scope is left for the next open."""
         now = self._now()
         for folder in self._folders.values():
             if not folder.path.is_dir():
@@ -173,6 +177,7 @@ class MemoryStore:
             try:
                 with self._lock, folder.lock():
                     folder.prune_history(now)
+                    Inbox(folder).prune(now)
             except MemoryBusy:
                 continue
 
@@ -444,3 +449,185 @@ class MemoryStore:
                     current.memory.path.unlink(missing_ok=True)
                 folder.prune_history(self._now(), memory_id)
                 return restored
+
+    # -- proposals -----------------------------------------------------------
+
+    def _dropped(self, reason: str, scope: str) -> None:
+        logger.info("memory_proposal_dropped", reason=reason, scope=scope)
+
+    def _candidate_problem(self, candidate: Candidate) -> str | None:
+        """Why ``candidate`` fails a save rule (1-3), names no scope here, or looks like a secret."""
+        reason = _files.description_problem(candidate.description)
+        if reason:
+            return f"description: {reason}"
+        reason = _files.content_problem(candidate.content)
+        if reason:
+            return f"content: {reason}"
+        if candidate.type not in MEMORY_TYPES:
+            return f"type: {candidate.type!r}"
+        if candidate.scope not in SCOPES:
+            return f"scope: {candidate.scope!r}"
+        if candidate.action not in ACTIONS:
+            return f"action: {candidate.action!r}"
+        if candidate.scope not in self._folders and candidate.action == "new":
+            return "no project scope"
+        if self._screen is not None and self._screen(candidate.description + "\n" + candidate.content):
+            return "looks like a secret"
+        return None
+
+    def propose(
+        self,
+        candidate: Candidate,
+        *,
+        conversation: str | None = None,
+        outside_content: str | None = None,
+        source: str = "extractor",
+    ) -> Proposal | None:
+        """File ``candidate`` in its scope's inbox; None when a filter drops it (spec §8.2).
+
+        An update is filed in its memory's scope, whatever the candidate says.
+        Each drop is logged (``memory_proposal_dropped``) with its reason.
+        """
+        reason = self._candidate_problem(candidate)
+        if reason is not None:
+            self._dropped(reason, candidate.scope)
+            return None
+        with self._lock:
+            if candidate.action == "update":
+                entry = self._entries()[0].get(candidate.target or "")
+                if entry is None:
+                    self._dropped("its memory does not exist", candidate.scope)
+                    return None
+                candidate = replace(candidate, scope=entry.memory.scope)
+            folder = self._folders[candidate.scope]
+            with folder.lock():
+                return self._propose_locked(folder, candidate, conversation, outside_content, source)
+
+    def _propose_locked(
+        self,
+        folder: ScopeFolder,
+        candidate: Candidate,
+        conversation: str | None,
+        outside_content: str | None,
+        source: str,
+    ) -> Proposal | None:
+        """Filters 3-5, then the file. The caller checked the fields and holds the lock."""
+        winners, _ = self._entries()
+        waiting = [p for f in self._folders.values() for p in Inbox(f).proposals()[0]]
+        discarded = set(self.discarded())
+        description, content = candidate.description.strip(), candidate.content.strip()
+        key_d, key_c = _files.normalized(description), _files.normalized(content)
+        if candidate.action == "new":
+            if any(
+                _files.normalized(e.memory.description) == key_d or _files.normalized(e.memory.content) == key_c
+                for e in winners.values()
+            ) or any(
+                _files.normalized(p.description) == key_d or _files.normalized(p.content) == key_c
+                for p in waiting
+            ):
+                self._dropped("it repeats a memory or a waiting proposal", folder.scope)
+                return None
+        else:
+            target = winners.get(candidate.target or "")
+            if target is None:
+                self._dropped("its memory does not exist", folder.scope)
+                return None
+            if (_files.normalized(target.memory.description) == key_d
+                    and _files.normalized(target.memory.content) == key_c):
+                self._dropped("it changes nothing", folder.scope)
+                return None
+            if any(e.memory.id != target.memory.id and _files.normalized(e.memory.description) == key_d
+                   for e in winners.values()):
+                self._dropped("another memory has its description", folder.scope)
+                return None
+        if key_d in discarded:
+            self._dropped("a person discarded it before", folder.scope)
+            return None
+        inbox = Inbox(folder)
+        if len(inbox.proposals()[0]) >= _inbox.INBOX_MAX:
+            self._dropped("the inbox is full", folder.scope)
+            return None
+        proposal_id = _files.new_id(self._taken(winners))
+        proposal = Proposal(
+            id=proposal_id,
+            action=candidate.action,
+            target=candidate.target if candidate.action == "update" else None,
+            description=description,
+            content=content,
+            type=candidate.type,
+            scope=folder.scope,  # type: ignore[arg-type]
+            source=source,  # type: ignore[arg-type]
+            conversation=conversation,
+            outside_content=outside_content,
+            created=self._now_s(),
+            path=inbox.path / f"{proposal_id}.md",
+        )
+        inbox.write(proposal)
+        return proposal
+
+    def proposals(self, scope: str | None = None) -> list[Proposal]:
+        """The waiting proposals (of ``scope`` only, if given), oldest first."""
+        with self._lock:
+            found = [
+                p for name, folder in self._folders.items() if scope is None or name == scope
+                for p in Inbox(folder).proposals()[0]
+            ]
+        return sorted(found, key=lambda p: (p.created, p.id))
+
+    def _find_proposal(self, proposal_id: str) -> Proposal | None:
+        if not _files.valid_id(proposal_id):
+            return None
+        for folder in self._folders.values():
+            for proposal in Inbox(folder).proposals()[0]:
+                if proposal.id == proposal_id:
+                    return proposal
+        return None
+
+    def accept(self, proposal_id: str) -> Memory:
+        """Make a proposal a memory: a new one is saved, an update applied (its old
+        version goes to history). The proposal is removed only on success.
+
+        Raises:
+            InvalidMemory: no such proposal, a rule fails now, or an update's
+                memory was deleted.
+            DuplicateMemory, MemoryStoreFull, MemoryBusy: as ``save``/``update``.
+        """
+        with self._lock:
+            proposal = self._find_proposal(proposal_id)
+            if proposal is None:
+                raise InvalidMemory(f"no proposal {proposal_id}")
+            folder = self._folders[proposal.scope]
+            description, content = self._checked(proposal.description, proposal.content, proposal.type)
+            self._screened(description, content)
+            with folder.lock():
+                if proposal.action == "new":
+                    memory = self._save_locked(
+                        folder, description, content, proposal.type, proposal.source, proposal.conversation
+                    )
+                else:
+                    memory = self._update_locked(folder, proposal.target or "", description, content, proposal.type)
+                    if memory is None:
+                        raise InvalidMemory("its memory was deleted; discard it")
+                Inbox(folder).remove(proposal)
+                return memory
+
+    def discard(self, proposal_id: str) -> bool:
+        """Remove a proposal and remember its description. False: no such proposal."""
+        with self._lock:
+            proposal = self._find_proposal(proposal_id)
+            if proposal is None:
+                return False
+            folder = self._folders[proposal.scope]
+            with folder.lock():
+                inbox = Inbox(folder)
+                inbox.remove(proposal)
+                inbox.add_discarded(_files.normalized(proposal.description), self._now())
+                return True
+
+    def discarded(self) -> list[str]:
+        """The descriptions a person discarded, both scopes, oldest first, each once."""
+        seen: dict[str, None] = {}
+        for folder in self._folders.values():
+            for description in Inbox(folder).discarded():
+                seen.setdefault(description, None)
+        return list(seen)
