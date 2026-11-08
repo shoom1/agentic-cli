@@ -7,6 +7,10 @@ The folder:
     concepts/          concept pages (``ConceptStore``)
     index.md           the catalogue, rendered from the database
     ingest_log.md      one line per ingest and delete
+
+A folder 0.6 wrote (``metadata.json``, ``documents/<id>.json``,
+``embeddings/``) is imported into ``kb.sqlite`` when it first opens, and its
+old files are moved into ``pre-0.7.0/`` (``_import_06``).
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from agentic_cli.memory._core.io import (
 )
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
-from agentic_cli.memory.kb import _search, enrich
+from agentic_cli.memory.kb import _import_06, _search, enrich
 from agentic_cli.memory.kb._db import (  # noqa: F401 - KnowledgeBaseBusy, UnsafeKnowledgeBase: re-exported
     DB_NAME,
     Database,
@@ -256,12 +260,16 @@ class KnowledgeBaseManager:
         self._service, self._semantic = self._choose_service(embedding or EmbeddingConfig(), embedding_service, use_mock)
         self._model_name = str(getattr(self._service, "model_name", "unknown"))
         self._vectors: VectorIndex | None = None
+        if _import_06.needs_import(self.kb_dir):
+            _import_06.run(self.kb_dir)
         self._db = Database.open(self.db_path)
         try:
             with self._lock:
+                # Before the sweep, which would delete the files of documents the import skipped.
+                moved = _import_06.tidy(self.kb_dir, self._db)
                 self._reconcile_terms()
                 self._sweep()
-                self._ensure_index_md()
+                self._ensure_index_md(rewrite=moved)
                 if self._semantic:
                     self._vectors = self._reconcile_vectors()
         except BaseException:
