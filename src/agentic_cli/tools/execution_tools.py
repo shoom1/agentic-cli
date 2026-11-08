@@ -18,6 +18,7 @@ from agentic_cli.workflow.permissions import Capability
 
 @register_tool(
     category=ToolCategory.EXECUTION,
+    outside_content=True,
     capabilities=[Capability("python.exec")],
     description=(
         "Stateless Python scratchpad for quick calculations, formula checks, and "

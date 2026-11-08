@@ -125,6 +125,7 @@ class TestMCPSessions:
             definition = sessions.identify(add)
             assert definition.name == "add"
             assert definition.capabilities == [Capability("mcp", target="add")]
+            assert sessions.identify(add).outside_content is True
             assert sessions.identify(lookup).capabilities == [
                 Capability("mcp", target="lookup")
             ]

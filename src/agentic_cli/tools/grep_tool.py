@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from agentic_cli.file_utils import expand_braces, glob_pattern_escapes_root, path_is_within
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools._saved_outputs import reads_saved_output
 from agentic_cli.tools.registry import (
     ToolCategory,
     register_tool,
@@ -30,6 +31,7 @@ _MAX_RG_ERROR_BYTES = 2_000  # how much of ripgrep's error output a failure quot
 
 @register_tool(
     category=ToolCategory.READ,
+    outside_content=reads_saved_output("path"),
     capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Search for text patterns inside file contents (regex or literal). Use this to find code references, function definitions, or any text across files. For finding files by name, use glob instead.",
 )

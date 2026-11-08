@@ -277,6 +277,7 @@ async def fetch_and_summarize(url: str, prompt: str, timeout: int, summarizer) -
 
 @register_tool(
     category=ToolCategory.NETWORK,
+    outside_content=True,
     capabilities=[Capability("http.read", target_arg="url")],
     description=(
         "Fetch a web page, convert it to markdown, and summarize it using an LLM "

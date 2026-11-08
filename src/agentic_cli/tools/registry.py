@@ -99,6 +99,10 @@ class ToolDefinition:
     requires: tuple[str, ...] = ()
     is_async: bool = False
     long_running: bool = False  # tool starts a background job; see tools/jobs/
+    # True, or a function of the call's arguments, when the call brings
+    # content from outside the user and the project into the conversation
+    # (a web page, a document, a program's output); see workflow/outside_content.py.
+    outside_content: bool | Callable[[dict], bool] = False
     variants: tuple[Callable[..., Any], ...] = ()
 
     def __post_init__(self):
@@ -240,11 +244,12 @@ def _same_declaration(
     requires: tuple[str, ...],
     category: "ToolCategory",
     long_running: bool,
+    outside_content: "bool | Callable[[dict], bool]",
 ) -> bool:
     """Whether a re-registration describes the *same tool*, differently implemented.
 
     Everything the framework acts on — what it may do, what it needs, whether
-    it is long-running — must match. Only the callable may differ, which is the
+    it is long-running, whether it brings outside content — must match. Only the callable may differ, which is the
     legitimate case of one tool with two backend-native implementations.
     """
     return (
@@ -252,6 +257,7 @@ def _same_declaration(
         and existing.requires == requires
         and existing.category == category
         and existing.long_running == long_running
+        and existing.outside_content == outside_content
     )
 
 
@@ -332,6 +338,7 @@ class ToolRegistry:
         capabilities: CapabilitiesSpec,
         requires: str | tuple[str, ...] | list[str] | None = None,
         long_running: bool = False,
+        outside_content: bool | Callable[[dict], bool] = False,
         replace: bool = False,
         variant_of: str | None = None,
     ) -> Callable[..., Any]:
@@ -352,6 +359,12 @@ class ToolRegistry:
         ``long_running=True`` marks a tool that starts a background job (it should
         return a ``job_id`` and delegate to ``JobManager``); see ``tools/jobs/``.
 
+        ``outside_content=True`` marks a tool whose calls bring content from
+        outside the user and the project into the conversation (a web page, a
+        document, a program's output); a function of the call's arguments
+        decides per call. Once such a call is allowed, a memory write in that
+        conversation is approved for each call (``workflow/outside_content.py``).
+
         A name means **one tool**. Registering it again raises ``ValueError``
         rather than taking it over: the two definitions would disagree about
         what the tool is, and consumers keyed on the name (permission rules,
@@ -365,7 +378,8 @@ class ToolRegistry:
           already-declared tool (see :func:`declare_tool`). It binds to that
           tool's identity and permission metadata, and may differ in signature
           and docstring, which is the whole point. Its declaration
-          (capabilities/requires/category/long_running) must match exactly.
+          (capabilities/requires/category/long_running/outside_content) must
+          match exactly.
         - ``replace=True`` takes the name over deliberately; the previous
           definition's identities are retired, so its callables resolve to
           nothing and are denied rather than inheriting the replacement's
@@ -403,12 +417,14 @@ class ToolRegistry:
                     validated_requires,
                     category,
                     long_running,
+                    outside_content,
                 ):
                     raise ValueError(
                         f"Variant of {variant_of!r} declares a different "
                         "declaration than the tool it implements: capabilities, "
-                        "requires, category and long_running must match exactly "
-                        "(a variant shares the tool's permission contract)."
+                        "requires, category, long_running and outside_content "
+                        "must match exactly (a variant shares the tool's "
+                        "permission contract)."
                     )
                 existing.variants = _ordered_variants(
                     existing.variants + (canonical,)
@@ -437,6 +453,7 @@ class ToolRegistry:
                 category=category,
                 requires=validated_requires,
                 long_running=long_running,
+                outside_content=outside_content,
             )
 
             self._tools[tool_name] = definition
@@ -486,6 +503,7 @@ class ToolRegistry:
         category: ToolCategory = ToolCategory.OTHER,
         requires: str | tuple[str, ...] | list[str] | None = None,
         long_running: bool = False,
+        outside_content: bool | Callable[[dict], bool] = False,
     ) -> "ToolDefinition":
         """Declare a tool that exists only as backend-native variants.
 
@@ -514,7 +532,12 @@ class ToolRegistry:
                 existing.func is not None
                 or existing.description != description
                 or not _same_declaration(
-                    existing, validated_caps, validated_requires, category, long_running
+                    existing,
+                    validated_caps,
+                    validated_requires,
+                    category,
+                    long_running,
+                    outside_content,
                 )
             ):
                 raise ValueError(
@@ -531,6 +554,7 @@ class ToolRegistry:
             category=category,
             requires=validated_requires,
             long_running=long_running,
+            outside_content=outside_content,
         )
         self._tools[name] = definition
         return definition
@@ -644,6 +668,7 @@ def declare_tool(
     category: ToolCategory = ToolCategory.OTHER,
     requires: str | tuple[str, ...] | list[str] | None = None,
     long_running: bool = False,
+    outside_content: bool | Callable[[dict], bool] = False,
     registry: "ToolRegistry | None" = None,
 ) -> "ToolDefinition":
     """Declare a tool implemented only by backend-native variants.
@@ -660,6 +685,7 @@ def declare_tool(
         category=category,
         requires=requires,
         long_running=long_running,
+        outside_content=outside_content,
     )
 
 
@@ -672,6 +698,7 @@ def register_tool(
     capabilities: CapabilitiesSpec,
     requires: str | tuple[str, ...] | list[str] | None = None,
     long_running: bool = False,
+    outside_content: bool | Callable[[dict], bool] = False,
     replace: bool = False,
     variant_of: str | None = None,
 ) -> Callable[..., Any]:
@@ -691,6 +718,12 @@ def register_tool(
     ``long_running=True`` marks a tool that starts a background job (see
     ``tools/jobs/``).
 
+    ``outside_content=True`` (or a function of the call's arguments) marks a
+    tool whose calls bring content from outside the user and the project into
+    the conversation, which makes a memory write there ask for each call (see
+    ``workflow/outside_content.py``). An application's tools are unmarked
+    unless they declare it.
+
     A name may be registered once; a collision raises ``ValueError`` unless
     ``variant_of=`` (a backend-native implementation of a declared tool) or
     ``replace=True`` is passed deliberately (see ``ToolRegistry.register``).
@@ -705,6 +738,7 @@ def register_tool(
             capabilities=capabilities,
             requires=requires,
             long_running=long_running,
+            outside_content=outside_content,
             replace=replace,
             variant_of=variant_of,
         )

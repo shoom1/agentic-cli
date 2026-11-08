@@ -376,6 +376,7 @@ async def _search_concepts(kb, query: str, limit: int = 10) -> dict[str, Any]:
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description="Search the local knowledge base for relevant documents using semantic similarity. Use this when you need to find previously ingested papers, notes, or documents.",
     requires="knowledge_base",
@@ -493,6 +494,7 @@ async def kb_ingest_file(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description=(
         "Read a stored document by ID or title. Returns the per-document "
@@ -521,6 +523,7 @@ async def kb_read(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description="List documents in the knowledge base with summaries. Filter by query or source type. Returns summaries, not full content.",
     requires="knowledge_base",
@@ -584,6 +587,7 @@ async def kb_write_concept(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    outside_content=True,
     capabilities=[Capability("kb.read")],
     description=(
         "Search concept pages (agent-curated synthesis notes). "

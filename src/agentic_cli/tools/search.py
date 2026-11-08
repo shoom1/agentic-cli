@@ -198,6 +198,7 @@ def _get_backend(settings: Any) -> SearchBackend:
 
 @register_tool(
     category=ToolCategory.NETWORK,
+    outside_content=True,
     # Its own capability: sending queries to the configured search provider is
     # a different decision from fetching arbitrary URLs (http.read), and
     # approving one must not approve the other.

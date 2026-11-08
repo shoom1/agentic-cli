@@ -73,6 +73,7 @@ def job_status(job_id: str) -> dict:
 
 @register_tool(
     category=ToolCategory.EXECUTION,
+    outside_content=True,
     capabilities=[Capability("jobs.manage")],
     description="Get the result of a finished background job.",
     requires="job_manager",
@@ -94,6 +95,7 @@ def job_result(job_id: str) -> dict:
 
 @register_tool(
     category=ToolCategory.EXECUTION,
+    outside_content=True,
     capabilities=[Capability("jobs.manage")],
     description="Read recent log lines (stdout/stderr) of a background job.",
     requires="job_manager",
