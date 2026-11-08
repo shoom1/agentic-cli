@@ -60,8 +60,8 @@ def run(kb_dir: Path) -> None:
         ValueError: ``metadata.json`` is not JSON at all (a git-LFS pointer
             not pulled yet, say): nothing is imported, created or moved,
             and the next open tries again.
-        KnowledgeBaseBusy: an older version's session held the folder lock
-            for ``BUSY_TIMEOUT_S``.
+        KnowledgeBaseBusy: another session (perhaps an older version's)
+            held the folder lock for ``BUSY_TIMEOUT_S``.
     """
     _headers(kb_dir)  # before anything is created, the lock file included
     with _legacy_lock(kb_dir):
@@ -72,19 +72,19 @@ def run(kb_dir: Path) -> None:
 @contextmanager
 def _legacy_lock(kb_dir: Path) -> Iterator[None]:
     """The ``.lock`` folder lock 0.6 sessions take around each change, waited
-    for up to ``BUSY_TIMEOUT_S`` (an older version's session may be changing
+    for up to ``BUSY_TIMEOUT_S`` (another session may be changing or importing
     the folder), then ``KnowledgeBaseBusy``."""
 
     def waiting() -> None:
         logger.warning("kb_legacy_lock_held", path=str(kb_dir),
-                       reason="an older version's session is changing this knowledge base; waiting")
+                       reason="another session (perhaps an older version's) holds this knowledge base's .lock; waiting")
 
     with ExitStack() as stack:
         try:
             stack.enter_context(folder_lock(kb_dir / ".lock", timeout=_db.BUSY_TIMEOUT_S, on_wait=waiting))
         except TimeoutError as e:
             raise KnowledgeBaseBusy(
-                f"{kb_dir}: an older version's session kept the knowledge base locked for {_db.BUSY_TIMEOUT_S:g} s"
+                f"{kb_dir}: another session (perhaps an older version's) held its .lock for {_db.BUSY_TIMEOUT_S:g} s"
             ) from e
         yield
 
@@ -104,10 +104,12 @@ def tidy(kb_dir: Path, db: Database) -> bool:
                         note="nothing reads it any more: delete it once the knowledge base looks right")
         elif _legacy_files(kb_dir):
             # What the old session wrote: its headers and texts, and the
-            # sidecars and stored files no row names (the leftover sweep
-            # would delete them).
+            # sidecars and stored files of its documents (the leftover sweep
+            # would delete them). Nothing else: a document this version
+            # deleted still has its files until its delete unlinks them.
             target = kb_dir / LEGACY_DIR / f"after-import-{_stamp()}"
-            _move_aside(kb_dir, target, imported=db.document_ids(), referenced=db.file_names())
+            _move_aside(kb_dir, target, imported=None, referenced=None,
+                        written_later=_written_later(kb_dir, db.document_ids()))
             logger.warning("kb_legacy_files_ignored", path=str(target),
                            reason="an older version wrote to this knowledge base after it was imported; "
                                   "what it wrote is not in the knowledge base")
@@ -261,10 +263,33 @@ def _real_folder(path: Path) -> Path:
     return path
 
 
-def _move_aside(kb_dir: Path, target: Path, *, imported: set[str] | None, referenced: set[str] | None) -> None:
+def _written_later(kb_dir: Path, known: set[str]) -> set[str]:
+    """The IDs of the documents an older version wrote after the import (its
+    headers in ``metadata.json``, its ``documents/<id>.json`` texts), less
+    the database's own."""
+    ids = {path.stem for path in _entries(kb_dir / "documents") if path.suffix == ".json"}
+    raw = read_if_regular(kb_dir / "metadata.json")
+    try:
+        data = json.loads(raw) if raw is not None else None
+    except (ValueError, UnicodeDecodeError):
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("documents"), list):
+        ids |= {header["id"] for header in data["documents"] if isinstance(header, dict) and isinstance(header.get("id"), str)}
+    return {doc_id for doc_id in ids if PLAIN_DOC_ID.fullmatch(doc_id) and doc_id not in known}
+
+
+def _move_aside(
+    kb_dir: Path,
+    target: Path,
+    *,
+    imported: set[str] | None,
+    referenced: set[str] | None,
+    written_later: set[str] | None = None,
+) -> None:
     """Move 0.6's files into ``target``; with ``imported``, also the sidecars
     and stored files of documents that were not imported (the leftover sweep
-    would delete them). Then delete ``embeddings/``."""
+    would delete them), and with ``written_later``, those of the documents
+    an older version wrote after the import. Then delete ``embeddings/``."""
     _real_folder(kb_dir / LEGACY_DIR)
     if target != kb_dir / LEGACY_DIR:
         _real_folder(target)
@@ -282,12 +307,17 @@ def _move_aside(kb_dir: Path, target: Path, *, imported: set[str] | None, refere
         move(kb_dir / "metadata.json", "metadata.json")
     for path in _entries(kb_dir / "documents"):
         stem, suffix = path.stem, path.suffix
-        if suffix == ".json" or (imported is not None and suffix == ".md" and stem not in imported):
+        if (
+            suffix == ".json"
+            or (imported is not None and suffix == ".md" and stem not in imported)
+            or (written_later is not None and suffix == ".md" and stem in written_later)
+        ):
             move(path, "documents", path.name)
-    if imported is not None and referenced is not None:
-        for path in _entries(kb_dir / "files"):
-            if path.name not in referenced:
-                move(path, "files", path.name)
+    for path in _entries(kb_dir / "files"):
+        if (imported is not None and referenced is not None and path.name not in referenced) or (
+            written_later is not None and path.name.partition(".")[0] in written_later
+        ):
+            move(path, "files", path.name)
     embeddings = kb_dir / "embeddings"
     if os.path.islink(embeddings):
         embeddings.unlink()

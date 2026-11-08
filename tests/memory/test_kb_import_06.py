@@ -422,3 +422,32 @@ def test_an_older_session_holding_the_lock_is_waited_for_then_reported_busy(tmp_
     assert outcome and isinstance(outcome[0], KnowledgeBaseBusy)
     assert len(log.warnings("kb_legacy_lock_held")) == 1
     assert not (tmp_path / "kb.sqlite").exists()
+
+
+def test_only_the_older_session_s_own_files_are_kept_aside(tmp_path, monkeypatch):
+    """A document this version deleted (its row gone, its files not yet: the
+    delete unlinks them after it commits) and a file a user put in files/
+    are not the old session's: they are not moved aside."""
+    write_06(tmp_path, [(A, "Otters", "Otters nest.")])
+    kb = KnowledgeBaseManager(tmp_path, use_mock=True)
+    doomed = kb.ingest_document(content="Herons wade.", title="Herons", source_type=SourceType.USER,
+                                file_bytes=b"%PDF herons", file_extension=".pdf")
+    monkeypatch.setattr(KnowledgeBaseManager, "_delete_sidecar", lambda self, doc_id: None)
+    monkeypatch.setattr(KnowledgeBaseManager, "_delete_stored_file", lambda self, doc: None)
+    kb.delete_document(doomed.id)  # committed; its files are still there, as in that moment
+    monkeypatch.undo()
+    kb.close()
+    (tmp_path / "files" / "notes.txt").write_text("the user's own")
+    (tmp_path / "metadata.json").write_text(json.dumps({"version": 3, "documents": [header_06(C, "Gamma", file_path=f"{C}.pdf")]}))
+    (tmp_path / "documents" / f"{C}.json").write_text(json.dumps({"content": "gamma text", "chunks": {}}))
+    (tmp_path / "documents" / f"{C}.md").write_text("# Gamma")
+    (tmp_path / "files" / f"{C}.pdf").write_bytes(b"%PDF gamma")
+
+    KnowledgeBaseManager(tmp_path, use_mock=True)
+
+    [aside] = (tmp_path / "pre-0.7.0").glob("after-import-*")
+    assert sorted(p.relative_to(aside).as_posix() for p in aside.rglob("*") if p.is_file()) == [
+        f"documents/{C}.json", f"documents/{C}.md", f"files/{C}.pdf", "metadata.json",
+    ]
+    assert (tmp_path / "files" / "notes.txt").read_text() == "the user's own"
+    assert not list(tmp_path.rglob(f"{doomed.id}*"))  # the deleted document's files are gone

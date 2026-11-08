@@ -313,8 +313,8 @@ class KnowledgeBaseManager:
         that is a symlink would put its reads, writes and deletes in a folder
         elsewhere, and so would the database or one of its companions
         (``kb.sqlite``, ``-wal``, ``-shm``, ``-journal``) or the lock file
-        (or create the file a dangling link names); a non-empty rollback
-        journal is refused too (see ``_db.check_files``). The knowledge
+        (or create the file a dangling link names); a rollback journal that
+        names a super-journal is refused too (see ``_db.check_files``). The knowledge
         base's folder itself may be a symlink, unless it was opened
         ``within`` a folder: then each folder from there down to it must be a
         real one, so a repository cannot point ``.{app}`` or

@@ -282,8 +282,8 @@ class Database:
 
         Raises:
             UnsafeKnowledgeBase: the file or a companion is a link or not a
-                regular file, a rollback journal is there, or the schema is
-                not this module's.
+                regular file, its rollback journal names a super-journal, or
+                the schema is not this module's.
             ValueError: the database is of a format this version does not read.
             KnowledgeBaseBusy: other sessions kept it locked past ``BUSY_TIMEOUT_S``.
             sqlite3.DatabaseError: the file is not a database (a git-LFS
