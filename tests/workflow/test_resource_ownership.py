@@ -63,6 +63,7 @@ def _manager(session_service) -> GoogleADKWorkflowManager:
     mgr._catalog = None
     mgr._session_service_pinned = False
     mgr._carried_service_keys = frozenset()
+    mgr._index_snapshots = {}
     mgr._lifecycle_lock = asyncio.Lock()
     mgr._turn_lock = asyncio.Lock()
     return mgr
@@ -585,6 +586,7 @@ def _deepagents_manager(connection, mcp=None):
     mgr._initialized = True
     mgr._catalog = None
     mgr._carried_service_keys = frozenset()
+    mgr._index_snapshots = {}
     mgr._lifecycle_lock = asyncio.Lock()
     mgr._turn_lock = asyncio.Lock()
     return mgr

@@ -322,6 +322,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         runner, self._runner = self._runner, None
         self._root_agent = None
         self._budgets = {}
+        self._index_snapshots.clear()
         self._initialized = False
 
         # Clear LLM logging plugin

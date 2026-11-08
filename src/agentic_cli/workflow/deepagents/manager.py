@@ -412,6 +412,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root_name = None
         self._root_summarization = None
         self._budgets = {}
+        self._index_snapshots.clear()
         self._initialized = False
         self._pending_notices = []
 

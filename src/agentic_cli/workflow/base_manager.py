@@ -191,6 +191,9 @@ class BaseWorkflowManager(ABC):
         self._carried_service_keys: frozenset[str] = frozenset()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
+        # The memory index each conversation's main agent gets (spec §11.1):
+        # taken once, so the prompt prefix stays cached.
+        self._index_snapshots: dict[SessionRef, str] = {}
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -750,6 +753,63 @@ class BaseWorkflowManager(ABC):
             if proposal is not None:
                 filed.append(proposal)
         return filed
+
+    def _root_memory_tools(self, root: str | None = None) -> tuple[str, ...]:
+        """The memory tools the main agent ``root`` has, by name, from its config."""
+        from agentic_cli.memory import ALL_MEMORY_TOOLS
+        from agentic_cli.tools.registry import identify_tool
+
+        root = root or self._root_agent_name
+        config = next((c for c in self._agent_configs if c.name == root), None)
+        if config is None:
+            return ()
+        names = [
+            definition.name
+            for definition in (identify_tool(tool) for tool in config.tools or [])
+            if definition is not None and definition.name in ALL_MEMORY_TOOLS
+        ]
+        return tuple(dict.fromkeys(names))
+
+    def _memory_index_wanted(self, root: str) -> bool:
+        """Whether ``root``'s requests carry the memory index (setting on, a memory tool)."""
+        return bool(getattr(self._settings, "memory_index_enabled", True)) and bool(
+            self._root_memory_tools(root)
+        )
+
+    def _memory_index_now(self) -> str:
+        """The index the turn's conversation carries, taken the first time it is
+        asked for; ``""`` for none. It reads the memory files: call it off the
+        event loop."""
+        ref = get_active_turn()
+        if ref is None:
+            return ""
+        text = self._index_snapshots.get(ref)
+        if text is None:
+            text = self._render_memory_index()
+            self._index_snapshots[ref] = text
+        return text
+
+    def _memory_index_cached(self) -> str:
+        """The turn's conversation's snapshot if one was taken, else ``""``; reads nothing."""
+        ref = get_active_turn()
+        return self._index_snapshots.get(ref, "") if ref is not None else ""
+
+    def _render_memory_index(self) -> str:
+        store = self._services.get(MEMORY_STORE)
+        tools = self._root_memory_tools()
+        if store is None or not tools or not getattr(self._settings, "memory_index_enabled", True):
+            return ""
+        try:
+            return store.index(max_bytes=self._settings.memory_index_max_bytes, tools=tools)
+        except Exception as e:  # the turn goes on without it
+            logger.warning("memory_index_unavailable", error=f"{type(e).__name__}: {e}")
+            return ""
+
+    def _forget_memory_index(self, ref: SessionRef | None = None) -> None:
+        """Drop a conversation's snapshot (the turn's by default): its next request takes a new one."""
+        ref = ref or get_active_turn()
+        if ref is not None:
+            self._index_snapshots.pop(ref, None)
 
     def _outside_content_mark(self, ref: SessionRef) -> str | None:
         """The tool that brought outside content into ``ref``'s conversation, or None."""
@@ -1551,6 +1611,8 @@ class BaseWorkflowManager(ABC):
         if not self.supports_sessions:
             if hasattr(self, "session_id"):
                 self.session_id = session_id
+            # A resumed conversation takes a new memory index (spec §11.1).
+            self._forget_memory_index(self.session_ref(session_id, user_id))
             logger.info(
                 "session_adopted", session_id=session_id, resumed=False,
                 backend_sessions=False,
@@ -1562,6 +1624,7 @@ class BaseWorkflowManager(ABC):
             exists = await self.session_exists(session_id, user_id=user_id)
         if hasattr(self, "session_id"):
             self.session_id = session_id
+        self._forget_memory_index(self.session_ref(session_id, user_id))
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         return exists
 
