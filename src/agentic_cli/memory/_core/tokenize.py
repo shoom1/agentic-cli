@@ -1,10 +1,11 @@
-"""How the knowledge base splits text into keyword terms.
+"""How the memory package splits text into keyword terms.
 
-Each chunk's terms are stored with it (``chunks.terms`` in ``kb.sqlite``),
-and the keyword index (FTS5) indexes them, so a query split by
-:func:`tokenize` and the indexed text are split the same way. The database
-records ``TOKENIZER``; one recorded with a different tokenizer has every
-chunk's terms recomputed when it opens. A run of Chinese, Japanese or Korean
+The knowledge base stores each chunk's terms with it (``chunks.terms`` in
+``kb.sqlite``), and the keyword index (FTS5) indexes them, so a query split by
+:func:`tokenize` and the indexed text are split the same way; the memory
+store ranks its memories by the same terms. The database records
+``TOKENIZER``; one recorded with a different tokenizer has every chunk's
+terms recomputed when it opens. A run of Chinese, Japanese or Korean
 characters, which spaces do not divide into words, is indexed as overlapping
 two-character terms.
 """

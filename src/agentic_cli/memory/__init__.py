@@ -15,6 +15,7 @@ from agentic_cli.memory._core.embeddings import (
     resolve_embedding_device,
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
+from agentic_cli.memory._core.secrets import looks_like_secret
 from agentic_cli.memory.store import ForgettingPolicy, MemoryItem, MemoryStore
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "MemoryItem",
     "MemoryStore",
     "MockEmbeddingService",
+    "looks_like_secret",
     "resolve_embedding_device",
 ]

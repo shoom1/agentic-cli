@@ -66,7 +66,7 @@ CHUNKS_DDL = (
     "position INTEGER NOT NULL, content TEXT NOT NULL, terms TEXT NOT NULL, vector BLOB)"
 )
 CHUNKS_INDEX_DDL = "CREATE INDEX chunks_by_document ON chunks(document_id)"
-# The terms are split already (_tokenize.tokenize, space-separated): the ascii
+# The terms are split already (_core.tokenize.tokenize, space-separated): the ascii
 # tokenizer splits at the spaces only, every non-ASCII character and "_"
 # being part of a term. The external content table reads them from
 # chunks.terms, so they are stored once.

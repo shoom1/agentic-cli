@@ -50,7 +50,7 @@ from agentic_cli.memory.kb._db import (  # noqa: F401 - KnowledgeBaseBusy, Unsaf
     check_files,
     refuse,
 )
-from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
+from agentic_cli.memory._core.tokenize import TOKENIZER, tokenize
 from agentic_cli.memory.kb._vectors import VectorIndex, normalized, to_blob
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SearchResult, SourceType
 from agentic_cli.memory.kb.sidecar import render_index_md, render_sidecar_markdown
