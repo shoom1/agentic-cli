@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
+import threading
+
 import pytest
 
 from agentic_cli.memory import MemoryStore
+from agentic_cli.memory._core.filelock import folder_lock
+from agentic_cli.memory.store import _scope
 from agentic_cli.tools import memory_tools
 from agentic_cli.tools.factories import make_memory_tools
 from agentic_cli.tools.registry import get_registry
@@ -175,3 +181,73 @@ def test_an_update_to_text_no_file_can_hold_is_refused_and_leaves_the_memory(too
     result = tools["update_memory"](saved["item_id"], content="\ud800")
     assert result["success"] is False and "UTF-8" in result["error"]
     assert store.read(saved["item_id"]).content == "Tabs."
+
+
+# Spec §7: a result says what happened, never where on the disk: the paths stay in the
+# exceptions and the logs.
+
+
+def _no_path(result, tmp_path):
+    assert result["success"] is False and result["error"]
+    assert str(tmp_path) not in json.dumps(result)
+
+
+def test_a_busy_scope_is_a_result_without_the_folder(tools, store, tmp_path, monkeypatch):
+    monkeypatch.setattr(_scope, "LOCK_TIMEOUT_S", 0.2)
+    folder = store._folders["user"]
+    folder.ensure()
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with folder_lock(folder.path / ".lock"):
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    held.wait(5)
+    try:
+        result = tools["save_memory"]("d", "c", "user", scope="user")
+    finally:
+        release.set()
+        holder.join()
+    _no_path(result, tmp_path)
+    assert "busy" in result["error"]
+
+
+def test_a_file_in_the_way_is_a_result_without_the_folder(tools, store, tmp_path):
+    saved = tools["save_memory"]("alpha", "a", "user", scope="user")
+    (tmp_path / "user" / f"beta-{saved['item_id']}.md").write_text("my notes, not a memory\n")
+    result = tools["update_memory"](saved["item_id"], description="beta")
+    _no_path(result, tmp_path)
+
+
+def test_a_linked_history_folder_is_a_result_without_the_folder(tools, store, tmp_path):
+    saved = tools["save_memory"]("note", "c", "user", scope="user")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "user" / ".history").mkdir()
+    os.symlink(tmp_path / "elsewhere", tmp_path / "user" / ".history" / saved["item_id"])
+    _no_path(tools["update_memory"](saved["item_id"], content="c2"), tmp_path)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+def test_a_folder_that_cannot_be_created_is_a_result_without_the_folder(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent.chmod(0o500)
+    try:
+        store = MemoryStore(parent / "user")
+        [save] = [t for t in make_memory_tools(store) if t.__name__ == "save_memory"]
+        _no_path(save("d", "c", "user", scope="user"), tmp_path)
+    finally:
+        parent.chmod(0o700)
+
+
+def test_an_os_error_is_a_result_without_the_file(tools, store, tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(tmp_path / "user" / "x.md"))
+
+    monkeypatch.setattr(store, "save", broken)
+    monkeypatch.setattr(store, "search", broken)
+    _no_path(tools["save_memory"]("d", "c", "user", scope="user"), tmp_path)
+    _no_path(tools["search_memory"]("x"), tmp_path)

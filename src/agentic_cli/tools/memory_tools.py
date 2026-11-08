@@ -18,7 +18,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from agentic_cli.memory import DuplicateMemory, MemoryStoreError
+from agentic_cli.memory import (
+    DuplicateMemory,
+    FileInTheWay,
+    InvalidMemory,
+    MemoryBusy,
+    MemoryStoreError,
+    MemoryStoreFull,
+    NoProjectScope,
+    UnsafeMemoryStore,
+)
 from agentic_cli.tools.registry import ToolCategory, register_tool
 from agentic_cli.workflow.permissions import Capability
 from agentic_cli.workflow.service_registry import MEMORY_STORE, require_service
@@ -57,6 +66,28 @@ def _failed(error: object) -> dict[str, Any]:
     return {"success": False, "error": str(error)}
 
 
+def _store_failed(error: Exception) -> dict[str, Any]:
+    """A result for a store call that failed: what happened, never where on the disk.
+
+    The exception holds the paths (and the logs); a tool result goes to the
+    model, and the layout of the user's disk is not its business.
+    """
+    if isinstance(error, (InvalidMemory, DuplicateMemory, MemoryStoreFull, NoProjectScope)):
+        return _failed(error)  # about the memory, naming no path
+    if isinstance(error, MemoryBusy):
+        return _failed("the memory store is busy (another session is writing); try again")
+    if isinstance(error, FileInTheWay):
+        return _failed(
+            "a file in the memory folder that is not this memory's is in the way of the change; "
+            "it was left as it is, and the user can look at it"
+        )
+    if isinstance(error, UnsafeMemoryStore):
+        return _failed("the memory folder is a link or not a folder, so the store does not use it")
+    if isinstance(error, MemoryStoreError):
+        return _failed("the memory store cannot create or lock its folder")
+    return _failed(f"the memory store cannot be read or written ({error.strerror or type(error).__name__})")
+
+
 def _wrong_kind(**arguments: tuple[object, bool]) -> dict[str, Any] | None:
     """A refusal for the first argument that is not text (``(value, optional)`` each), or None.
 
@@ -93,7 +124,7 @@ def _save_memory_with_store(
     except DuplicateMemory as e:
         return _failed(f"{e}: use update_memory to change it")
     except (MemoryStoreError, OSError) as e:
-        return _failed(e)
+        return _store_failed(e)
     return {
         "success": True,
         "item_id": memory.id,
@@ -109,7 +140,7 @@ def _read_memory_with_store(store: "MemoryStore", item_id: str) -> dict[str, Any
     try:
         memory = store.read(item_id)
     except (MemoryStoreError, OSError) as e:
-        return _failed(e)
+        return _store_failed(e)
     if memory is None:
         return _failed(f"No memory with id {item_id}")
     return {"success": True, "memory": _memory_dict(memory)}
@@ -124,7 +155,7 @@ def _search_memory_with_store(store: "MemoryStore", query: str, limit: int) -> d
     try:
         found = store.search(query, limit=limit)
     except (MemoryStoreError, OSError) as e:
-        return _failed(e)
+        return _store_failed(e)
     items = [_memory_dict(memory) for memory in found]
     return {"success": True, "query": query, "items": items, "count": len(items)}
 
@@ -149,7 +180,7 @@ def _update_memory_with_store(
     except DuplicateMemory as e:
         return _failed(f"{e}: update or delete that one instead")
     except (MemoryStoreError, OSError) as e:
-        return _failed(e)
+        return _store_failed(e)
     if memory is None:
         return _failed(f"No memory with id {item_id}")
     return {"success": True, "updated": True, "message": f"Updated memory: {memory.description}"}
@@ -163,7 +194,7 @@ def _delete_memory_with_store(store: "MemoryStore", item_id: str) -> dict[str, A
         memory = store.read(item_id)
         deleted = memory is not None and store.delete(item_id)
     except (MemoryStoreError, OSError) as e:
-        return _failed(e)
+        return _store_failed(e)
     if not deleted:
         return _failed(f"No memory with id {item_id}")
     return {"success": True, "deleted": True, "message": f"Deleted memory: {memory.description}"}
