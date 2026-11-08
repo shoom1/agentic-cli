@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 
 from agentic_cli.memory.kb._vectors import VectorIndex, normalized, to_blob
@@ -51,3 +53,17 @@ def test_removing_rows_keeps_the_rest_in_step():
 
     assert index.ranked(normalized([[0, 0, 1]])[0])[0] == (3, "c")
     assert {doc for _, doc in index.ranked(normalized([[1, 0, 0]])[0])} == {"a", "c"}
+
+
+def test_stored_vectors_are_normalized_again_and_unusable_ones_left_out():
+    index = VectorIndex(3)
+    index.load([(1, "exact", to_blob([0, 1, 0])), (2, "long", to_blob([0, 50, 0])), (3, "nan", to_blob([np.nan, 1, 0])),
+                (4, "inf", to_blob([np.inf, 0, 0])), (5, "huge", to_blob([3e38, 3e38, 0])), (6, "other", to_blob([1, 0, 0]))],
+               generation=1)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ranked = index.ranked(normalized([[0, 1, 0]])[0])
+
+    assert len(index) == 3
+    assert [doc for _, doc in ranked] == ["exact", "long", "other"]  # "long" ties with the exact match, never above it

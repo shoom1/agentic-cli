@@ -42,12 +42,21 @@ class VectorIndex:
         return len(self._documents)
 
     def load(self, rows: Iterable[tuple[int, str, bytes]], generation: int) -> None:
-        """Hold exactly ``rows`` (rowid, document ID, vector). A vector of another size is left out."""
+        """Hold exactly ``rows`` (rowid, document ID, vector), normalized again.
+
+        A stored vector is not trusted to be normalized (a project can ship
+        its database): one of another size, or holding NaN or infinity (or
+        too large to measure), is left out, so its chunk is found by keyword
+        only.
+        """
         size = self.dim * 4
         kept = [(rowid, doc, blob) for rowid, doc, blob in rows if isinstance(blob, bytes) and len(blob) == size]
-        self._rowids = np.array([rowid for rowid, _, _ in kept], dtype=np.int64)
-        self._documents = [str(doc) for _, doc, _ in kept]
-        self._matrix = np.frombuffer(b"".join(blob for _, _, blob in kept), dtype="<f4").reshape(len(kept), self.dim).astype(np.float32)
+        matrix = np.frombuffer(b"".join(blob for _, _, blob in kept), dtype="<f4").reshape(len(kept), self.dim)
+        with np.errstate(over="ignore", invalid="ignore"):
+            usable = np.isfinite(np.linalg.norm(matrix, axis=1))
+        self._rowids = np.array([rowid for rowid, _, _ in kept], dtype=np.int64)[usable]
+        self._documents = [str(doc) for (_, doc, _), ok in zip(kept, usable) if ok]
+        self._matrix = normalized(matrix[usable])
         self.generation = generation
 
     def apply(self, generation: int, *, add: tuple[Sequence[int], Sequence[str], np.ndarray] | None = None, remove: Iterable[int] = ()) -> None:
@@ -66,9 +75,11 @@ class VectorIndex:
             self._documents = [doc for doc, k in zip(self._documents, keep) if k]
         if add is not None:
             rowids, documents, vectors = add
-            self._rowids = np.concatenate([self._rowids, np.asarray(rowids, dtype=np.int64)])
-            self._matrix = np.vstack([self._matrix, np.asarray(vectors, dtype=np.float32).reshape(-1, self.dim)])
-            self._documents.extend(str(doc) for doc in documents)
+            matrix = np.asarray(vectors, dtype=np.float32).reshape(-1, self.dim)
+            usable = np.isfinite(matrix).all(axis=1)
+            self._rowids = np.concatenate([self._rowids, np.asarray(rowids, dtype=np.int64)[usable]])
+            self._matrix = np.vstack([self._matrix, matrix[usable]])
+            self._documents.extend(str(doc) for doc, ok in zip(documents, usable) if ok)
         self.generation = generation
 
     def ranked(self, query: np.ndarray, allowed: set[str] | None = None) -> list[tuple[int, str]]:
