@@ -12,6 +12,7 @@ from agentic_cli.memory._core.filelock import folder_lock
 from agentic_cli.memory.store import _files, _scope
 from agentic_cli.memory.store import store as store_module
 from agentic_cli.memory.store.models import (
+    Candidate,
     DuplicateMemory,
     FileInTheWay,
     InvalidMemory,
@@ -248,6 +249,37 @@ class TestFilesThatAreNotTheEntrys:
         assert mine.read_text() == "not frontmatter, my notes\n"
         assert store.read(alpha.id).description == "alpha"
         assert store.history(alpha.id) == []  # nothing was written before it refused
+
+
+def _case_insensitive(folder) -> bool:
+    """Whether ``folder``'s file system treats names that differ only by case as one."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "CaseProbe").write_text("x")
+    return (folder / "caseprobe").exists()
+
+
+class TestTheEntrysOwnFile:
+    """A change may write onto the memory's own file, whatever its name is spelled."""
+
+    def test_two_names_of_one_file_are_the_entrys_own(self, tmp_path):
+        mine = tmp_path / "a.md"
+        mine.write_text("x")
+        os.link(mine, tmp_path / "b.md")
+        MemoryStore._check_free(tmp_path / "b.md", own=mine)  # no FileInTheWay
+        with pytest.raises(FileInTheWay):
+            MemoryStore._check_free(tmp_path / "b.md", own=tmp_path / "missing.md")
+
+    def test_a_name_that_differs_only_by_case(self, store, tmp_path):
+        if not _case_insensitive(tmp_path / "probe"):
+            pytest.skip("a case-sensitive file system: a name differing by case is another file")
+        write_memory(tmp_path / "user", "Prefers-Tabs-a1b2.md", memory_text("a1b2", "Prefers tabs", "Tabs."))
+        assert store.update("a1b2", content="Tabs, width 4.").content == "Tabs, width 4."
+        assert store.read("a1b2").content == "Tabs, width 4."  # the new file was not removed as the old one
+        store.propose(Candidate("update", "a1b2", "Prefers tabs", "Tabs, width 8.", "feedback", "user"))
+        assert store.accept(store.proposals()[0].id).content == "Tabs, width 8."
+        assert store.read("a1b2").content == "Tabs, width 8."
+        assert [p.kind for p in store.problems()] == []
+        assert len(list((tmp_path / "user").glob("*.md"))) == 1
 
 
 class TestUnsafeFolders:

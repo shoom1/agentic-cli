@@ -174,16 +174,30 @@ class MemoryStore:
         return taken
 
     @staticmethod
-    def _check_free(path: Path, own: Path | None = None) -> None:
+    def _same_file(a: Path, b: Path | None) -> bool:
+        """Whether ``a`` and ``b`` are one file, whatever their names: on a case-insensitive
+        file system ``Prefers-Tabs-x1.md`` and ``prefers-tabs-x1.md`` are."""
+        if b is None:
+            return False
+        if a == b:
+            return True
+        try:
+            return os.path.samestat(os.lstat(a), os.lstat(b))
+        except OSError:
+            return False
+
+    @classmethod
+    def _check_free(cls, path: Path, own: Path | None = None) -> None:
         """Refuse to write onto ``path`` when a file is there that is not ``own``.
 
         A file the store cannot use is never rewritten, moved or deleted
-        (spec §5.3): a change that would take its name stops first.
+        (spec §5.3): a change that would take its name stops first. ``own``
+        is compared as a file, not as a name.
 
         Raises:
             FileInTheWay: a file is at ``path`` and it is not the memory's own.
         """
-        if path != own and os.path.lexists(path):
+        if os.path.lexists(path) and not cls._same_file(path, own):
             raise FileInTheWay(
                 f"{path} is in the way: it is not this memory's file; move or remove it first"
             )
@@ -356,7 +370,7 @@ class MemoryStore:
         self._check_free(changed.path, entry.memory.path)
         folder.keep_version(entry, self._now())
         folder.write(changed, entry.extra)
-        if entry.memory.path != changed.path:
+        if not self._same_file(entry.memory.path, changed.path):
             entry.memory.path.unlink(missing_ok=True)
         folder.prune_history(self._now(), memory_id)
         return changed
@@ -484,7 +498,7 @@ class MemoryStore:
                 if current is not None:
                     folder.keep_version(current, self._now())
                 folder.write(restored, old.extra)
-                if current is not None and current.memory.path != restored.path:
+                if current is not None and not self._same_file(current.memory.path, restored.path):
                     current.memory.path.unlink(missing_ok=True)
                 folder.prune_history(self._now(), memory_id)
                 return restored
