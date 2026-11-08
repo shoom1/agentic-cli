@@ -144,6 +144,26 @@ def settings_env_file_denies(settings: object, ctx: PermissionContext) -> list[R
     return rules
 
 
+def memory_folder_denies(settings: object, ctx: PermissionContext) -> list[Rule]:
+    """A builtin write deny on the memory folders: the user scope
+    (``<workspace_dir>/memory``) and the project scopes
+    (``<workspace_dir>/projects``).
+
+    The memory tools write them through the store, where a write in a
+    conversation that read outside content is approved per call; a file tool
+    or a grant must not get around that. ``~/.{app_name}`` is denied anyway,
+    but ``workspace_dir`` need not be there.
+    """
+    workspace = getattr(settings, "workspace_dir", None)
+    if workspace is None:
+        return []
+    root = Path(workspace).expanduser().resolve(strict=False)
+    return [
+        Rule(_WRITE, f"{root}/memory/**", Effect.DENY, RuleSource.BUILTIN),
+        Rule(_WRITE, f"{root}/projects/**", Effect.DENY, RuleSource.BUILTIN),
+    ]
+
+
 def settings_rules(settings: object, ctx: PermissionContext) -> list[Rule]:
     """The trusted rules: ``settings.permissions``, allow and deny.
 

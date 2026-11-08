@@ -46,6 +46,7 @@ from agentic_cli.workflow.permissions.store import (
     PermissionContext,
     load_project_denies,
     load_project_grants,
+    memory_folder_denies,
     settings_env_file_denies,
     settings_rules,
 )
@@ -386,6 +387,8 @@ class PermissionEngine:
             )
         # The keys the app was given, wherever its env_file puts them.
         rules += settings_env_file_denies(self._settings, self._ctx)
+        # The memory folders are written only through the memory tools.
+        rules += memory_folder_denies(self._settings, self._ctx)
         # The trusted rules, allow and deny: settings.permissions, the union
         # of the app's class default, the user file, the environment and the
         # constructor. The user file is read once, by the settings.

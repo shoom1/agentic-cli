@@ -22,6 +22,7 @@ alike, and ``sandbox_opt_out`` names where the user turns the sandbox off.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -48,13 +49,33 @@ def python_sandbox_policy(settings: Any) -> "OSSandboxPolicy | None":
         return None
     from agentic_cli.tools.os_sandbox import OSSandboxPolicy
 
-    return OSSandboxPolicy(
+    folders = _memory_folders(settings)
+    policy = OSSandboxPolicy(
         enabled=True,
         writable_paths=list(getattr(settings, "os_sandbox_writable_paths", None) or []),
         allow_network=bool(getattr(settings, "os_sandbox_allow_network", False)),
         strict=_sandbox_strict(settings),
         app_name=getattr(settings, "app_name", None),
+        # The memory folders: written only through the memory tools.
+        deny_read_paths=[str(folder) for folder in folders],
     )
+    # Hidden is not enough where a folder sits in a writable place: code could
+    # plant a file the next conversation reads as a memory. Added to the
+    # policy's own list (a list passed to the constructor would replace it),
+    # and only for a folder that exists: the backends bind over a missing
+    # deny-write path to block its creation, which leaves a stray file where
+    # the store makes the folder.
+    policy.deny_write_paths += [str(folder) for folder in folders if folder.exists()]
+    return policy
+
+
+def _memory_folders(settings: Any) -> list[Path]:
+    """The memory folders under ``workspace_dir``: the user scope and the project scopes."""
+    workspace = getattr(settings, "workspace_dir", None)
+    if workspace is None:
+        return []
+    root = Path(workspace).expanduser().resolve(strict=False)
+    return [root / "memory", root / "projects"]
 
 
 def sandbox_opt_out(settings: Any) -> str:
