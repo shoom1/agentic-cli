@@ -38,18 +38,23 @@ from google.adk.tools import FunctionTool, LongRunningFunctionTool
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.registry import (
     ToolCategory,
+    ToolDefinition,
     identify_tool,
     register_tool,
 )
+from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY, brings_outside_content
 from agentic_cli.workflow.permissions import EXEMPT
 from agentic_cli.workflow.permissions.capabilities import Capability, _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
+from agentic_cli.workflow.sessions import get_active_turn
 
 if TYPE_CHECKING:
+    from google.adk.agents.callback_context import CallbackContext
     from google.adk.tools import BaseTool
     from google.adk.tools.tool_context import ToolContext
 
     from agentic_cli.workflow.interrupts import OpenCalls
+    from agentic_cli.workflow.outside_content import OutsideContentMarks
 
 logger = Loggers.workflow()
 
@@ -170,14 +175,28 @@ def _no_engine_result(tool_name: str) -> dict | None:
 class PermissionPlugin(BasePlugin):
     """ADK plugin: gates every tool call through :class:`PermissionEngine`.
 
+    It also marks the conversation when it allows a call that brings outside
+    content (``workflow/outside_content.py``), in ``marks`` and in the
+    session's state.
+
     Args:
         open_calls: The manager's record of its calls, marked while a call
             waits at its prompt: a cancel there means it was not run.
+        marks: The manager's record of each conversation's mark.
+        root: The root agent's name, whose session state carries the mark.
     """
 
-    def __init__(self, open_calls: "OpenCalls | None" = None) -> None:
+    def __init__(
+        self,
+        open_calls: "OpenCalls | None" = None,
+        *,
+        marks: "OutsideContentMarks | None" = None,
+        root: str | None = None,
+    ) -> None:
         super().__init__(name="permission")
         self._open_calls = open_calls
+        self._marks = marks
+        self._root = root
 
     def _asking(self, tool_context: "ToolContext | None"):
         call_id = getattr(tool_context, "function_call_id", None)
@@ -193,7 +212,55 @@ class PermissionPlugin(BasePlugin):
         tool_context: "ToolContext | None",
     ) -> dict | None:
         defn = self._resolve_definition(tool)
+        denial = await self._gate(tool, defn, tool_args, tool_context)
+        if denial is None:
+            self._note_outside_content(tool, defn, tool_args, tool_context)
+        return denial
 
+    def _note_outside_content(
+        self,
+        tool: "BaseTool",
+        defn: Any,
+        tool_args: dict[str, Any],
+        tool_context: "ToolContext | None",
+    ) -> None:
+        """Mark the conversation when an allowed call brings outside content,
+        in the marks and in the session's state (it rides on the call's event)."""
+        if self._marks is None:
+            return
+        if defn is _MCP:
+            name = tool.name
+        elif isinstance(defn, ToolDefinition) and brings_outside_content(defn, tool_args):
+            name = defn.name
+        else:
+            return
+        ref = get_active_turn()
+        if ref is None or not self._marks.mark(ref, name):
+            return
+        logger.debug("conversation_marked_outside_content", tool=name, session_id=ref.session_id)
+        if tool_context is not None:
+            tool_context.state[OUTSIDE_CONTENT_KEY] = name
+
+    async def before_model_callback(
+        self, *, callback_context: "CallbackContext", llm_request: Any
+    ) -> None:
+        """Write the conversation's mark into the root's session state when a
+        sub-agent's call set it (a sub-agent's state may be its own)."""
+        if self._marks is None or self._root is None or callback_context.agent_name != self._root:
+            return None
+        mark = self._marks.get(get_active_turn())
+        if mark and callback_context.state.get(OUTSIDE_CONTENT_KEY) != mark:
+            callback_context.state[OUTSIDE_CONTENT_KEY] = mark
+        return None
+
+    async def _gate(
+        self,
+        tool: "BaseTool",
+        defn: Any,
+        tool_args: dict[str, Any],
+        tool_context: "ToolContext | None",
+    ) -> dict | None:
+        """The permission decision: None to let the call run, else its error result."""
         if defn is _UNVERIFIED:
             # Nothing the framework issued. Its name (or its class name) may
             # match a registered tool; that proves nothing.

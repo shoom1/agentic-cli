@@ -21,6 +21,12 @@ from google.adk.tools import LongRunningFunctionTool  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.interrupts import OpenCalls  # noqa: E402
+from agentic_cli.workflow.outside_content import (  # noqa: E402
+    JOB_RESULT,
+    OUTSIDE_CONTENT_KEY,
+    OutsideContentMarks,
+)
+from agentic_cli.workflow.sessions import SessionRef  # noqa: E402
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_ASK, JOB_NOTICE_HEADER  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 
@@ -67,18 +73,21 @@ class _FakeRunner:
     async def run_async(self, *, session_id, user_id, new_message, state_delta=None,
                         run_config=None, abort_signal=None):
         self.calls.append(
-            SimpleNamespace(session_id=session_id, user_id=user_id, new_message=new_message)
+            SimpleNamespace(session_id=session_id, user_id=user_id, new_message=new_message,
+                            state_delta=state_delta)
         )
         for n in ("ev-1", "ev-2"):
             yield n
 
 
 def _resume_manager(
-    runner: _FakeRunner, *, session_exists: bool = True, native: bool = False
+    runner: _FakeRunner, *, session_exists: bool = True, native: bool = False,
+    state: dict | None = None,
 ) -> GoogleADKWorkflowManager:
     mgr = GoogleADKWorkflowManager.__new__(GoogleADKWorkflowManager)
     mgr._settings = SimpleNamespace(app_name="test", default_user="default_user")
     mgr._open_calls = OpenCalls()
+    mgr._outside_marks = OutsideContentMarks()
     mgr._adk_config_path = "root_agent.yaml" if native else None
     mgr._app_name = "test"
     mgr._services = {}
@@ -106,7 +115,7 @@ def _resume_manager(
 
     class _SessionService:
         async def get_session(self, *, app_name, user_id, session_id):
-            return SimpleNamespace(events=[]) if session_exists else None
+            return SimpleNamespace(events=[], state=dict(state or {})) if session_exists else None
 
     mgr._session_service = _SessionService()
     return mgr
@@ -143,6 +152,40 @@ async def test_resume_sends_the_job_notice_and_streams():
     assert payload["state"] == "succeeded"
     assert payload["exit_code"] == 0
     assert payload["result_summary"] == "build output"
+
+
+async def test_a_job_notice_marks_the_conversation_and_its_state():
+    """A job's output is outside content (spec 9.1): the notice turn marks the
+    conversation, and the state it saves with the notice keeps the mark."""
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner)
+    [ev async for ev in mgr.resume_with_job_result(_record(), result="build output")]
+
+    assert runner.calls[0].state_delta == {OUTSIDE_CONTENT_KEY: JOB_RESULT}
+    ref = SessionRef(app_name="test", user_id="u1", session_id="s1")
+    assert mgr._outside_marks.get(ref) == JOB_RESULT
+
+
+async def test_a_conversation_already_marked_is_not_marked_again_by_a_notice():
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner, state={OUTSIDE_CONTENT_KEY: "web_fetch"})
+    [ev async for ev in mgr.resume_with_job_result(_record(), result="x")]
+
+    ref = SessionRef(app_name="test", user_id="u1", session_id="s1")
+    assert runner.calls[0].state_delta is None
+    assert mgr._outside_marks.get(ref) == "web_fetch"
+
+
+async def test_a_mark_the_process_holds_is_never_saved_as_unmarked():
+    """A state with no record of a mark the process holds (a turn that died
+    before its state was saved) is brought up to date, never set to ""."""
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner)
+    ref = SessionRef(app_name="test", user_id="u1", session_id="s1")
+    mgr._outside_marks.mark(ref, "web_fetch")
+    [ev async for ev in mgr.resume_with_job_result(_record(), result="x")]
+
+    assert runner.calls[0].state_delta == {OUTSIDE_CONTENT_KEY: "web_fetch"}
 
 
 async def test_a_native_adk_app_still_answers_the_pending_call():

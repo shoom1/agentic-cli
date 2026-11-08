@@ -58,6 +58,7 @@ from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_to
 from agentic_cli.workflow.context import is_context_overflow
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
+from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
@@ -88,6 +89,16 @@ def _denied(reason: str, call: ToolCall) -> ToolMessage:
     return error_tool_message(
         {"success": False, "error": f"Permission denied: {reason}"}, call
     )
+
+
+def with_state_update(result: _ToolResult, update: dict[str, Any]) -> _ToolResult:
+    """``result`` carrying ``update`` into the agent's state, as a ``Command``."""
+    if isinstance(result, Command):
+        current = result.update if isinstance(result.update, dict) else {}
+        return dataclasses.replace(result, update={**current, **update})
+    if isinstance(result, ToolMessage):
+        return Command(update={**update, "messages": [result]})
+    return result
 
 
 class PermissionMiddleware(AgentMiddleware):
@@ -123,6 +134,10 @@ class PermissionMiddleware(AgentMiddleware):
             its MCP tools' map chained before it.
         open_calls: The manager's record of its calls, marked while a call
             waits at its prompt: a cancel there means it was not run.
+        marks: The manager's record of each conversation's mark. A call that
+            brings outside content (``workflow/outside_content.py``) is
+            marked here before it runs, and returns the mark in its state
+            update, so the checkpoint keeps it.
     """
 
     def __init__(
@@ -131,11 +146,13 @@ class PermissionMiddleware(AgentMiddleware):
         *,
         bound: Callable[[object], ToolDefinition | None] = identify_tool,
         open_calls: OpenCalls | None = None,
+        marks: OutsideContentMarks | None = None,
     ) -> None:
         super().__init__()
         self.agent_name = agent_name
         self._bound = bound
         self._open_calls = open_calls
+        self._marks = marks
 
     async def awrap_tool_call(
         self,
@@ -150,7 +167,9 @@ class PermissionMiddleware(AgentMiddleware):
         denial = await self._check(request.tool, call)
         if denial is not None:
             return denial
-        return await handler(request)
+        mark = self._marking(request.tool, call)
+        result = await handler(request)
+        return with_state_update(result, {"outside_content": mark}) if mark else result
 
     def wrap_tool_call(
         self,
@@ -165,6 +184,22 @@ class PermissionMiddleware(AgentMiddleware):
     def _resolve(self, tool: BaseTool) -> ToolDefinition | None:
         """What this exact tool object is, or None (steps 1 and 2)."""
         return _resolve_tool(tool, self._bound)
+
+    def _marking(self, tool: BaseTool, call: ToolCall) -> str | None:
+        """The tool's name when the call brings outside content (the conversation
+        is marked now, before it runs), else None."""
+        definition = self._resolve(tool)
+        if definition is None or not brings_outside_content(definition, call["args"]):
+            return None
+        ref = get_active_turn()
+        if self._marks is not None and ref is not None and self._marks.mark(ref, definition.name):
+            logger.debug(
+                "conversation_marked_outside_content",
+                tool=definition.name,
+                session_id=ref.session_id,
+                agent=self.agent_name,
+            )
+        return definition.name
 
     async def _check(self, tool: BaseTool, call: ToolCall) -> ToolMessage | None:
         """None when the call may run, else its denial (steps 3 to 6)."""

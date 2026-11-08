@@ -55,6 +55,11 @@ from agentic_cli.workflow.adk.sessions import (
     turn_state,
 )
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
+from agentic_cli.workflow.outside_content import (
+    BEFORE_0_7_0,
+    JOB_RESULT,
+    OUTSIDE_CONTENT_KEY,
+)
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
@@ -617,7 +622,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
         # exception into an error result the model can read.
-        plugins: list = [PermissionPlugin(self._open_calls), ToolErrorPlugin()]
+        plugins: list = [
+            PermissionPlugin(
+                self._open_calls,
+                marks=self._outside_marks,
+                root=self._root_agent.name if self._root_agent else None,
+            ),
+            ToolErrorPlugin(),
+        ]
 
         # Task progress tracking via ToolContext.state
         self._task_progress_plugin = TaskProgressPlugin()
@@ -987,6 +999,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             ))
         return session
 
+    def _seed_outside_content(self, ref: SessionRef, session: Session) -> dict[str, Any]:
+        """Seed the marks from the session's state; the state delta a turn writes.
+
+        A conversation with events but no record is from before 0.7.0 and
+        counts as marked; a new one records ``""``. A mark this process holds
+        that the state lacks is written, never ``""`` over it.
+        """
+        value = session.state.get(OUTSIDE_CONTENT_KEY)
+        if isinstance(value, str):
+            self._outside_marks.seed(ref, value)
+            return {}
+        self._outside_marks.seed(ref, BEFORE_0_7_0 if session.events else "")
+        return {OUTSIDE_CONTENT_KEY: self._outside_marks.get(ref) or ""}
+
     # -------------------------------------------------------------------------
     # Main processing
     # -------------------------------------------------------------------------
@@ -1028,6 +1054,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 session = await self._get_or_create_session(user_id, current_session_id)
                 # A crash (or an old cancel) may have left calls without a result.
                 session = await self._answer_left_open(session)
+                ref = self.session_ref(current_session_id, user_id)
+                state_delta = {
+                    **turn_state(session, message),
+                    **self._seed_outside_content(ref, session),
+                }
 
                 # Create message
                 new_message = types.Content(
@@ -1041,8 +1072,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     session_id=current_session_id,
                     user_id=user_id,
                     new_message=new_message,
-                    # The conversation's row (workflow/adk/sessions.py).
-                    state_delta=turn_state(session, message),
+                    # The conversation's row (workflow/adk/sessions.py) and its mark.
+                    state_delta=state_delta,
                 )) as events:
                     async for event in events:
                         yield event
@@ -1230,6 +1261,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     # OpenAI refuse a call without one.
                     session = await self._answer_left_open(session)
 
+                # The job's output is outside content: its notice marks the conversation.
+                ref = self.session_ref(session_id, user_id)
+                state_delta = self._seed_outside_content(ref, session)
+                if self._outside_marks.mark(ref, JOB_RESULT):
+                    state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
+
                 if result is None:
                     jm = self._services.get(JOB_MANAGER)
                     if jm is not None:
@@ -1261,6 +1298,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     session_id=session_id,
                     user_id=user_id,
                     new_message=new_message,
+                    state_delta=state_delta or None,
                 )) as events:
                     async for event in events:
                         yield event

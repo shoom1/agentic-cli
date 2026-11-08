@@ -91,3 +91,19 @@ def test_a_variant_must_declare_the_same_flag():
         @registry.register(category=ToolCategory.OTHER, capabilities=EXEMPT, variant_of="shared")
         def shared_variant() -> dict:
             return {}
+
+
+def test_the_langgraph_manager_marks_every_conversation(mock_context):
+    """LangGraph's gate tracks no mark (spec 9.1): every memory write there asks."""
+    pytest.importorskip("langgraph")
+    from agentic_cli.workflow.config import AgentConfig
+    from agentic_cli.workflow.langgraph.manager import LangGraphWorkflowManager
+    from agentic_cli.workflow.outside_content import LANGGRAPH_MARK
+    from agentic_cli.workflow.sessions import SessionRef
+
+    manager = LangGraphWorkflowManager(
+        agent_configs=[AgentConfig(name="a", prompt="p")], settings=mock_context.settings,
+        model="gemini-2.5-flash",
+    )
+    assert manager._outside_marks.get(SessionRef(app_name='app', user_id='u', session_id='s')) == LANGGRAPH_MARK
+    assert manager._outside_marks.get(None) == LANGGRAPH_MARK

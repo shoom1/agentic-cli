@@ -271,6 +271,14 @@ class CheckpointSessions:
                 out.append({"role": role, "content": text})
         return out[-limit:] if limit > 0 else []
 
+    async def outside_content(self, ref: SessionRef) -> str:
+        """The conversation's mark in its newest root checkpoint (``""``: none)."""
+        item = await self._root(ref)
+        if item is None:
+            return ""
+        value = item.checkpoint["channel_values"].get("outside_content")
+        return value if isinstance(value, str) else ""
+
     async def _root(self, ref: SessionRef) -> "CheckpointTuple | None":
         """The latest checkpoint of ``ref``'s root agent, or None."""
         return await self._saver.aget_tuple(

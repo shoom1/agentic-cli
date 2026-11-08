@@ -84,7 +84,7 @@ class _AdmissionHarness:
 
     @staticmethod
     async def _get_session(**kwargs):
-        return SimpleNamespace(id=kwargs.get("session_id"), events=[])
+        return SimpleNamespace(id=kwargs.get("session_id"), events=[], state={})
 
     async def drain(self, session_id: str) -> list[str]:
         return [
@@ -113,7 +113,9 @@ class _DeepAgentsAdmissionHarness:
 
         async def _do_initialize() -> None:
             self.inits += 1
-            self.manager._sessions = SimpleNamespace(exists=self._exists)
+            self.manager._sessions = SimpleNamespace(
+                exists=self._exists, outside_content=self._outside_content
+            )
             self.manager._root_name = "a"
             self.manager._root = SimpleNamespace(name=f"backend-{self.inits}")
 
@@ -129,6 +131,10 @@ class _DeepAgentsAdmissionHarness:
     @staticmethod
     async def _exists(ref) -> bool:
         return True
+
+    @staticmethod
+    async def _outside_content(ref) -> str:
+        return ""
 
     async def drain(self, session_id: str) -> list[str]:
         return [

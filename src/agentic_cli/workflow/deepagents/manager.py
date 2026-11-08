@@ -81,6 +81,7 @@ from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
+from agentic_cli.workflow.outside_content import JOB_RESULT
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 if TYPE_CHECKING:
@@ -274,6 +275,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             bound=self._identify_tool,
             summarizers=summarizers,
             open_calls=self._open_calls,
+            marks=self._outside_marks,
         )
         self._root_name = graph.root_name
         self._root_summarization = summarizers.get(graph.root_name)
@@ -531,6 +533,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 for notice in self._take_notices():
                     yield notice
                 ref = self.session_ref(current_session_id, user_id)
+                # What the conversation's checkpoint says of outside content.
+                self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
                 # aclosing: a consumer that closes this generator closes the
                 # run now, inside the turn, so its cancel is on record first.
                 async with contextlib.aclosing(self._run_turn(
@@ -605,6 +609,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                     )
                     return
 
+                # The job's output is outside content: its notice marks the conversation.
+                self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+                self._outside_marks.mark(ref, JOB_RESULT)
+
                 if result is None:
                     jobs = self._services.get(JOB_MANAGER)
                     if jobs is not None:
@@ -619,7 +627,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 for notice in self._take_notices():
                     yield notice
                 async with contextlib.aclosing(self._run_turn(
-                    ref, {"messages": [job_notification(record, result)]}
+                    ref,
+                    {
+                        "messages": [job_notification(record, result)],
+                        "outside_content": JOB_RESULT,
+                    },
                 )) as events:
                     async for event in events:
                         yield event

@@ -40,6 +40,7 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
+from agentic_cli.workflow.outside_content import OutsideContentMarks
 from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
@@ -188,6 +189,8 @@ class BaseWorkflowManager(ABC):
         # Keys of services a reinitialize is carrying over; see
         # _carrying_services().
         self._carried_service_keys: frozenset[str] = frozenset()
+        # Which conversations have read outside content (workflow/outside_content.py).
+        self._outside_marks = OutsideContentMarks()
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -748,7 +751,7 @@ class BaseWorkflowManager(ABC):
 
     def _outside_content_mark(self, ref: SessionRef) -> str | None:
         """The tool that brought outside content into ``ref``'s conversation, or None."""
-        return None
+        return self._outside_marks.get(ref)
 
     @property
     def active_turn(self) -> SessionRef | None:
