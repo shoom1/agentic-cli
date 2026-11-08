@@ -172,12 +172,37 @@ def _no_engine_result(tool_name: str) -> dict | None:
     return None
 
 
+def _model_side_tool(llm_request: Any, callback_context: Any) -> str | None:
+    """What brings outside content into the conversation with no tool call of
+    ours: the first model-side tool in the request, else the agent's code
+    executor, else None.
+
+    A request tool that is more than function declarations (``google_search``,
+    ``url_context``, ``retrieval``, ``enterprise_web_search``,
+    ``code_execution``, and whatever ADK's genai adds) is the model's own: the
+    field that is set names it. An agent's code executor runs the model's code
+    blocks and puts their output in the conversation, which nothing in the
+    request shows.
+    """
+    config = getattr(llm_request, "config", None)
+    for tool in getattr(config, "tools", None) or ():
+        for field in getattr(type(tool), "model_fields", ()):
+            if field != "function_declarations" and getattr(tool, field, None) is not None:
+                return field
+    invocation = getattr(callback_context, "_invocation_context", None)
+    if getattr(getattr(invocation, "agent", None), "code_executor", None) is not None:
+        return "code_executor"
+    return None
+
+
 class PermissionPlugin(BasePlugin):
     """ADK plugin: gates every tool call through :class:`PermissionEngine`.
 
     It also marks the conversation when it allows a call that brings outside
     content (``workflow/outside_content.py``), in ``marks`` and in the
-    session's state.
+    session's state, and when a model request carries a model-side tool or the
+    agent has a code executor (``before_model_callback``): those never reach
+    the tool callback.
 
     Args:
         open_calls: The manager's record of its calls, marked while a call
@@ -244,11 +269,28 @@ class PermissionPlugin(BasePlugin):
     async def before_model_callback(
         self, *, callback_context: "CallbackContext", llm_request: Any
     ) -> None:
-        """Write the conversation's mark into the root's session state when a
-        sub-agent's call set it (a sub-agent's state may be its own)."""
-        if self._marks is None or self._root is None or callback_context.agent_name != self._root:
+        """Mark the conversation when the request brings a model-side tool, and
+        write its mark into the root's session state when a sub-agent's call
+        set it (a sub-agent's state may be its own).
+
+        A model-side tool (Google Search, URL context, Vertex AI Search, a code
+        executor) puts search results, pages or program output into the
+        conversation without a tool call, so ``before_tool_callback`` never
+        sees it. ADK has built the request's tools by now (each tool's
+        ``process_llm_request`` runs before the model callbacks), so the
+        request names them; an agent's own code executor is read from the agent.
+        """
+        if self._marks is None:
             return None
-        mark = self._marks.get(get_active_turn())
+        ref = get_active_turn()
+        name = _model_side_tool(llm_request, callback_context)
+        if name is not None and ref is not None and self._marks.mark(ref, name):
+            logger.debug(
+                "conversation_marked_outside_content", tool=name, session_id=ref.session_id
+            )
+        if self._root is None or callback_context.agent_name != self._root:
+            return None
+        mark = self._marks.get(ref)
         if mark and callback_context.state.get(OUTSIDE_CONTENT_KEY) != mark:
             callback_context.state[OUTSIDE_CONTENT_KEY] = mark
         return None
