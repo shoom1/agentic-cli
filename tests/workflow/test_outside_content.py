@@ -18,7 +18,7 @@ from agentic_cli.workflow.permissions import EXEMPT
 MARKING = {
     "web_fetch", "web_search", "search_arxiv", "fetch_arxiv_paper", "ingest_arxiv_paper",
     "kb_search", "kb_read", "kb_list", "kb_search_concepts", "sandbox_execute",
-    "execute_python", "job_result", "job_logs",
+    "execute_python", "job_result", "job_logs", "job_status", "run_skill_script",
 }
 NOT_MARKING = {
     "kb_ingest_text", "kb_ingest_file", "kb_write_concept", "ask_clarification", "write_file",
@@ -29,6 +29,8 @@ NOT_MARKING = {
 def _definition(name):
     if name == "sandbox_execute":
         import agentic_cli.tools.sandbox  # noqa: F401
+    if name == "run_skill_script":
+        import agentic_cli.tools.skills  # noqa: F401
     return get_registry().get(name)
 
 
@@ -57,6 +59,26 @@ def project(tmp_path, monkeypatch) -> Path:
     ("grep", {"pattern": "x", "path": "."}, False),
     ("diff_compare", {"source_a": "a.md", "source_b": ".agentic_cli/fetched/p.md"}, True),
     ("diff_compare", {"source_a": "a.md", "source_b": "b.md"}, False),
+    # Every spelling of the folder is the folder: on a case-insensitive
+    # filesystem (macOS, Windows) these read the same page.
+    ("read_file", {"path": ".AGENTIC_CLI/FETCHED/page.md"}, True),
+    ("read_file", {"path": ".Agentic_Cli/Tool-Output/r.txt"}, True),
+    ("diff_compare", {"source_a": "a.md", "source_b": ".agentic_cli/FETCHED/p.md"}, True),
+    ("kb_ingest_file", {"path": ".agentic_cli/fetched/page.md"}, True),
+    ("kb_ingest_file", {"path": ".agentic_cli/tool-output/r.txt"}, True),
+    ("kb_ingest_file", {"path": "notes.md"}, False),
+    # A folder is not a page: only grep, which searches below its path, reads
+    # what is under a path that holds a saved folder.
+    ("read_file", {"path": ".agentic_cli"}, False),
+    # grep marks when its path is a saved folder, inside one, or above one
+    # with no hidden entry between (it searches no hidden entry below its path).
+    ("grep", {"pattern": "x", "path": ".agentic_cli"}, True),
+    ("grep", {"pattern": "x", "path": ".AGENTIC_CLI"}, True),
+    ("grep", {"pattern": "x", "path": ".agentic_cli/fetched/page.md"}, True),
+    ("grep", {"pattern": "x", "path": ".agentic_cli/tool-output"}, True),
+    ("grep", {"pattern": "x", "path": ".agentic_cli/knowledge_base"}, False),
+    ("grep", {"pattern": "x", "path": ".."}, False),
+    ("grep", {"pattern": "x"}, False),
 ])
 def test_reading_a_saved_page_or_output_marks(project, name, args, marks):
     token = set_context_settings(BaseSettings(app_name="agentic_cli", workspace_dir=project / "w"))

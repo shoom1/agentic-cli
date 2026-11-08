@@ -31,6 +31,7 @@ logger = structlog.get_logger(__name__)
 
 from agentic_cli.config import get_settings
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools._saved_outputs import reads_saved_output
 from agentic_cli.tools.registry import (
     register_tool,
     ToolCategory,
@@ -443,6 +444,9 @@ async def kb_ingest_text(
 
 @register_tool(
     category=ToolCategory.KNOWLEDGE,
+    # Its result carries the document's summary: a page web_fetch saved, or a
+    # tool's full output, is outside content here as it is for read_file.
+    outside_content=reads_saved_output("path"),
     capabilities=[
         Capability("kb.write"),
         Capability("filesystem.read", target_arg="path"),

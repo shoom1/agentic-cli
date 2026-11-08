@@ -31,7 +31,7 @@ _MAX_RG_ERROR_BYTES = 2_000  # how much of ripgrep's error output a failure quot
 
 @register_tool(
     category=ToolCategory.READ,
-    outside_content=reads_saved_output("path"),
+    outside_content=reads_saved_output("path", searching=True),
     capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Search for text patterns inside file contents (regex or literal). Use this to find code references, function definitions, or any text across files. For finding files by name, use glob instead.",
 )

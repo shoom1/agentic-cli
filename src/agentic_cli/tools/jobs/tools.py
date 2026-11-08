@@ -44,6 +44,7 @@ def _manager():
 
 @register_tool(
     category=ToolCategory.EXECUTION,
+    outside_content=True,
     capabilities=[Capability("jobs.manage")],
     description="Check a background job: state, exit code, a stdout tail, and the result once finished.",
     requires="job_manager",
