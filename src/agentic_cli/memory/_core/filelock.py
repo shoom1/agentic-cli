@@ -15,7 +15,8 @@ store keeps only its own threads apart, as before.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -26,13 +27,19 @@ except ImportError:  # pragma: no cover - not POSIX
 
 
 @contextmanager
-def folder_lock(path: Path) -> Iterator[None]:
+def folder_lock(
+    path: Path, *, timeout: float | None = None, on_wait: Callable[[], None] | None = None
+) -> Iterator[None]:
     """Hold an exclusive lock on ``path`` (created private, 0600) for the block.
 
     ``flock`` belongs to the open file, so the lock is not re-entrant: a
     holder must not take it again, even in the same process. A symlink at
     ``path`` is not followed (``OSError``): opening it would create, or
     open for writing, the file it points to.
+
+    With ``timeout``, a lock another process holds is waited for that many
+    seconds at most (``on_wait`` is called once, as the wait starts), then
+    ``TimeoutError`` is raised.
     """
     if fcntl is None:  # pragma: no cover - not POSIX
         yield
@@ -40,10 +47,31 @@ def folder_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            _lock_within(fd, path, timeout, on_wait)
         yield
     finally:
         os.close(fd)  # closing the file releases the lock
+
+
+def _lock_within(fd: int, path: Path, timeout: float, on_wait: Callable[[], None] | None) -> None:
+    """Take the lock on ``fd`` without blocking, trying again until ``timeout``."""
+    deadline = time.monotonic() + timeout
+    waited = False
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            pass
+        if not waited and on_wait is not None:
+            on_wait()
+        waited = True
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{path} stayed locked for {timeout:g} s")
+        time.sleep(0.05)
 
 
 def file_stamp(path: Path) -> tuple[int, int, int] | None:

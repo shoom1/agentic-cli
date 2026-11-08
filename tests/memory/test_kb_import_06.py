@@ -351,3 +351,74 @@ class TestKBManagerMigrationV1ToV2:
         assert doc is not None
         assert doc.content == "V2 content here."
         assert doc.chunks[0].content == "V2 content here."
+
+
+def test_files_an_older_session_writes_after_the_import_are_kept_aside(tmp_path):
+    """A 0.6 session still running after the upgrade ingests a document: its
+    header, text, sidecar and PDF must not be deleted as leftovers."""
+    write_06(tmp_path, [(A, "Otters", "Otters nest.")])
+    KnowledgeBaseManager(tmp_path, use_mock=True).close()
+    (tmp_path / "metadata.json").write_text(json.dumps({"version": 3, "documents": [header_06(C, "Gamma", file_path=f"{C}.pdf")]}))
+    (tmp_path / "documents" / f"{C}.json").write_text(json.dumps({"content": "gamma text", "chunks": {}}))
+    (tmp_path / "documents" / f"{C}.md").write_text("# Gamma: a sidecar the model wrote")
+    (tmp_path / "files" / f"{C}.pdf").write_bytes(b"%PDF the user's original")
+
+    kb = KnowledgeBaseManager(tmp_path, use_mock=True)
+
+    [aside] = (tmp_path / "pre-0.7.0").glob("after-import-*")
+    assert (aside / "files" / f"{C}.pdf").read_bytes() == b"%PDF the user's original"
+    assert (aside / "documents" / f"{C}.md").read_text() == "# Gamma: a sidecar the model wrote"
+    assert (aside / "metadata.json").exists()
+    assert _titles(kb) == ["Otters"]
+
+
+@pytest.mark.parametrize("contents", [b"version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 1\n", b"\xff\xfe not text"])
+def test_a_metadata_json_that_is_not_json_waits_for_its_real_contents(tmp_path, monkeypatch, contents):
+    from agentic_cli.memory.kb import KnowledgeBase, knowledge_base
+
+    log = LogRecorder().install(monkeypatch, knowledge_base)
+    project = tmp_path / "project"
+    write_06(project, [(A, "Otters", "Otters nest.")])
+    real = (project / "metadata.json").read_bytes()
+    (project / "metadata.json").write_bytes(contents)
+    before = sorted(p.relative_to(project) for p in project.rglob("*"))
+
+    kb = KnowledgeBase.open({"project": project, "user": tmp_path / "user"}, use_mock=True)
+
+    assert kb.scopes == ("user",)
+    assert "metadata.json" in log.warnings("kb_scope_unavailable")[0]["error"]
+    assert sorted(p.relative_to(project) for p in project.rglob("*")) == before  # nothing created or moved
+    (project / "metadata.json").write_bytes(real)  # git lfs pull
+    assert _titles(KnowledgeBaseManager(project, use_mock=True)) == ["Otters"]
+
+
+def test_an_older_session_holding_the_lock_is_waited_for_then_reported_busy(tmp_path, monkeypatch):
+    import fcntl
+    import os
+    import threading
+
+    from agentic_cli.memory.kb import KnowledgeBaseBusy, _db, _import_06
+
+    log = LogRecorder().install(monkeypatch, _import_06)
+    monkeypatch.setattr(_db, "BUSY_TIMEOUT_S", 0.3)
+    write_06(tmp_path, [(A, "Otters", "Otters nest.")])
+    fd = os.open(tmp_path / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # an older version's session, mid-change
+    outcome: list[BaseException | None] = []
+
+    def open_it() -> None:
+        try:
+            KnowledgeBaseManager(tmp_path, use_mock=True)
+            outcome.append(None)
+        except BaseException as e:  # noqa: BLE001 - the outcome is the test's
+            outcome.append(e)
+
+    opener = threading.Thread(target=open_it, daemon=True)
+    opener.start()
+    opener.join(5)
+    os.close(fd)  # let a stuck opener go
+    opener.join(5)
+
+    assert outcome and isinstance(outcome[0], KnowledgeBaseBusy)
+    assert len(log.warnings("kb_legacy_lock_held")) == 1
+    assert not (tmp_path / "kb.sqlite").exists()

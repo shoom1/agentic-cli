@@ -19,6 +19,8 @@ import json
 import os
 import shutil
 import stat
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,7 +29,16 @@ from agentic_cli.memory._core.chunking import chunk_text
 from agentic_cli.memory._core.filelock import folder_lock
 from agentic_cli.memory._core.io import is_regular_file, read_if_regular
 from agentic_cli.memory._core.log import get_logger
-from agentic_cli.memory.kb._db import COMPANION_SUFFIXES, DB_NAME, PLAIN_DOC_ID, Database, naive, refuse
+from agentic_cli.memory.kb import _db
+from agentic_cli.memory.kb._db import (
+    COMPANION_SUFFIXES,
+    DB_NAME,
+    PLAIN_DOC_ID,
+    Database,
+    KnowledgeBaseBusy,
+    naive,
+    refuse,
+)
 from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
 from agentic_cli.memory.kb.models import Document, DocumentChunk
 
@@ -43,10 +54,39 @@ def needs_import(kb_dir: Path) -> bool:
 
 
 def run(kb_dir: Path) -> None:
-    """Import the folder once, under the folder lock 0.6 sessions also take."""
-    with folder_lock(kb_dir / ".lock"):
+    """Import the folder once, under the folder lock 0.6 sessions also take.
+
+    Raises:
+        ValueError: ``metadata.json`` is not JSON at all (a git-LFS pointer
+            not pulled yet, say): nothing is imported, created or moved,
+            and the next open tries again.
+        KnowledgeBaseBusy: an older version's session held the folder lock
+            for ``BUSY_TIMEOUT_S``.
+    """
+    _headers(kb_dir)  # before anything is created, the lock file included
+    with _legacy_lock(kb_dir):
         if needs_import(kb_dir):  # another process may have imported it meanwhile
             _build(kb_dir)
+
+
+@contextmanager
+def _legacy_lock(kb_dir: Path) -> Iterator[None]:
+    """The ``.lock`` folder lock 0.6 sessions take around each change, waited
+    for up to ``BUSY_TIMEOUT_S`` (an older version's session may be changing
+    the folder), then ``KnowledgeBaseBusy``."""
+
+    def waiting() -> None:
+        logger.warning("kb_legacy_lock_held", path=str(kb_dir),
+                       reason="an older version's session is changing this knowledge base; waiting")
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(folder_lock(kb_dir / ".lock", timeout=_db.BUSY_TIMEOUT_S, on_wait=waiting))
+        except TimeoutError as e:
+            raise KnowledgeBaseBusy(
+                f"{kb_dir}: an older version's session kept the knowledge base locked for {_db.BUSY_TIMEOUT_S:g} s"
+            ) from e
+        yield
 
 
 def tidy(kb_dir: Path, db: Database) -> bool:
@@ -54,16 +94,20 @@ def tidy(kb_dir: Path, db: Database) -> bool:
     old version wrote after it. Returns whether files moved."""
     if db.info().get(_PENDING) != "pending" and not _legacy_files(kb_dir):
         return False
-    with folder_lock(kb_dir / ".lock"):
+    # The folder lock keeps 0.6 sessions out; the write lock keeps out this
+    # version's, whose files are written inside their own transactions.
+    with _legacy_lock(kb_dir), db.write():
         if db.info().get(_PENDING) == "pending":
             _move_aside(kb_dir, kb_dir / LEGACY_DIR, imported=db.document_ids(), referenced=db.file_names())
-            with db.write():
-                db.set_info(**{_PENDING: "done"})
+            db.set_info(**{_PENDING: "done"})
             logger.info("kb_import_files_moved", path=str(kb_dir / LEGACY_DIR),
                         note="nothing reads it any more: delete it once the knowledge base looks right")
         elif _legacy_files(kb_dir):
+            # What the old session wrote: its headers and texts, and the
+            # sidecars and stored files no row names (the leftover sweep
+            # would delete them).
             target = kb_dir / LEGACY_DIR / f"after-import-{_stamp()}"
-            _move_aside(kb_dir, target, imported=None, referenced=None)
+            _move_aside(kb_dir, target, imported=db.document_ids(), referenced=db.file_names())
             logger.warning("kb_legacy_files_ignored", path=str(target),
                            reason="an older version wrote to this knowledge base after it was imported; "
                                   "what it wrote is not in the knowledge base")
@@ -105,12 +149,19 @@ def _build(kb_dir: Path) -> None:
 
 
 def _headers(kb_dir: Path) -> tuple[int, list[Any]]:
+    """``metadata.json``'s format version and headers.
+
+    Raises:
+        ValueError: it is not JSON at all.
+    """
     raw = read_if_regular(kb_dir / "metadata.json")
     try:
         data = json.loads(raw) if raw is not None else {}
     except (ValueError, UnicodeDecodeError) as e:
-        logger.warning("kb_import_skipped", path=str(kb_dir), reason=f"metadata.json does not parse: {e}")
-        return 1, []
+        raise ValueError(
+            f"{kb_dir / 'metadata.json'} could not be read as JSON (a git-LFS pointer not pulled yet?): "
+            f"the knowledge base is left out until it can be imported ({e})"
+        ) from None
     if isinstance(data, dict) and isinstance(data.get("documents"), list):
         version = data.get("version", 1)
         return (version if isinstance(version, int) else 1), data["documents"]
