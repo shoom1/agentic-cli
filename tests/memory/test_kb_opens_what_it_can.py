@@ -17,7 +17,7 @@ import os
 import pytest
 
 from agentic_cli.memory import EmbeddingService, MemoryStore
-from agentic_cli.memory import store as store_module
+from agentic_cli.memory.store import _legacy as store_module
 from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceType
 from agentic_cli.memory.kb import _db as db_module
 from agentic_cli.memory.kb import knowledge_base as knowledge_base_module

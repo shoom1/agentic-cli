@@ -31,8 +31,8 @@ def test_a_non_path_base_dir_raises_typeerror():
 
 
 def test_the_public_names_are_the_store_types():
-    assert MemoryItem.__module__ == "agentic_cli.memory.store"
-    assert ForgettingPolicy.__module__ == "agentic_cli.memory.store"
+    assert MemoryItem.__module__ == "agentic_cli.memory.store._legacy"
+    assert ForgettingPolicy.__module__ == "agentic_cli.memory.store._legacy"
 
 
 class TestMemoryStore:

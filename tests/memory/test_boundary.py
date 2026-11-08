@@ -141,7 +141,7 @@ def _kind(module: str) -> str:
 
 def _component(path: Path) -> str:
     first = path.relative_to(PACKAGE).parts[0]
-    components = {"__init__.py": "root", "_core": "_core", "store.py": "store", "kb": "kb"}
+    components = {"__init__.py": "root", "_core": "_core", "store": "store", "kb": "kb"}
     if first not in components:
         raise AssertionError(f"{path} belongs to no component; classify it in _component")
     return components[first]
