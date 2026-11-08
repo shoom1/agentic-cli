@@ -90,6 +90,45 @@ def test_what_0_6_writes_after_the_import_is_imported_at_the_next_open(tmp_path)
     assert not (user / "memories.json").exists()
 
 
+def test_a_0_6_rewrite_does_not_bring_back_what_was_deleted_in_0_7(tmp_path):
+    """Released 0.6 takes no lock and rewrites memories.json on every change, a search included."""
+    user = tmp_path / "memory"
+    other = {"id": "5a1b8e7f-0000-4f7e-8a51-2d3c4b5a6f75", "content": "Prefers tabs"}
+    _write(user, [SAVED, other])
+    store = MemoryStore(user)
+    store.delete(SAVED["id"])
+    later = {"id": "4f0a7f6e-0000-4f7e-8a51-2d3c4b5a6f74", "content": "Prefers dark mode"}
+    (user / "memories.json").write_text(json.dumps([SAVED, other, later]))
+
+    store = MemoryStore(user)
+
+    assert sorted(m.description for m in store.memories()) == ["Prefers dark mode", "Prefers tabs"]
+    assert store.read(SAVED["id"]) is None
+    assert not (user / "memories.json").exists()
+    assert any(p.name.startswith("memories.json.2") for p in (user / "pre-0.7.0").iterdir())
+
+
+def test_a_proposal_that_was_accepted_and_deleted_is_not_proposed_again(tmp_path):
+    user = tmp_path / "memory"
+    _write(user, [EXTRACTED])
+    store = MemoryStore(user)
+    store.delete(store.accept(store.proposals()[0].id).id)
+    (user / "memories.json").write_text(json.dumps([EXTRACTED]))
+
+    store = MemoryStore(user)
+
+    assert store.proposals() == [] and store.memories() == []
+
+
+def test_an_old_file_that_cannot_be_read_says_nothing_of_what_was_imported(tmp_path):
+    user = tmp_path / "memory"
+    (user / "pre-0.7.0").mkdir(parents=True)
+    (user / "pre-0.7.0" / "memories.json.20260101T000000000000Z").write_text("not json {")
+    (user / "pre-0.7.0" / "memories.json.unreadable-20260101T000000000000Z").write_text("[")
+    _write(user, [SAVED])
+    assert [m.id for m in MemoryStore(user).memories()] == [SAVED["id"]]
+
+
 def test_a_running_0_6_session_holding_the_lock_postpones_the_import(tmp_path, monkeypatch, log):
     monkeypatch.setattr(_scope, "LOCK_TIMEOUT_S", 0.2)
     user = tmp_path / "memory"

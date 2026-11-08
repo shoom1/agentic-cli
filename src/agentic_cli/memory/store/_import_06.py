@@ -4,9 +4,12 @@
 uses. Each memory the model saved becomes a live memory (its id kept, so a
 second run adds nothing); each one the extractor wrote, which nobody ever
 reviewed, becomes a proposal. Then the old files move into ``pre-0.7.0/``.
-0.6 locked the same ``.lock``, so a 0.6 session still running and this import
-exclude each other; what such a session writes later is imported at the
-next open.
+A 0.6 session still running rewrites ``memories.json`` with every item it
+holds (released 0.6 takes no lock, and rewrites it on every change, a search
+included), so what such a session writes later is imported at the next open
+with new ids only: an id found in any file already in ``pre-0.7.0/`` was
+imported before, and a memory deleted since stays deleted. The ``.lock`` the
+import takes orders two 0.7 processes.
 """
 
 from __future__ import annotations
@@ -69,6 +72,28 @@ def _entries(path: Path) -> list[Any]:
     return items
 
 
+def _imported_ids(folder: Path) -> set[str]:
+    """The ids in the files already moved to ``pre-0.7.0/``: imported before, whatever became of them.
+
+    A file that cannot be read says nothing.
+    """
+    legacy = folder / LEGACY_DIR
+    try:
+        if not stat.S_ISDIR(os.lstat(legacy).st_mode):
+            return set()
+        names = sorted(item.name for item in os.scandir(legacy) if item.name.startswith("memories.json"))
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for name in names:
+        try:
+            entries = _entries(legacy / name)
+        except _Unreadable:
+            continue
+        ids.update(entry["id"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str))
+    return ids
+
+
 def _description(content: str) -> str:
     line = next((part.strip() for part in content.splitlines() if part.strip()), "")
     if len(line) <= DESCRIPTION_CUT:
@@ -100,8 +125,9 @@ def _import(store: "MemoryStore", folder: ScopeFolder, path: Path) -> list[Probl
         logger.warning("memory_import_unreadable", path=str(path), reason=str(e))
         return [Problem(path, "import_unreadable", str(e))]
     counts = {"memories": 0, "proposals": 0, "skipped": 0}
+    imported = _imported_ids(folder.path)
     for entry in entries:
-        outcome = _one(store, folder, entry)
+        outcome = _one(store, folder, entry, imported)
         if outcome in counts:
             counts[outcome] += 1
     _move_aside(folder.path)
@@ -109,12 +135,14 @@ def _import(store: "MemoryStore", folder: ScopeFolder, path: Path) -> list[Probl
     return []
 
 
-def _one(store: "MemoryStore", folder: ScopeFolder, entry: Any) -> str:
+def _one(store: "MemoryStore", folder: ScopeFolder, entry: Any, imported: set[str]) -> str:
     """Import one entry: ``memories``, ``proposals``, ``skipped``, or another word."""
     if not isinstance(entry, dict) or entry.get("archived"):
         return "archived"
     content = entry.get("content")
     old_id = entry.get("id")
+    if isinstance(old_id, str) and old_id in imported:
+        return "already"
     if not isinstance(content, str) or not content.strip():
         logger.info("memory_import_item_skipped", id=str(old_id), reason="no content")
         return "skipped"
