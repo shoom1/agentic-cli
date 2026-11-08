@@ -24,6 +24,20 @@ SECRET_SAMPLES = [
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     "password=hunter2hunter2",
     "api_key: 9f8e7d6c5b4a3210",
+    # An assignment's name may carry a prefix or a suffix, and its value needs no digit.
+    "TAVILY_API_KEY=tvly-abcdef123456",
+    "DB_PASSWORD=hunter2hunter2",
+    "client_secret: abcdefghijkl",
+    "access_token=abcdefgh1234",
+    "aws_secret_access_key = wJalrXUtnFEMIK7MDENG",
+    "password: CorrectHorseBatteryStaple",
+    # More token families. Written in parts: a secret scanner reads the file too.
+    "sk_" + "live_" + "AbCdEfGhIjKlMnOpQrStUvWx",
+    "sk_" + "test_" + "AbCdEfGhIjKlMnOpQrStUvWx",
+    "rk_" + "live_" + "AbCdEfGhIjKlMnOpQrStUvWx",
+    "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYzAbCd",
+    "glpat" + "-AbCdEfGhIjKlMnOpQrSt",
+    "-----BEGIN PGP PRIVATE KEY BLOCK-----",
 ]
 
 
@@ -38,6 +52,15 @@ def test_a_credential_is_flagged(text):
     "The auth flow rotates its refresh token every hour",
     "Use the token bucket limiter for the arXiv client",
     "password reset emails go through the notifications service",
+    "The API uses bearer authentication for every call",
+    "Requests use bearer authentication.",
+    "pwd: /home/me/proj2",
+    "SK-Hynix-memory-modules-ddr5",
+    "password: $DB_PASSWORD",
+    "api_key=<your key here>",
+    "token: {{ secrets.TOKEN }}",
+    "secret: ~/.config/app/secret-file",
+    "tokenizer: cl100k_base",
 ])
 def test_ordinary_text_is_not(text):
     assert looks_like_secret(text) is None
