@@ -57,6 +57,18 @@ def _failed(error: object) -> dict[str, Any]:
     return {"success": False, "error": str(error)}
 
 
+def _wrong_kind(**arguments: tuple[object, bool]) -> dict[str, Any] | None:
+    """A refusal for the first argument that is not text (``(value, optional)`` each), or None.
+
+    ADK does not check a tool's arguments against its signature, so a model can
+    send anything, and nothing raises out of a tool.
+    """
+    for name, (value, optional) in arguments.items():
+        if not (isinstance(value, str) or (optional and value is None)):
+            return _failed(f"{name} must be text")
+    return None
+
+
 def _save_memory_with_store(
     store: "MemoryStore",
     description: str,
@@ -65,11 +77,17 @@ def _save_memory_with_store(
     scope: str,
     user_requested: bool,
 ) -> dict[str, Any]:
+    wrong = _wrong_kind(
+        description=(description, False), content=(content, False),
+        type=(memory_type, False), scope=(scope, False),
+    )
+    if wrong is not None:
+        return wrong
     turn = get_active_turn()
     try:
         memory = store.save(
             description, content, memory_type, scope=scope,
-            source="user" if user_requested else "agent",
+            source="user" if user_requested is True else "agent",
             conversation=turn.session_id if turn is not None else None,
         )
     except DuplicateMemory as e:
@@ -85,6 +103,9 @@ def _save_memory_with_store(
 
 
 def _read_memory_with_store(store: "MemoryStore", item_id: str) -> dict[str, Any]:
+    wrong = _wrong_kind(item_id=(item_id, False))
+    if wrong is not None:
+        return wrong
     try:
         memory = store.read(item_id)
     except (MemoryStoreError, OSError) as e:
@@ -95,6 +116,11 @@ def _read_memory_with_store(store: "MemoryStore", item_id: str) -> dict[str, Any
 
 
 def _search_memory_with_store(store: "MemoryStore", query: str, limit: int) -> dict[str, Any]:
+    wrong = _wrong_kind(query=(query, False))
+    if wrong is not None:
+        return wrong
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        return _failed("limit must be a whole number")
     try:
         found = store.search(query, limit=limit)
     except (MemoryStoreError, OSError) as e:
@@ -110,6 +136,12 @@ def _update_memory_with_store(
     content: str | None,
     memory_type: str | None,
 ) -> dict[str, Any]:
+    wrong = _wrong_kind(
+        item_id=(item_id, False), description=(description, True),
+        content=(content, True), type=(memory_type, True),
+    )
+    if wrong is not None:
+        return wrong
     if description is None and content is None and memory_type is None:
         return _failed("Give a new description, content or type")
     try:
@@ -124,6 +156,9 @@ def _update_memory_with_store(
 
 
 def _delete_memory_with_store(store: "MemoryStore", item_id: str) -> dict[str, Any]:
+    wrong = _wrong_kind(item_id=(item_id, False))
+    if wrong is not None:
+        return wrong
     try:
         memory = store.read(item_id)
         deleted = memory is not None and store.delete(item_id)

@@ -77,6 +77,11 @@ class TestSave:
         with pytest.raises(InvalidMemory, match=message):
             store.save(*args)
 
+    @pytest.mark.parametrize("args", [("\ud800", "c", "user"), ("d", "\ud800", "user")])
+    def test_text_no_file_can_hold_is_refused(self, store, args):
+        with pytest.raises(InvalidMemory, match="UTF-8"):
+            store.save(*args)
+
     def test_an_unknown_scope(self, store):
         with pytest.raises(InvalidMemory, match="scope: 'team'"):
             store.save("d", "c", "user", scope="team")

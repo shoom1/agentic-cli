@@ -83,11 +83,22 @@ def file_name(description: str, memory_id: str) -> str:
     return f"{slug(description)}-{memory_id}.md"
 
 
+def _encodable(text: str) -> bool:
+    """Whether ``text`` can be written as UTF-8 (a lone surrogate cannot)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def description_problem(text: str) -> str | None:
     """Why ``text`` (stripped) cannot be a description, or None."""
     stripped = text.strip()
     if not stripped:
         return "empty"
+    if not _encodable(stripped):
+        return "cannot be written as UTF-8 text (it holds a lone surrogate)"
     if len(stripped) > DESCRIPTION_MAX:
         return f"longer than {DESCRIPTION_MAX} characters"
     if any(unicodedata.category(ch) in _LINE_BREAKS for ch in stripped):
@@ -100,6 +111,8 @@ def content_problem(text: str) -> str | None:
     stripped = text.strip()
     if not stripped:
         return "empty"
+    if not _encodable(stripped):
+        return "cannot be written as UTF-8 text (it holds a lone surrogate)"
     if len(stripped) > CONTENT_MAX:
         return (
             f"longer than {CONTENT_MAX} characters; split it, or keep long material "

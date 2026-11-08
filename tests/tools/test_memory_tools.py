@@ -68,6 +68,11 @@ def test_provenance_from_the_model_and_the_turn(tools, store):
     assert (memory.source, memory.conversation) == ("user", "conv-9")
 
 
+def test_only_true_says_the_user_asked(tools, store):
+    saved = tools["save_memory"]("Uses metric", "km.", "user", scope="user", user_requested="yes")
+    assert store.read(saved["item_id"]).source == "agent"
+
+
 @pytest.mark.parametrize("args, kwargs, error", [
     (("d", "c", "preference"), {}, "type: 'preference'"),
     (("d", "key AKIAIOSFODNN7EXAMPLE", "user"), {}, "looks like a secret"),
@@ -126,3 +131,47 @@ def test_without_a_store_the_registered_tool_says_so():
     finally:
         token.var.reset(token)
     assert result["success"] is False
+
+
+# ADK does not type-check a tool's arguments: a model can send anything.
+BAD_CALLS = [
+    ("save_memory", (None, "c", "user"), {}),
+    ("save_memory", ("d", 5, "user"), {}),
+    ("save_memory", ("d", "c", None), {}),
+    ("save_memory", ("d", "c", "user"), {"scope": None}),
+    ("save_memory", ("d", "c", "user"), {"scope": ["user"]}),
+    ("search_memory", (None,), {}),
+    ("search_memory", ("x",), {"limit": "5"}),
+    ("search_memory", ("x",), {"limit": None}),
+    ("read_memory", (None,), {}),
+    ("read_memory", (5,), {}),
+    ("update_memory", (None,), {"content": "x"}),
+    ("update_memory", ("deadbeef",), {"content": 5}),
+    ("update_memory", ("deadbeef",), {"description": ["x"]}),
+    ("update_memory", ("deadbeef",), {"type": 3}),
+    ("delete_memory", (None,), {}),
+    ("delete_memory", (5,), {}),
+    # Text no file can hold: a lone surrogate is not UTF-8.
+    ("save_memory", ("\ud800", "c", "user"), {}),
+    ("save_memory", ("d", "\ud800", "user"), {}),
+]
+
+
+@pytest.mark.parametrize("name, args, kwargs", BAD_CALLS, ids=[f"{n}-{i}" for i, (n, _, _) in enumerate(BAD_CALLS)])
+def test_a_call_with_the_wrong_kind_of_argument_is_refused_with_a_reason(tools, store, name, args, kwargs):
+    result = tools[name](*args, **kwargs)
+    assert result["success"] is False
+    assert isinstance(result["error"], str) and result["error"]
+    assert store.memories() == []
+
+
+def test_a_search_for_text_no_file_can_hold_is_a_result(tools):
+    result = tools["search_memory"]("\ud800")
+    assert isinstance(result["success"], bool)
+
+
+def test_an_update_to_text_no_file_can_hold_is_refused_and_leaves_the_memory(tools, store):
+    saved = tools["save_memory"]("Prefers tabs", "Tabs.", "feedback")
+    result = tools["update_memory"](saved["item_id"], content="\ud800")
+    assert result["success"] is False and "UTF-8" in result["error"]
+    assert store.read(saved["item_id"]).content == "Tabs."
