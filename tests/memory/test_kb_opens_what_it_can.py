@@ -16,8 +16,7 @@ import os
 
 import pytest
 
-from agentic_cli.memory import EmbeddingService, MemoryStore
-from agentic_cli.memory import store as store_module
+from agentic_cli.memory import EmbeddingService
 from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceType
 from agentic_cli.memory.kb import _db as db_module
 from agentic_cli.memory.kb import knowledge_base as knowledge_base_module
@@ -54,7 +53,7 @@ def no_model(monkeypatch):
 @pytest.fixture
 def log(monkeypatch) -> _Log:
     recorder = _Log()
-    for module in (manager_module, knowledge_base_module, db_module, store_module):
+    for module in (manager_module, knowledge_base_module, db_module):
         monkeypatch.setattr(module, "logger", recorder, raising=False)
     return recorder
 
@@ -103,22 +102,6 @@ def test_a_manager_whose_model_cannot_load_searches_by_keyword(tmp_path, log):
 
     assert [hit["document_title"] for hit in manager.search("herons")["results"]] == ["Herons"]
     assert len(log.warnings("kb_keyword_search_only")) == 1
-
-
-def test_a_memory_store_whose_model_cannot_load_searches_by_substring(tmp_path, log):
-    store = MemoryStore(tmp_path / "memory", embedding_service=_OfflineModel())
-    store.store("The user prefers metric units")
-
-    assert [item.content for item in store.search("metric")] == ["The user prefers metric units"]
-    assert len(log.warnings("memory_substring_search_only")) == 1
-
-
-def test_memories_embedded_earlier_are_searched_by_substring_without_the_model(tmp_path, log):
-    MemoryStore(tmp_path / "memory", embedding_service=FakeEmbeddingService()).store("The mascot is an otter")
-
-    store = MemoryStore(tmp_path / "memory", embedding_service=_OfflineModel())
-
-    assert [item.content for item in store.search("otter")] == ["The mascot is an otter"]
 
 
 # -- a scope that cannot open --------------------------------------------------

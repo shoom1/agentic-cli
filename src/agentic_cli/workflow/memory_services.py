@@ -7,13 +7,20 @@ the package never sees a settings object.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.memory import EmbeddingConfig, EmbeddingService, MemoryStore
     from agentic_cli.memory.kb import KnowledgeBase
+
+
+logger = Loggers.workflow()
 
 
 def project_kb_dir(settings: "BaseSettings") -> Path:
@@ -37,8 +44,8 @@ def build_embedding_service(settings: "BaseSettings") -> "EmbeddingService | Non
 
     None in mock mode (``knowledge_base_use_mock``) and without
     sentence-transformers. The model loads on first use, not here. The
-    workflow builds one and passes it to both knowledge bases and the memory
-    store, so the model loads once per process.
+    workflow builds one and passes it to both knowledge bases, so the model
+    loads once per process.
     """
     if settings.knowledge_base_use_mock:
         return None
@@ -93,18 +100,67 @@ def open_knowledge_base(
     )
 
 
-def open_memory_store(settings: "BaseSettings", *, embedding_service: Any = None) -> "MemoryStore":
-    """The memory store in ``workspace_dir/memory``.
+def project_key(path: Path) -> str:
+    """A project scope's folder name: the folder's name (at most 40 of
+    ``[A-Za-z0-9._-]``) and 12 hex characters of the SHA-256 of its path."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", path.name)[:40] or "root"
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    return f"{name}-{digest}"
 
-    It uses ``embedding_service`` when given (the workflow passes the one its
-    knowledge bases use); otherwise it builds one with
-    :func:`build_embedding_service`. With none (mock mode, or no
-    sentence-transformers) it searches by substring. (The mock embedder's
-    vectors are hashes of the text: ranking memories by them would return
-    arbitrary ones.)
+
+def project_memory_dir(settings: "BaseSettings", cwd: Path | None = None) -> Path | None:
+    """The project memory scope's folder for the working directory, or None.
+
+    None at ``/``, the home folder or above it (a project there would be all
+    of home: the rule the project read allow uses).
     """
-    from agentic_cli.memory import MemoryStore
+    cwd = (cwd or Path.cwd()).resolve()
+    home = Path.home().resolve()
+    if cwd == Path(cwd.anchor) or home.is_relative_to(cwd):
+        return None
+    return settings.workspace_dir / "projects" / project_key(cwd) / "memory"
 
-    if embedding_service is None:
-        embedding_service = build_embedding_service(settings)
-    return MemoryStore(settings.workspace_dir / "memory", embedding_service=embedding_service)
+
+def open_memory_store(settings: "BaseSettings") -> "MemoryStore | None":
+    """The memory store: the user scope in ``workspace_dir/memory``, the
+    project scope in ``workspace_dir/projects/<key>/memory`` (none at home,
+    ``/`` or above home). It searches by keyword and needs no embedding
+    service.
+
+    A memory folder that cannot open never stops the app (a link, which is
+    refused, or a folder that cannot be written). A project scope that fails
+    is left out, with a warning (``memory_project_scope_unavailable``) and
+    the user scope still works; a user scope that fails gives None, with a
+    warning (``memory_store_unavailable``), and the memory tools answer that
+    the store is not available.
+    """
+    from agentic_cli.memory import MemoryStore, MemoryStoreError
+
+    cwd = Path.cwd().resolve()
+    project_dir = project_memory_dir(settings, cwd)
+    user_dir = settings.workspace_dir / "memory"
+    try:
+        return MemoryStore(
+            user_dir,
+            project_dir,
+            project_name=cwd.name if project_dir is not None else None,
+            project_path=cwd if project_dir is not None else None,
+        )
+    except (MemoryStoreError, OSError) as e:
+        failure = e
+    if project_dir is not None:
+        # Which scope failed? The user scope alone says.
+        try:
+            store = MemoryStore(user_dir)
+        except (MemoryStoreError, OSError):
+            pass
+        else:
+            logger.warning(
+                "memory_project_scope_unavailable", path=str(project_dir),
+                error=f"{type(failure).__name__}: {failure}",
+            )
+            return store
+    logger.warning(
+        "memory_store_unavailable", path=str(user_dir), error=f"{type(failure).__name__}: {failure}"
+    )
+    return None

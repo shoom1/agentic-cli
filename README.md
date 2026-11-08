@@ -13,7 +13,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Native Tool Architecture**: Backend-specific tool factories for each backend, with automatic HITL confirmation for dangerous tools
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
-- **Semantic Memory**: Embedding-backed memory with lifecycle management, contradiction detection, and forgetting policy
+- **Memory**: markdown files in a user and a project scope, keyword search, history, proposals for review
 - **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `/resume` in the app for a picker
 - **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
 - **A Short Model List**: the app ships the models its pickers offer, and the user and the project add to them; each provider's live listing, cached for a day, checks them, and `/models` shows them and searches the full listings
@@ -1597,35 +1597,36 @@ A project's knowledge base can arrive with a cloned repository, so the knowledge
 
 Ingesting a document writes a summary and a sidecar with the workflow's LLM when `knowledge_base_summarize` is on (the default; one call per document). Turn it off in `~/.{app_name}/settings.json` to store the first ~500 characters instead. A knowledge base you build yourself calls the `summarizer=` you pass it in `generate_summary`, `generate_sidecar_payload` and `backfill_sidecars`; `ingest_document` stores the summary and sidecar payload you give it, or a preview. `KnowledgeBase.ingest_text(content, ...)` and `ingest_bytes(data, extension=..., ...)` do the conversion and the summarizer call for you; they raise `EmptyDocument`, `UnsupportedDocument` or `ConversionFailed`, `KeyError` for an unknown `scope=`, and `ValueError` for an unknown `source_type`; errors from storing the document propagate.
 
-Both knowledge bases and the memory store share one `EmbeddingService`, so the workflow loads the embedding model once (`/papers`, opening a knowledge base the workflow has not, builds its own). An `EmbeddingService` whose model fails to load remembers the error and does not try again. A knowledge base you build yourself uses the `embedding_service=` you pass it (any service but a `MockEmbeddingService` searches by meaning; the `kb` extra is needed only to build a sentence-transformers one), so several knowledge bases can share one model too. A model that does not load (the first run while offline, before the model is cached) leaves the knowledge base searching by keyword and the memory store by substring for that session, with one warning each (`kb_keyword_search_only`, `memory_substring_search_only`); the app starts. Such a session stores its chunks without vectors, and the next open with a working model embeds them. Ingesting embeds on a worker thread, before the change takes the database's write lock, and every knowledge-base call an async method or kb tool makes runs there too: a change may wait for another session's (up to 60 s, then `KnowledgeBaseBusy`), and the event loop does not wait with it. A thread cannot be stopped, so an ingest cancelled with Ctrl+C still stores its document.
+Both knowledge base scopes share one `EmbeddingService`, so the workflow loads the embedding model once (`/papers`, opening a knowledge base the workflow has not, builds its own). An `EmbeddingService` whose model fails to load remembers the error and does not try again. A knowledge base you build yourself uses the `embedding_service=` you pass it (any service but a `MockEmbeddingService` searches by meaning; the `kb` extra is needed only to build a sentence-transformers one), so several knowledge bases can share one model too. A model that does not load (the first run while offline, before the model is cached) leaves the knowledge base searching by keyword for that session, with one warning (`kb_keyword_search_only`); the app starts. Such a session stores its chunks without vectors, and the next open with a working model embeds them. Ingesting embeds on a worker thread, before the change takes the database's write lock, and every knowledge-base call an async method or kb tool makes runs there too: a change may wait for another session's (up to 60 s, then `KnowledgeBaseBusy`), and the event loop does not wait with it. A thread cannot be stopped, so an ingest cancelled with Ctrl+C still stores its document.
 
 #### Memory Tools
 
-Semantic, lifecycle-aware memory:
+Memories are short notes kept across conversations, as markdown files:
 
 ```python
 from agentic_cli.tools import memory_tools
-# save_memory, search_memory, update_memory, delete_memory
+# save_memory, read_memory, search_memory, update_memory, delete_memory
 ```
 
-The store itself is `agentic_cli.memory.MemoryStore`, part of the memory
-package that depends on nothing else in agentic-cli:
+Each memory is one file with a frontmatter (`id`, a one-line `description`, `type`: `user`, `feedback`, `project` or `reference`, `source`, `conversation`, `created`, `updated`) and its text. User memories (true across projects) live in `<workspace_dir>/memory/`; project memories in `<workspace_dir>/projects/<name>-<hash>/memory/`, keyed by the working directory (there is no project scope when the app starts at home, `/` or above home). You can read and edit the files: the store sees an edit at its next call, keeps keys you add, and never rewrites, moves or deletes a file it cannot parse (it lists it as a problem). A change keeps the previous version in the scope's `.history/` for 30 days (at most 20 versions a memory). Search is by keyword (BM25, the knowledge base's word rules, Chinese, Japanese and Korean included), computed when asked; it writes nothing.
+
+`save_memory(description, content, type, scope="project", user_requested=False)` refuses a description over 150 characters or on two lines, a text over 4,000 characters, a description another memory has, text that looks like a credential, and a scope over 1,000 memories, each with a result saying why. `read_memory(item_id)` returns one memory; `update_memory` keeps its id and its previous version; `delete_memory` can be undone for 30 days.
+
+With `auto_extract_session_facts` on, the end of a conversation (`/new`, `/resume`, exit) asks the default model for at most five memories worth keeping and files them as proposals in the scope's `.inbox/`, never as memories: a candidate already known, waiting, or discarded before is dropped. The first start of 0.7.0 imports 0.6's `memories.json` into the user scope once (what the model saved as memories, what the extractor wrote as proposals) and moves the old files into `memory/pre-0.7.0/`; extracted items past the inbox's 100 stay only in that old file (the log counts them), and what a 0.6 session still running writes later is imported at the next start, new ids only. A memory folder that cannot open (a link, which is refused, or one that cannot be written) never stops the app: a project scope that fails is left out, and a user scope that fails leaves the memory tools answering that the store is not available.
+
+The store itself is `agentic_cli.memory.MemoryStore` (provisional), part of the memory package that depends on nothing else in agentic-cli:
 
 ```python
 from pathlib import Path
 from agentic_cli.memory import MemoryStore
 
-store = MemoryStore(Path("~/.myapp/memory").expanduser())
-store.store("User prefers metric units", tags=["preference"])
+store = MemoryStore(Path("~/.myapp/memory").expanduser(), Path("~/.myapp/projects/app/memory").expanduser())
+memory = store.save("Prefers metric units", "Report distances in km.", "user", scope="user")
+store.search("metric")
+store.index()  # the text the main agent gets
 ```
 
-`MemoryStore` features:
-- Embedding-backed semantic search
-- Contradiction detection via `store_with_similarity_check`
-- `ForgettingPolicy` with `apply_forgetting()` for bounded retention
-- Archive filtering and `load_all` with tag/source filters
-
-Each store records the embedding model its vectors belong to: a knowledge base in its database, the memory store in `embedding_model.json`. After a change of `embedding_model`, the next open embeds the stored text again (a large knowledge base makes that one start slower; the log gives the chunk count and the time taken, `kb_reembedding` / `kb_reembedded`); it embeds in batches, each saved as it is done, so an open interrupted part way carries on where it stopped. A session whose model is not the one recorded (another session switched it meanwhile) searches by keyword for the rest of its run (`kb_model_changed_elsewhere`). The default model, `all-MiniLM-L6-v2`, is trained on English; for documents in other languages set `embedding_model` to a multilingual model, such as `paraphrase-multilingual-MiniLM-L12-v2` (384 dimensions, like the default).
+A knowledge base records the embedding model its vectors belong to, in its database. After a change of `embedding_model`, the next open embeds the stored text again (a large knowledge base makes that one start slower; the log gives the chunk count and the time taken, `kb_reembedding` / `kb_reembedded`); it embeds in batches, each saved as it is done, so an open interrupted part way carries on where it stopped. A session whose model is not the one recorded (another session switched it meanwhile) searches by keyword for the rest of its run (`kb_model_changed_elsewhere`). The default model, `all-MiniLM-L6-v2`, is trained on English; for documents in other languages set `embedding_model` to a multilingual model, such as `paraphrase-multilingual-MiniLM-L12-v2` (384 dimensions, like the default).
 
 #### HITL (Human-in-the-Loop)
 
@@ -1787,8 +1788,8 @@ model and its `max_tokens`.
 - **`/new`** starts a new conversation without a restart, through
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with
-  `auto_extract_session_facts` on, the facts of the conversation being left
-  saved first when a turn ran in it, as at exit ("Saving facts from the
+  `auto_extract_session_facts` on, memories proposed for review from the
+  conversation being left first when a turn ran in it, as at exit ("Saving facts from the
   conversation…" while it runs). Its line names the conversation left when `/sessions` lists it
   (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
@@ -1915,12 +1916,12 @@ See the `examples/` directory for complete working examples:
 - `arxiv_demo.py` — ArXiv paper search and analysis
 - `fileops_demo.py` — File operation tools (read, write, grep, glob)
 - `jobs_demo.py` — Long-running background jobs with a live status-bar monitor; a finished job resumes the agent (ADK, or Deep Agents with `AGENTIC_ORCHESTRATOR=deepagents`)
-- `memory_demo.py` — Memory persistence system (save/search/update/delete)
+- `memory_demo.py` — The memory store: markdown files in two scopes (save/search/update/restore, the index, proposals)
 - `webfetch_demo.py` — Web fetching and summarization
 - `websearch_demo.py` — Web search with multiple backends
 
 **Full Applications**
-- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, semantic memory, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini and Claude models: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`) in `~/.research_demo/.env`. It defines no other provider: OpenRouter, or an OpenAI-compatible service, is yours to define in `~/.research_demo/settings.json`, with its models, and its key goes in the same `.env` (the module docstring of `examples/research_demo/settings.py` shows OpenRouter's entry). A configured provider's model has no tier, so with only such a provider's key also choose the default model: pick one in `/settings`, which works while the workflow is down, or set `default_model` in `~/.research_demo/settings.json`.
+- `research_demo/` — Full-featured research assistant with KB ingest + concept pages, memory files, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini and Claude models: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`) in `~/.research_demo/.env`. It defines no other provider: OpenRouter, or an OpenAI-compatible service, is yours to define in `~/.research_demo/settings.json`, with its models, and its key goes in the same `.env` (the module docstring of `examples/research_demo/settings.py` shows OpenRouter's entry). A configured provider's model has no tier, so with only such a provider's key also choose the default model: pick one in `/settings`, which works while the workflow is down, or set `default_model` in `~/.research_demo/settings.json`.
 
 Run examples:
 
@@ -2069,7 +2070,7 @@ agentic-cli/
 │   │   ├── search.py             # web_search (Tavily / Brave)
 │   │   ├── webfetch_tool.py      # web_fetch (orchestrator)
 │   │   ├── pdf_utils.py          # PDF text extraction helpers
-│   │   ├── memory_tools.py       # save/search/update/delete (store: agentic_cli.memory)
+│   │   ├── memory_tools.py       # save/read/search/update/delete (store: agentic_cli.memory)
 │   │   ├── _core/                # Shared planning/task logic, backend-neutral declarations
 │   │   │   ├── planning.py
 │   │   │   ├── tasks.py
@@ -2087,9 +2088,9 @@ agentic-cli/
 │   │   │   └── backends/         # Jupyter backends: docker (isolated), local (not isolated)
 │   │   └── webfetch/             # Fetcher, converter, validator, robots, summarizer, saved pages
 │   ├── memory/                   # Knowledge base + memory store; imports nothing else from agentic_cli
-│   │   ├── __init__.py           # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
-│   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, io.py, log.py
-│   │   ├── store.py              # MemoryStore
+│   │   ├── __init__.py           # MemoryStore, Memory, Proposal, Candidate, the store's errors, extraction_prompt, looks_like_secret, EmbeddingService, EmbeddingConfig, MockEmbeddingService
+│   │   ├── _core/                # Shared, private: embeddings.py, mock_embeddings.py, tokenize.py, secrets.py, io.py, log.py
+│   │   ├── store/                # MemoryStore: memory files, scopes, search, index, history, proposals, 0.6 import
 │   │   └── kb/                   # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py                # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer: one folder on kb.sqlite
 │   │       ├── _db.py                    # kb.sqlite: opened as untrusted, the schema, transactions, rows read one by one

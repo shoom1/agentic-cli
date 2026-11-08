@@ -14,7 +14,7 @@ import pytest
 
 from agentic_cli.memory.kb._db import Database
 from agentic_cli.memory.kb._search import allowed_documents, fuse, keyword_ranked
-from agentic_cli.memory.kb._tokenize import tokenize
+from agentic_cli.memory._core.tokenize import tokenize
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 from tests.memory.kb_storage import A, B, C
 

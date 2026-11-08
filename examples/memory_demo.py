@@ -1,11 +1,13 @@
 #!/usr/bin/env python
-"""Standalone demo for the simplified memory system.
+"""Standalone demo of the memory store: markdown files in two scopes.
 
 Demonstrates:
-1. Storing memories with optional tags
-2. Searching memories by substring
-3. Loading all memories for system prompt injection
-4. Persistence across instances
+1. Saving memories to the user and the project scope
+2. Searching them by keyword
+3. The index the main agent gets each conversation
+4. Updating one, then restoring its previous version
+5. A proposal waiting for review, then accepted
+6. Persistence across instances
 
 Usage:
     conda run -n agenticcli python examples/memory_demo.py
@@ -14,60 +16,55 @@ Usage:
 import tempfile
 from pathlib import Path
 
-from agentic_cli.memory import MemoryItem, MemoryStore
-from agentic_cli.config import BaseSettings
+from agentic_cli.memory import Candidate, MemoryStore
 
 
-class DemoSettings(BaseSettings):
-    """Settings for demo with temp directory."""
-
-    workspace_dir: Path = Path(".")
-
-    def __init__(self, temp_dir: Path, **kwargs):
-        super().__init__(workspace_dir=temp_dir, **kwargs)
-
-
-def main():
+def main() -> None:
     print("\n" + "#" * 60)
-    print("#  Memory System Demo (Simplified)")
+    print("#  Memory Store Demo")
     print("#" * 60)
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        settings = DemoSettings(temp_path)
+        root = Path(temp_dir)
+        project = root / "projects" / "demo" / "memory"
+        store = MemoryStore(root / "user", project, project_name="demo")
 
-        # --- Store memories ---
-        print("\n  Storing memories:")
-        store = MemoryStore(settings.workspace_dir / "memory")
+        print("\n  Saving memories:")
+        saved = [
+            store.save("Prefers markdown output", "Answers in markdown, with short headings.",
+                       "feedback", scope="user"),
+            store.save("Basel III needs 99% VaR confidence", "The risk model reports VaR at 99%.", "project"),
+            store.save("Runs on Python 3.12", "The project's runtime is Python 3.12.", "project"),
+        ]
+        for memory in saved:
+            print(f"    {memory.id} [{memory.scope}/{memory.type}] {memory.description} -> {memory.path.name}")
 
-        id1 = store.store("User prefers markdown output", tags=["preference"])
-        print(f"    Stored: {id1[:8]}... [preference]")
+        print("\n  Search for 'VaR':")
+        for memory in store.search("VaR"):
+            print(f"    - {memory.description}")
 
-        id2 = store.store("Basel III requires 99% VaR confidence", tags=["fact", "finance"])
-        print(f"    Stored: {id2[:8]}... [fact, finance]")
+        print("\n  The index the main agent gets:")
+        print(store.index())
 
-        id3 = store.store("Python 3.12 is the project runtime")
-        print(f"    Stored: {id3[:8]}... (no tags)")
+        print("\n  Update, then restore the previous version:")
+        runtime = saved[2]
+        store.update(runtime.id, content="The project's runtime is Python 3.13.")
+        [version] = store.history(runtime.id)
+        store.restore(runtime.id, version.saved)
+        print(f"    {store.read(runtime.id).content}")
 
-        # --- Search ---
-        print("\n  Search for 'Basel':")
-        for item in store.search("Basel"):
-            print(f"    - {item.content}")
+        print("\n  A proposal waits for review:")
+        proposal = store.propose(
+            Candidate("new", None, "Uses metric units", "Report distances in km.", "user", "user")
+        )
+        print(f"    {len(store.proposals())} waiting: {proposal.description}")
+        store.accept(proposal.id)
+        print(f"    Accepted: {len(store.memories())} memories")
 
-        print("\n  Search for 'Python':")
-        for item in store.search("Python"):
-            print(f"    - {item.content}")
-
-        # --- Load all (system prompt injection) ---
-        print("\n  All memories (for system prompt):")
-        print(store.load_all())
-
-        # --- Persistence ---
-        print("\n  Persistence test:")
-        store2 = MemoryStore(settings.workspace_dir / "memory")
-        results = store2.search("")
-        print(f"    New instance loaded {len(results)} memories")
-        assert len(results) == 3
+        print("\n  Persistence: a new store over the same folders")
+        again = MemoryStore(root / "user", project)
+        print(f"    It reads {len(again.memories())} memories")
+        assert len(again.memories()) == 4
 
     print("\n" + "#" * 60)
     print("#  Demo Complete!")

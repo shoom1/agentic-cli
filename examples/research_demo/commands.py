@@ -56,16 +56,12 @@ class MemoryCommand(Command):
 
         table = Table(title="Persistent Memory", show_header=True)
         table.add_column("ID", style="dim", width=8)
-        table.add_column("Content")  # the terminal's own color: readable on every theme
-        table.add_column("Tags", style="dim")
+        table.add_column("Description")  # the terminal's own color: readable on every theme
+        table.add_column("Kind", style="dim")
 
         if memory_store:
-            for item in memory_store.search("", limit=20):
-                content_str = item.content
-                if len(content_str) > 60:
-                    content_str = content_str[:60] + "..."
-                tags_str = ", ".join(item.tags) if item.tags else ""
-                table.add_row(item.id[:8], content_str, tags_str)
+            for memory in memory_store.memories()[:20]:
+                table.add_row(memory.id[:8], memory.description, f"{memory.scope} {memory.type}")
 
         if table.row_count == 0:
             table.add_row("(empty)", "", "")

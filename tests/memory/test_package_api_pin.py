@@ -3,8 +3,10 @@
 0.6.4 kept the 0.6.3 package API. 0.7.0 moves the knowledge base onto one
 SQLite file and drops ``VectorStore``, ``MockVectorStore``,
 ``create_bm25_index``, ``matches_document_filters`` and
-``KnowledgeBaseManager(vector_store=)``, and adds ``KnowledgeBaseBusy``. New
-names may be added. None of these may go, and these classes and methods must
+``KnowledgeBaseManager(vector_store=)``, and adds ``KnowledgeBaseBusy``. 0.7.0
+also replaces the memory store: memories are markdown files in two scopes;
+``MemoryItem`` and ``ForgettingPolicy`` are gone, ``MemoryStore`` takes the
+scope folders. New names may be added. None of these may go, and these classes and methods must
 stay call-compatible: the same parameters, in the same order, of the same
 kind, with the same defaults. Annotations are not compared.
 """
@@ -19,12 +21,30 @@ import agentic_cli.memory as memory
 import agentic_cli.memory.kb as kb
 
 MEMORY_EXPORTS = {
+    "ALL_MEMORY_TOOLS",
+    "Candidate",
+    "DuplicateMemory",
     "EmbeddingConfig",
     "EmbeddingService",
-    "ForgettingPolicy",
-    "MemoryItem",
+    "FileInTheWay",
+    "InvalidMemory",
+    "MAX_CANDIDATES",
+    "MEMORY_TYPES",
+    "Memory",
+    "MemoryBusy",
     "MemoryStore",
+    "MemoryStoreError",
+    "MemoryStoreFull",
     "MockEmbeddingService",
+    "NoProjectScope",
+    "Problem",
+    "Proposal",
+    "SCOPES",
+    "UnsafeMemoryStore",
+    "Version",
+    "extraction_prompt",
+    "looks_like_secret",
+    "parse_candidates",
     "resolve_embedding_device",
 }
 
@@ -86,17 +106,33 @@ SIGNATURES = {
         ("self", P, R), ("doc_id", P, R), ("file_bytes", P, R), ("extension", P, R),
     ],
     ("KnowledgeBaseManager", "write_sidecar_if_present"): [("self", P, R), ("doc", P, R), ("payload", P, R)],
-    ("MemoryStore", "__init__"): [("self", P, R), ("base_dir", P, R), ("embedding_service", P, None)],
-    ("MemoryStore", "apply_forgetting"): [("self", P, R), ("policy", P, R)],
-    ("MemoryStore", "delete"): [("self", P, R), ("item_id", P, R), ("purge", P, False)],
-    ("MemoryStore", "load_all"): [("self", P, R)],
-    ("MemoryStore", "search"): [("self", P, R), ("query", P, R), ("limit", P, 10), ("include_archived", P, False)],
-    ("MemoryStore", "store"): [("self", P, R), ("content", P, R), ("tags", P, None), ("importance", P, 5)],
-    ("MemoryStore", "store_with_similarity_check"): [
-        ("self", P, R), ("content", P, R), ("tags", P, None), ("importance", P, 5),
-        ("similarity_threshold", P, 0.85),
+    ("MemoryStore", "__init__"): [
+        ("self", P, R), ("user_dir", P, R), ("project_dir", P, None), ("project_name", K, None),
+        ("project_path", K, None), ("screen", K, O), ("now", K, None),
     ],
-    ("MemoryStore", "update"): [("self", P, R), ("item_id", P, R), ("content", P, None), ("tags", P, O)],
+    ("MemoryStore", "save"): [
+        ("self", P, R), ("description", P, R), ("content", P, R), ("type", P, R),
+        ("scope", K, "project"), ("source", K, "agent"), ("conversation", K, None),
+    ],
+    ("MemoryStore", "read"): [("self", P, R), ("memory_id", P, R)],
+    ("MemoryStore", "update"): [
+        ("self", P, R), ("memory_id", P, R), ("description", K, None), ("content", K, None), ("type", K, None),
+    ],
+    ("MemoryStore", "delete"): [("self", P, R), ("memory_id", P, R)],
+    ("MemoryStore", "memories"): [("self", P, R), ("scope", P, None)],
+    ("MemoryStore", "search"): [("self", P, R), ("query", P, R), ("limit", K, 10)],
+    ("MemoryStore", "index"): [("self", P, R), ("max_lines", K, 200), ("max_bytes", K, 25_000), ("tools", K, O)],
+    ("MemoryStore", "problems"): [("self", P, R)],
+    ("MemoryStore", "propose"): [
+        ("self", P, R), ("candidate", P, R), ("conversation", K, None), ("outside_content", K, None),
+        ("source", K, "extractor"),
+    ],
+    ("MemoryStore", "proposals"): [("self", P, R), ("scope", P, None)],
+    ("MemoryStore", "accept"): [("self", P, R), ("proposal_id", P, R)],
+    ("MemoryStore", "discard"): [("self", P, R), ("proposal_id", P, R)],
+    ("MemoryStore", "discarded"): [("self", P, R)],
+    ("MemoryStore", "history"): [("self", P, R), ("memory_id", P, None), ("days", K, 30)],
+    ("MemoryStore", "restore"): [("self", P, R), ("memory_id", P, R), ("saved", P, R)],
     ("EmbeddingService", "__init__"): [
         ("self", P, R), ("model_name", P, "all-MiniLM-L6-v2"), ("batch_size", P, 32), ("device", P, "auto"),
     ],
@@ -123,7 +159,7 @@ def _shape(fn) -> list[tuple[str, str, object]]:
     return shape
 
 
-def test_agentic_cli_memory_still_exports_its_0_6_3_names():
+def test_agentic_cli_memory_exports_its_0_7_0_names():
     assert MEMORY_EXPORTS <= set(memory.__all__)
     assert all(hasattr(memory, name) for name in MEMORY_EXPORTS)
 

@@ -1152,6 +1152,7 @@ class TestToolRegistryConsistency:
             "ask_clarification",
             # Memory tools
             "save_memory",
+            "read_memory",
             "search_memory",
         ]
 
@@ -1239,7 +1240,7 @@ class TestToolRegistryConsistency:
         #              search_arxiv, fetch_arxiv_paper, ingest_arxiv_paper)
         # Execution: 1 (execute_python)
         # Interaction: 1 (ask_clarification)
-        # Memory: 2 (save_memory, search_memory)
+        # Memory: 5 (save/read/search/update/delete_memory)
         # Sandbox: 1 (sandbox_execute)
         # Plan/task state tools are backend-specific (not in global registry)
         # Total: ~25 tools

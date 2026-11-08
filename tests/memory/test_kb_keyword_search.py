@@ -17,7 +17,7 @@ import pytest
 
 from agentic_cli.memory import MockEmbeddingService
 from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
-from agentic_cli.memory.kb._tokenize import tokenize
+from agentic_cli.memory._core.tokenize import tokenize
 from tests.memory.kb_storage import raw_write
 
 TOPICS = {

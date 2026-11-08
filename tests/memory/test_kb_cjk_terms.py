@@ -12,7 +12,7 @@ import pytest
 
 from agentic_cli.memory import EmbeddingService
 from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
-from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
+from agentic_cli.memory._core.tokenize import TOKENIZER, tokenize
 
 
 @pytest.fixture(autouse=True)

@@ -90,7 +90,9 @@ async def test_a_project_database_that_does_not_open_leaves_the_user_scope(tmp_p
     assert ingested["success"] is True, ingested
     found = tools["kb_search"]("otters")
     assert [(hit["document_title"], hit["scope"]) for hit in found["results"]] == [("Otters", "user")]
-    assert tools["save_memory"]("The user prefers metric units")["success"] is True
+    assert tools["save_memory"]("Prefers metric units", "The user prefers metric units", "user", scope="user")[
+        "success"
+    ] is True
     assert [item["content"] for item in tools["search_memory"]("metric")["items"]] == [
         "The user prefers metric units"
     ]
@@ -123,7 +125,6 @@ def test_a_model_that_does_not_load_is_tried_once(tmp_path, monkeypatch):
     services = mgr._build_services()
 
     assert len(loads) == 1
-    assert services["memory_store"]._embedding_service is None
 
 
 async def test_releasing_the_services_closes_the_knowledge_base(tmp_path, monkeypatch):

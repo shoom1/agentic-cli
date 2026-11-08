@@ -45,35 +45,42 @@ def test_the_knowledge_base_uses_the_settings_embedding_model(tmp_path):
     assert kb.manager("project").get_stats()["embedding_model"] == "m-x"
 
 
-def test_the_memory_store_lives_in_the_workspace(settings):
+def test_the_user_scope_is_the_workspace_memory_folder(settings):
     store = memory_services.open_memory_store(settings)
-    store.store("a fact")
-
+    memory = store.save("a fact", "a fact", "user", scope="user")
     assert isinstance(store, MemoryStore)
-    assert (settings.workspace_dir / "memory" / "memories.json").is_file()
+    assert memory.path.parent == settings.workspace_dir / "memory"
 
 
-def test_the_mock_setting_gives_the_memory_store_no_embedder(settings):
-    """Hash embeddings carry no meaning, so the store searches by substring."""
+def test_the_project_scope_is_keyed_by_the_working_directory(settings, tmp_path):
     store = memory_services.open_memory_store(settings)
-
-    assert store._embedding_service is None
-
-
-def test_memory_search_in_mock_mode_finds_the_matching_memory(settings):
-    store = memory_services.open_memory_store(settings)
-    for text in ("Project uses Python 3.12", "User prefers dark mode", "The team mascot is an otter"):
-        store.store(text)
-
-    assert [item.content for item in store.search("otter", limit=2)] == ["The team mascot is an otter"]
+    memory = store.save("p fact", "p", "project")
+    cwd = (tmp_path / "project").resolve()
+    key = memory_services.project_key(cwd)
+    assert memory.path.parent == settings.workspace_dir / "projects" / key / "memory"
+    assert key.startswith("project-") and len(key) == len("project-") + 12
+    assert (settings.workspace_dir / "projects" / key / "project-path.txt").read_text() == f"{cwd}\n"
+    assert store.project_name == "project"
 
 
-def test_the_memory_store_uses_the_service_it_is_given(settings):
-    service = MockEmbeddingService(embedding_dim=16)
+def test_two_folders_with_one_name_get_two_keys(tmp_path):
+    assert memory_services.project_key(tmp_path / "a" / "app") != memory_services.project_key(tmp_path / "b" / "app")
+    assert memory_services.project_key(tmp_path / "my app!").startswith("my-app--")
 
-    store = memory_services.open_memory_store(settings, embedding_service=service)
 
-    assert store._embedding_service is service
+@pytest.mark.parametrize("where", ["home", "root"])
+def test_no_project_scope_at_home_or_root(settings, tmp_path, monkeypatch, where):
+    monkeypatch.chdir(tmp_path / "home" if where == "home" else Path("/"))
+    assert memory_services.project_memory_dir(settings) is None
+    assert not memory_services.open_memory_store(settings).has_project_scope
+
+
+def test_the_memory_store_needs_no_embedding_service(settings, monkeypatch):
+    def refuse(settings):
+        raise AssertionError("the memory store built an embedding service")
+
+    monkeypatch.setattr(memory_services, "build_embedding_service", refuse)
+    memory_services.open_memory_store(settings)
 
 
 def test_no_embedding_service_in_mock_mode(settings, monkeypatch):

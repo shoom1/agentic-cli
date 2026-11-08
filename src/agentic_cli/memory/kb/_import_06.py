@@ -39,7 +39,7 @@ from agentic_cli.memory.kb._db import (
     naive,
     refuse,
 )
-from agentic_cli.memory.kb._tokenize import TOKENIZER, tokenize
+from agentic_cli.memory._core.tokenize import TOKENIZER, tokenize
 from agentic_cli.memory.kb.models import Document, DocumentChunk
 
 logger = get_logger("agentic_cli.memory.kb")

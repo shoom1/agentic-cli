@@ -969,6 +969,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Memories are markdown files, in a user scope and a project scope.** The
+  memory store kept one `memories.json` per app and OS user, searched it by
+  embeddings, rewrote it on every search to count accesses, and showed nothing
+  to the model unless it searched. Each memory is now a file with a one-line
+  description, a type (`user`, `feedback`, `project`, `reference`), its source
+  and its dates: user memories in `<workspace_dir>/memory/`, project memories
+  in `<workspace_dir>/projects/<name>-<hash>/memory/` (keyed by the working
+  directory; none at home, `/` or above home). A person can read and edit
+  them; the store picks up an edit at its next call, and never rewrites, moves
+  or deletes a file it cannot parse (it lists it as a problem). Search is by
+  keyword (BM25, the knowledge base's word rules) and writes nothing; the
+  memory store no longer uses an embedding model. A change keeps the previous
+  version for 30 days. The tools are `save_memory(description, content, type,
+  scope="project", user_requested=False)`, the new `read_memory(item_id)`,
+  `search_memory(query, limit=10)`, `update_memory(item_id, description=,
+  content=, type=)` and `delete_memory(item_id)`; a duplicate description, a
+  text over 4,000 characters or one that looks like a credential is refused
+  with a result saying why. With `auto_extract_session_facts` on, the end of a
+  conversation now files proposals (at most five, never one already known,
+  repeated or discarded before) instead of writing memories; `on_session_end`
+  returns them (`list[Proposal]`, was `list[str]`). At first start, 0.6's
+  `memories.json` is imported once into the user scope: what the model saved
+  as memories, what the extractor wrote as proposals, archived items not at
+  all; the old files move into `memory/pre-0.7.0/`, and what a 0.6 session
+  still running writes later is imported at the next start, new ids only (a
+  memory deleted since stays deleted); extracted items past the inbox's 100
+  stay only in `memory/pre-0.7.0/memories.json` (the log's `memory_imported`
+  counts them as `proposals_not_filed`). A memory folder that cannot open (a
+  link, which is refused, or a folder that cannot be written) never stops the
+  app: a project scope that fails is left out with a warning, and a user scope
+  that fails leaves no memory store, so the memory tools answer that it is not
+  available. `agentic_cli.memory`'s store API is provisional.
+
 - **The knowledge base keeps each folder in one SQLite file, `kb.sqlite`.**
   It holds the documents, their chunks, each chunk's keyword terms and
   vector, and a keyword index, and every change is one transaction. Search
@@ -1637,6 +1670,21 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **The 0.6 memory store API.** `MemoryItem` (now `Memory`),
+  `ForgettingPolicy` (never applied), `MemoryStore(base_dir,
+  embedding_service=)` (now `MemoryStore(user_dir, project_dir=None, ...)`)
+  and its `store`, `store_with_similarity_check`, `load_all`,
+  `apply_forgetting` and archiving `delete(purge=)`; the memory tools' `tags`,
+  `importance`, `include_archived` and `purge` parameters and
+  `similar_existing` result; `make_memory_tools`' unused `embedding_service`;
+  `memory_tools`' re-exports of `MemoryItem` and `ForgettingPolicy`;
+  `memories_embeddings.json`, `embedding_model.json` and the
+  `memory_substring_search_only` warning. `search(query, limit=10)` still
+  lists the newest memories for an empty query, but it returns `Memory`
+  objects, which have none of `tags`, `importance` or `access_count`: an app
+  with its own `/memory` command that read them (research_demo's did) reads
+  `description`, `type` and `scope`, or lists everything with
+  `MemoryStore.memories()`.
 - **The knowledge base's FAISS and BM25 classes.** `VectorStore`,
   `MockVectorStore`, `create_bm25_index` and `matches_document_filters` are
   no longer exported, `KnowledgeBaseManager` takes no `vector_store` and has

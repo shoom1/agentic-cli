@@ -1,10 +1,10 @@
-"""Both knowledge bases and the memory store share one embedding service.
+"""Both knowledge base scopes share one embedding service.
 
 Each knowledge base loaded the embedding model when it opened (to size its
-index), and the memory store loaded its own on first use: up to three
-copies of one model per process. The workflow now builds one service, only
-when a knowledge base or the memory store is needed and never in mock mode,
-keeps it under a private key, and passes it to all three.
+index): two copies of one model per process. The workflow builds one
+service, only when a knowledge base is needed and never in mock mode, keeps
+it under a private key, and passes it to both scopes. The memory store
+searches by keyword and has none.
 """
 
 from __future__ import annotations
@@ -81,14 +81,21 @@ def made(monkeypatch) -> list:
     return services
 
 
-def test_one_service_reaches_both_scopes_and_the_memory_store(tmp_path, made):
+def test_one_service_reaches_both_scopes(tmp_path, made):
     services = _manager(tmp_path, {"knowledge_base", "memory_store"}, knowledge_base_use_mock=False)._build_services()
 
     [service] = made
     assert services[EMBEDDING_SERVICE] is service
     assert services[KNOWLEDGE_BASE].manager("project")._service is service
     assert services[KNOWLEDGE_BASE].manager("user")._service is service
-    assert services[MEMORY_STORE]._embedding_service is service
+
+
+def test_the_memory_store_alone_builds_no_service(tmp_path, made):
+    services = _manager(tmp_path, {"memory_store"}, knowledge_base_use_mock=False)._build_services()
+
+    assert made == []
+    assert EMBEDDING_SERVICE not in services
+    assert MEMORY_STORE in services
 
 
 def test_no_service_without_a_knowledge_base_or_memory_store(tmp_path, made):
@@ -106,11 +113,11 @@ def test_a_component_built_later_reuses_the_service(tmp_path, made):
     later = mgr._build_services(frozenset(mgr._services))
 
     assert len(made) == 1
-    assert later[MEMORY_STORE]._embedding_service is mgr._services[EMBEDDING_SERVICE]
+    assert MEMORY_STORE in later
 
 
 def test_a_model_switch_carries_the_service(tmp_path, made):
-    mgr = _manager(tmp_path, {"memory_store"}, knowledge_base_use_mock=False)
+    mgr = _manager(tmp_path, {"knowledge_base"}, knowledge_base_use_mock=False)
     mgr._publish_services(mgr._build_services())
     service = mgr._services[EMBEDDING_SERVICE]
 
@@ -130,7 +137,6 @@ def test_mock_mode_builds_no_service(tmp_path, monkeypatch):
     services = _manager(tmp_path, {"knowledge_base", "memory_store"}, knowledge_base_use_mock=True)._build_services()
 
     assert EMBEDDING_SERVICE not in services
-    assert services[MEMORY_STORE]._embedding_service is None
 
 
 def _install_fake_model(monkeypatch, loads: list[str]) -> None:
@@ -152,7 +158,7 @@ def _install_fake_model(monkeypatch, loads: list[str]) -> None:
     )
 
 
-def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, monkeypatch):
+def test_the_model_loads_once_for_both_scopes(tmp_path, monkeypatch):
     loads: list[str] = []
     _install_fake_model(monkeypatch, loads)
     mgr = _manager(
@@ -161,7 +167,6 @@ def test_the_model_loads_once_for_both_scopes_and_the_memory_store(tmp_path, mon
     services = mgr._build_services()
     kb = services[KNOWLEDGE_BASE]
 
-    services[MEMORY_STORE].store("The team mascot is an otter")
     kb.manager("project").ingest_document(content="Basalt columns.", title="Basalt", source_type=SourceType.USER)
     kb.manager("user").ingest_document(content="Glacier notes.", title="Glacier", source_type=SourceType.USER)
 

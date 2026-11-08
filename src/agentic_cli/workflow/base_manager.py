@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.config import AgentGraph
     from agentic_cli.workflow.context import CompactResult, ContextBudget
-    from agentic_cli.memory import MemoryStore
+    from agentic_cli.memory import MemoryStore, Proposal
     from agentic_cli.memory.kb import KnowledgeBase
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
@@ -528,12 +528,11 @@ class BaseWorkflowManager(ABC):
         needs_memory = "memory_store" in self._required_managers and MEMORY_STORE not in existing
         needs_kb = "knowledge_base" in self._required_managers and KNOWLEDGE_BASE not in existing
         embedding_service = None
-        if needs_memory or needs_kb:
-            # One service for both knowledge bases and the memory store, so the
-            # model loads once. Reading the live registry here is safe: nothing
-            # publishes into it while services are being built, and a service
-            # carried over a model switch, or built for an earlier component,
-            # is reused rather than built again.
+        if needs_kb:
+            # One service for both knowledge base scopes, so the model loads
+            # once. Reading the live registry here is safe: nothing publishes
+            # into it while services are being built, and a service carried
+            # over a model switch is reused rather than built again.
             embedding_service = self._services.get(EMBEDDING_SERVICE)
             if embedding_service is None:
                 from agentic_cli.workflow.memory_services import build_embedding_service
@@ -545,7 +544,9 @@ class BaseWorkflowManager(ABC):
         if needs_memory:
             from agentic_cli.workflow.memory_services import open_memory_store
 
-            s[MEMORY_STORE] = open_memory_store(self._settings, embedding_service=embedding_service)
+            store = open_memory_store(self._settings)
+            if store is not None:  # None: it cannot open, and the memory tools say so
+                s[MEMORY_STORE] = store
 
         if needs_kb:
             from agentic_cli.workflow.memory_services import open_knowledge_base
@@ -677,10 +678,14 @@ class BaseWorkflowManager(ABC):
         messages: list[dict] | None = None,
         *,
         session: "SessionRef | None" = None,
-    ) -> list[str]:
-        """Hook called when a session ends. Optionally extracts facts.
+    ) -> list["Proposal"]:
+        """Propose memories from a conversation that ends, for review in ``/memory inbox``.
 
-        Override in downstream apps for custom session-end behavior.
+        Runs with ``auto_extract_session_facts`` on and a memory store. It
+        writes no memory: each candidate the model returns goes to
+        ``MemoryStore.propose``, which files it in the inbox or drops it.
+        Never raises. Override in downstream apps for custom session-end
+        behavior.
 
         Args:
             messages: Recent messages from the session (optional).
@@ -691,59 +696,59 @@ class BaseWorkflowManager(ABC):
                 silently coming back empty.
 
         Returns:
-            List of extracted facts (empty if disabled or no messages).
+            The proposals filed (empty if disabled, without a memory store or
+            messages, or when the call fails).
         """
         if not getattr(self._settings, "auto_extract_session_facts", False):
             return []
-
         store = self._services.get(MEMORY_STORE)
         if store is None:
             return []
-
+        ref = session or get_active_turn() or self.session_ref()
         # When the caller doesn't supply messages, pull them from the live
         # backend session (same source/sid save_session uses) so the CLI can
         # invoke this with no arguments on exit.
         if messages is None:
-            ref = session or get_active_turn() or self.session_ref()
             try:
                 if self._is_default_user(ref.user_id):
                     # Compatible call for backends that predate the user_id
                     # parameter (see _user_scoped_kwargs).
                     messages = await self.recent_messages(ref.session_id)
                 else:
-                    messages = await self.recent_messages(
-                        ref.session_id, user_id=ref.user_id
-                    )
+                    messages = await self.recent_messages(ref.session_id, user_id=ref.user_id)
             except Exception:
                 logger.debug("session_fact_extraction_extract_failed", exc_info=True)
                 return []
-
         if not messages:
             return []
 
-        prompt = (
-            "Extract key facts, decisions, and user preferences from this conversation. "
-            "Return each fact as a single concise sentence on its own line. "
-            "Only include facts worth remembering for future conversations. "
-            "If there are no notable facts, return an empty response.\n\n"
-        )
-        content = "\n".join(
-            f"{m.get('role', 'unknown')}: {m.get('content', '')}"
-            for m in messages[-20:]
-        )
+        from agentic_cli.memory import ALL_MEMORY_TOOLS, extraction_prompt, parse_candidates
 
         try:
-            summary = await self.generate_simple(
-                self._fit_prompt(prompt + content, 2000), max_tokens=2000
-            )
+            index = await asyncio.to_thread(store.index, tools=ALL_MEMORY_TOOLS)
+            discarded = await asyncio.to_thread(store.discarded)
+            prompt = extraction_prompt(messages[-20:], index, discarded)
+            answer = await self.generate_simple(self._fit_prompt(prompt, 2000), max_tokens=2000)
         except Exception:
             logger.debug("session_fact_extraction_failed", exc_info=True)
             return []
+        mark = self._outside_content_mark(ref)
+        filed: list["Proposal"] = []
+        for candidate in parse_candidates(answer):
+            try:
+                proposal = await asyncio.to_thread(
+                    store.propose, candidate, conversation=ref.session_id, outside_content=mark
+                )
+            except Exception:
+                logger.debug("memory_proposal_failed", exc_info=True)
+                continue
+            if proposal is not None:
+                filed.append(proposal)
+        return filed
 
-        facts = [line.strip() for line in summary.strip().split("\n") if line.strip()]
-        for fact in facts:
-            store.store(fact, tags=["auto-extracted", "session"])
-        return facts
+    def _outside_content_mark(self, ref: SessionRef) -> str | None:
+        """The tool that brought outside content into ``ref``'s conversation, or None."""
+        return None
 
     @property
     def active_turn(self) -> SessionRef | None:
