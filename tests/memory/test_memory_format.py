@@ -45,6 +45,21 @@ class TestValues:
     def test_a_bare_value_is_stripped(self):
         assert files.read_value("  spaced out  ") == "spaced out"
 
+    @pytest.mark.parametrize("raw, expected", [
+        (" user # a note", "user"),
+        (" user   #note", "user"),
+        (" # only a comment", ""),
+        (" a#b", "a#b"),
+        (" 'quoted # not a comment'", "quoted # not a comment"),
+        (' "quoted # not a comment"', "quoted # not a comment"),
+    ])
+    def test_a_comment_after_a_bare_value_is_not_part_of_it(self, raw, expected):
+        assert files.read_value(raw) == expected
+
+    def test_a_file_with_a_comment_after_a_value_reads(self):
+        fields, _ = files.parse("---\nid: a1\ndescription: d\ntype: user # note\n---\nx\n")
+        assert fields["type"] == "user"
+
 
 class TestParse:
     def test_round_trip_keeps_every_key_in_order(self):

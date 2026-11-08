@@ -39,6 +39,7 @@ _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _YAML_WORDS = frozenset({"true", "false", "null", "yes", "no", "on", "off", "~"})
 _RADIX_NUMBER = re.compile(r"[-+]?0[xXoObB][0-9a-fA-F_]+")
 _LINE_BREAKS = frozenset({"Cc", "Zl", "Zp"})
+_COMMENT = re.compile(r"\s#")
 
 
 class FormatError(ValueError):
@@ -159,6 +160,9 @@ def write_value(value: str) -> str:
 def read_value(raw: str) -> str:
     """A frontmatter value: a JSON string, a YAML single-quoted string, or bare text.
 
+    A bare value ends at a ``#`` that follows whitespace, as in YAML: the rest
+    of the line is a comment.
+
     Raises:
         FormatError: a quoted value that does not close.
     """
@@ -175,7 +179,7 @@ def read_value(raw: str) -> str:
         if len(text) < 2 or not text.endswith("'"):
             raise FormatError("a single-quoted value that does not close")
         return text[1:-1].replace("''", "'")
-    return text
+    return _COMMENT.split(raw, maxsplit=1)[0].strip()
 
 
 def parse(text: str) -> tuple[dict[str, str], str]:
