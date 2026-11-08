@@ -42,6 +42,32 @@ def _entry_id(entry: Any) -> Any:
     return entry.get("id") if isinstance(entry, dict) else None
 
 
+def _require_usable(item: "MemoryItem") -> None:
+    """Raise ``TypeError`` when a field of ``item`` is not what the store works with.
+
+    ``MemoryItem.from_dict`` takes whatever the file holds. A content that is
+    not text breaks every search and every embedder, a tag list that is not
+    strings breaks ``load_all``, a counter that is not a number breaks the
+    next search that finds the memory, and an id that is not a string can
+    collide with another as a key (``1``, ``true`` and ``1.0`` are one).
+    ``bool`` is a number to Python and none to a file, so it is refused where
+    a number is expected; an importance may be a float, which ``store`` never
+    casts.
+    """
+    if not isinstance(item.id, str):
+        raise TypeError(f"id is a {type(item.id).__name__}, not a string")
+    if not isinstance(item.content, str):
+        raise TypeError(f"content is a {type(item.content).__name__}, not a string")
+    if item.tags is not None and not (
+        isinstance(item.tags, list) and all(isinstance(tag, str) for tag in item.tags)
+    ):
+        raise TypeError("tags are not a list of strings")
+    if isinstance(item.access_count, bool) or not isinstance(item.access_count, int):
+        raise TypeError(f"access_count is a {type(item.access_count).__name__}, not an integer")
+    if isinstance(item.importance, bool) or not isinstance(item.importance, (int, float)):
+        raise TypeError(f"importance is a {type(item.importance).__name__}, not a number")
+
+
 def _loaded(service: Any) -> Any:
     """``service`` with its model loaded, or None when it does not load.
 
@@ -158,8 +184,11 @@ class MemoryStore:
         self._model_path = base_dir / "embedding_model.json"
         self._lock_path = base_dir / ".lock"
         self._items: dict[str, MemoryItem] = {}
-        # Entries of memories.json that did not parse, as they were read.
+        # Entries of memories.json that did not parse, as they were read, and
+        # which of them this store has already warned about (by content: a
+        # save moves them to the end of the file).
         self._unreadable: list[Any] = []
+        self._reported: set[str] = set()
         # Guards self._items and _save() — LangGraph's ToolNode runs sync tools
         # concurrently in executor threads, so store/update/delete/search (and
         # the full-file rewrite in _save) must not interleave. The folder lock
@@ -223,40 +252,64 @@ class MemoryStore:
     def _load(self) -> None:
         """Read ``memories.json`` entry by entry, then the vectors.
 
-        An entry that does not parse is kept as it was (``_unreadable``) and
-        written back by every save, so one bad entry costs only itself. A
-        file that does not parse at all is renamed aside first
-        (:meth:`_set_aside`), so no save writes over it.
+        An entry that does not parse, has a field of the wrong type, or has
+        the id of an earlier entry is kept as it was (``_unreadable``) and
+        written back by every save, so one bad entry costs only itself. The
+        first entry with an id is the memory: saves write the memories before
+        the kept entries, so a later copy that won would be the one a reload
+        read, and undo every edit. A file that does not parse at all is
+        renamed aside first (:meth:`_set_aside`), so no save writes over it.
         """
         self._unreadable = []
         if self._path.exists():
             for position, entry in enumerate(self._read_entries()):
                 try:
                     item = MemoryItem.from_dict(entry)
-                    self._items[item.id] = item  # an id that is no key (a list) fails here
+                    _require_usable(item)
+                    if item.id in self._items:
+                        raise ValueError(f"the id {item.id!r} is an earlier entry's")
                 except (KeyError, TypeError, AttributeError, ValueError) as e:
-                    logger.warning(
-                        "memory_entry_unreadable",
-                        path=str(self._path),
-                        position=position,
-                        id=_entry_id(entry),
-                        error=f"{type(e).__name__}: {e}",
-                    )
-                    self._unreadable.append(entry)
+                    self._keep_unreadable(position, entry, e)
+                    continue
+                self._items[item.id] = item
         if self._embeddings_path.exists():
+            # Derived data: one that cannot be read is ignored, and the
+            # vectors are made again.
             try:
-                emb_data = json.loads(self._embeddings_path.read_text())
+                emb_data = json.loads(self._embeddings_path.read_text(encoding="utf-8"))
+                if not isinstance(emb_data, dict):
+                    raise ValueError("not a JSON object")
                 for item_id, embedding in emb_data.items():
                     if item_id in self._items:
                         self._items[item_id].embedding = embedding
-            except (json.JSONDecodeError, KeyError):
+            except (ValueError, KeyError, RecursionError):
                 logger.warning("corrupted_embeddings_file", path=str(self._embeddings_path))
+
+    def _keep_unreadable(self, position: int, entry: Any, error: Exception) -> None:
+        """Keep ``entry`` for every save, and warn the first time this store meets it.
+
+        Every reload after another process wrote meets it again, and the CLI
+        prints log lines above the prompt.
+        """
+        self._unreadable.append(entry)
+        key = json.dumps(entry, sort_keys=True)
+        if key in self._reported:
+            return
+        self._reported.add(key)
+        logger.warning(
+            "memory_entry_unreadable",
+            path=str(self._path),
+            position=position,
+            id=_entry_id(entry),
+            error=f"{type(error).__name__}: {error}",
+        )
 
     def _read_entries(self) -> list[Any]:
         """The entries of ``memories.json``: a list, or ``{"items": [...]}``."""
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            # utf-8-sig: some editors save a byte order mark, which is no JSON.
+            data = json.loads(self._path.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
             self._set_aside(f"{type(e).__name__}: {e}")
             return []
         entries = data.get("items") if isinstance(data, dict) else data
