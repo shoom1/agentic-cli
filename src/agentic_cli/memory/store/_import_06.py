@@ -3,7 +3,10 @@
 0.6 kept one store per app and OS user in the same folder the user scope now
 uses. Each memory the model saved becomes a live memory (its id kept, so a
 second run adds nothing); each one the extractor wrote, which nobody ever
-reviewed, becomes a proposal. Then the old files move into ``pre-0.7.0/``.
+reviewed, becomes a proposal, up to the inbox's cap (the rest are counted in
+``memory_imported`` as ``proposals_not_filed`` and stay only in the old
+file). Then the old files move into ``pre-0.7.0/``.
+
 A 0.6 session still running rewrites ``memories.json`` with every item it
 holds (released 0.6 takes no lock, and rewrites it on every change, a search
 included), so what such a session writes later is imported at the next open
@@ -24,7 +27,9 @@ from typing import TYPE_CHECKING, Any
 
 from agentic_cli.memory._core.io import read_regular_file
 from agentic_cli.memory._core.log import get_logger
+from agentic_cli.memory.store import _inbox
 from agentic_cli.memory.store._files import DESCRIPTION_MAX, normalized, valid_id
+from agentic_cli.memory.store._inbox import Inbox
 from agentic_cli.memory.store._scope import ScopeFolder
 from agentic_cli.memory.store.models import Candidate, MemoryBusy, MemoryStoreError, Problem
 
@@ -142,7 +147,7 @@ def _import(store: "MemoryStore", folder: ScopeFolder, path: Path) -> list[Probl
     except _Unreadable as e:
         logger.warning("memory_import_unreadable", path=str(path), reason=str(e))
         return [Problem(path, "import_unreadable", str(e))]
-    counts = {"memories": 0, "proposals": 0, "skipped": 0}
+    counts = {"memories": 0, "proposals": 0, "proposals_not_filed": 0, "skipped": 0}
     imported = _imported_ids(folder.path)
     for entry in entries:
         outcome = _one(store, folder, entry, imported)
@@ -177,7 +182,11 @@ def _one(store: "MemoryStore", folder: ScopeFolder, entry: Any, imported: set[st
             logger.info("memory_import_item_skipped", id=str(old_id), reason=reason)
             return "skipped"
         proposal = store._propose_locked(folder, candidate, None, None, "imported")
-        return "proposals" if proposal is not None else "repeated"
+        if proposal is not None:
+            return "proposals"
+        # Not filed: a repeat, or the inbox is full. The latter stays in the old file, and counts.
+        full = len(Inbox(folder).proposals()[0]) >= _inbox.INBOX_MAX
+        return "proposals_not_filed" if full else "repeated"
     memory_id = old_id if valid_id(old_id) else None
     if memory_id is not None and memory_id in store._entries()[0]:
         return "already"

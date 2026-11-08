@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from agentic_cli.memory._core.filelock import folder_lock
-from agentic_cli.memory.store import _import_06, _scope
+from agentic_cli.memory.store import _import_06, _inbox, _scope
 from agentic_cli.memory.store.store import MemoryStore
 from tests.memory.kb_storage import LogRecorder
 
@@ -57,6 +57,29 @@ def test_saved_items_become_memories_and_extracted_ones_proposals(tmp_path, log,
     assert not (user / "memories.json").exists()
     [counts] = log.infos("memory_imported")
     assert (counts["memories"], counts["proposals"]) == (1, 1)
+
+
+def test_extracted_items_past_the_inbox_cap_are_counted_and_stay_in_the_old_file(tmp_path, log, monkeypatch):
+    monkeypatch.setattr(_inbox, "INBOX_MAX", 2)
+    extracted = [{"id": f"e{n}", "content": f"Extracted fact number {n}", "tags": ["auto-extracted"]}
+                 for n in range(5)]
+    user = tmp_path / "memory"
+    _write(user, [SAVED, *extracted])
+
+    store = MemoryStore(user)
+
+    assert [m.id for m in store.memories()] == [SAVED["id"]]  # saved items are not capped
+    assert len(store.proposals()) == 2
+    [counts] = log.infos("memory_imported")
+    assert (counts["memories"], counts["proposals"], counts["proposals_not_filed"]) == (1, 2, 3)
+    assert "Extracted fact number 4" in (user / "pre-0.7.0" / "memories.json").read_text()
+
+
+def test_an_extracted_item_that_repeats_one_is_not_counted_as_unfiled(tmp_path, log):
+    _write(tmp_path / "memory", [EXTRACTED, EXTRACTED_AGAIN])
+    MemoryStore(tmp_path / "memory")
+    [counts] = log.infos("memory_imported")
+    assert (counts["proposals"], counts["proposals_not_filed"]) == (1, 0)
 
 
 def test_a_long_first_line_is_cut_at_a_word(tmp_path):
