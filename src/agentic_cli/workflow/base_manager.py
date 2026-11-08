@@ -40,7 +40,7 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
-from agentic_cli.workflow.outside_content import OutsideContentMarks
+from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_content_note
 from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
@@ -592,10 +592,12 @@ class BaseWorkflowManager(ABC):
                 app_name=self._settings.app_name,
             )
             # Code that would run on the host without a sandbox is approved
-            # per call; the engine asks which that is at each check.
+            # per call, and so is a memory write once the conversation has
+            # read outside content; the engine asks which at each check.
             s[PERMISSION_ENGINE] = PermissionEngine(
                 settings=self._settings, workflow=self, ctx=ctx,
                 uncontained=uncontained_exec_capabilities,
+                per_call=self._per_call_capabilities,
             )
 
         # Always ensure workflow reference is available
@@ -752,6 +754,11 @@ class BaseWorkflowManager(ABC):
     def _outside_content_mark(self, ref: SessionRef) -> str | None:
         """The tool that brought outside content into ``ref``'s conversation, or None."""
         return self._outside_marks.get(ref)
+
+    def _per_call_capabilities(self, settings: "BaseSettings") -> dict[str, str]:
+        """``memory.write`` with its note while the turn's conversation is marked."""
+        tool = self._outside_marks.get(get_active_turn())
+        return {"memory.write": outside_content_note(tool)} if tool else {}
 
     @property
     def active_turn(self) -> SessionRef | None:
