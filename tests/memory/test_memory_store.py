@@ -193,6 +193,15 @@ class TestChanges:
         assert store.history(days=5) == []
 
 
+def test_a_new_id_avoids_one_that_differs_only_by_case(tmp_path, monkeypatch):
+    from agentic_cli.memory.store import _files
+
+    write_memory(tmp_path / "user", "mine-4F2A9C1E.md", memory_text("4F2A9C1E", "Written by hand"))
+    draws = iter(["4f2a9c1e", "5a5a5a5a"])
+    monkeypatch.setattr(_files.secrets, "token_hex", lambda n: next(draws))
+    assert MemoryStore(tmp_path / "user").save("d", "c", "user", scope="user").id == "5a5a5a5a"
+
+
 class TestLists:
     def test_memories_newest_first_then_by_id(self, store, clock):
         a = store.save("a", "1", "user", scope="user")

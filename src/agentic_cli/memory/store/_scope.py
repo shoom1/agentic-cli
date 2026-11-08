@@ -59,18 +59,21 @@ def resolve_duplicates(entries: list[Entry]) -> tuple[dict[str, Entry], list[Pro
     """Each id's memory, and a problem for every other file claiming it.
 
     The memory is the one with the later ``updated``, then the later mtime.
+    Ids that differ only by case are one id: on a case-insensitive file
+    system they share a history folder and file names.
     """
     by_id: dict[str, list[Entry]] = {}
     for entry in entries:
-        by_id.setdefault(entry.memory.id, []).append(entry)
+        by_id.setdefault(entry.memory.id.casefold(), []).append(entry)
     winners: dict[str, Entry] = {}
     problems: list[Problem] = []
-    for memory_id, group in by_id.items():
+    for group in by_id.values():
         group.sort(key=lambda e: (e.memory.updated, e.mtime_ns), reverse=True)
-        winners[memory_id] = group[0]
+        winner = group[0]
+        winners[winner.memory.id] = winner
         problems += [
             Problem(other.memory.path, "duplicate_id",
-                    f"the id {memory_id} is also {group[0].memory.path.name}'s")
+                    f"the id {other.memory.id} is also {winner.memory.path.name}'s")
             for other in group[1:]
         ]
     return winners, problems

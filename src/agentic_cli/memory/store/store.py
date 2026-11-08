@@ -159,11 +159,14 @@ class MemoryStore:
 
     def _taken(self, winners: dict[str, Entry]) -> Callable[[str], bool]:
         """Whether a new id is taken by a memory, a proposal or a history entry."""
+        live = {memory_id.casefold() for memory_id in winners}
+
         def taken(candidate: str) -> bool:
-            if candidate in winners:
+            if candidate.casefold() in live:
                 return True
             return any(
-                candidate in folder.history_ids() or (folder.path / INBOX / f"{candidate}.md").exists()
+                candidate.casefold() in {one.casefold() for one in folder.history_ids()}
+                or (folder.path / INBOX / f"{candidate}.md").exists()
                 for folder in self._folders.values()
             )
         return taken

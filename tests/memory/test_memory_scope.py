@@ -104,6 +104,17 @@ def test_duplicate_ids_keep_the_newer_and_report_the_other(tmp_path):
     assert [(p.path.name, p.kind) for p in problems] == [("old-a1.md", "duplicate_id")]
 
 
+def test_ids_that_differ_only_by_case_are_one_id(tmp_path):
+    """On a case-insensitive file system ``.history/ABCD`` and ``.history/abcd`` are one folder."""
+    folder = _folder(tmp_path)
+    write_memory(folder.path, "upper-ABCD.md", memory_text("ABCD", "Upper one", updated="2026-11-01T00:00:00Z"))
+    write_memory(folder.path, "lower-abcd.md", memory_text("abcd", "Lower one", updated="2026-11-02T00:00:00Z"))
+    entries, _ = folder.scan()
+    winners, problems = resolve_duplicates(entries)
+    assert list(winners) == ["abcd"]
+    assert [(p.path.name, p.kind) for p in problems] == [("upper-ABCD.md", "duplicate_id")]
+
+
 def test_write_creates_private_folders_and_files_and_the_note(tmp_path):
     folder = ScopeFolder(tmp_path / "projects" / "app-0123" / "memory", "project",
                          note=(tmp_path / "projects" / "app-0123" / "project-path.txt", "/src/app"))
