@@ -5,7 +5,7 @@ Every keyword index (MockBM25Index and the bm25s / rank_bm25 backends) uses
 Indexes save their tokenized text, so each saved index records ``TOKENIZER``;
 one saved with a different tokenizer loads empty, and the knowledge base then
 re-indexes its chunks. A run of Chinese, Japanese or Korean characters, which
-no spaces divide into words, is indexed as overlapping two-character terms.
+spaces do not divide into words, is indexed as overlapping two-character terms.
 """
 
 from __future__ import annotations
@@ -36,12 +36,15 @@ def _word() -> re.Pattern[str]:
     return re.compile("[\\w" + re.escape(marks) + "\u200c\u200d]+")
 
 
-# Scripts written without spaces between words, whose runs become overlapping
-# two-character terms: Han (with its extensions and compatibility ideographs),
-# Hiragana, Katakana (half-width too) and Hangul.
+# Scripts whose runs become overlapping two-character terms: Han (with its
+# iteration and closing marks 々〆〇, the Hangzhou numerals and 〻, the
+# extensions and the compatibility ideographs, up to Extension H), Hiragana,
+# Katakana (the phonetic extensions and half-width too) and Hangul. Chinese and
+# Japanese put no spaces between words; a Korean word carries its particles.
 _CJK = re.compile(
-    "[\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf\u4e00-\u9fff"
-    "\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003134f]+"
+    "[\u1100-\u11ff\u3005-\u3007\u3021-\u3029\u3038-\u303b\u3040-\u30ff"
+    "\u3130-\u318f\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af"
+    "\uf900-\ufaff\uff66-\uff9f\U00020000-\U000323af]+"
 )
 
 
@@ -66,10 +69,12 @@ def tokenize(text: str) -> list[str]:
     """Case-folded words, punctuation dropped; a run of Chinese, Japanese or
     Korean characters as its overlapping two-character terms.
 
-    Those scripts put no spaces between words, so a run is not one word: as
-    search engines do (Elasticsearch's cjk analyzer), every two adjacent
-    characters are a term, in the indexed text and the query alike. A
-    one-character query then matches only a character that stands alone.
+    Chinese and Japanese put no spaces between words, and a Korean word
+    carries its particles (수달이), so a run is not one word: as search
+    engines do (Elasticsearch's cjk analyzer), every two adjacent characters
+    are a term, in the indexed text and the query alike. A one-character query
+    then matches only a character that stands alone. Thai, Lao, Khmer and
+    Burmese, written without spaces too, are not split into words.
     """
     words = _word().findall(unicodedata.normalize("NFC", text).casefold())
     return [term for word in words for term in _terms(word)]

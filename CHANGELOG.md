@@ -1831,18 +1831,23 @@ step; each entry says what to use instead.
   chunked properly and found by keyword.** A sentence ended only at `.`, `!`
   or `?` before a capital A-Z, and nothing cut a sentence that ran long, so a
   Russian or Chinese document became one chunk: the embedding model read only
-  its first ~1,000 characters, and every hit returned the whole document. A
-  sentence now ends at `.`, `!`, `?` or `…` before any whitespace, whatever
-  letter follows (a lower-case one, a Cyrillic or Greek capital), and at
-  `。！？`; anything longer than the chunk size is cut at whitespace (or at the
-  limit, in text without spaces), and a code block between lines, so no chunk
-  is longer than the chunk size plus the overlap. nltk, used only where it
-  happened to be installed (and so chunking differently from one install to
-  the next), is no longer used. Chinese, Japanese and Korean words are not
-  separated by spaces, so a run of them was one keyword term and `水獭` found
-  nothing in `水獭住在河边`; a run is now indexed (and a query split) as
-  overlapping two-character terms. Keyword indexes rebuild on the next open;
-  documents ingested before keep their chunks.
+  its beginning, and every hit returned the whole document. A sentence now
+  ends at `.`, `!`, `?` or `…` before any whitespace, whatever letter follows
+  (a lower-case one, a Cyrillic or Greek capital), at the full stops of Hindi,
+  Urdu, Arabic, Armenian, Ethiopic and Burmese, and at `。！？．` and `｡`;
+  anything longer than the chunk size is cut at whitespace (or at the limit,
+  in text without spaces), and a code block between lines, so no chunk is
+  longer than the chunk size plus the overlap. A chunk size under 1 is a
+  `ValueError`. nltk, used only where it happened to be installed (and so
+  chunking differently from one install to the next), is no longer used.
+  Chinese and Japanese words are not separated by spaces, and a Korean word
+  carries its particles (`수달이`), so a run of them was one keyword term and
+  `水獭` found nothing in `水獭住在河边`; a run (`々` and the other Han marks
+  included) is now indexed, and a query split, as overlapping two-character
+  terms. A one-character query finds only a one-character run, and Thai, Lao,
+  Khmer and Burmese, also written without spaces, are not split into words.
+  Keyword indexes rebuild on the next open; documents ingested before keep
+  their chunks.
 - **A slow DNS server no longer freezes the app while `web_fetch` runs.** The
   fetcher's SSRF-safe transport resolved each host with `socket.getaddrinfo`
   on the event loop's thread: a fetch makes at least two lookups (robots.txt,
