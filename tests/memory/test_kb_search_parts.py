@@ -1,0 +1,79 @@
+"""Keyword ranking, search filters and rank fusion (review F12, F14)."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from agentic_cli.memory.kb._db import Database
+from agentic_cli.memory.kb._search import allowed_documents, fuse, keyword_ranked
+from agentic_cli.memory.kb._tokenize import tokenize
+from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
+from tests.memory.kb_storage import A, B, C
+
+
+def _db(tmp_path, *docs):
+    db = Database.open(tmp_path / "kb.sqlite")
+    with db.write():
+        for doc_id, text, source, created in docs:
+            doc = Document(id=doc_id, title=text[:10], content=text, source_type=source, created_at=created, updated_at=created)
+            doc.chunks = [DocumentChunk(id=f"{doc_id}-0", document_id=doc_id, content=text, chunk_index=0)]
+            db.insert_document(doc, [" ".join(tokenize(text))], None, None)
+    return db
+
+
+NOON = datetime(2026, 11, 7, 12)
+
+
+@pytest.fixture
+def db(tmp_path):
+    db = _db(
+        tmp_path,
+        (A, "Otters nest in burrows; otters swim.", SourceType.USER, NOON),
+        (B, "Herons wade, and otters watch them.", SourceType.ARXIV, NOON - timedelta(days=2)),
+        (C, "水獭住在河边的洞穴里。", SourceType.WEB, NOON - timedelta(days=5)),
+    )
+    yield db
+    db.close()
+
+
+def test_fuse_adds_each_list_s_rank():
+    assert [item for item, _ in fuse([["x", "y"], ["y", "z"]])] == ["y", "x", "z"]
+
+
+@pytest.mark.parametrize("fts", [True, False])
+def test_keyword_ranking_finds_every_chunk_holding_a_term(db, fts, monkeypatch):
+    if not fts:
+        monkeypatch.setattr(db, "_fts_module", False)
+    with db.read():
+        ranked = keyword_ranked(db.conn, tokenize("otters"), fts=db.fts)
+    assert [doc for _, doc in ranked] == [A, B]  # A holds the term twice
+
+
+def test_keyword_ranking_finds_a_chinese_word(db):
+    with db.read():
+        assert [doc for _, doc in keyword_ranked(db.conn, tokenize("水獭"), fts=db.fts)] == [C]
+
+
+def test_date_to_keeps_the_whole_day_it_names(db):
+    with db.read():
+        assert allowed_documents(db.conn, {"date_to": "2026-11-07"}) == {A, B, C}
+        assert allowed_documents(db.conn, {"date_to": "2026-11-06"}) == {B, C}
+
+
+def test_a_date_with_an_offset_is_compared_as_local_time(db):
+    noon_utc = NOON.astimezone(timezone.utc).isoformat()  # NOON is local time
+    with db.read():
+        assert allowed_documents(db.conn, {"date_from": noon_utc}) == {A}
+
+
+def test_filters_combine_and_keywords_ignore_case(db):
+    with db.read():
+        assert allowed_documents(db.conn, {"source_type": "arxiv", "keywords": ["HERONS"]}) == {B}
+        assert allowed_documents(db.conn, {"keywords": ["Выдры"]}) == set()
+
+
+def test_an_unknown_source_type_is_an_error(db):
+    with db.read(), pytest.raises(ValueError):
+        allowed_documents(db.conn, {"source_type": "podcast"})
