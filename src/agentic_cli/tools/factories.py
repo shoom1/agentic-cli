@@ -9,8 +9,10 @@ legacy modules), so the service registry is never in the dependency chain.
 Usage:
     from agentic_cli.tools.factories import make_memory_tools
 
-    memory_store = MemoryStore(settings)
-    save_memory, search_memory = make_memory_tools(memory_store)
+    memory_store = MemoryStore(user_dir, project_dir)
+    save_memory, read_memory, search_memory, update_memory, delete_memory = make_memory_tools(
+        memory_store
+    )
 """
 
 from __future__ import annotations
@@ -50,76 +52,67 @@ def _issued(*pairs: "tuple[Callable, Callable]") -> list[Callable]:
 # Memory tools
 # ---------------------------------------------------------------------------
 
-def make_memory_tools(memory_store, embedding_service=None) -> list[Callable]:
-    """Create memory tools bound to a MemoryStore.
+def make_memory_tools(memory_store) -> list[Callable]:
+    """Create the memory tools bound to a ``MemoryStore``.
 
     Thin closure-bound wrappers around the shared helpers in
     ``tools.memory_tools``. The helpers take the store as an explicit arg
     so the closure-bound and module-level (registry-bound) tool versions
     stay in lockstep.
 
-    Args:
-        memory_store: A MemoryStore instance.
-        embedding_service: Optional EmbeddingService (unused, kept for interface compat).
-
     Returns:
-        [save_memory, search_memory, update_memory, delete_memory]
+        [save_memory, read_memory, search_memory, update_memory, delete_memory]
     """
     from agentic_cli.tools.memory_tools import (
         _delete_memory_with_store,
+        _read_memory_with_store,
         _save_memory_with_store,
         _search_memory_with_store,
         _update_memory_with_store,
+        delete_memory as _orig_delete,
+        read_memory as _orig_read,
         save_memory as _orig_save,
         search_memory as _orig_search,
         update_memory as _orig_update,
-        delete_memory as _orig_delete,
     )
 
     def save_memory(
+        description: str,
         content: str,
-        tags: list[str] | None = None,
-        importance: int = 5,
+        type: str,
+        scope: str = "project",
+        user_requested: bool = False,
     ) -> dict[str, Any]:
-        return _save_memory_with_store(memory_store, content, tags, importance)
+        return _save_memory_with_store(memory_store, description, content, type, scope, user_requested)
 
-    def search_memory(
-        query: str,
-        limit: int = 10,
-        include_archived: bool = False,
-    ) -> dict[str, Any]:
-        return _search_memory_with_store(
-            memory_store, query, limit, include_archived
-        )
+    def read_memory(item_id: str) -> dict[str, Any]:
+        return _read_memory_with_store(memory_store, item_id)
+
+    def search_memory(query: str, limit: int = 10) -> dict[str, Any]:
+        return _search_memory_with_store(memory_store, query, limit)
 
     def update_memory(
         item_id: str,
+        description: str | None = None,
         content: str | None = None,
-        tags: list[str] | None = None,
+        type: str | None = None,
     ) -> dict[str, Any]:
-        return _update_memory_with_store(memory_store, item_id, content, tags)
+        return _update_memory_with_store(memory_store, item_id, description, content, type)
 
-    def delete_memory(
-        item_id: str,
-        purge: bool = False,
-    ) -> dict[str, Any]:
-        return _delete_memory_with_store(memory_store, item_id, purge)
+    def delete_memory(item_id: str) -> dict[str, Any]:
+        return _delete_memory_with_store(memory_store, item_id)
 
-    save_memory.__name__ = "save_memory"
-    save_memory.__doc__ = _orig_save.__doc__
-    search_memory.__name__ = "search_memory"
-    search_memory.__doc__ = _orig_search.__doc__
-    update_memory.__name__ = "update_memory"
-    update_memory.__doc__ = _orig_update.__doc__
-    delete_memory.__name__ = "delete_memory"
-    delete_memory.__doc__ = _orig_delete.__doc__
-
-    return _issued(
+    pairs = (
         (save_memory, _orig_save),
+        (read_memory, _orig_read),
         (search_memory, _orig_search),
         (update_memory, _orig_update),
         (delete_memory, _orig_delete),
     )
+    for bound, original in pairs:
+        bound.__name__ = original.__name__
+        bound.__doc__ = original.__doc__
+    return _issued(*pairs)
 
 
 # ---------------------------------------------------------------------------

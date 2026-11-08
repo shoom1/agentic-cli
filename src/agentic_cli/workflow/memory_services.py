@@ -7,6 +7,8 @@ the package never sees a settings object.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,8 +39,8 @@ def build_embedding_service(settings: "BaseSettings") -> "EmbeddingService | Non
 
     None in mock mode (``knowledge_base_use_mock``) and without
     sentence-transformers. The model loads on first use, not here. The
-    workflow builds one and passes it to both knowledge bases and the memory
-    store, so the model loads once per process.
+    workflow builds one and passes it to both knowledge bases, so the model
+    loads once per process.
     """
     if settings.knowledge_base_use_mock:
         return None
@@ -93,18 +95,39 @@ def open_knowledge_base(
     )
 
 
-def open_memory_store(settings: "BaseSettings", *, embedding_service: Any = None) -> "MemoryStore":
-    """The memory store in ``workspace_dir/memory``.
+def project_key(path: Path) -> str:
+    """A project scope's folder name: the folder's name (at most 40 of
+    ``[A-Za-z0-9._-]``) and 12 hex characters of the SHA-256 of its path."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", path.name)[:40] or "root"
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:12]
+    return f"{name}-{digest}"
 
-    It uses ``embedding_service`` when given (the workflow passes the one its
-    knowledge bases use); otherwise it builds one with
-    :func:`build_embedding_service`. With none (mock mode, or no
-    sentence-transformers) it searches by substring. (The mock embedder's
-    vectors are hashes of the text: ranking memories by them would return
-    arbitrary ones.)
+
+def project_memory_dir(settings: "BaseSettings", cwd: Path | None = None) -> Path | None:
+    """The project memory scope's folder for the working directory, or None.
+
+    None at ``/``, the home folder or above it (a project there would be all
+    of home: the rule the project read allow uses).
     """
+    cwd = (cwd or Path.cwd()).resolve()
+    home = Path.home().resolve()
+    if cwd == Path(cwd.anchor) or home.is_relative_to(cwd):
+        return None
+    return settings.workspace_dir / "projects" / project_key(cwd) / "memory"
+
+
+def open_memory_store(settings: "BaseSettings") -> "MemoryStore":
+    """The memory store: the user scope in ``workspace_dir/memory``, the
+    project scope in ``workspace_dir/projects/<key>/memory`` (none at home,
+    ``/`` or above home). It searches by keyword and needs no embedding
+    service."""
     from agentic_cli.memory import MemoryStore
 
-    if embedding_service is None:
-        embedding_service = build_embedding_service(settings)
-    return MemoryStore(settings.workspace_dir / "memory", embedding_service=embedding_service)
+    cwd = Path.cwd().resolve()
+    project_dir = project_memory_dir(settings, cwd)
+    return MemoryStore(
+        settings.workspace_dir / "memory",
+        project_dir,
+        project_name=cwd.name if project_dir is not None else None,
+        project_path=cwd if project_dir is not None else None,
+    )

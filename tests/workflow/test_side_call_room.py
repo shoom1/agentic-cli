@@ -16,11 +16,13 @@ for the provider to answer.
 
 from __future__ import annotations
 
+import json
 from typing import AsyncGenerator
 
 import pytest
 
 from agentic_cli.config import BaseSettings
+from agentic_cli.memory import MemoryStore
 from agentic_cli.models import ModelCatalog, ModelEntry, ModelRef, RoleMap, resolve_model
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import WorkflowEvent
@@ -55,12 +57,7 @@ class _Manager(BaseWorkflowManager):
 
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         self.sent.append((prompt, max_tokens))
-        return "A fact."
-
-
-class _Store:
-    def store(self, content: str, tags: list[str] | None = None, importance: int = 5) -> str:
-        return "id"
+        return self.answer
 
 
 SONNET = ModelRef("anthropic", "claude-sonnet-4-5")
@@ -75,7 +72,8 @@ def _manager(tmp_path, window: int | None, max_output: int | None = None) -> _Ma
         settings=BaseSettings(workspace_dir=tmp_path, auto_extract_session_facts=True),
     )
     manager.sent = []
-    manager._services[MEMORY_STORE] = _Store()
+    manager.answer = "A fact."
+    manager._services[MEMORY_STORE] = MemoryStore(tmp_path / "user")
     if window is not None:
         providers = fake_providers(anthropic="a-test-key")
         entry = ModelEntry(context_window=window, max_output=max_output)
@@ -149,15 +147,18 @@ async def test_a_room_too_small_for_a_useful_prompt_sends_it_as_it_is(tmp_path):
 @pytest.mark.parametrize(("window", "ratio"), MODELS)
 async def test_fact_extraction_sends_a_bounded_prompt(tmp_path, window, ratio):
     manager = _manager(tmp_path, window)
+    manager.answer = json.dumps([
+        {"action": "new", "description": "A fact.", "content": "A fact.", "type": "user", "scope": "user"}
+    ])
     messages = [
         {"role": "user" if n % 2 else "assistant", "content": f"message {n}: " + "x" * 100_000 + " END"}
         for n in range(30)
     ]
 
-    assert await manager.on_session_end(messages) == ["A fact."]
+    assert [p.description for p in await manager.on_session_end(messages)] == ["A fact."]
 
     (sent, max_tokens), = manager.sent
     assert len(sent) <= _room(window, ratio, max_tokens)
-    assert sent.startswith("Extract key facts, decisions, and user preferences")
+    assert sent.startswith("You keep a user's long-term memory")
     assert "assistant: message 10: x" in sent  # the first of the last 20
     assert sent.endswith("x END")

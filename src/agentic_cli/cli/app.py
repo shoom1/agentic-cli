@@ -1609,7 +1609,7 @@ class BaseCLIApp:
             return False
 
     async def _extract_session_facts(self, session_id: str | None = None) -> None:
-        """Extract the facts of ``session_id``'s conversation into memory (if enabled).
+        """Propose memories from ``session_id``'s conversation (if enabled).
 
         ``session_id`` defaults to the current conversation (at exit).
         Gated by ``auto_extract_session_facts``; a no-op when the workflow is
@@ -1624,14 +1624,14 @@ class BaseCLIApp:
         workflow = self._workflow_controller.workflow
         session_id = session_id or self._session_id
         try:
-            facts = await workflow.on_session_end(
+            proposals = await workflow.on_session_end(
                 session=workflow.session_ref(session_id, self._settings.default_user)
             )
         except Exception:
             logger.debug("session_fact_extraction_failed", exc_info=True)
             return
-        if facts:
-            logger.info("session_facts_extracted", count=len(facts), session_id=session_id)
+        if proposals:
+            logger.info("memory_proposals_filed", count=len(proposals), session_id=session_id)
 
     async def _adopt_session_on_startup(self) -> bool:
         """Adopt this run's conversation before the prompt; False when the app must not start.

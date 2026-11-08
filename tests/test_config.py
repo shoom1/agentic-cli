@@ -759,14 +759,14 @@ class TestSettingsJsonLoading:
 def test_package_exports_new_modules():
     """Test that new modules are exported from package."""
     # Memory
-    from agentic_cli.memory import MemoryItem, MemoryStore
+    from agentic_cli.memory import Memory, MemoryStore
 
     # Tools
     from agentic_cli.tools import read_file, write_file, diff_compare
 
     # All imports should succeed
     assert MemoryStore is not None
-    assert MemoryItem is not None
+    assert Memory is not None
     assert read_file is not None
 
 

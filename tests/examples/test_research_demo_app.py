@@ -626,8 +626,8 @@ class TestMemoryCommandColors:
         from examples.research_demo.commands import MemoryCommand
         from tests.cli.dialog_fakes import autospec_session
 
-        item = SimpleNamespace(id="m1234567", content="likes teal", tags=["colour"])
-        store = SimpleNamespace(search=lambda query, limit: [item])
+        item = SimpleNamespace(id="m1234567", description="likes teal", type="user", scope="user")
+        store = SimpleNamespace(memories=lambda: [item])
         app = SimpleNamespace(
             workflow=SimpleNamespace(memory_store=store), session=autospec_session()
         )
@@ -636,5 +636,5 @@ class TestMemoryCommandColors:
 
         (table,) = app.session.add_rich.call_args.args
         assert isinstance(table, Table)
-        content = next(column for column in table.columns if column.header == "Content")
+        content = next(column for column in table.columns if column.header == "Description")
         assert "white" not in str(content.style)

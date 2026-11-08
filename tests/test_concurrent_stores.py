@@ -1,4 +1,4 @@
-"""Tests for concurrent access to MemoryStore, plan registry state, and task functions.
+"""Tests for concurrent access to plan registry state and task functions.
 
 Verifies that parallel read/write operations don't corrupt data.
 """
@@ -14,51 +14,6 @@ from tests.conftest import MockContext
 def mock_context():
     with MockContext() as ctx:
         yield ctx
-
-
-class TestConcurrentMemoryStore:
-    """Test concurrent access to MemoryStore."""
-
-    async def test_concurrent_writes(self, mock_context):
-        """Parallel stores should not lose data."""
-        from agentic_cli.memory import MemoryStore
-
-        store = MemoryStore(mock_context.settings.workspace_dir / "memory")
-
-        async def write_memory(i: int) -> str:
-            return store.store(f"memory-{i}", tags=[f"tag-{i}"])
-
-        ids = await asyncio.gather(*(write_memory(i) for i in range(20)))
-
-        assert len(ids) == 20
-        assert len(set(ids)) == 20  # All unique IDs
-        # All memories should be searchable
-        results = store.search("", limit=100)
-        assert len(results) == 20
-
-    async def test_concurrent_read_write(self, mock_context):
-        """Reads during writes should not raise or return corrupt data."""
-        from agentic_cli.memory import MemoryStore
-
-        store = MemoryStore(mock_context.settings.workspace_dir / "memory")
-        # Seed some data
-        for i in range(5):
-            store.store(f"seed-{i}")
-
-        async def writer(i: int):
-            store.store(f"new-{i}")
-
-        async def reader():
-            results = store.search("seed")
-            # Should always find at least the seeds
-            assert len(results) >= 5
-            return results
-
-        tasks = [writer(i) for i in range(10)] + [reader() for _ in range(10)]
-        await asyncio.gather(*tasks)
-
-        # Final state: 5 seeds + 10 new = 15
-        assert len(store.search("", limit=100)) == 15
 
 
 class TestConcurrentPlanRegistry:
