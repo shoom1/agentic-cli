@@ -10,7 +10,7 @@ with more candidates until every chunk was ranked.
 
 from __future__ import annotations
 
-import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -437,3 +437,88 @@ def test_a_sidecar_rendered_again_keeps_the_document_s_chunk_count(tmp_path):
     kb.sidecar_path(doc.id).unlink()
 
     assert f"chunks: {len(doc.chunks)}\n" in kb.read_sidecar(doc.id)
+
+
+# -- the model the stored vectors belong to (from test_kb_model_record.py) ------
+
+
+def _seed(kb, n: int = 3):
+    return [_ingest(kb, f"Note {i}", f"Note {i} about basalt and lava.") for i in range(n)]
+
+
+def _info(kb_dir: Path) -> dict[str, str]:
+    return dict(read_rows(kb_dir, "SELECT key, value FROM info"))
+
+
+def test_a_reopen_with_the_same_model_embeds_nothing(tmp_path):
+    _seed(KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8)))
+    service = FakeEmbeddingService("model-a", 8)
+
+    kb = KnowledgeBaseManager(tmp_path, embedding_service=service)
+
+    assert service.calls == 0
+    assert kb.get_stats()["vector_count"] == 3
+
+
+@pytest.mark.parametrize(("model", "dim"), [("model-b", 8), ("model-a", 16), ("model-b", 16)])
+def test_another_model_re_embeds_every_chunk_and_searches_with_it(tmp_path, model, dim):
+    _seed(KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8)))
+    service = FakeEmbeddingService(model, dim)
+
+    kb = KnowledgeBaseManager(tmp_path, embedding_service=service)
+
+    assert service.calls == 3
+    assert (_info(tmp_path)["embedding_model"], _info(tmp_path)["embedding_dim"]) == (model, str(dim))
+    assert read_rows(tmp_path, "SELECT DISTINCT length(vector) FROM chunks") == [(dim * 4,)]
+    assert kb.search("basalt lava")["results"]
+    assert service.calls == 4  # the query: semantic search runs with the new vectors
+
+
+def test_a_failed_re_embedding_searches_by_keyword_and_the_next_open_tries_again(tmp_path, monkeypatch):
+    log = LogRecorder().install(monkeypatch, manager_module)
+    _seed(KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8)))
+
+    kb = KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-b", 8, fail_after=0))
+
+    assert kb.search("Note 1")["results"][0]["document_title"] == "Note 1"
+    assert log.warnings("kb_reembed_failed")
+    retry = FakeEmbeddingService("model-b", 8)
+    KnowledgeBaseManager(tmp_path, embedding_service=retry)
+    assert retry.calls == 3
+
+
+def test_a_keyword_only_session_leaves_the_stored_vectors_and_model_alone(tmp_path):
+    _seed(KnowledgeBaseManager(tmp_path, embedding_service=FakeEmbeddingService("model-a", 8)), 1)
+    before = (_info(tmp_path)["embedding_model"], read_rows(tmp_path, "SELECT rowid, vector FROM chunks"))
+
+    kb = KnowledgeBaseManager(tmp_path, use_mock=True)
+    _ingest(kb, "Basalt", "Basalt columns.")
+
+    assert _info(tmp_path)["embedding_model"] == before[0]
+    assert read_rows(tmp_path, "SELECT rowid, vector FROM chunks WHERE vector IS NOT NULL") == before[1]
+    assert kb.search("basalt")["results"]
+
+
+def test_a_copy_of_a_knowledge_base_reopens_without_embedding(tmp_path):
+    kb = KnowledgeBaseManager(tmp_path / "kb", embedding_service=FakeEmbeddingService("model-a", 8))
+    _seed(kb)
+    kb.close()
+    shutil.copytree(tmp_path / "kb", tmp_path / "copy")
+    service = FakeEmbeddingService("model-a", 8)
+
+    kb = KnowledgeBaseManager(tmp_path / "copy", embedding_service=service)
+
+    assert service.calls == 0
+    assert kb.get_stats()["document_count"] == 3
+
+
+def test_a_stored_vector_of_another_size_is_embedded_again(tmp_path):
+    fake = FakeEmbeddingService("model-a", 8)
+    _seed(KnowledgeBaseManager(tmp_path, embedding_service=fake))
+    raw_write(tmp_path, "UPDATE chunks SET vector = zeroblob(12) WHERE rowid = 2")
+    service = FakeEmbeddingService("model-a", 8)
+
+    KnowledgeBaseManager(tmp_path, embedding_service=service)
+
+    assert service.calls == 1
+    assert _vectors_match_their_chunks(tmp_path, service)

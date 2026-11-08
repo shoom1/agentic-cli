@@ -3,8 +3,8 @@
 ``KnowledgeBase._store`` called the synchronous ``ingest_document`` on the
 loop (only conversion ran on a worker thread), and ``sidecar`` read the
 document and its file there, so embedding every chunk (and the model's first
-load), and a wait for another process's folder lock, froze the loop: the
-spinner, Ctrl+C and every other task. Each synchronous manager call reached
+load), and a wait for another process's lock, froze the loop: the spinner,
+Ctrl+C and every other task. Each synchronous manager call reached
 from an async method now runs on a worker thread.
 
 A ticker task measures how long the loop goes without running it, beyond its
@@ -14,7 +14,7 @@ own sleep.
 from __future__ import annotations
 
 import asyncio
-import os
+import sqlite3
 import threading
 import time
 from collections.abc import Awaitable
@@ -25,8 +25,6 @@ import pytest
 
 from agentic_cli.memory import MockEmbeddingService
 from agentic_cli.memory.kb import KnowledgeBase, KnowledgeBaseManager, SourceType
-
-fcntl = pytest.importorskip("fcntl")
 
 TICK = 0.01
 # Far below what a blocked loop shows (the whole embedding, or the whole
@@ -70,22 +68,23 @@ async def _longest_stall(work: Awaitable[Any]) -> tuple[float, Any]:
     return max(stalls), result
 
 
-def _hold_folder_lock(kb_dir: Path, seconds: float) -> threading.Event:
-    """Hold the knowledge base's folder lock for ``seconds`` from another thread, as another process would.
+def _hold_write_lock(kb_dir: Path, seconds: float) -> threading.Event:
+    """Hold the knowledge base's write lock for ``seconds`` from another thread, as another process would.
 
-    ``flock`` belongs to the open file, so another descriptor in this
+    SQLite's lock belongs to the connection, so another connection in this
     process waits for it as another process's would. Returns once it is held.
     """
     held = threading.Event()
 
     def hold() -> None:
-        fd = os.open(kb_dir / ".lock", os.O_RDWR)
+        conn = sqlite3.connect(kb_dir / "kb.sqlite", isolation_level=None)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            conn.execute("BEGIN IMMEDIATE")
             held.set()
             time.sleep(seconds)
+            conn.execute("ROLLBACK")
         finally:
-            os.close(fd)
+            conn.close()
 
     threading.Thread(target=hold, daemon=True).start()
     held.wait(5)
@@ -106,7 +105,7 @@ async def test_embedding_runs_off_the_loop(tmp_path):
 
 async def test_an_ingest_waits_for_another_process_off_the_loop(tmp_path):
     kb = KnowledgeBase.open({"project": tmp_path / "kb"}, use_mock=True)
-    _hold_folder_lock(tmp_path / "kb", HOLD)
+    _hold_write_lock(tmp_path / "kb", HOLD)
     started = time.perf_counter()
 
     stall, found = await _longest_stall(kb.ingest_text("A short note about herons.", title="short"))
@@ -117,15 +116,15 @@ async def test_an_ingest_waits_for_another_process_off_the_loop(tmp_path):
 
 
 async def test_a_sidecar_waits_off_the_loop_while_another_thread_holds_the_knowledge_base(tmp_path):
-    """A thread inside a transaction holds the manager's lock while it waits for
-    the folder lock; writing a missing sidecar must not wait for it on the loop."""
+    """A thread starting a change holds the manager's lock while it waits for
+    the write lock; writing a missing sidecar must not wait for it on the loop."""
     manager = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
     doc = manager.ingest_document(content="Herons wade at dawn.", title="Herons", source_type=SourceType.USER)
     manager.sidecar_path(doc.id).unlink()
     kb = KnowledgeBase({"project": manager})
     found = kb.get_document(doc.id)
-    _hold_folder_lock(tmp_path / "kb", HOLD)
-    waiting = threading.Thread(target=manager.list_documents, daemon=True)
+    _hold_write_lock(tmp_path / "kb", HOLD)
+    waiting = threading.Thread(target=manager.delete_document, args=("no-such-document",), daemon=True)
     waiting.start()
     await asyncio.sleep(0.05)  # the thread now holds the manager's lock, waiting
 
@@ -141,7 +140,7 @@ async def test_backfill_waits_off_the_loop(tmp_path):
     doc = manager.ingest_document(content="Herons wade at dawn.", title="Herons", source_type=SourceType.USER)
     manager.sidecar_path(doc.id).unlink()
     kb = KnowledgeBase({"project": manager})
-    _hold_folder_lock(tmp_path / "kb", HOLD)
+    _hold_write_lock(tmp_path / "kb", HOLD)
 
     stall, [result] = await _longest_stall(kb.backfill_sidecars())
 

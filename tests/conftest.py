@@ -5,7 +5,7 @@ Provides:
 - Temporary workspace fixtures
 - Settings fixtures with various configurations
 
-Mock services (MockEmbeddingService, MockVectorStore) are in tests/mocks.py.
+The mock embedding service (MockEmbeddingService) is exported by agentic_cli.memory.
 """
 
 import os

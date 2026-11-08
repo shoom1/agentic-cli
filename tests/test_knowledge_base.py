@@ -13,21 +13,14 @@ from agentic_cli.memory.kb.models import (
     SourceType,
 )
 from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
-from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
+from agentic_cli.memory.kb import _search
 
-from tests.memory.kb_extra import require_kb_module
+from tests.memory.kb_storage import read_rows
 
 
 def _make_mock_kb(base_dir: Path, **kwargs) -> KnowledgeBaseManager:
-    """Create a KnowledgeBaseManager with mock services injected."""
-    emb = MockEmbeddingService()
-    vs = MockVectorStore(index_path=base_dir / "embeddings" / "index.mock")
-    return KnowledgeBaseManager(
-        base_dir=base_dir,
-        embedding_service=emb,
-        vector_store=vs,
-        **kwargs,
-    )
+    """Create a KnowledgeBaseManager with a mock embedding service injected (keyword search)."""
+    return KnowledgeBaseManager(base_dir=base_dir, embedding_service=MockEmbeddingService(), **kwargs)
 
 
 class TestSourceType:
@@ -706,9 +699,8 @@ class TestBaseDirOverride:
 
         assert kb.kb_dir == custom_dir
         assert kb.documents_dir == custom_dir / "documents"
-        assert kb.embeddings_dir == custom_dir / "embeddings"
         assert kb.files_dir == custom_dir / "files"
-        assert kb.metadata_path == custom_dir / "metadata.json"
+        assert kb.db_path == custom_dir / "kb.sqlite"
 
     def test_base_dir_creates_directories(self, tmp_path):
         """base_dir creates all subdirectories on init."""
@@ -717,8 +709,8 @@ class TestBaseDirOverride:
 
         assert custom_dir.is_dir()
         assert (custom_dir / "documents").is_dir()
-        assert (custom_dir / "embeddings").is_dir()
         assert (custom_dir / "files").is_dir()
+        assert (custom_dir / "kb.sqlite").is_file()
 
 
 class TestFindDocument:
@@ -737,14 +729,14 @@ class TestFindDocument:
 
     def test_find_document_by_exact_id(self, kb):
         """Find document by exact ID."""
-        doc = list(kb._documents.values())[0]
+        doc = kb.list_documents()[0]
         found = kb.find_document(doc.id)
         assert found is not None
         assert found.id == doc.id
 
     def test_find_document_by_id_prefix(self, kb):
         """Find document by ID prefix."""
-        doc = list(kb._documents.values())[0]
+        doc = kb.list_documents()[0]
         prefix = doc.id[:8]
         found = kb.find_document(prefix)
         assert found is not None
@@ -764,20 +756,16 @@ class TestFindDocument:
 
 class TestHybridSearch:
 
-    def test_bm25_index_created_on_ingest(self, tmp_path):
+    def test_the_keyword_index_holds_an_ingested_document_s_terms(self, tmp_path):
         kb = _make_mock_kb(tmp_path)
         kb.ingest_document(
             title="Test Doc",
             content="Python programming language tutorial for beginners",
             source_type=SourceType.USER,
         )
-        assert kb._bm25_index is not None
-        assert kb._bm25_index.size > 0
+        assert read_rows(tmp_path, "SELECT count(*) FROM chunk_terms WHERE chunk_terms MATCH 'python'") == [(1,)]
 
     def test_hybrid_search_finds_exact_match(self, tmp_path):
-        # Searching builds the real BM25 model (bm25s), unlike the other
-        # TestHybridSearch cases which don't search or null out the index.
-        require_kb_module("bm25s")
         kb = _make_mock_kb(tmp_path)
         kb.ingest_document(
             title="Config Doc",
@@ -794,17 +782,16 @@ class TestHybridSearch:
         assert results["results"][0]["document_title"] == "Config Doc"
 
     def test_rrf_fusion(self):
-        from agentic_cli.memory.kb.manager import KnowledgeBaseManager
-        semantic = [("c1", 0.9), ("c2", 0.8), ("c3", 0.7)]
-        bm25 = [("c3", 5.0), ("c1", 3.0), ("c4", 1.0)]
-        fused = KnowledgeBaseManager._fuse_results(semantic, bm25)
+        semantic = ["c1", "c2", "c3"]
+        bm25 = ["c3", "c1", "c4"]
+        fused = _search.fuse([semantic, bm25])
         ids = [cid for cid, _ in fused]
         assert "c1" in ids[:3]
         assert "c3" in ids[:3]
         assert "c4" in ids
 
     def test_hybrid_search_bm25_graceful_degradation(self, tmp_path):
-        """Without a keyword index, a meaningful embedder still finds documents."""
+        """Without a keyword match, a meaningful embedder still finds documents."""
 
         class _StandInEmbedder:
             """Not MockEmbeddingService, so the KB searches its vectors."""
@@ -815,21 +802,16 @@ class TestHybridSearch:
             def __getattr__(self, name):
                 return getattr(self._inner, name)
 
-        kb = KnowledgeBaseManager(
-            base_dir=tmp_path,
-            embedding_service=_StandInEmbedder(),
-            vector_store=MockVectorStore(index_path=tmp_path / "embeddings" / "index.mock"),
-        )
+        kb = KnowledgeBaseManager(base_dir=tmp_path, embedding_service=_StandInEmbedder())
         kb.ingest_document(
             title="Test",
             content="Some test content for searching",
             source_type=SourceType.USER,
         )
-        kb._bm25_index = None  # Force BM25 unavailable
-        results = kb.search("test content", top_k=5)
+        results = kb.search("quartz zeppelin", top_k=5)  # no stored word: the keyword list is empty
         assert len(results["results"]) > 0  # Semantic-only still works
 
-    def test_hash_embeddings_without_a_keyword_index_find_nothing(self, tmp_path):
+    def test_hash_embeddings_without_a_keyword_match_find_nothing(self, tmp_path):
         """MockEmbeddingService vectors carry no meaning: no noise in their place."""
         kb = _make_mock_kb(tmp_path)
         kb.ingest_document(
@@ -837,8 +819,7 @@ class TestHybridSearch:
             content="Some test content for searching",
             source_type=SourceType.USER,
         )
-        kb._bm25_index = None  # Force BM25 unavailable
-        assert kb.search("test content", top_k=5)["results"] == []
+        assert kb.search("quartz zeppelin", top_k=5)["results"] == []
 
 
 class TestStructureAwareChunking:

@@ -10,19 +10,15 @@ matched the query "orchestras".
 
 from __future__ import annotations
 
-import json
-import sys
-import types
 import unicodedata
 from pathlib import Path
 
 import pytest
 
 from agentic_cli.memory import MockEmbeddingService
-from agentic_cli.memory.kb import KnowledgeBaseManager, MockVectorStore, SourceType
-from agentic_cli.memory.kb._bm25_backends import BM25sIndex, RankBM25Index
-from agentic_cli.memory.kb._mock_bm25 import MockBM25Index
+from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 from agentic_cli.memory.kb._tokenize import tokenize
+from tests.memory.kb_storage import raw_write
 
 TOPICS = {
     "Otters": "Otters are semiaquatic mammals that eat fish and live near rivers.",
@@ -55,11 +51,7 @@ def test_search_without_the_kb_extra_returns_only_matching_documents(tmp_path, q
 
 
 def test_injected_hash_embeddings_are_not_searched_either(tmp_path):
-    kb = KnowledgeBaseManager(
-        tmp_path / "kb",
-        embedding_service=MockEmbeddingService(),
-        vector_store=MockVectorStore(index_path=tmp_path / "kb" / "embeddings" / "index.mock"),
-    )
+    kb = KnowledgeBaseManager(tmp_path / "kb", embedding_service=MockEmbeddingService())
     for title, text in TOPICS.items():
         kb.ingest_document(content=text, title=title, source_type=SourceType.USER)
 
@@ -89,11 +81,7 @@ class _ConceptEmbedder:
 
 
 def test_a_meaningful_embedder_still_finds_documents_without_a_keyword_match(tmp_path):
-    kb = KnowledgeBaseManager(
-        tmp_path / "kb",
-        embedding_service=_ConceptEmbedder(),
-        vector_store=MockVectorStore(index_path=tmp_path / "kb" / "embeddings" / "index.mock", embedding_dim=2),
-    )
+    kb = KnowledgeBaseManager(tmp_path / "kb", embedding_service=_ConceptEmbedder())
     kb.ingest_document(content="Hot lava flows downhill.", title="Lava", source_type=SourceType.USER)
     kb.ingest_document(content="A busy insect visits flowers.", title="Insect", source_type=SourceType.USER)
 
@@ -110,58 +98,6 @@ def test_punctuation_next_to_a_word_does_not_stop_a_match(tmp_path, reopen):
     assert _titles(kb, "orchestras") == ["Violins"]
     assert _titles(kb, "squares") == ["Chess"]
     assert _titles(kb, "Sixty-Four") == ["Chess"]
-
-
-def test_an_index_saved_by_the_old_tokenizer_is_rebuilt_on_open(tmp_path):
-    _mock_kb(tmp_path / "kb")
-    index_file = tmp_path / "kb" / "embeddings" / "bm25_index.json"
-    saved = json.loads(index_file.read_text())
-    # What 0.6.2 wrote: whitespace-split tokens and no tokenizer name.
-    chunk_texts = {
-        chunk_id: chunk.content
-        for chunk_id, chunk in KnowledgeBaseManager(tmp_path / "kb", use_mock=True)._chunks.items()
-    }
-    index_file.write_text(json.dumps({
-        "chunk_ids": saved["chunk_ids"],
-        "documents": [chunk_texts[cid].lower().split() for cid in saved["chunk_ids"]],
-    }))
-
-    reopened = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
-
-    assert _titles(reopened, "orchestras") == ["Violins"]
-    assert "tokenizer" in json.loads(index_file.read_text())
-
-
-@pytest.mark.parametrize("index_cls", [MockBM25Index, RankBM25Index, BM25sIndex])
-def test_every_keyword_index_splits_words_the_same_way(tmp_path, index_cls):
-    index = index_cls()
-    index.add_documents(["c1"], ["Played with a bow, in ORCHESTRAS."])
-    index.save(tmp_path)
-
-    reloaded = index_cls()
-    reloaded.load(tmp_path)
-
-    assert reloaded.size == 1
-    saved = json.loads(next(tmp_path.glob("*.json")).read_text())
-    tokens = saved.get("documents", saved.get("tokenized"))
-    assert tokens == [["played", "with", "a", "bow", "in", "orchestras"]]
-
-
-@pytest.mark.parametrize(
-    "index_cls, file_name, key",
-    [
-        (MockBM25Index, "bm25_index.json", "documents"),
-        (RankBM25Index, "bm25_rank.json", "tokenized"),
-        (BM25sIndex, "bm25s_sidecar.json", "tokenized"),
-    ],
-)
-def test_an_index_saved_by_the_old_tokenizer_loads_empty(tmp_path, index_cls, file_name, key):
-    (tmp_path / file_name).write_text(json.dumps({"chunk_ids": ["c1"], key: [["orchestras."]]}))
-
-    index = index_cls()
-    index.load(tmp_path)
-
-    assert index.size == 0
 
 
 def _nfc(words: list[str]) -> list[str]:
@@ -197,44 +133,12 @@ def test_a_word_with_combining_marks_does_not_match_its_fragments(tmp_path):
     assert _titles(kb, "किताब") == ["Book"]
 
 
-def test_the_real_backends_tokenize_the_query_the_same_way(monkeypatch):
-    """The query side, which saved-index tests cannot see (CI has no kb extra)."""
-    seen: dict[str, list[str]] = {}
+def test_a_tokenizer_change_recomputes_every_chunk_s_terms(tmp_path, monkeypatch):
+    kb = KnowledgeBaseManager(tmp_path, use_mock=True)
+    kb.ingest_document(content="水獭住在河边。", title="otters", source_type=SourceType.USER)
+    raw_write(tmp_path, "UPDATE chunks SET terms = 'stale'", "UPDATE info SET value = 'words-v2' WHERE key = 'tokenizer'",
+              "INSERT INTO chunk_terms (chunk_terms) VALUES ('rebuild')")
 
-    class _BM25Plus:
-        def __init__(self, corpus):
-            pass
+    reopened = KnowledgeBaseManager(tmp_path, use_mock=True)
 
-        def get_scores(self, query_tokens):
-            seen["rank_bm25"] = list(query_tokens)
-            return [1.0]
-
-    class _BM25:
-        def index(self, corpus, show_progress=False):
-            pass
-
-        def retrieve(self, queries, k, show_progress=False):
-            seen["bm25s"] = list(queries[0])
-            return [[0]], [[1.0]]
-
-    monkeypatch.setitem(sys.modules, "rank_bm25", types.SimpleNamespace(BM25Plus=_BM25Plus))
-    monkeypatch.setitem(sys.modules, "bm25s", types.SimpleNamespace(BM25=_BM25))
-
-    for index_cls in (RankBM25Index, BM25sIndex):
-        index = index_cls()
-        index.add_documents(["c1"], ["Played on sixty-four squares."])
-        assert index.search("Sixty-Four squares!", top_k=1) == [("c1", 1.0)]
-
-    assert seen == {
-        "rank_bm25": ["sixty", "four", "squares"],
-        "bm25s": ["sixty", "four", "squares"],
-    }
-
-
-def test_a_corrupt_keyword_index_is_rebuilt_on_open(tmp_path):
-    _mock_kb(tmp_path / "kb")
-    (tmp_path / "kb" / "embeddings" / "bm25_index.json").write_text("{not json")
-
-    reopened = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
-
-    assert _titles(reopened, "volcanoes") == ["Volcanoes"]
+    assert [h["document_title"] for h in reopened.search("水獭")["results"]] == ["otters"]

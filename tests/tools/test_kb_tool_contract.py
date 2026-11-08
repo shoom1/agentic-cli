@@ -13,11 +13,14 @@ user knowledge base (``two``), and with both names pointing at one knowledge
 base (``same``). Document IDs, timestamps, timings and the temporary
 directory are replaced by placeholders.
 
-The JSON changes twice: when arXiv papers go through the ingestion pipeline,
-the ``summary`` of the ``arxiv_*`` scenarios becomes the synthesis other
-documents already get; and ``ingest_arxiv_paper`` reports why a PDF download
+The JSON changes three times: when arXiv papers go through the ingestion
+pipeline, the ``summary`` of the ``arxiv_*`` scenarios becomes the synthesis
+other documents already get; ``ingest_arxiv_paper`` reports why a PDF download
 failed in its result (``pdf_download_error`` in ``arxiv_download_fails``), not
-only in the document's metadata. Any other change to it is a broken contract.
+only in the document's metadata; and in 0.7.0 a search's filters apply before
+ranking (review F13), so ``search_filtered``'s one hit ranks first among the
+documents the filter keeps (score 1/61, not 1/62). Any other change to it is a
+broken contract.
 
 The JSON was written from 0.6.3 by ``python -m tests.tools.test_kb_tool_contract``.
 Never rewrite it to make a failing scenario pass.

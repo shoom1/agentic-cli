@@ -507,8 +507,8 @@ class TestTwoTierKnowledgeBase:
 
         token = self._set_both_contexts(project_kb, user_kb)
         try:
-            user_count_before = len(user_kb._documents)
-            project_count_before = len(project_kb._documents)
+            user_count_before = user_kb.get_stats()["document_count"]
+            project_count_before = project_kb.get_stats()["document_count"]
 
             result = await kb_ingest_text(
                 content="New ingested document.",
@@ -518,9 +518,9 @@ class TestTwoTierKnowledgeBase:
             assert result["success"] is True
 
             # Project KB gains a document
-            assert len(project_kb._documents) == project_count_before + 1
+            assert project_kb.get_stats()["document_count"] == project_count_before + 1
             # User KB unchanged
-            assert len(user_kb._documents) == user_count_before
+            assert user_kb.get_stats()["document_count"] == user_count_before
         finally:
             self._reset_token(token)
 

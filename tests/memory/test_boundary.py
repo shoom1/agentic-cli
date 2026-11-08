@@ -31,7 +31,7 @@ PACKAGE = SRC / "agentic_cli" / "memory"
 TESTS = ROOT / "tests" / "memory"
 
 LIBRARIES = {
-    "numpy", "structlog", "torch", "sentence_transformers", "faiss", "bm25s", "rank_bm25", "nltk",
+    "numpy", "structlog", "torch", "sentence_transformers", "nltk",
     "pypdf", "html2text", "trafilatura",
 }
 TEST_LIBRARIES = LIBRARIES | {"pytest"}

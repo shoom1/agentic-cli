@@ -1,9 +1,9 @@
 """``kb_read`` reads a document's stored file only from inside the knowledge base.
 
 A document with no text of its own is read from its stored PDF, found through
-``file_path`` in ``metadata.json``. The project knowledge base lives in the
-project (``./.{app}/knowledge_base``), so a cloned repository can ship that
-file, and ``file_path`` was joined to the files directory unchecked: a ``..``
+its ``file_name`` in the database (``file_path`` in 0.6's ``metadata.json``).
+The project knowledge base lives in the project (``./.{app}/knowledge_base``),
+so a cloned repository can ship that file, and ``file_path`` was joined to the files directory unchecked: a ``..``
 path, a ``files`` directory that is a symlink, or a stored file that is a
 symlink put the text of a PDF elsewhere on disk into the model's context, both
 through ``kb_read(full=True)`` and through the summary built when a document
@@ -21,13 +21,12 @@ from pathlib import Path
 
 import pytest
 
-from agentic_cli.memory._core.mock_embeddings import MockEmbeddingService
 from agentic_cli.memory.kb import UnsafeKnowledgeBase
-from agentic_cli.memory.kb._mock_vector_store import MockVectorStore
 from agentic_cli.memory.kb.manager import KnowledgeBaseManager
 from agentic_cli.memory.kb.models import SourceType
 from agentic_cli.tools.knowledge_tools import kb_read
 from agentic_cli.workflow.service_registry import set_service_registry
+from tests.memory.kb_storage import raw_write
 
 INSIDE = "inside ledger"
 OUTSIDE = "outside ledger"  # only in a PDF outside the knowledge base
@@ -74,35 +73,26 @@ def kb_dir(tmp_path) -> Path:
 
 
 def _open_kb(kb_dir: Path) -> KnowledgeBaseManager:
-    return KnowledgeBaseManager(
-        base_dir=kb_dir,
-        embedding_service=MockEmbeddingService(),
-        vector_store=MockVectorStore(index_path=kb_dir / "embeddings" / "index.mock"),
-    )
+    return KnowledgeBaseManager(kb_dir, use_mock=True)
 
 
 def _ingest_pdf(kb_dir: Path) -> str:
     """A document with no text of its own, only a stored PDF."""
-    doc = _open_kb(kb_dir).ingest_document(
+    kb = _open_kb(kb_dir)
+    doc = kb.ingest_document(
         content="",
         title="Ledger",
         source_type=SourceType.USER,
         file_bytes=_pdf_with_text(INSIDE),
         file_extension=".pdf",
     )
+    kb.close()
     return doc.id
 
 
 def _set_file_path(kb_dir: Path, doc_id: str, file_path: str) -> None:
-    """Rewrite metadata.json as a repository could ship it."""
-    metadata_path = kb_dir / "metadata.json"
-    metadata = json.loads(metadata_path.read_text())
-    entries = metadata["documents"]
-    entry = entries[doc_id] if isinstance(entries, dict) else next(
-        e for e in entries if e["id"] == doc_id
-    )
-    entry["file_path"] = file_path
-    metadata_path.write_text(json.dumps(metadata))
+    """Rewrite the document's row as a repository could ship it."""
+    raw_write(kb_dir, ("UPDATE documents SET file_name = ? WHERE id = ?", [file_path, doc_id]))
 
 
 async def _read(kb_dir: Path, doc_id: str, **kwargs) -> str:
@@ -144,7 +134,8 @@ async def test_a_files_directory_that_links_elsewhere_is_not_followed(kb_dir, ou
     shutil.rmtree(kb_dir / "files")
     (kb_dir / "files").symlink_to(outside, target_is_directory=True)
 
-    assert kb.get_file_path(doc_id) is None
+    with pytest.raises(UnsafeKnowledgeBase):
+        kb.get_file_path(doc_id)
     with pytest.raises(UnsafeKnowledgeBase):
         await _read(kb_dir, doc_id, full=True)
 

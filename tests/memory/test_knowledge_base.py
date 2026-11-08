@@ -23,6 +23,7 @@ from agentic_cli.memory.kb import (
     ScopedDocument,
     SourceType,
 )
+from tests.memory.kb_storage import raw_write
 from tests.memory.pdf_bytes import pdf_with_text
 
 EPOCH = datetime(2026, 1, 1)
@@ -42,6 +43,8 @@ def _add(manager, title, minute=0, content=None, source=SourceType.USER, **kwarg
         content=f"Text of {title}." if content is None else content, title=title, source_type=source, **kwargs
     )
     doc.updated_at = EPOCH + timedelta(minutes=minute)
+    # The catalogue's order is the last change's: set it where it is kept.
+    raw_write(manager.kb_dir, ("UPDATE documents SET updated_at = ? WHERE id = ?", [doc.updated_at.isoformat(), doc.id]))
     return doc
 
 
@@ -135,8 +138,8 @@ def test_open_shares_the_given_service_across_scopes(tmp_path):
         {"project": tmp_path / "project", "user": tmp_path / "user"}, embedding_service=service
     )
 
-    assert kb.manager("project")._embedding_service is service
-    assert kb.manager("user")._embedding_service is service
+    assert kb.manager("project")._service is service
+    assert kb.manager("user")._service is service
 
 
 def test_open_builds_one_service_for_all_scopes(tmp_path, monkeypatch):
@@ -156,8 +159,8 @@ def test_open_builds_one_service_for_all_scopes(tmp_path, monkeypatch):
     kb = KnowledgeBase.open({"project": tmp_path / "project", "user": tmp_path / "user"})
 
     assert len(built) == 1
-    assert kb.manager("project")._embedding_service is built[0]
-    assert kb.manager("user")._embedding_service is built[0]
+    assert kb.manager("project")._service is built[0]
+    assert kb.manager("user")._service is built[0]
 
 
 def test_open_passes_the_summarizer_to_every_scope(tmp_path):
@@ -309,13 +312,13 @@ def test_find_document_tries_the_whole_chain_in_each_scope_first(two):
     user_doc = _add(two.manager("user"), "Elsewhere")
     project_doc = _add(two.manager("project"), f"Notes on {user_doc.id}")
 
-    assert two.find_document(user_doc.id).document is project_doc
+    assert two.find_document(user_doc.id).document == project_doc
 
 
 def test_find_document_by_id_prefix(two):
     doc = _add(two.manager("user"), "Glacier survey")
 
-    assert two.find_document(doc.id[:8]).document is doc
+    assert two.find_document(doc.id[:8]).document == doc
 
 
 def test_an_unknown_document_is_none(two):
@@ -710,7 +713,8 @@ def test_a_later_scopes_document_without_authors_does_not_break_the_catalogue(tw
 
 def test_an_author_list_with_a_non_string_still_matches(two):
     doc = _add(two.manager("project"), "Mixed")
-    doc.metadata["authors"] = [7, "Ada"]  # set after ingestion: the sidecar writer wants strings
+    # Set after ingestion: the sidecar writer wants strings.
+    raw_write(two.manager("project").kb_dir, ("UPDATE documents SET metadata = ? WHERE id = ?", ['{"authors": [7, "Ada"]}', doc.id]))
 
     assert [s.document.title for s in two.list_documents(title_or_author="ada")] == ["Mixed"]
 

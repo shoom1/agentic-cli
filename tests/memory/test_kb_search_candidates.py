@@ -4,8 +4,8 @@
 per document and dropped those the filters refuse. A document with many
 matching chunks filled that list on its own, so a filtered search for another
 document came back empty (with ``top_k=2``; ``top_k=100`` found it), and an
-unfiltered one returned fewer documents than matched. The search now widens
-the ranked list until ``top_k`` documents pass, or every chunk is ranked.
+unfiltered one returned fewer documents than matched. The search now ranks
+every chunk once, the filters applied first, and keeps each document's best.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import pytest
 from agentic_cli.memory import EmbeddingService
 from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 from tests.memory.fake_embeddings import FakeEmbeddingService
-from tests.memory.kb_extra import require_kb_module
 
 # Forty paragraphs about lanterns, each its own chunk.
 _LONG = "\n\n".join(
@@ -40,7 +39,7 @@ def _kb(folder: Path, embedding_service=None) -> KnowledgeBaseManager:
     kb.ingest_document(content=_LONG, title="Festival", source_type=SourceType.USER)
     kb.ingest_document(content="A short note on a paper lantern.", title="The note",
                        source_type=SourceType.WEB)
-    assert len(kb._chunks) > 20
+    assert kb.get_stats()["chunk_count"] > 20
     return kb
 
 
@@ -69,8 +68,7 @@ def test_a_search_for_more_documents_than_match_returns_those_that_do(tmp_path):
     assert kb.search("lantern", filters={"source_type": "arxiv"}, top_k=2)["results"] == []
 
 
-def test_semantic_and_keyword_search_widen_alike(tmp_path):
-    require_kb_module("faiss")
+def test_semantic_and_keyword_search_find_it_alike(tmp_path):
     kb = _kb(tmp_path, FakeEmbeddingService(embedding_dim=8))
 
     result = kb.search("lantern", filters={"source_type": "web"}, top_k=2)

@@ -12,8 +12,9 @@ def test_the_knowledge_base_lives_under_the_directory_it_is_given(tmp_path):
     kb = KnowledgeBaseManager(tmp_path / "kb", use_mock=True)
 
     assert kb.kb_dir == tmp_path / "kb"
-    for sub in ("documents", "embeddings", "files"):
+    for sub in ("documents", "files"):
         assert (tmp_path / "kb" / sub).is_dir()
+    assert (tmp_path / "kb" / "kb.sqlite").is_file()
 
 
 def test_a_string_base_dir_works(tmp_path):

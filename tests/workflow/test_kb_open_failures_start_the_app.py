@@ -1,20 +1,18 @@
 """A workflow starts when part of its knowledge base or memory store cannot open.
 
-A project knowledge base the framework cannot read (here, a document header
-naming a source type it does not know) and an embedding model that does not
-load (an offline first run) raised out of service construction, so an app
-whose agents use the kb or memory tools did not start. The project scope is
+A project knowledge base the framework cannot read (here, a database that is
+a git-LFS pointer, as a repository can ship it) and an embedding model that
+does not load (an offline first run) raised out of service construction, so an
+app whose agents use the kb or memory tools did not start. The project scope is
 now left out (the user scope takes the writes), the model's absence leaves
 keyword and substring search, and the tools answer.
 """
 
 from __future__ import annotations
 
-import json
 from typing import AsyncGenerator
 
 from agentic_cli.config import BaseSettings
-from agentic_cli.memory.kb import KnowledgeBaseManager, SourceType
 from agentic_cli.tools.knowledge_tools import kb_ingest_text, kb_search
 from agentic_cli.tools.memory_tools import save_memory, search_memory
 from agentic_cli.workflow import memory_services
@@ -67,7 +65,7 @@ class _OfflineModel:
         self._fail()
 
 
-async def test_the_app_starts_and_the_tools_answer(tmp_path, monkeypatch):
+async def test_a_project_database_that_does_not_open_leaves_the_user_scope(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for variable in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
@@ -76,12 +74,8 @@ async def test_the_app_starts_and_the_tools_answer(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_services, "build_embedding_service", lambda settings: _OfflineModel())
     settings = BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=False)
     project = memory_services.project_kb_dir(settings)
-    KnowledgeBaseManager(project, use_mock=True).ingest_document(
-        content="Granite cools slowly.", title="Granite", source_type=SourceType.USER
-    )
-    metadata = json.loads((project / "metadata.json").read_text())
-    metadata["documents"][0]["source_type"] = "podcast"
-    (project / "metadata.json").write_text(json.dumps(metadata))
+    project.mkdir(parents=True)
+    (project / "kb.sqlite").write_text("version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 1\n")
     config = AgentConfig(name="a", prompt="p", tools=[kb_search, kb_ingest_text, save_memory, search_memory])
     mgr = _Manager(agent_configs=[config], settings=settings)
 

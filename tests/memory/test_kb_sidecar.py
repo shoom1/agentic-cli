@@ -250,7 +250,7 @@ class TestBackfillSidecars:
     async def test_backfill_reports_progress_per_doc(self, kb):
         kb.ingest_document(content="a", title="One", source_type=SourceType.USER)
         kb.ingest_document(content="b", title="Two", source_type=SourceType.USER)
-        for doc in list(kb._documents.values()):
+        for doc in kb.list_documents(limit=None):
             kb.sidecar_path(doc.id).unlink()
 
         calls: list[tuple[int, int, str]] = []

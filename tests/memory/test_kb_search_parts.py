@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import random
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -88,6 +90,21 @@ def test_keyword_ranking_finds_every_chunk_holding_a_term(db, fts, monkeypatch):
     with db.read():
         ranked = keyword_ranked(db.conn, tokenize("otters"), fts=db.fts)
     assert [doc for _, doc in ranked] == [A, B]  # A holds the term twice
+
+
+def test_each_term_reaches_the_keyword_index_unchanged_and_a_query_is_split_alike(tmp_path):
+    text = "Played on sixty-four squares: naïve_café, 水獭住在, मुझे किताब, Résumé 3.14"
+    db = _db(tmp_path, (A, text, SourceType.USER, NOON))
+    with db.read():
+        found = [doc for _, doc in keyword_ranked(db.conn, tokenize("Sixty-Four SQUARES!"), fts=db.fts)]
+    db.close()
+    uri = (tmp_path / "kb.sqlite").absolute().as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
+        conn.execute("CREATE VIRTUAL TABLE temp.vocabulary USING fts5vocab('main', 'chunk_terms', 'row')")
+        indexed = {term for (term,) in conn.execute("SELECT term FROM temp.vocabulary")}
+
+    assert found == [A]
+    assert indexed == set(tokenize(text))
 
 
 def test_keyword_ranking_finds_a_chinese_word(db):
