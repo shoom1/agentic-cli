@@ -54,6 +54,13 @@ class TestSave:
         assert (tmp_path / "projects" / "app-0123" / "project-path.txt").read_text() == f"{tmp_path / 'src' / 'app'}\n"
         assert store.read(memory.id) == memory
 
+    @pytest.mark.parametrize("description", ["Ticket #42 blocks the release", "課題　#42 が残っている"])
+    def test_a_hash_in_a_description_survives_a_save_and_an_update(self, store, description):
+        memory = store.save(description, "text", "project")
+        assert store.read(memory.id).description == description
+        store.update(memory.id, content="more text")
+        assert store.read(memory.id).description == description
+
     def test_description_and_content_are_stripped(self, store):
         memory = store.save("  Spaced  ", "  text \n", "user", scope="user")
         assert (memory.description, memory.content) == ("Spaced", "text")

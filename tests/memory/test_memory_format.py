@@ -45,8 +45,16 @@ class TestValues:
     def test_a_bare_value_is_stripped(self):
         assert files.read_value("  spaced out  ") == "spaced out"
 
+    @pytest.mark.parametrize("value", [
+        "a#b", "Ticket #42", "課題　#42 が残っている", "no-break\u00a0#1", "tab\t#1", "ends #",
+    ])
+    def test_a_value_with_a_hash_reads_back_whole(self, value):
+        assert files.read_value(files.write_value(value)) == value
+
     @pytest.mark.parametrize("raw, expected", [
         (" user # a note", "user"),
+        (" user\t# a note", "user"),
+        (" 課題　#42", "課題　#42"),
         (" user   #note", "user"),
         (" # only a comment", ""),
         (" a#b", "a#b"),

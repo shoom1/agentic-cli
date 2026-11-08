@@ -39,7 +39,7 @@ _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _YAML_WORDS = frozenset({"true", "false", "null", "yes", "no", "on", "off", "~"})
 _RADIX_NUMBER = re.compile(r"[-+]?0[xXoObB][0-9a-fA-F_]+")
 _LINE_BREAKS = frozenset({"Cc", "Zl", "Zp"})
-_COMMENT = re.compile(r"\s#")
+_COMMENT = re.compile(r"[ \t]#")  # YAML: a space or a tab, not any Unicode whitespace
 
 
 class FormatError(ValueError):
@@ -145,6 +145,7 @@ def _bare_ok(value: str) -> bool:
         and value == value.rstrip()
         and ": " not in value
         and " #" not in value
+        and "\t#" not in value
         and "\n" not in value
         and "\r" not in value
         and value.casefold() not in _YAML_WORDS
@@ -160,8 +161,9 @@ def write_value(value: str) -> str:
 def read_value(raw: str) -> str:
     """A frontmatter value: a JSON string, a YAML single-quoted string, or bare text.
 
-    A bare value ends at a ``#`` that follows whitespace, as in YAML: the rest
-    of the line is a comment.
+    A bare value ends at a ``#`` that follows a space or a tab, as in YAML: the
+    rest of the line is a comment. Other whitespace (a full-width space) is
+    part of the value.
 
     Raises:
         FormatError: a quoted value that does not close.
