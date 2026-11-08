@@ -858,8 +858,8 @@ class TestStructureAwareChunking:
             "This is a conclusion."
         )
         svc = EmbeddingService.__new__(EmbeddingService)
-        chunks = svc.chunk_document(content, chunk_size=50)
-        # The code block should not be split across chunks
+        chunks = svc.chunk_document(content, chunk_size=100)
+        # A code block that fits the chunk size is not split across chunks
         code_chunk = [c for c in chunks if "def hello" in c]
         assert len(code_chunk) >= 1
         assert "return True" in code_chunk[0]

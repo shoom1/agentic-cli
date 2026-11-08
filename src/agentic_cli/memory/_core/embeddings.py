@@ -7,10 +7,11 @@ and document chunking for efficient retrieval.
 from __future__ import annotations
 
 import platform
-import re
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from agentic_cli.memory._core.chunking import chunk_text
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
@@ -178,125 +179,6 @@ class EmbeddingService:
         chunk_size: int = 512,
         overlap: int = 50,
     ) -> list[str]:
-        """Split content into chunks, respecting structure.
-
-        Splits on markdown structure (headings, code fences) first,
-        then splits prose sections into sentences. Code blocks are
-        never split.
-
-        Args:
-            content: The text content to chunk.
-            chunk_size: Target size per chunk in characters.
-            overlap: Overlap between adjacent prose chunks in characters.
-
-        Returns:
-            List of text chunks.
-        """
-        if not content or not content.strip():
-            return []
-
-        blocks = self._split_structural_blocks(content)
-
-        chunks = []
-        for block_type, block_text in blocks:
-            if block_type == "code":
-                chunks.append(block_text.strip())
-            else:
-                sentences = self._split_sentences(block_text)
-                prose_chunks = self._merge_sentences(sentences, chunk_size, overlap)
-                chunks.extend(prose_chunks)
-
-        return [c for c in chunks if c.strip()]
-
-    @staticmethod
-    def _split_structural_blocks(content: str) -> list[tuple[str, str]]:
-        """Split content into structural blocks: code vs prose.
-
-        Returns list of (type, text) tuples where type is 'code' or 'prose'.
-        """
-        blocks: list[tuple[str, str]] = []
-        lines = content.split("\n")
-        current_lines: list[str] = []
-        in_code_fence = False
-
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("```") and not in_code_fence:
-                # Start of code block — flush prose
-                if current_lines:
-                    blocks.append(("prose", "\n".join(current_lines)))
-                    current_lines = []
-                in_code_fence = True
-                current_lines.append(line)
-            elif stripped.startswith("```") and in_code_fence:
-                # End of code block
-                current_lines.append(line)
-                blocks.append(("code", "\n".join(current_lines)))
-                current_lines = []
-                in_code_fence = False
-            elif not in_code_fence and re.match(r"^#{1,6}\s", stripped):
-                # Markdown heading — natural boundary
-                if current_lines:
-                    blocks.append(("prose", "\n".join(current_lines)))
-                    current_lines = []
-                current_lines.append(line)
-            else:
-                current_lines.append(line)
-
-        if current_lines:
-            block_type = "code" if in_code_fence else "prose"
-            blocks.append((block_type, "\n".join(current_lines)))
-
-        return blocks
-
-    def _split_sentences(self, text: str) -> list[str]:
-        """Split text into sentences.
-
-        Uses nltk.sent_tokenize if available, falls back to regex. nltk
-        installed without its punkt data (its default state) raises
-        ``LookupError``, which falls back too.
-        """
-        if not text.strip():
-            return []
-        try:
-            import nltk
-            return nltk.sent_tokenize(text)
-        except (ImportError, LookupError):
-            pass
-        # Regex fallback
-        parts = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text)
-        return [p.strip() for p in parts if p.strip()]
-
-    @staticmethod
-    def _merge_sentences(
-        sentences: list[str],
-        chunk_size: int,
-        overlap: int,
-    ) -> list[str]:
-        """Merge sentences into chunks respecting size and overlap."""
-        if not sentences:
-            return []
-        chunks = []
-        current: list[str] = []
-        current_len = 0
-
-        for sentence in sentences:
-            if current_len + len(sentence) > chunk_size and current:
-                chunks.append(" ".join(current))
-                # Keep overlap from end of current chunk
-                overlap_sentences: list[str] = []
-                overlap_len = 0
-                for s in reversed(current):
-                    if overlap_len + len(s) > overlap:
-                        break
-                    overlap_sentences.insert(0, s)
-                    overlap_len += len(s)
-                current = overlap_sentences
-                current_len = overlap_len
-            current.append(sentence)
-            current_len += len(sentence)
-
-        if current:
-            chunks.append(" ".join(current))
-
-        return chunks
+        """``content`` in chunks of at most ``chunk_size + overlap`` characters
+        (``agentic_cli.memory._core.chunking``). Loads no model."""
+        return chunk_text(content, chunk_size, overlap)
