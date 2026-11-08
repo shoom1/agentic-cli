@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -62,10 +64,30 @@ def test_date_to_keeps_the_whole_day_it_names(db):
         assert allowed_documents(db.conn, {"date_to": "2026-11-06"}) == {B, C}
 
 
-def test_a_date_with_an_offset_is_compared_as_local_time(db):
-    noon_utc = NOON.astimezone(timezone.utc).isoformat()  # NOON is local time
+@pytest.fixture
+def ahead_of_utc():
+    """Local time 5 h 30 min ahead of UTC wherever the tests run: in UTC (as
+    CI runs) a time with an offset reads the same converted or not."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is POSIX")
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "IST-5:30"
+    time.tzset()
+    yield
+    if saved is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = saved
+    time.tzset()
+
+
+def test_a_date_with_an_offset_is_compared_as_local_time(db, ahead_of_utc):
+    # NOON is local time; each bound is a minute from it, written in UTC.
+    just_before = (NOON - timedelta(minutes=1)).astimezone(timezone.utc).isoformat()
+    just_after = (NOON + timedelta(minutes=1)).astimezone(timezone.utc).isoformat()
     with db.read():
-        assert allowed_documents(db.conn, {"date_from": noon_utc}) == {A}
+        assert allowed_documents(db.conn, {"date_from": just_before}) == {A}
+        assert allowed_documents(db.conn, {"date_from": just_after}) == set()
 
 
 def test_filters_combine_and_keywords_ignore_case(db):
