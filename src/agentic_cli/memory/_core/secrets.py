@@ -6,11 +6,13 @@ are the keys and tokens most often pasted into a conversation, and cover what
 agentic-cli's LLM log masks of them (a test outside the package feeds both the
 same samples). A pattern is anchored so that a word merely containing one
 (``task-management-…`` holds ``sk-``) is not taken for a key, and the two
-loosest ones are tightened against ordinary notes: ``Bearer`` must be followed
-by something that looks like a token, not a word (``bearer authentication``),
-and an assignment (``password=…``) is not flagged when its value is an
-environment reference, a path, a placeholder or a template (``$DB_PASSWORD``,
-``/etc/app``, ``<your key>``, ``{{ token }}``).
+loosest ones are tightened against ordinary notes:
+
+- ``Bearer`` must be followed by something that looks like a token, not a word
+  or a placeholder (``bearer authentication``, ``Bearer YOUR_API_TOKEN``);
+- an assignment (``password=…``, or ``"password": …`` in JSON) is not flagged
+  when its value is an environment reference, a path, a placeholder or a
+  template (``$DB_PASSWORD``, ``/etc/app``, ``<your key>``, ``{{ token }}``).
 """
 
 from __future__ import annotations
@@ -28,11 +30,13 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("a Google API key", re.compile(r"(?<![A-Za-z0-9_])AIza[A-Za-z0-9_\-]{16,}")),
     (
         "a bearer token",
-        # Ten or more token characters, one of them a digit or a mark: a word is no token. A
-        # period counts only inside the run, so a sentence's last full stop does not.
+        # A word is no token, and neither is a placeholder (``YOUR_API_TOKEN``). Ten or more
+        # token characters with a digit in them, or twenty or more with a mark of their own
+        # (a period only inside the run: a sentence's last full stop is none) or mixed case.
         re.compile(
-            rf"\bBearer\s+(?={_BEARER_CHARS}*(?:[0-9_~+/=-]|\.{_BEARER_CHARS})){_BEARER_CHARS}{{10,}}",
-            re.IGNORECASE,
+            rf"\b(?i:Bearer)\s+(?:(?={_BEARER_CHARS}*[0-9]){_BEARER_CHARS}{{10,}}"
+            rf"|(?={_BEARER_CHARS}*(?:[~+/=]|\.{_BEARER_CHARS})){_BEARER_CHARS}{{20,}}"
+            rf"|(?={_BEARER_CHARS}*[a-z])(?={_BEARER_CHARS}*[A-Z]){_BEARER_CHARS}{{20,}})"
         ),
     ),
     ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
@@ -44,10 +48,11 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "a password or key",
         # A name that holds one of the words (``DB_PASSWORD``, ``client_secret``,
-        # ``aws_secret_access_key``), ``:`` or ``=``, and a value of 8 or more characters.
+        # ``aws_secret_access_key``), a quote when the name is a JSON or dict key, ``:`` or
+        # ``=``, and a value of 8 or more characters.
         re.compile(
             rf"(?<!{_NAME_CHARS}){_NAME_CHARS}*{_NAME_WORD}(?:[_.-]{_NAME_CHARS}*)?"
-            r"\s*[:=]\s*['\"]?(?![$/~<{])[^\s'\"]{8,}",
+            r"['\"]?\s*[:=]\s*['\"]?(?![$/~<{])[^\s'\"]{8,}",
             re.IGNORECASE,
         ),
     ),

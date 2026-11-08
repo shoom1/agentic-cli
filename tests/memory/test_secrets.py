@@ -31,6 +31,12 @@ SECRET_SAMPLES = [
     "access_token=abcdefgh1234",
     "aws_secret_access_key = wJalrXUtnFEMIK7MDENG",
     "password: CorrectHorseBatteryStaple",
+    # JSON or dict-style configuration: a quote sits between the name and the separator.
+    '{"password": "hunter2hunter2"}',
+    "{'api_key': 'abcdefgh12345678'}",
+    '"client_secret" = "abcdefghijkl"',
+    '{"Authorization": "Bearer abcdef1234567890"}',
+    "Authorization: Bearer AbCdEfGhIjKlMnOpQrStUv",
     # More token families. Written in parts: a secret scanner reads the file too.
     "sk_" + "live_" + "AbCdEfGhIjKlMnOpQrStUvWx",
     "sk_" + "test_" + "AbCdEfGhIjKlMnOpQrStUvWx",
@@ -61,6 +67,12 @@ def test_a_credential_is_flagged(text):
     "token: {{ secrets.TOKEN }}",
     "secret: ~/.config/app/secret-file",
     "tokenizer: cl100k_base",
+    "Bearer token-based auth is what the API uses",
+    "Send it as Authorization: Bearer YOUR_API_TOKEN",
+    "The header is Bearer <token>",
+    '{"password": "$DB_PASSWORD"}',
+    '{"api_key": "<your key here>"}',
+    '{"token": null, "retries": 3}',
 ])
 def test_ordinary_text_is_not(text):
     assert looks_like_secret(text) is None
