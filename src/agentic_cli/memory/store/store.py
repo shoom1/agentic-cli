@@ -10,7 +10,7 @@ also serialized within the process (tools run on worker threads).
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,8 +18,11 @@ from pathlib import Path
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory._core.secrets import looks_like_secret
 from agentic_cli.memory.store import _files
+from agentic_cli.memory.store._index import render_index
 from agentic_cli.memory.store._scope import INBOX, PROJECT_NOTE, Entry, ScopeFolder, resolve_duplicates
+from agentic_cli.memory.store._search import ranked
 from agentic_cli.memory.store.models import (
+    ALL_MEMORY_TOOLS,
     MEMORY_TYPES,
     SCOPES,
     SOURCES,
@@ -346,6 +349,26 @@ class MemoryStore:
             winners = self._entries()[0]
         found = [e.memory for e in winners.values() if scope is None or e.memory.scope == scope]
         return sorted(found, key=newest_first)
+
+    def search(self, query: str, *, limit: int = 10) -> list[Memory]:
+        """Memories matching ``query`` by keyword (BM25), best first; writes nothing.
+
+        An empty query gives the newest; ``limit`` is clamped to 1-50.
+        """
+        return ranked(self.memories(), query, limit)
+
+    def index(
+        self,
+        *,
+        max_lines: int = 200,
+        max_bytes: int = 25_000,
+        tools: Collection[str] = ALL_MEMORY_TOOLS,
+    ) -> str:
+        """The index for the main agent (spec §6.6); ``""`` when there are no memories."""
+        return render_index(
+            self.memories(), project_name=self.project_name,
+            max_lines=max_lines, max_bytes=max_bytes, tools=tools,
+        )
 
     def problems(self) -> list[Problem]:
         """The files the store cannot use (it never changes them)."""
