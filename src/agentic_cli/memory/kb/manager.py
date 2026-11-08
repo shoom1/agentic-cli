@@ -784,7 +784,9 @@ class KnowledgeBaseManager:
                     else:
                         logger.warning("kb_model_changed_elsewhere", path=str(self.kb_dir), model=self._model_name)
                         self._keyword_only()
-                rowids = db.insert_document(doc, terms, blobs, payload)
+                # Only a summarizer's output is stored: without one, a missing
+                # sidecar is written by the summarizer later, as before.
+                rowids = db.insert_document(doc, terms, blobs, sidecar_payload)
                 generation = db.bump_generation()
                 self._write_rendered(self.sidecar_path(doc.id), render_sidecar_markdown(doc, payload), "kb_sidecar_not_written")
                 self._write_index_md(db)
@@ -1086,9 +1088,9 @@ class KnowledgeBaseManager:
             self._backfill_running = False
 
     def _documents_without_sidecar(self) -> list[Document]:
-        """The documents that have no sidecar, as the knowledge base is now."""
+        """The documents that have no sidecar, as the knowledge base is now, in the order they were added."""
         with self._read() as db:
-            headers = db.headers()
+            headers = sorted(db.headers(), key=lambda doc: (doc.created_at, doc.id))
         return [doc for doc in headers if not self._has_sidecar(doc.id)]
 
     def _needs_sidecar(self, doc_id: str) -> bool:
