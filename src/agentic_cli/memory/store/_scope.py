@@ -32,7 +32,14 @@ from agentic_cli.memory.store._files import (
     render,
     valid_id,
 )
-from agentic_cli.memory.store.models import Memory, MemoryBusy, Problem, Scope, UnsafeMemoryStore
+from agentic_cli.memory.store.models import (
+    Memory,
+    MemoryBusy,
+    MemoryStoreError,
+    Problem,
+    Scope,
+    UnsafeMemoryStore,
+)
 
 logger = get_logger("agentic_cli.memory.store")
 
@@ -106,6 +113,7 @@ class ScopeFolder:
         self.scope = scope
         self._note = note
         self._cache: dict[str, tuple[tuple[int, int, int], Entry | Problem]] = {}
+        self._refused: set[str] = set()
 
     def check(self) -> None:
         """Refuse a folder, ``.inbox`` or ``.history`` that is a link or not a folder.
@@ -122,15 +130,25 @@ class ScopeFolder:
                 raise UnsafeMemoryStore(f"{path} is a symbolic link or not a folder")
 
     def ensure(self, sub: str | None = None) -> Path:
-        """The folder (or ``sub`` inside it), created 0700 when missing."""
-        created = not os.path.lexists(self.path)
-        _private_dirs(self.path)
-        if created and self._note is not None:
-            note, text = self._note
-            atomic_write_text(note, text + "\n")
+        """The folder (or ``sub`` inside it), created 0700 when missing.
+
+        Raises:
+            UnsafeMemoryStore: the folder, or ``sub``, is a link or not a folder.
+            MemoryStoreError: a folder cannot be created (the message names it).
+        """
         target = self.path / sub if sub else self.path
-        _private_dirs(target)
+        try:
+            created = not os.path.lexists(self.path)
+            _private_dirs(self.path)
+            if created and self._note is not None:
+                note, text = self._note
+                atomic_write_text(note, text + "\n")
+            _private_dirs(target)
+        except OSError as e:
+            raise MemoryStoreError(f"cannot create {e.filename or target}: {e.strerror or e}") from e
         self.check()
+        if sub and not stat.S_ISDIR(os.lstat(target).st_mode):
+            raise UnsafeMemoryStore(f"{target} is a symbolic link or not a folder")
         return target
 
     @contextlib.contextmanager
@@ -139,15 +157,26 @@ class ScopeFolder:
 
         Raises:
             MemoryBusy: another process held it for ``LOCK_TIMEOUT_S``.
+            UnsafeMemoryStore: ``.lock`` is a link or not a regular file.
+            MemoryStoreError: the lock cannot be taken, say in a read-only folder.
         """
         self.ensure()
+        path = self.path / LOCK
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and not stat.S_ISREG(mode):
+            raise UnsafeMemoryStore(f"{path} is a symbolic link or not a regular file")
         with contextlib.ExitStack() as stack:
             try:
-                stack.enter_context(folder_lock(self.path / LOCK, timeout=LOCK_TIMEOUT_S))
+                stack.enter_context(folder_lock(path, timeout=LOCK_TIMEOUT_S))
             except TimeoutError as e:
                 raise MemoryBusy(
                     f"memory is busy: {self.path} stayed locked for {LOCK_TIMEOUT_S:g} s; try again"
                 ) from e
+            except OSError as e:
+                raise MemoryStoreError(f"cannot take the lock {path}: {e.strerror or e}") from e
             yield
 
     def target(self, description: str, memory_id: str) -> Path:
@@ -232,16 +261,28 @@ class ScopeFolder:
         atomic_write_text(path, render(memory_fields(entry.memory, entry.extra), entry.memory.content))
         return path
 
+    def _refuse_history(self, path: Path) -> None:
+        """Log, once a process, a history folder that is a link or not a folder."""
+        if str(path) not in self._refused:
+            self._refused.add(str(path))
+            logger.warning("memory_history_folder_refused", path=str(path))
+
     def history_ids(self) -> set[str]:
-        """The ids that have a history folder."""
+        """The ids that have a history folder. A link or a file with an id's name is no folder."""
         root = self.path / HISTORY
         try:
-            return {
-                item.name for item in os.scandir(root)
-                if item.is_dir(follow_symlinks=False) and valid_id(item.name)
-            }
-        except FileNotFoundError:
+            items = list(os.scandir(root))
+        except (FileNotFoundError, NotADirectoryError):
             return set()
+        ids: set[str] = set()
+        for item in items:
+            if not valid_id(item.name):
+                continue
+            if item.is_dir(follow_symlinks=False):
+                ids.add(item.name)
+            else:
+                self._refuse_history(Path(item.path))
+        return ids
 
     def versions(self, memory_id: str | None = None) -> list[tuple[str, datetime, Path]]:
         """``(memory id, saved, file)`` of every version (of ``memory_id`` only, if given)."""
@@ -252,6 +293,9 @@ class ScopeFolder:
                 continue
             folder = self.path / HISTORY / one
             try:
+                if not stat.S_ISDIR(os.lstat(folder).st_mode):
+                    self._refuse_history(folder)
+                    continue
                 items = list(os.scandir(folder))
             except (FileNotFoundError, NotADirectoryError):
                 continue

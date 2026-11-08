@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import timedelta
 
@@ -15,10 +16,13 @@ from agentic_cli.memory.store.models import (
     FileInTheWay,
     InvalidMemory,
     MemoryBusy,
+    MemoryStoreError,
     MemoryStoreFull,
     NoProjectScope,
+    UnsafeMemoryStore,
 )
 from agentic_cli.memory.store.store import MemoryStore
+from tests.memory.kb_storage import LogRecorder
 from tests.memory.memory_files import T0, Clock, memory_text, write_memory
 
 
@@ -237,6 +241,69 @@ class TestFilesThatAreNotTheEntrys:
         assert mine.read_text() == "not frontmatter, my notes\n"
         assert store.read(alpha.id).description == "alpha"
         assert store.history(alpha.id) == []  # nothing was written before it refused
+
+
+class TestUnsafeFolders:
+    """Links and read-only folders: the store refuses them in words, and writes nothing through them."""
+
+    def _linked_history(self, store, tmp_path):
+        memory = store.save("note", "c", "user", scope="user")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "20200101T000000.000000Z.md"  # old enough to be pruned, if it were followed
+        victim.write_text("victim")
+        (tmp_path / "user" / ".history").mkdir(exist_ok=True)
+        os.symlink(outside, tmp_path / "user" / ".history" / memory.id)
+        return memory, outside, victim
+
+    def test_a_symlinked_history_folder_is_never_written_into(self, store, tmp_path):
+        memory, outside, victim = self._linked_history(store, tmp_path)
+        with pytest.raises(UnsafeMemoryStore, match=memory.id):
+            store.update(memory.id, content="c2")
+        with pytest.raises(UnsafeMemoryStore, match=memory.id):
+            store.delete(memory.id)
+        assert os.listdir(outside) == [victim.name]
+        assert store.read(memory.id).content == "c"
+
+    def test_a_symlinked_history_folder_is_not_pruned_and_is_logged(self, store, tmp_path, monkeypatch):
+        memory, outside, victim = self._linked_history(store, tmp_path)
+        log = LogRecorder().install(monkeypatch, _scope)
+        MemoryStore(tmp_path / "user")
+        assert victim.read_text() == "victim"
+        assert [f["path"] for f in log.warnings("memory_history_folder_refused")] == [
+            str(tmp_path / "user" / ".history" / memory.id)
+        ]
+
+    def test_a_symlinked_lock_is_refused_when_the_store_opens(self, tmp_path):
+        user = tmp_path / "user"
+        user.mkdir()
+        os.symlink(tmp_path / "elsewhere.lock", user / ".lock")
+        with pytest.raises(UnsafeMemoryStore, match=r"\.lock"):
+            MemoryStore(user)
+        assert not (tmp_path / "elsewhere.lock").exists()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+    def test_a_read_only_scope_folder_is_a_store_error_naming_it(self, tmp_path):
+        user = tmp_path / "user"
+        user.mkdir()
+        user.chmod(0o500)
+        try:
+            with pytest.raises(MemoryStoreError, match=str(user)):
+                MemoryStore(user)
+        finally:
+            user.chmod(0o700)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+    def test_a_folder_that_cannot_be_created_is_a_store_error_naming_it(self, tmp_path):
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        parent.chmod(0o500)
+        try:
+            store = MemoryStore(parent / "user")  # nothing exists yet, so nothing is opened
+            with pytest.raises(MemoryStoreError, match=str(parent)):
+                store.save("d", "c", "user", scope="user")
+        finally:
+            parent.chmod(0o700)
 
 
 class TestLists:
