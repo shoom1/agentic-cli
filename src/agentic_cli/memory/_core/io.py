@@ -133,6 +133,21 @@ def append_text(path: Path, text: str) -> None:
         os.close(fd)
 
 
+def create_private_file(path: Path) -> None:
+    """Create ``path`` empty and private (0600) unless a name is there already.
+
+    Whatever is there (a file, or a symlink, dangling or not) is left as it
+    is, never followed: the caller checks it is a regular file before use.
+    For a file a library then opens itself (SQLite's database), so it is
+    private from the start.
+    """
+    try:
+        fd = _open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        return
+    os.close(fd)
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     """Write ``data`` to a temp file beside ``path``, fsync, then rename."""
     path.parent.mkdir(parents=True, exist_ok=True)

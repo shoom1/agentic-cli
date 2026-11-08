@@ -32,6 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agentic_cli.memory._core.io import create_private_file
 from agentic_cli.memory._core.log import get_logger
 from agentic_cli.memory.kb.models import Document, DocumentChunk, SourceType
 
@@ -180,12 +181,7 @@ class Database:
                 pointer) or is corrupt.
         """
         check_files(path)
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        except FileExistsError:
-            pass
-        else:
-            os.close(fd)
+        create_private_file(path)
         conn = sqlite3.connect(
             path.absolute().as_uri() + "?mode=rw&nofollow=1",
             uri=True,
