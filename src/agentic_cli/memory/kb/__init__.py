@@ -16,6 +16,7 @@ from agentic_cli.memory.kb.knowledge_base import (
 )
 from agentic_cli.memory.kb.manager import (
     BackfillAlreadyRunning,
+    KnowledgeBaseBusy,
     KnowledgeBaseManager,
     Summarizer,
     UnsafeKnowledgeBase,
@@ -33,6 +34,7 @@ __all__ = [
     "DocumentNotFound",
     "EmptyDocument",
     "KnowledgeBase",
+    "KnowledgeBaseBusy",
     "KnowledgeBaseManager",
     "ScopedDocument",
     "SearchResult",

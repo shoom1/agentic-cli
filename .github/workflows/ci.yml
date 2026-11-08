@@ -75,8 +75,8 @@ jobs:
       - name: Install the kb, langgraph and deepagents extras
         run: conda run -n agenticcli pip install -e '.[kb,langgraph,deepagents]'
 
-      # The whole offline suite, so the real backends (faiss, bm25s,
-      # rank_bm25, trafilatura) run where the other jobs use fakes.
+      # The whole offline suite, so the real backends (sentence-transformers,
+      # trafilatura) run where the other jobs use fakes.
       # KB_REQUIRE_EXTRA makes a missing kb library fail its tests rather
       # than skip them. The HF variables make loading an embedding model an
       # error: no offline test needs one, so none is downloaded or cached.

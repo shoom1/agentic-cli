@@ -1,9 +1,12 @@
-"""What ``agentic_cli.memory`` and ``agentic_cli.memory.kb`` export in 0.6.3.
+"""What ``agentic_cli.memory`` and ``agentic_cli.memory.kb`` export in 0.7.0.
 
-0.6.4 keeps the 0.6.3 package API and redesigns it in 0.7.0. New names may
-be added. None of these may go, and these classes and methods must stay
-call-compatible: the same parameters, in the same order, of the same kind,
-with the same defaults. Annotations are not compared.
+0.6.4 kept the 0.6.3 package API. 0.7.0 moves the knowledge base onto one
+SQLite file and drops ``VectorStore``, ``MockVectorStore``,
+``create_bm25_index``, ``matches_document_filters`` and
+``KnowledgeBaseManager(vector_store=)``, and adds ``KnowledgeBaseBusy``. New
+names may be added. None of these may go, and these classes and methods must
+stay call-compatible: the same parameters, in the same order, of the same
+kind, with the same defaults. Annotations are not compared.
 """
 
 from __future__ import annotations
@@ -30,14 +33,11 @@ KB_EXPORTS = {
     "ConceptStore",
     "Document",
     "DocumentChunk",
+    "KnowledgeBaseBusy",
     "KnowledgeBaseManager",
-    "MockVectorStore",
     "SearchResult",
     "SourceType",
     "Summarizer",
-    "VectorStore",
-    "create_bm25_index",
-    "matches_document_filters",
 }
 
 CLASSES = {
@@ -61,8 +61,7 @@ P, K = "POSITIONAL_OR_KEYWORD", "KEYWORD_ONLY"
 SIGNATURES = {
     ("KnowledgeBaseManager", "__init__"): [
         ("self", P, R), ("base_dir", P, R), ("embedding", K, None), ("summarizer", K, None),
-        ("use_mock", K, False), ("embedding_service", K, None), ("vector_store", K, None),
-        ("within", K, None),
+        ("use_mock", K, False), ("embedding_service", K, None), ("within", K, None),
     ],
     ("KnowledgeBaseManager", "backfill_sidecars"): [("self", P, R), ("progress_cb", P, None)],
     ("KnowledgeBaseManager", "clear"): [("self", P, R)],

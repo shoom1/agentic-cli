@@ -841,6 +841,7 @@ class BaseWorkflowManager(ABC):
     _SYNC_SERVICE_CLOSERS = (
         (SANDBOX_MANAGER, "cleanup"),
         (JOB_MANAGER, "close"),
+        (KNOWLEDGE_BASE, "close"),  # a database connection per scope
     )
 
     @classmethod

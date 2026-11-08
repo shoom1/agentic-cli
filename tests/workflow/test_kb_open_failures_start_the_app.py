@@ -10,7 +10,10 @@ keyword and substring search, and the tools answer.
 
 from __future__ import annotations
 
+import sqlite3
 from typing import AsyncGenerator
+
+import pytest
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.tools.knowledge_tools import kb_ingest_text, kb_search
@@ -121,3 +124,22 @@ def test_a_model_that_does_not_load_is_tried_once(tmp_path, monkeypatch):
 
     assert len(loads) == 1
     assert services["memory_store"]._embedding_service is None
+
+
+async def test_releasing_the_services_closes_the_knowledge_base(tmp_path, monkeypatch):
+    """The knowledge base holds a database connection per scope; releasing
+    the workflow's services closes them, as it closes the sandbox and the jobs."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for variable in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
+    settings = BaseSettings(workspace_dir=tmp_path / "workspace", knowledge_base_use_mock=True)
+    mgr = _Manager(agent_configs=[AgentConfig(name="a", prompt="p", tools=[kb_search])], settings=settings)
+    await mgr.initialize_services(validate=False)
+    kb = mgr.knowledge_base
+
+    mgr._cleanup_managers()
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        kb.manager("user").get_stats()
