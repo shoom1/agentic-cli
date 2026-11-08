@@ -11,7 +11,7 @@ class FakeEmbeddingService:
     """A deterministic embedding service with a fixed dimension.
 
     The knowledge base treats it as a real service (it is not a
-    ``MockEmbeddingService``): it builds a FAISS index for it and searches
+    ``MockEmbeddingService``): it stores its vectors and searches
     semantically. ``calls`` counts the texts embedded. With ``fail_after``,
     ``embed_batch`` raises once embedding a batch would pass that many texts.
     """

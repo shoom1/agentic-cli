@@ -621,7 +621,7 @@ class TestTwoTierKnowledgeBase:
     def test_search_cross_kb_merge_uses_rrf(self, tmp_path):
         """Cross-KB merge uses Reciprocal Rank Fusion, not absolute scores.
 
-        Scores from separate FAISS / BM25 indexes are not comparable, so
+        Scores from separate knowledge bases' indexes are not comparable, so
         a "concat + sort by score" merge produces a degenerate ordering
         whenever the two KBs happen to score on different scales. RRF
         works on rank position instead, so a project rank-0 result and

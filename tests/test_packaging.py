@@ -114,7 +114,8 @@ def test_the_model_table_ships_in_the_wheel():
 # --- Optional-capability isolation -------------------------------------------
 #
 # The heavyweight capability stacks live behind extras (``kb``: torch /
-# sentence-transformers / faiss / bm25; ``langgraph``). Importing the base
+# sentence-transformers / trafilatura, and faiss / bm25 before 0.7.0;
+# ``langgraph``). Importing the base
 # package — or the tool package, which the tool resolver imports to discover
 # built-ins — must not require any of them, and must not drag them in.
 

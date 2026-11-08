@@ -209,23 +209,26 @@ class KnowledgeBase:
             embedding: The model to build a service for; default
                 ``EmbeddingConfig()``.
             summarizer: Passed to every scope (see ``KnowledgeBaseManager``).
-            use_mock: Mock embeddings and vector store in every scope.
+            use_mock: Keyword search only, nothing embedded, in every scope.
             within: Scope name → a folder that scope's directory must lie in,
                 every folder between them a real one (see
                 ``KnowledgeBaseManager``): for a project's scope, the working
                 directory. A scope not named here may be a symlink itself.
 
         With the ``kb`` extra and no ``use_mock``, this builds one embedding
-        service; the model loads once, before the first real index is opened,
-        to size or reconcile it. A model that does not load (an offline first
-        run, say) leaves every scope searching by keyword, with one warning
-        (``kb_keyword_search_only``).
+        service; the model loads once, before the first scope opens, so each
+        scope can check which model its stored vectors belong to. A model
+        that does not load (an offline first run, say) leaves every scope
+        searching by keyword, with one warning (``kb_keyword_search_only``).
 
-        A directory whose own folders or lock file are symlinks (a project
-        can ship its knowledge base), or that is reached through one from its
+        A directory whose own folders, database or lock file are symlinks, or
+        whose database holds more than a knowledge base (a project can ship
+        its knowledge base), or that is reached through a link from its
         ``within`` folder, is left out, with a warning (``kb_scope_refused``);
         so is one that fails to open for any other reason (a folder it cannot
-        create, a document header it cannot read: ``kb_scope_unavailable``).
+        create, a database that is not one or that a newer version wrote, a
+        0.6 ``metadata.json`` that is not JSON yet, another session holding
+        it past the busy timeout: ``kb_scope_unavailable``).
         The knowledge base opens with the other scopes, the first of them
         taking writes, and never reads or writes a scope left out.
 
@@ -531,9 +534,9 @@ class KnowledgeBase:
     ) -> ScopedDocument:
         """Enrich (one summarizer call) and store through the scope's manager.
 
-        Storing runs on a worker thread: it embeds every chunk and waits
-        for the folder's lock, which another process can hold for as long
-        as it re-embeds.
+        Storing runs on a worker thread: it embeds every chunk, and its change
+        may wait for another session's (up to ``BUSY_TIMEOUT_S``) and for
+        this process's other calls on the scope.
         """
         if not text and not data:
             raise EmptyDocument("no text and no bytes to ingest")
@@ -581,7 +584,7 @@ class KnowledgeBase:
 
         The summarizer is called under the document's sidecar lock, so two
         first reads make one call. Reads and writes run on a worker thread
-        (they wait for the folder's lock; a PDF's text is extracted); a
+        (they may wait for the scope's other calls; a PDF's text is extracted); a
         cancelled call keeps the lock until the one its thread is in ends.
 
         A sidecar that is a symlink counts as missing: it is never read

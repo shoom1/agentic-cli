@@ -980,8 +980,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again, and their vectors are embedded at the first open that has the model
   (the log gives the count and the time); its old files move to
   `pre-0.7.0/`, which can be deleted once the knowledge base looks right,
-  and `embeddings/` is deleted. 0.6 cannot read the new format: going back
-  means restoring `pre-0.7.0/` by hand. `list_documents` returns documents
+  and `embeddings/` is deleted (a `metadata.json` that is not JSON, such as
+  a git-LFS pointer not pulled yet, leaves that scope out until it is). 0.6
+  cannot read the new format: going back means restoring `pre-0.7.0/` by
+  hand, and what a 0.6 session still running writes afterwards is moved
+  into `pre-0.7.0/after-import-<time>/`, not into the knowledge base. `list_documents` returns documents
   without their text or chunks, with `Document.chunk_count`; `use_mock`
   means keyword-only, nothing embedded; a change that waits more than 60 s
   for another session raises `KnowledgeBaseBusy`. WAL mode needs shared
