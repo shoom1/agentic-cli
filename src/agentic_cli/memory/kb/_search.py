@@ -39,7 +39,10 @@ def fuse(
     best item is kept; ``top_k`` cuts the result.
 
     Vectorized: a search fuses every chunk with a vector and every chunk
-    holding a term, which can be a hundred thousand of each.
+    holding a term, which can be a hundred thousand of each. With ``top_k``
+    only the head of the fused order is sorted, a longer head each time it
+    holds too few owners: each head is exact (every item tied with its last
+    one included), so the result is the whole order's.
     """
     present = [i for i, ranking in enumerate(rankings) if len(ranking)]
     if not present:
@@ -48,14 +51,41 @@ def fuse(
     weights = np.concatenate([1.0 / (k + np.arange(len(rankings[i]), dtype=np.float64) + 1) for i in present])
     unique, first, inverse = np.unique(items, return_index=True, return_inverse=True)
     scores = np.bincount(inverse.reshape(-1), weights=weights, minlength=len(unique))
-    order = np.lexsort((first, -scores))
-    if owners is not None:
-        owner = np.concatenate([np.asarray(owners[i]) for i in present])[first[order]]
-        _, best = np.unique(owner, return_index=True)
-        order = order[np.sort(best)]
-    if top_k is not None:
-        order = order[:top_k]
-    return list(zip(unique[order].tolist(), scores[order].tolist()))
+    owner_of = None if owners is None else np.concatenate([np.asarray(owners[i]) for i in present])
+    size = len(unique) if top_k is None else max(4 * top_k, 64)
+    while True:
+        order = _head(scores, first, size)
+        if owner_of is None:
+            picked = order if top_k is None else order[:top_k]
+        else:
+            picked = _first_of_each(order, owner_of[first[order]].tolist(), top_k)
+        if top_k is None or len(picked) >= top_k or len(order) == len(unique):
+            return list(zip(unique[picked].tolist(), scores[picked].tolist()))
+        size *= 4
+
+
+def _head(scores: np.ndarray, first: np.ndarray, size: int) -> np.ndarray:
+    """The first ``size`` items of the order by (score descending, first
+    seen), and every item tied with the last of them."""
+    if size < len(scores):
+        threshold = -np.partition(-scores, size - 1)[size - 1]
+        chosen = np.flatnonzero(scores >= threshold)
+    else:
+        chosen = np.arange(len(scores))
+    return chosen[np.lexsort((first[chosen], -scores[chosen]))]
+
+
+def _first_of_each(order: np.ndarray, owners: list[Any], top_k: int | None) -> np.ndarray:
+    """The items of ``order`` that come first for their owner, up to ``top_k``."""
+    seen: set[Any] = set()
+    kept: list[int] = []
+    for position, owner in enumerate(owners):
+        if owner not in seen:
+            seen.add(owner)
+            kept.append(position)
+            if top_k is not None and len(kept) >= top_k:
+                break
+    return order[np.asarray(kept, dtype=np.int64)]
 
 
 def keyword_ranked(

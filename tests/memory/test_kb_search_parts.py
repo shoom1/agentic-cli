@@ -65,11 +65,32 @@ def _fused_by_dict(rankings, owners, top_k, k=60):
     return picked[:top_k]
 
 
+@pytest.mark.parametrize("n", [200, 201, 260])
+def test_fusion_keeps_every_tie_at_the_end_of_the_head_it_sorts(n):
+    # Mirrored lists tie each chunk with its mirror; one document holds the
+    # top chunks, so the second document's chunk sits where the sorted head
+    # ends, tied with a chunk of a third document seen after it.
+    semantic = [0, *range(1, n + 1)]
+    keyword = [0, *range(n, 0, -1)]
+    owner = {chunk: "big" for chunk in semantic}
+    for position in range(1, n // 2 + 1):
+        if 2 * position + 1 >= 64:
+            owner[position], owner[n + 1 - position] = "second", "third"
+            break
+    owners = [[owner[c] for c in semantic], [owner[c] for c in keyword]]
+
+    got = fuse([np.array(semantic), np.array(keyword)], owners=[np.array(o) for o in owners], top_k=2)
+
+    assert got == _fused_by_dict([semantic, keyword], owners, 2)
+
+
 @pytest.mark.parametrize("seed", range(40))
 def test_fusion_is_the_item_by_item_fusion_ties_included(seed):
     rnd = random.Random(seed)
     chunks = list(range(1, rnd.randint(2, 300)))
     owner = {chunk: f"doc-{rnd.randrange(1 + len(chunks) // 3)}" for chunk in chunks}
+    if seed % 4 == 1:  # one document holds most chunks: the head of the order grows to find others
+        owner.update({chunk: "doc-big" for chunk in chunks if rnd.random() < 0.9})
     semantic = rnd.sample(chunks, rnd.randint(0, len(chunks)))
     keyword = rnd.sample(chunks, rnd.randint(0, len(chunks)))
     if seed % 4 == 0:  # mirrored ranks: every shared chunk ties with its mirror

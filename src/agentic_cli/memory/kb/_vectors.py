@@ -29,17 +29,35 @@ def to_blob(vector) -> bytes:
 
 
 class VectorIndex:
-    """The vectors of one model, as of one ``generation`` of the database."""
+    """The vectors of one model, as of one ``generation`` of the database.
+
+    Each row keeps its chunk's rowid and its document as a number (``_codes``,
+    an index into ``_names``), so a search keeps the rows of some documents
+    without comparing strings row by row.
+    """
 
     def __init__(self, dim: int) -> None:
         self.dim = dim
         self.generation: int | None = None
         self._rowids = np.empty(0, dtype=np.int64)
-        self._documents = np.empty(0, dtype=str)
+        self._codes = np.empty(0, dtype=np.int64)
+        self._names: list[str] = []
+        self._code_of: dict[str, int] = {}
         self._matrix = np.empty((0, dim), dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self._rowids)
+
+    def _encode(self, documents: Iterable[str]) -> np.ndarray:
+        """Each document ID's number, a new one for an ID not seen before."""
+        codes = []
+        for doc in documents:
+            code = self._code_of.get(doc)
+            if code is None:
+                code = self._code_of[doc] = len(self._names)
+                self._names.append(doc)
+            codes.append(code)
+        return np.asarray(codes, dtype=np.int64)
 
     def load(self, rows: Iterable[tuple[int, str, bytes]], generation: int) -> None:
         """Hold exactly ``rows`` (rowid, document ID, vector), normalized again.
@@ -54,8 +72,9 @@ class VectorIndex:
         matrix = np.frombuffer(b"".join(blob for _, _, blob in kept), dtype="<f4").reshape(len(kept), self.dim)
         with np.errstate(over="ignore", invalid="ignore"):
             usable = np.isfinite(np.linalg.norm(matrix, axis=1))
+        self._names, self._code_of = [], {}
         self._rowids = np.array([rowid for rowid, _, _ in kept], dtype=np.int64)[usable]
-        self._documents = np.array([str(doc) for _, doc, _ in kept], dtype=str)[usable]
+        self._codes = self._encode(str(doc) for _, doc, _ in kept)[usable]
         self._matrix = normalized(matrix[usable])
         self.generation = generation
 
@@ -71,14 +90,14 @@ class VectorIndex:
         removed = np.asarray(list(remove), dtype=np.int64)
         if removed.size:
             keep = ~np.isin(self._rowids, removed)
-            self._rowids, self._documents, self._matrix = self._rowids[keep], self._documents[keep], self._matrix[keep]
+            self._rowids, self._codes, self._matrix = self._rowids[keep], self._codes[keep], self._matrix[keep]
         if add is not None:
             rowids, documents, vectors = add
             matrix = np.asarray(vectors, dtype=np.float32).reshape(-1, self.dim)
             usable = np.isfinite(matrix).all(axis=1)
             self._rowids = np.concatenate([self._rowids, np.asarray(rowids, dtype=np.int64)[usable]])
             self._matrix = np.vstack([self._matrix, matrix[usable]])
-            self._documents = np.concatenate([self._documents, np.array([str(doc) for doc in documents], dtype=str)[usable]])
+            self._codes = np.concatenate([self._codes, self._encode(str(doc) for doc in documents)[usable]])
         self.generation = generation
 
     def ranked(self, query: np.ndarray, allowed: set[str] | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -88,5 +107,7 @@ class VectorIndex:
         scores = self._matrix @ np.asarray(query, dtype=np.float32)
         order = np.argsort(-scores, kind="stable")
         if allowed is not None:
-            order = order[np.isin(self._documents[order], np.array(list(allowed), dtype=str))]
-        return self._rowids[order], self._documents[order]
+            kept = np.fromiter((name in allowed for name in self._names), dtype=bool, count=len(self._names))
+            order = order[kept[self._codes[order]]]
+        names = np.array(self._names if self._names else [""], dtype=str)
+        return self._rowids[order], names[self._codes[order]]
