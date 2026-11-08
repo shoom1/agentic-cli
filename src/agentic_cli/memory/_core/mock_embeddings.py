@@ -6,6 +6,8 @@ Hash-based vectors, for tests and for running without sentence-transformers
 
 import hashlib
 
+from agentic_cli.memory._core.chunking import chunk_text
+
 
 class MockEmbeddingService:
     """Mock embedding service for testing without loading models."""
@@ -46,24 +48,5 @@ class MockEmbeddingService:
         chunk_size: int = 512,
         overlap: int = 50,
     ) -> list[str]:
-        """Structure-aware chunking (delegates to real EmbeddingService logic)."""
-        if not content or not content.strip():
-            return []
-
-        from agentic_cli.memory._core.embeddings import EmbeddingService
-
-        blocks = EmbeddingService._split_structural_blocks(content)
-        chunks = []
-        for block_type, block_text in blocks:
-            if block_type == "code":
-                stripped = block_text.strip()
-                if stripped:
-                    chunks.append(stripped)
-            else:
-                # Create a temporary instance to access _split_sentences
-                svc = EmbeddingService.__new__(EmbeddingService)
-                sentences = svc._split_sentences(block_text)
-                prose_chunks = EmbeddingService._merge_sentences(sentences, chunk_size, overlap)
-                chunks.extend(prose_chunks)
-
-        return [c for c in chunks if c.strip()]
+        """Structure-aware chunking: the real service's (``chunk_text``)."""
+        return chunk_text(content, chunk_size, overlap)

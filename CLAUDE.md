@@ -140,7 +140,7 @@ agentic-cli/
 │   │   └── webfetch/        # Fetcher (fetch(max_pdf_bytes=): a call's own PDF limit, uncached; FetchResult.transient), converter (page_text, text_extension), validator (DNS in a worker thread: the loop's getaddrinfo), robots, summarizer, saved pages
 │   ├── memory/               # Knowledge base + memory store; imports nothing else from agentic_cli
 │   │   ├── __init__.py       # MemoryStore, MemoryItem, ForgettingPolicy, EmbeddingService, EmbeddingConfig, MockEmbeddingService
-│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, io.py (atomic writes; reads and appends of regular files only, never through a symlink), log.py, model_record.py
+│   │   ├── _core/            # Shared, private: embeddings.py, mock_embeddings.py, chunking.py (chunk_text: the one chunker), io.py (atomic writes; reads and appends of regular files only, never through a symlink), log.py, model_record.py
 │   │   ├── store.py          # MemoryStore
 │   │   └── kb/               # Knowledge base (agentic_cli.memory.kb)
 │   │       ├── manager.py    # KnowledgeBaseManager(base_dir, embedding=, summarizer=), Summarizer; UnsafeKnowledgeBase: a symlinked documents/embeddings/files/concepts folder or .lock, or a link between `within=` and the knowledge base (checked at open and in every transaction)

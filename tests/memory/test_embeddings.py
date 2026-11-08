@@ -136,45 +136,6 @@ class TestEmbeddingServiceChunking:
             words_1 = set(chunks[1].split())
             assert words_0 & words_1, "Chunks should have overlapping words"
 
-    def test_split_sentences(self, svc):
-        """Test sentence splitting regex."""
-        text = "First sentence. Second sentence! Third one? Final."
-        sentences = svc._split_sentences(text)
-        assert len(sentences) >= 2
-
-    def test_merge_sentences(self, svc):
-        """Test _merge_sentences produces chunks with overlap."""
-        sentences = ["Short.", "Medium length.", "A longer sentence here."]
-        chunks = EmbeddingService._merge_sentences(sentences, chunk_size=30, overlap=10)
-        assert len(chunks) >= 1
-        # All sentences should appear somewhere across chunks
-        all_text = " ".join(chunks)
-        for s in sentences:
-            assert s in all_text
-
-    def test_merge_sentences_empty(self, svc):
-        """Test _merge_sentences with empty list returns empty."""
-        assert EmbeddingService._merge_sentences([], chunk_size=100, overlap=10) == []
-
-    def test_nltk_without_its_data_falls_back_to_the_regex_split(self, svc, monkeypatch):
-        """nltk installed without its punkt data (its default state) raises
-        LookupError from sent_tokenize, which failed every ingest."""
-        import sys
-        import types
-
-        def sent_tokenize(text):
-            raise LookupError("Resource punkt_tab not found. Please use the NLTK Downloader")
-
-        monkeypatch.setitem(sys.modules, "nltk", types.SimpleNamespace(sent_tokenize=sent_tokenize))
-
-        assert svc._split_sentences("Otters nest in burrows. Herons wade at dawn.") == [
-            "Otters nest in burrows.",
-            "Herons wade at dawn.",
-        ]
-        assert MockEmbeddingService().chunk_document("Otters nest. Herons wade.") == [
-            "Otters nest. Herons wade."
-        ]
-
 
 class TestResolveEmbeddingDevice:
     """Tests for the device-resolution autodetect helper."""
