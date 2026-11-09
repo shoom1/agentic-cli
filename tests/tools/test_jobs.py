@@ -2372,3 +2372,48 @@ class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
             gate.write_text("go")
             monkeypatch.undo()
             owner.close()
+
+    def test_close_with_nothing_queued_does_not_wait_for_the_lock(
+        self, tmp_path: Path
+    ):
+        """Another CLI's transaction holds the lock; this one has nothing to fail."""
+        import fcntl
+        import threading
+
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base)
+        jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        fd = os.open(base / ".resume.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        closing = threading.Thread(target=jm.close, daemon=True)
+        try:
+            closing.start()
+            closing.join(2.0)
+            assert not closing.is_alive(), "close() waited for another CLI's lock"
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            closing.join(5.0)
+
+    def test_close_with_nothing_queued_does_not_warn_of_the_lock(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The jobs directory is gone, so no lock can be taken: nothing to say."""
+        import shutil
+
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        logged: list[str] = []
+
+        class _Recorder:
+            def __getattr__(self, level):
+                return lambda event, **fields: logged.append(event)
+
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base)
+        shutil.rmtree(base)
+        monkeypatch.setattr(jobs_manager, "logger", _Recorder())
+
+        jm.close()
+
+        assert "job_close_skipped_unlocked" not in logged

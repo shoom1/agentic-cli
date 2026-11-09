@@ -941,19 +941,26 @@ class JobManager:
         """Record FAILED the jobs this manager claimed but has not started.
 
         Only a job claimed at submit is still QUEUED under this manager's
-        token: a launch claims and starts a job in one transaction. Each is
-        judged on its record reloaded under the cross-process lock. Without
-        the lock nothing is written: the job stays QUEUED under a claim that
-        no other manager takes, and startup recovery fails it once this
-        process is gone.
+        token: a launch claims and starts a job in one transaction. They are
+        found in memory first, and the cross-process lock is taken only if
+        there are any, so a close with nothing to fail neither waits behind
+        another CLI nor warns of a lock it did not need. Each is judged on
+        its record reloaded under the lock. Without the lock nothing is
+        written: the job stays QUEUED under a claim that no other manager
+        takes, and startup recovery fails it once this process is gone.
         """
         with self._lock:
             mine = self._exec_owner_token()
+            claimed = [
+                rec
+                for rec in self._records.values()
+                if rec.state == JobState.QUEUED and rec.exec_owner == mine
+            ]
+            if not claimed:
+                return
             try:
                 with self._claim_transaction():
-                    for rec in list(self._records.values()):
-                        if rec.state != JobState.QUEUED or rec.exec_owner != mine:
-                            continue
+                    for rec in claimed:
                         status = self._reload_durable(rec)
                         if status is DurableRead.MISSING:
                             self._forget(rec.job_id)
