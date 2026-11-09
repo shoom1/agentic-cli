@@ -1243,6 +1243,66 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `transfer_to_agent`: the agent it transfers to takes the conversation and
   answers the user.
 
+### Defining agents in YAML
+
+The same agents can be written in a YAML file. `load_agents_from_yaml(path)`
+reads it into the `AgentConfig`s above, and `create_workflow_manager_from_yaml(path, settings)`
+loads the file and builds the manager (it is
+`create_workflow_manager_from_settings(load_agents_from_yaml(path), settings)`):
+
+```yaml
+# agents.yaml
+agents:
+  - name: coordinator
+    instruction_file: prompts/coordinator.md   # relative to this file
+    sub_agents: [researcher]
+  - name: researcher
+    description: Analyzes text it is given and reports the figures.
+    context: fresh
+    prompt: |
+      You are a researcher. Count words with the word_count tool, never by
+      eye, and report the figure to the agent that asked.
+    tools: [word_count]                         # a registered name
+```
+
+```python
+from agentic_cli.workflow import load_agents_from_yaml
+
+import my_app.tools  # registers word_count with @register_tool: first, so the name resolves
+
+AGENT_CONFIGS = load_agents_from_yaml("agents.yaml")
+app = BaseCLIApp(app_info=info, agent_configs=AGENT_CONFIGS, settings=settings)
+```
+
+A bare list of agents, without the `agents:` key, is accepted too. The fields
+are `AgentConfig`'s, and an unknown one is an error:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Required, unique |
+| `prompt` (or `instruction`), `instruction_file` | The system prompt, inline or read from a file; one is required, and `instruction_file` wins when both are set. A relative `instruction_file` is relative to the YAML file, not the working directory |
+| `description` | What the agent does: its parent chooses whom to delegate to by it |
+| `model`, `model_settings` | A model reference or role, and `ModelSettings` as a mapping (`temperature`, `max_tokens`, `thinking: {mode: high}`, ...) |
+| `tools` | A list of names: a registered tool's name (`web_search`, or your own), or a dotted path `my_pkg.tools.fn` to a function registered with `@register_tool` |
+| `mcp_servers`, `skills` | As on `AgentConfig`: MCP servers (`name`, `transport`, `command`/`args` or `url`, ...) and skill names |
+| `sub_agents`, `context` | The agents it may delegate to, and what a sub-agent sees: `fresh` or `inherit` (see [Sub-agent context](#sub-agent-context)) |
+| `include_state_tools` | `true` by default: the plan and task tools are added |
+
+- **A tool is a name, resolved when the manager is built.** A bare name is
+  looked up in the tool registry, so the module that registers it must be
+  imported first, as above; a name nothing registered raises `ValueError`
+  naming it. A dotted path is imported, then must be the registered
+  function: one that is not is denied at every call, and named at startup by a
+  `tool_not_registered` warning (see [Creating Tools](#creating-tools)).
+- **Load only YAML you trust.** A dotted path imports its module, which runs
+  its code, and an absolute `instruction_file` reads whatever it points at. The
+  framework never loads a YAML file on its own: your code names it. A native
+  ADK `root_agent.yaml` is a different thing, built by ADK itself
+  (`adk_config_path`; see [Sub-agent context](#sub-agent-context)).
+
+`examples/yaml_agents/` is a runnable app on this: a coordinator that delegates
+word counting to a researcher whose tool is named in its YAML.
+
 ### Turn and lifecycle contracts
 
 A workflow manager runs **one turn at a time**: `process()` and
@@ -1926,6 +1986,7 @@ See the `examples/` directory for complete working examples:
 - `memory_demo.py` — The memory store: markdown files in two scopes (save/search/update/restore, the index, proposals)
 - `webfetch_demo.py` — Web fetching and summarization
 - `websearch_demo.py` — Web search with multiple backends
+- `yaml_agents/` — Agents defined in a YAML file (`agents.yaml`, prompts in files, a tool by its registered name), loaded with `load_agents_from_yaml`: a coordinator that delegates word counting to a researcher; run `python examples/yaml_agents/app.py` (see [Defining agents in YAML](#defining-agents-in-yaml))
 
 **Full Applications**
 - `research_demo/` — Full-featured research assistant with KB ingest + concept pages, memory files, sandbox execution, and durable sessions. Installed as the `research-demo` console script. It ships a model list of Gemini and Claude models: put the keys you have (`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`) in `~/.research_demo/.env`. It defines no other provider: OpenRouter, or an OpenAI-compatible service, is yours to define in `~/.research_demo/settings.json`, with its models, and its key goes in the same `.env` (the module docstring of `examples/research_demo/settings.py` shows OpenRouter's entry). A configured provider's model has no tier, so with only such a provider's key also choose the default model: pick one in `/settings`, which works while the workflow is down, or set `default_model` in `~/.research_demo/settings.json`.
@@ -2127,6 +2188,7 @@ agentic-cli/
 │   ├── hello_deepagents.py       # Basic Deep Agents example
 │   ├── hello_langgraph.py        # Basic LangGraph example (deprecated)
 │   ├── *_demo.py                 # Feature demonstration scripts
+│   ├── yaml_agents/              # Agents defined in YAML (agents.yaml, prompts/, tools.py, app.py)
 │   └── research_demo/            # Full-featured example (pip-installable)
 └── tests/
     ├── conftest.py               # MockContext and shared fixtures

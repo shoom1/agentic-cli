@@ -6,7 +6,8 @@ a plain function in ``AgentConfig.tools`` shows a model refused every call:
 arrived. Each example is loaded in a fresh interpreter (two examples
 registering a ``calculate`` would collide in one registry, and the suite's own
 registry stays untouched), and every tool of every ``AgentConfig`` it defines
-must resolve to a registry definition.
+must resolve to a registry definition (a name, as an agents YAML file has it,
+is resolved first: ``yaml_agents`` builds its configs from one).
 
 The hello examples' ``calculate`` is registered EXEMPT, so it runs without a
 prompt: it must evaluate arithmetic and nothing else.
@@ -49,6 +50,7 @@ module = importlib.import_module({name!r})
 
 _REPORT = """
 from agentic_cli.tools.registry import identify_tool
+from agentic_cli.tools.tool_resolver import resolve_tool
 from agentic_cli.workflow.config import AgentConfig
 
 
@@ -60,12 +62,22 @@ def configs(value):
             yield from configs(item)
 
 
+def issued(tool):
+    # A name, as agents YAML has it, resolves first; then the registry must have issued it.
+    if isinstance(tool, str):
+        try:
+            tool = resolve_tool(tool)
+        except ValueError:
+            return False
+    return identify_tool(tool) is not None
+
+
 found = [config for value in vars(module).values() for config in configs(value)]
 unregistered = [
     f"{{config.name}}: {{getattr(tool, '__name__', repr(tool))}}"
     for config in found
     for tool in config.tools or []
-    if not isinstance(tool, str) and identify_tool(tool) is None
+    if not issued(tool)
 ]
 print(json.dumps({{"configs": len(found), "unregistered": unregistered}}))
 """
@@ -130,6 +142,16 @@ def test_the_research_demo_agent_tools_are_registered(tmp_path):
     report = _run(_script(_IMPORT + _REPORT, agents, name="research_demo.agents"), tmp_path)
 
     assert report["configs"] > 0
+    assert report["unregistered"] == [], report["unregistered"]
+
+
+def test_the_yaml_example_agent_tools_are_registered(tmp_path):
+    """yaml_agents' agents come from a YAML file, whose tools are names to resolve."""
+    app = _REPO_ROOT / "examples" / "yaml_agents" / "app.py"
+
+    report = _run(_script(_CHECK_TOOLS, app, name="yaml_agents_app"), tmp_path)
+
+    assert report["configs"] == 2
     assert report["unregistered"] == [], report["unregistered"]
 
 

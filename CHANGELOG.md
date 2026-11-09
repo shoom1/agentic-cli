@@ -348,6 +348,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An example of agents defined in YAML, and a README section on the format.**
+  `examples/yaml_agents/` is a runnable app whose coordinator and researcher
+  are declared in `agents.yaml`: their prompts are read from `prompts/` through
+  `instruction_file` (relative to the YAML file), the researcher's `word_count`
+  tool is named by its registered name, and `app.py` loads the file with
+  `load_agents_from_yaml`. The README's "Defining agents in YAML" describes the
+  fields, how a tool is named (a registered name, or a dotted path to a
+  registered function), `create_workflow_manager_from_yaml`, and that a dotted
+  path imports its module, so only YAML you trust should be loaded.
+
 - **An agent's tool the registry did not issue is named at startup.** The
   permission gate denies every call to a tool in `AgentConfig.tools` that
   `@register_tool` did not issue, and an app learned it only from the model's
