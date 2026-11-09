@@ -586,9 +586,12 @@ class BaseWorkflowManager(ABC):
     def _ensure_managers_initialized(self) -> None:
         """Create and publish the services detected from tool metadata.
 
-        Synchronous convenience wrapper around
-        :meth:`_build_services`/:meth:`_publish_services`; initialization uses
-        the transactional path in :meth:`_construct_services` instead.
+        A helper for tests and scripts that need the services without
+        initializing: no initialization path calls it, so stubbing it changes
+        nothing there (``initialize_services`` builds them through
+        :meth:`_construct_services`, off the event loop and transactionally).
+        It is synchronous and blocks on the constructors, so it is no way to
+        build services on the event loop.
         """
         self._publish_services(self._build_services(frozenset(self._services)))
 

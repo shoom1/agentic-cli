@@ -47,9 +47,7 @@ def _settings():
 
 
 def _manager():
-    m = _CountingManager(_settings())
-    m._ensure_managers_initialized = lambda: None
-    return m
+    return _CountingManager(_settings())
 
 
 async def test_concurrent_initialize_services_runs_once():
