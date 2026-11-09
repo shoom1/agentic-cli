@@ -147,6 +147,7 @@ class WorkflowEvent:
         tool_name: str,
         result: Any,
         success: bool = True,
+        *,
         error: str | None = None,
     ) -> "WorkflowEvent":
         """Create a tool result event.

@@ -113,6 +113,12 @@ class TestWorkflowEvent:
         assert event.metadata["success"] is False
         assert event.metadata["error"] == "API rate limited"
 
+    def test_a_positional_duration_is_refused_not_taken_for_the_error(self):
+        """0.6.x took ``duration_ms`` fourth: such a call must not silently
+        become ``error=150.5``."""
+        with pytest.raises(TypeError):
+            WorkflowEvent.tool_result("search_kb", {"matches": 5}, True, 150.5)
+
     def test_tool_result_truncates_long_content(self):
         """Test that tool result truncates long string results for content."""
         long_result = "x" * 500

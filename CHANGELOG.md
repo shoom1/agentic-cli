@@ -1745,7 +1745,9 @@ step; each entry says what to use instead.
   backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
   showed: the parameter, the `duration_ms` metadata key it set and the suffix
   are gone (an app that sets `metadata["duration_ms"]` on its own events no
-  longer gets the suffix). `ExecutionTimeoutError`, exported from
+  longer gets the suffix), and `error` is keyword-only, so a call that passed
+  `duration_ms` fourth, positionally, is a `TypeError` rather than an error
+  message of `150.5`. `ExecutionTimeoutError`, exported from
   `agentic_cli.tools` and aliased as `TimeoutError` in
   `agentic_cli.tools.executor`, was never raised: `execute_python` reports a
   timeout in its result (`success` false, `error` "Execution timed out after N
