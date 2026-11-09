@@ -360,8 +360,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation read outside content. `/memory stale` lists memories not
   updated for 90 days. The app says how many proposals wait at startup and
   after `/new` or `/resume`, and prints a line for each memory the model
-  saves, updates or deletes. An app's own `memory` command still replaces the
-  built-in.
+  saves, updates or deletes. Enter in a `/memory` dialog presses the harmless
+  button (Close, or Skip in the inbox), and Delete removes only the memory as
+  it was shown: one changed or removed since says so. A file the store cannot
+  use, a proposal's too, is listed in the Problems row. An app's own `memory`
+  command still replaces the built-in.
 
 - **The main agent gets an index of saved memories at the start of each
   conversation.** Memory reached the model only when it thought to search, and
@@ -928,9 +931,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the summary fails (the error's type when it has no words), and "/compact
   is not supported on this backend" on LangGraph and in a native ADK YAML
   app, with no events box. `/new` starts a new conversation without a
-  restart, under the turn lock: the facts of the conversation being left
-  are extracted first when `auto_extract_session_facts` is on, as at exit,
-  under the status line "Saving facts from the conversation…" (a failure
+  restart, under the turn lock: memories are proposed from the conversation
+  being left first when `auto_extract_session_facts` is on, as at exit,
+  under the status line "Looking for memories to propose…" (a failure
   never stops it); a new 12-hex session id is adopted once the workflow has
   taken it; the task box and the usage counters start over
   (`MessageProcessor.reset()`), and the status bar is drawn again. It says
@@ -978,17 +981,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation first, so one that is not stored ("No conversation '<id>'
   found."), already open ("Already in this conversation.") or unreadable
   ("Could not open '<id>': <error>") changes nothing; then, as `/new` does,
-  the facts of the conversation left are extracted (when that is on), the
+  memories are proposed from the conversation left (when that is on), the
   id is adopted once the workflow has taken it, and the task box and the
   usage counters start over. It says "Resumed: <title> (<id>, 12 turns, last
   active 2h ago)." and shows the last 10 messages again, the user's as typed
   and the main agent's as a turn shows them, each cut at 2,000 characters,
   after "… N earlier messages" when there are more. Ctrl+C stops it like any
   request. Background jobs keep reporting to the conversation that started
-  them. A conversation's facts (`auto_extract_session_facts`) are saved once
-  per conversation used: on leaving it (`/new`, `/resume`) or at exit, only
-  when a turn ran in it since it was opened, so switching back and forth, or
-  resuming one and leaving it as it was, stores no duplicates.
+  them. A conversation's memories (`auto_extract_session_facts`) are proposed
+  once per conversation used: on leaving it (`/new`, `/resume`) or at exit,
+  only when a turn ran in it since it was opened, so switching back and
+  forth, or resuming one and leaving it as it was, files no duplicates.
 - **`BaseCLIApp.main()`: every app takes `--continue` and `--resume
   [ID]`.** Point an app's console script at it (`my-app =
   "my_app.cli:MyApp.main"`): it parses the session flags

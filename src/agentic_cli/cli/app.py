@@ -502,8 +502,9 @@ _GET_STYLES_REMOVED = (
 # === Base CLI Application ===
 
 
-#: What ``/new`` shows while it saves the facts of the conversation it leaves.
-SAVING_FACTS = "Saving facts from the conversation…"
+#: What ``/new`` and ``/resume`` show while the memories to propose are looked
+#: for in the conversation they leave (the name is from when it saved facts).
+SAVING_FACTS = "Looking for memories to propose…"
 
 
 class BaseCLIApp:
@@ -522,8 +523,8 @@ class BaseCLIApp:
     - apply_settings(): Handle additional custom settings
     """
 
-    #: A turn ran in the current conversation since it was opened (its facts
-    #: are saved on leaving it). A class default: an app built with
+    #: A turn ran in the current conversation since it was opened (its memories
+    #: are proposed on leaving it). A class default: an app built with
     #: ``__new__`` (tests, an application's own construction) reads it too.
     _turned: bool = False
 
@@ -595,7 +596,7 @@ class BaseCLIApp:
         # never overlap (shared session + thinking boxes).
         self._turn_lock = asyncio.Lock()
         # Whether a turn ran in the current conversation since it was adopted:
-        # its facts are saved on leaving it, or at exit, only then.
+        # its memories are proposed on leaving it, or at exit, only then.
         self._turned = False
 
         # === UI: ThinkingPromptSession ===
@@ -1104,7 +1105,7 @@ class BaseCLIApp:
 
         Sessions do not move between backends (neither reads the other's
         store), so the new one continues the id from empty; adopting it there
-        keeps ``/status`` and the facts saved at exit on this conversation,
+        keeps ``/status`` and the memories proposed at exit on this conversation,
         not on the manager's default session.
         """
         try:
@@ -1371,10 +1372,10 @@ class BaseCLIApp:
 
         Waits for a running turn or job resume (the turn lock), then:
 
-        - with ``auto_extract_session_facts`` on, extracts the facts of the
+        - with ``auto_extract_session_facts`` on, proposes memories from the
           conversation being left when a turn ran in it since it was opened,
-          as at exit, under a status line ("Saving facts from the
-          conversation…"; a failure never stops it);
+          as at exit, under a status line ("Looking for memories to
+          propose…"; a failure never stops it);
         - adopts a new session id once the workflow has taken it
           (``workflow.load_session``), and every later turn targets it;
         - ends the task box and forgets its tasks, zeroes the usage counters,
@@ -1402,7 +1403,7 @@ class BaseCLIApp:
                 old = self._session_id
                 controller = self._workflow_controller
                 ready = controller.is_ready
-                if self._turned:  # facts once per conversation used
+                if self._turned:  # memories proposed once per conversation used
                     await self._saving_facts(old)
                     self._turned = False
                 stored = ready and await self._is_stored(controller.workflow, old)
@@ -1430,7 +1431,7 @@ class BaseCLIApp:
         conversation first, its row (``workflow.session_info``) and its
         messages, and makes what it will show: one that is not stored, or
         cannot be read, changes nothing. Then, as ``start_new_session`` does,
-        it saves the facts of the conversation being left (when
+        it proposes memories from the conversation being left (when
         ``auto_extract_session_facts`` is on and a turn ran in it since it was
         opened), adopts the id once the workflow has taken it
         (``load_session``; one that fails changes nothing either), ends the
@@ -1532,9 +1533,9 @@ class BaseCLIApp:
                 return False
             adopted = False
             try:
-                if self._turned:  # facts once per conversation used
+                if self._turned:  # memories proposed once per conversation used
                     await self._saving_facts(old)
-                    self._turned = False  # saved: a switch that fails now saves none again
+                    self._turned = False  # proposed: a switch that fails now proposes none again
                 try:
                     await workflow.load_session(session_id)
                 except Exception as error:  # noqa: BLE001 - the id is not adopted
@@ -1586,8 +1587,9 @@ class BaseCLIApp:
         return None if picked is None else ids.get(picked)
 
     async def _saving_facts(self, session_id: str) -> None:
-        """Extract ``session_id``'s facts (if enabled) under a status line saying so,
-        then name the memory proposals waiting (``/new`` and ``/resume``)."""
+        """Propose memories from ``session_id``'s conversation (if enabled) under a
+        status line saying so, then name the proposals waiting (``/new`` and
+        ``/resume``)."""
         if not (
             getattr(self._settings, "auto_extract_session_facts", False)
             and self._workflow_controller.is_ready
@@ -1636,7 +1638,7 @@ class BaseCLIApp:
         ``session_id`` defaults to the current conversation (at exit).
         Gated by ``auto_extract_session_facts``; a no-op when the workflow is
         not ready. Never raises: a conversation must be left whatever its
-        facts. Runs outside any turn, so its model call reaches no usage
+        memories. Runs outside any turn, so its model call reaches no usage
         counter.
         """
         if not getattr(self._settings, "auto_extract_session_facts", False):
@@ -1890,10 +1892,10 @@ class BaseCLIApp:
         return f"Resume this conversation with /resume {self._session_id}"
 
     async def _extract_session_facts_on_exit(self) -> None:
-        """Extract key facts from the session into memory on exit (if enabled).
+        """Propose memories from the session on exit (if enabled).
 
         Gated by the ``auto_extract_session_facts`` setting; a no-op when the
-        workflow isn't ready or has no memory store. Never raises — fact
+        workflow isn't ready or has no memory store. Never raises — memory
         extraction must not block a clean shutdown. The conversation is the
         current one, which the manager also holds (``load_session``), and only
         when a turn ran in it since it was opened: a resumed conversation left
@@ -1946,8 +1948,8 @@ class BaseCLIApp:
                     opening.cancel()
                     await asyncio.gather(opening, return_exceptions=True)
 
-            # Extract session facts into memory (if enabled) while the workflow
-            # is still alive: leaving this context closes the manager, and fact
+            # Propose memories from the session (if enabled) while the workflow
+            # is still alive: leaving this context closes the manager, and the
             # extraction needs the live session store and an LLM call.
             await self._extract_session_facts_on_exit()
             # Named at exit when a later run can resume it: stored, not in memory.

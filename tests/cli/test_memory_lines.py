@@ -117,3 +117,10 @@ async def test_nothing_is_said_at_exit(tmp_path):
     await app._extract_session_facts_on_exit()
     assert len(store.proposals()) == 1
     assert said(app.session, "add_message") == []
+
+
+def test_the_line_shown_while_memories_are_proposed_says_so():
+    """Extraction files proposals for review: it saves no facts."""
+    from agentic_cli.cli.app import SAVING_FACTS
+
+    assert SAVING_FACTS == "Looking for memories to propose…"

@@ -10,9 +10,9 @@ backend"; a summary that fails is "Could not summarize: <error>", once. The
 summary's usage adds to the totals but never moves ``ctx``: the next turn's
 call shows the smaller context.
 
-``/new`` calls ``start_new_session()``: under the turn lock, the facts of the
-conversation being left are extracted first (when that is on, under "Saving
-facts from the conversation…"), a new session id is adopted once the
+``/new`` calls ``start_new_session()``: under the turn lock, memories are
+proposed from the conversation being left first (when that is on, under
+"Looking for memories to propose…"), a new session id is adopted once the
 workflow has taken it, the task box and the usage counters are reset, and
 the line names the new conversation, and the old one when it is stored.
 Ctrl+C stops it with "Operation cancelled...", once, and nothing changed.

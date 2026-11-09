@@ -1610,7 +1610,7 @@ from agentic_cli.tools import memory_tools
 # save_memory, read_memory, search_memory, update_memory, delete_memory
 ```
 
-Each memory is one file with a frontmatter (`id`, a one-line `description`, `type`: `user`, `feedback`, `project` or `reference`, `source`, `conversation`, `created`, `updated`) and its text. User memories (true across projects) live in `<workspace_dir>/memory/`; project memories in `<workspace_dir>/projects/<name>-<hash>/memory/`, keyed by the working directory (there is no project scope when the app starts at home, `/` or above home). You can read and edit the files: the store sees an edit at its next call, keeps keys you add, and never rewrites, moves or deletes a file it cannot parse (it lists it as a problem). A change keeps the previous version in the scope's `.history/` for 30 days (at most 20 versions a memory). Search is by keyword (BM25, the knowledge base's word rules, Chinese, Japanese and Korean included), computed when asked; it writes nothing.
+Each memory is one file with a frontmatter (`id`, a one-line `description`, `type`: `user`, `feedback`, `project` or `reference`, `source`, `conversation`, `created`, `updated`) and its text. User memories (true across projects) live in `<workspace_dir>/memory/`; project memories in `<workspace_dir>/projects/<name>-<hash>/memory/`, keyed by the working directory (there is no project scope when the app starts at home, `/` or above home). You can read and edit the files: the store sees an edit at its next call, keeps keys you add, and never rewrites, moves or deletes a file it cannot parse (it lists it as a problem, a proposal file too). A change keeps the previous version in the scope's `.history/` for 30 days (at most 20 versions a memory). Search is by keyword (BM25, the knowledge base's word rules, Chinese, Japanese and Korean included), computed when asked; it writes nothing.
 
 `save_memory(description, content, type, scope="project", user_requested=False)` refuses a description over 150 characters or on two lines, a text over 4,000 characters, a description another memory has, text that looks like a credential, and a scope over 1,000 memories, each with a result saying why. `read_memory(item_id)` returns one memory; `update_memory` keeps its id and its previous version; `delete_memory` can be undone for 30 days.
 
@@ -1795,8 +1795,8 @@ model and its `max_tokens`.
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with
   `auto_extract_session_facts` on, memories proposed for review from the
-  conversation being left first when a turn ran in it, as at exit ("Saving facts from the
-  conversation…" while it runs). Its line names the conversation left when `/sessions` lists it
+  conversation being left first when a turn ran in it, as at exit ("Looking for memories to
+  propose…" while it runs). Its line names the conversation left when `/sessions` lists it
   (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
   jobs carry on, and a job reports to the conversation that started it,
