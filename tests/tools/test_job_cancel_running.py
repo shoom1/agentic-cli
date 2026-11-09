@@ -287,6 +287,50 @@ class TestTheToolSaysWhatHappened:
         assert "already finished" in result.get("message", "")
         assert "nothing was cancelled" in result.get("message", "")
 
+    def test_a_queued_job_it_could_not_reach_is_still_queued(self, jobs, tmp_path):
+        gate = _Gate()
+        _submit(jobs, gate, "first")
+        second = _submit(jobs, gate, "second")  # queued, for its submitter only
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            result = _cancel_with(other, second.job_id)
+        finally:
+            other.close()
+            gate.release.set()
+
+        assert (result["success"], result["state"]) == (False, "queued")
+        assert "still queued" in result["error"]
+
+    def test_a_job_on_a_backend_this_app_has_not_registered(self, tmp_path):
+        class Remote(backends_mod.JobBackend):
+            name = "remote"
+            survives_restart = True
+            cancels_foreign_jobs = True
+
+            def start(self, record, job_dir):
+                record.backend_handle = "remote-1"
+
+            def poll(self, record, job_dir):
+                return JobState.RUNNING
+
+            def cancel(self, record, job_dir):
+                return True
+
+        owner = JobManager(base_dir=tmp_path / "jobs")
+        owner.register_backend(Remote())
+        rec = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+        other = JobManager(base_dir=tmp_path / "jobs")  # the app no longer registers it
+        try:
+            result = _cancel_with(other, rec.job_id)
+        finally:
+            other.close()
+
+        assert (result["success"], result["state"]) == (False, "running")
+        assert "runs on the 'remote' backend, which this app has not registered" in (
+            result["error"]
+        )
+
     def test_a_cancelled_job_is_reported_cancelled(self, jobs):
         gate = _Gate()
         _submit(jobs, gate, "first")

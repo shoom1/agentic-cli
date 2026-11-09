@@ -146,22 +146,28 @@ def job_cancel(job_id: str) -> dict:
             "state": state,
             "cancel_requested": True,
             "message": (
-                "Cancellation requested, but the job is still running: it cannot be "
+                f"Cancellation requested, but the job is still {state}: it cannot be "
                 "interrupted now. It is recorded as cancelled when it ends."
             ),
         }
-    # Out of reach (another process runs it and its backend cannot stop it
-    # from here), or its record could not be read or locked: cancel()
-    # returned it as it was.
+    # cancel() returned it as it was: its backend is not registered here, or
+    # it is out of reach (another process runs it and its backend cannot stop
+    # it from here), or its record could not be read or locked.
+    if not jm.has_backend(rec.backend):
+        why = (
+            f"runs on the '{rec.backend}' backend, which this app has not "
+            "registered, so it cannot be stopped from here. Tell the user."
+        )
+    else:
+        why = (
+            "could not be stopped from here (another process of this app may be "
+            "running it, or its record could not be updated just now). Try again "
+            "later, or tell the user."
+        )
     return {
         "success": False,
         "state": state,
-        "error": (
-            f"Job {job_id} was not cancelled: it is still {state}, and could not be "
-            "stopped from here (another process of this app may be running it, or "
-            "its record could not be updated just now). Try again later, or tell "
-            "the user."
-        ),
+        "error": f"Job {job_id} was not cancelled: it is still {state}, and {why}",
     }
 
 

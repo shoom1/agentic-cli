@@ -2216,11 +2216,12 @@ step; each entry says what to use instead.
   locked), `job_cancel` answered `{"success": true, "state": "running"}` and
   `/jobs cancel` printed "Job 'x' → running." as a success, so a model told
   the user the job was stopped. `job_cancel` now returns `success: false`
-  with an `error` saying the job was not cancelled and is still running, to
-  try again later or tell the user, and `/jobs cancel` shows it as a
-  warning. A job that had already finished keeps `success: true` and its
-  state, with a `message` that nothing was cancelled, which `/jobs cancel`
-  says too.
+  with an `error` saying the job was not cancelled, its state (running or
+  queued), and why: it runs on a backend this app has not registered (named),
+  or it could not be stopped from here, to try again later or tell the user.
+  `/jobs cancel` says the same as a warning. A job that had already finished
+  keeps `success: true` and its state, with a `message` that nothing was
+  cancelled, which `/jobs cancel` says too.
 
 - **A queued in-process job runs in the app that submitted it.** Its
   callable cannot be saved, yet any job manager that read the jobs
@@ -2262,8 +2263,9 @@ step; each entry says what to use instead.
   it (`job_backend_not_registered` is logged once per job): it is not
   polled, claimed, launched or cancelled, `cancel` returns it unchanged,
   `tail` returns no lines and `result` None, and a running one holds no slot
-  of the manager's concurrency cap. So a job on a backend the app no longer
-  registers stays as it was, RUNNING or queued, until its folder under
+  of the manager's concurrency cap. The new `JobManager.has_backend(name)`
+  says whether a backend is registered. So a job on a backend the app no
+  longer registers stays as it was, RUNNING or queued, until its folder under
   `~/.<app>/jobs/` is removed: `/jobs clean` removes finished jobs only.
 
 - **Cancelling a job that has already ended records how it ended.**

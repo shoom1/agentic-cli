@@ -1755,11 +1755,12 @@ manager starts with, `subprocess` and `inprocess`; a starter then submits to
 it with `submit(backend="<name>")`. A manager reads the jobs on disk when it
 is built, before the app registers its backends, and leaves a job whose
 backend it has not registered as it is (not polled, launched or cancelled)
-until one that has it looks at it. So a job on a backend the app no longer
-registers stays as it was, RUNNING or queued, until its folder under
-`~/.{app_name}/jobs/` is removed (`/jobs clean` removes finished jobs only).
-The manager is `workflow.job_manager`, or
-`get_service("job_manager")` in a tool that declares `requires="job_manager"`.
+until one that has it looks at it; `has_backend(name)` says whether one is
+registered. So a job on a backend the app no longer registers stays as it
+was, RUNNING or queued, until its folder under `~/.{app_name}/jobs/` is
+removed (`/jobs clean` removes finished jobs only). The manager is
+`workflow.job_manager`, or `get_service("job_manager")` in a tool that
+declares `requires="job_manager"`.
 It exists only when some agent's tool declares that need (`job_status` and the
 other `job_*` tools do), and `workflow.job_manager` is `None` before then.
 A backend implements `start`, `poll` and `cancel`, and may override `logs`,

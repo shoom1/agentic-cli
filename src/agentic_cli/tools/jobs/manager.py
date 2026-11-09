@@ -387,6 +387,15 @@ class JobManager:
         """
         self._backends[backend.name] = backend
 
+    def has_backend(self, name: str) -> bool:
+        """Whether a backend of this ``name`` is registered with this manager.
+
+        A job on a backend that is not is left as it is here: not polled,
+        launched or cancelled. ``job_cancel`` and ``/jobs cancel`` ask, to
+        say so.
+        """
+        return name in self._backends
+
     def submit(
         self,
         *,

@@ -339,18 +339,25 @@ class JobsCommand(Command):
             elif state in {s.value for s in TERMINAL_STATES}:
                 app.session.add_message(
                     "system",
-                    f"Job '{parts[1]}' had already finished ({state}): nothing was cancelled.",
+                    f"Job '{parts[1]}' had already finished ({state}): "
+                    "nothing was cancelled.",
                 )
             elif rec.cancel_requested:
                 app.session.add_warning(
-                    f"Job '{parts[1]}' is still running: it cannot be interrupted now, "
+                    f"Job '{parts[1]}' is still {state}: it cannot be interrupted now, "
                     "and is recorded as cancelled when it ends."
+                )
+            elif not manager.has_backend(rec.backend):
+                app.session.add_warning(
+                    f"Job '{parts[1]}' was not cancelled: it is still {state}, and "
+                    f"runs on the '{rec.backend}' backend, which this app has not "
+                    "registered."
                 )
             else:
                 app.session.add_warning(
-                    f"Job '{parts[1]}' was not cancelled: it is still {state}, and could "
-                    "not be stopped from here (another process of this app may be "
-                    "running it, or its record could not be updated just now)."
+                    f"Job '{parts[1]}' was not cancelled: it is still {state}, and "
+                    "could not be stopped from here (another process of this app may "
+                    "be running it, or its record could not be updated just now)."
                 )
             return
 
