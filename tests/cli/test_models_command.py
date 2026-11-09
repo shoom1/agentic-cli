@@ -134,10 +134,19 @@ async def models(app: App, args: str = "") -> Screen:
     return app.session
 
 
-async def _ready(settings: BaseSettings, api: ProviderAPI, model: str) -> SimpleNamespace:
-    """A ready workflow's view: its loaded catalog and its default model."""
+async def _ready(
+    settings: BaseSettings, api: ProviderAPI, model: str, *, checked: bool = True
+) -> SimpleNamespace:
+    """A ready workflow's view: its loaded catalog and its default model.
+
+    ``checked``: the background refresh a start leaves (it lists each provider in
+    use the start did not wait on) has run, as it has by the time a user types.
+    """
     catalog = model_services.build_catalog(settings, model_services.providers_from_settings(settings))
     await catalog.load()
+    task = catalog.start_background_refresh() if checked else None
+    if task is not None:
+        await task
     return SimpleNamespace(catalog=catalog, model=model)
 
 
@@ -291,7 +300,7 @@ async def test_a_model_a_setting_names_that_the_list_leaves_out_says_why(api, mo
     cache.write_text(json.dumps(document), encoding="utf-8")
     api.calls.clear()
     settings = BaseSettings(models={good: {}}, default_model=retired)
-    workflow = await _ready(settings, api, retired)
+    workflow = await _ready(settings, api, retired, checked=False)
 
     screen = await models(App(settings, workflow))
 

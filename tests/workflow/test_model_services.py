@@ -434,6 +434,32 @@ def test_model_references_in_order_once_each():
     )
 
 
+def test_reference_settings_say_where_each_reference_is_named():
+    """For the warning that a provider does not serve a model: the setting, the
+    role or the agent that names it, each that does."""
+    settings = BaseSettings(
+        default_model="gemini-2.5-flash",
+        model_roles={"fast": "google:gemini-2.5-flash-lite", "critic": "anthropic:claude-sonnet-4-6"},
+    )
+    agents = [
+        AgentConfig(name="writer", prompt="p", model="google:gemini-2.5-flash"),
+        AgentConfig(name="critic", prompt="p", model="critic"),  # the role's, named there
+        AgentConfig(name="bad", prompt="p", model="qwen3-32b"),  # malformed: left out
+    ]
+
+    named = model_services.reference_settings(settings, agents, manager_model="openai:gpt-5.5")
+
+    assert named == {
+        ModelRef("openai", "gpt-5.5"): "the manager's model",
+        ModelRef("google", "gemini-2.5-flash"): "default_model and agent 'writer'",
+        ModelRef("google", "gemini-2.5-flash-lite"): "model_roles['fast']",
+        ModelRef("anthropic", "claude-sonnet-4-6"): "model_roles['critic']",
+    }
+    assert tuple(named) == model_services.model_references(
+        settings, agents, manager_model="openai:gpt-5.5"
+    )
+
+
 def test_model_references_skip_what_does_not_parse():
     """Validation reports each of them, before any catalog is built."""
     agents = _agents("x y", "Lab:qwen3", "lab:", "")

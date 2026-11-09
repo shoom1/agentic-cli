@@ -1601,8 +1601,10 @@ class BaseWorkflowManager(ABC):
             await self._release_resources()
             raise
         self._initialized = True
-        # Older cached listings are refreshed now, in the background; the
-        # catalog swaps each result in as it arrives.
+        # The providers in use the start did not list (nothing cached, or an
+        # older or failed listing) are listed now, in the background: that is
+        # how the models the settings name are checked. The catalog swaps each
+        # result in as it arrives, and warns of a model a provider does not serve.
         self._catalog.start_background_refresh()
 
     # --- models ------------------------------------------------------------
@@ -1625,12 +1627,13 @@ class BaseWorkflowManager(ABC):
         """Build and load the model catalog, then resolve every model.
 
         The catalog is owned from here on: ``_release_resources`` closes it.
-        Loading lists only the providers in use (those the entries, the
-        settings, the agents and this manager's model need) that the cache
-        cannot answer for, and a provider whose cached listing rejected a
-        model is listed again, once, before startup fails on it.
+        Loading waits only on the listings that fill a gap the settings leave
+        (no entry can run, a computed role has none of its tier, or nothing
+        describes a model they name); every model the settings name is then
+        resolved as they name it, and the background refresh
+        (``_initialize_locked``) checks the rest, warning of a model a
+        provider does not serve.
         """
-        from agentic_cli.config import SettingsValidationError
         from agentic_cli.workflow import model_services
 
         providers = model_services.providers_from_settings(self._settings)
@@ -1641,13 +1644,7 @@ class BaseWorkflowManager(ABC):
             manager_model=self._model_override,
         )
         await self._catalog.load()
-        try:
-            self._resolve_models(providers)
-        except SettingsValidationError:
-            # A cached listing can predate a model the provider now serves.
-            if not await self._catalog.confirm_rejections():
-                raise
-            self._resolve_models(providers)
+        self._resolve_models(providers)
 
     def _resolve_models(self, providers: Mapping[str, Provider]) -> None:
         """Resolve the default model and every agent's, all or nothing.

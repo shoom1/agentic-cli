@@ -234,11 +234,11 @@ def _no_model_listings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_model_warnings_from_other_tests(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each test starts with no "not offered" warning given: the catalog gives
-    each one once per process (``catalog._WARNED_ENTRIES``)."""
+    """Each test starts with no warning given of a model the list leaves out: the
+    catalog gives each one once per process (``catalog._WARNED_MODELS``)."""
     from agentic_cli.models import catalog
 
-    monkeypatch.setattr(catalog, "_WARNED_ENTRIES", set())
+    monkeypatch.setattr(catalog, "_WARNED_MODELS", set())
 
 
 @pytest.fixture

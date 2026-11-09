@@ -148,18 +148,47 @@ def model_references(
     names), then each agent's model that is a reference or a bare model id.
     One that does not parse is left out: validation reports it.
     """
-    references: list[ModelRef] = []
-    for spec in (manager_model, settings.default_model, *settings.model_roles.values()):
+    return tuple(_named_references(settings, agent_configs, manager_model))
+
+
+def reference_settings(
+    settings: "BaseSettings",
+    agent_configs: Iterable["AgentConfig"] = (),
+    manager_model: str | None = None,
+) -> dict[ModelRef, str]:
+    """Where each model ``model_references`` gives is named, in its order:
+    ``the manager's model``, ``default_model``, ``model_roles['fast']``, ``agent
+    'writer'``, those that name one model joined with "and". The catalog's
+    warning that a provider does not serve a model says which setting to change.
+    """
+    named = _named_references(settings, agent_configs, manager_model)
+    return {ref: " and ".join(where) for ref, where in named.items()}
+
+
+def _named_references(
+    settings: "BaseSettings",
+    agent_configs: Iterable["AgentConfig"],
+    manager_model: str | None,
+) -> dict[ModelRef, list[str]]:
+    """Each model the settings, the agents and the manager name, with where."""
+    named: dict[ModelRef, list[str]] = {}
+    specs = [
+        ("the manager's model", manager_model),
+        ("default_model", settings.default_model),
+        *((f"model_roles[{role!r}]", spec) for role, spec in settings.model_roles.items()),
+    ]
+    for where, spec in specs:
         if not spec:
             continue
         try:
-            references.append(parse_ref(spec))
+            named.setdefault(parse_ref(spec), []).append(where)
         except ModelSpecError:
             continue
-    for parsed in _agent_models(agent_configs):
+    for config in agent_configs:
+        parsed = _agent_model(config)
         if isinstance(parsed, ModelRef):
-            references.append(parsed)
-    return tuple(dict.fromkeys(references))
+            named.setdefault(parsed, []).append(f"agent {config.name!r}")
+    return named
 
 
 def computed_roles(
@@ -189,16 +218,19 @@ def computed_roles(
 
 def _agent_models(agent_configs: Iterable["AgentConfig"]) -> list[ModelRef | RoleRef]:
     """Each agent's model that names one (None runs on the default) and parses."""
-    parsed: list[ModelRef | RoleRef] = []
-    for config in agent_configs:
-        spec = getattr(config, "model", None)
-        if not spec:
-            continue
-        try:
-            parsed.append(parse_spec(spec))
-        except ModelSpecError:
-            continue
-    return parsed
+    parsed = (_agent_model(config) for config in agent_configs)
+    return [model for model in parsed if model is not None]
+
+
+def _agent_model(config: "AgentConfig") -> ModelRef | RoleRef | None:
+    """The agent's model, when it names one (None runs on the default) that parses."""
+    spec = getattr(config, "model", None)
+    if not spec:
+        return None
+    try:
+        return parse_spec(spec)
+    except ModelSpecError:
+        return None
 
 
 def role_map_from_settings(settings: "BaseSettings", manager_model: str | None = None) -> RoleMap:
@@ -263,9 +295,10 @@ def build_catalog(
     transport: "httpx.AsyncBaseTransport | None" = None,
 ) -> ModelCatalog:
     """The catalog a workflow manager loads: ``providers``' models, cached in
-    ``model_cache_path(settings)``, with the ``models`` entries, and the models
+    ``model_cache_path(settings)``, with the ``models`` entries, the models
     and computed roles that decide which providers are in use and what the
-    list offers.
+    list offers, and where each model is named (``reference_settings``), for
+    the warning that its provider does not serve it.
 
     Args:
         settings: Give the entries, the references and the roles, and name
@@ -277,10 +310,12 @@ def build_catalog(
         transport: The HTTP transport for listings; httpx's own by default.
     """
     agent_configs = tuple(agent_configs)
+    named_by = reference_settings(settings, agent_configs, manager_model)
     return ModelCatalog(
         providers=providers,
         entries=entries_from_settings(settings),
-        references=model_references(settings, agent_configs, manager_model),
+        references=tuple(named_by),
+        named_by=named_by,
         computed_roles=computed_roles(settings, agent_configs, manager_model),
         cache_path=model_cache_path(settings),
         transport=transport,

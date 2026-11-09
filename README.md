@@ -896,11 +896,13 @@ AGENTS = [
 
 The coordinator runs on Claude Sonnet 5.5, the drafter on Gemini 3.5
 Flash-Lite, and the checker on DeepSeek V4 Pro through OpenRouter. A model a
-setting, a role or an agent names joins the list. Every model is checked when
+setting, a role or an agent names joins the list. Every model is resolved when
 the workflow starts: a reference to a provider that is neither built in nor
-defined in `model_providers`, a provider that cannot be called (it names its
-key variable and where it is read), or a model its provider's fresh listing
-lacks fails with one error that names each agent concerned.
+defined in `model_providers`, or a provider that cannot be called (it names
+its key variable and where it is read), fails with one error that names each
+agent concerned. A model its provider does not serve does not stop the start:
+the settings decide what runs, and one warning names the model, the setting
+that names it and what to do (see [Checking ids](#listings-and-the-model-cache)).
 
 ### The model pickers and `/models`
 
@@ -920,10 +922,11 @@ A model can run when its provider can be called: a built-in provider with
 its key, or a configured provider whose `api_key_env` is set (or that names
 none). A model a setting names (an entry, `default_model`, a role's model or
 an agent's) is not offered when its provider is not defined, cannot be
-called, or does not serve it (its fresh listing lacks the model, or the older
-listing in use recorded it as absent), and `/models` says why for each; an
-entry whose provider is not defined or does not serve it is also warned of
-once at startup. Listings never add to the list. Each model appears once. Picking writes
+called, or does not serve it (a listing this process made lacks it, or a
+listing recorded it as absent), and `/models` says why for each. A model the
+settings name that its provider does not serve, and an entry whose provider is
+not defined, is also warned of once, when a listing shows it. Listings never
+add to the list. Each model appears once. Picking writes
 `default_model`, or the role's `model_roles` entry, to the project settings
 file and restarts the workflow on it, keeping the conversation. Before the
 workflow is ready, the pickers offer the list from the entries and the
@@ -940,7 +943,8 @@ shipped table. An app adds a picker for a role of its own with the key
   is fresh, stale, failed or not listed, when it was fetched, how many models
   it shows (its listing holds more, which `/models <text>` finds), and the
   last error. Before the workflow is initialized it reads the model cache,
-  and lists a provider in use the cache holds nothing for.
+  and lists what a start would wait on (see
+  [Listings and the model cache](#listings-and-the-model-cache)).
 - **`/models <text>`** searches the full listing of each provider that can be
   called (and is listed), ignoring case, by reference, and marks the models
   already in the list: how to find an exact id to copy into `models`
@@ -973,13 +977,28 @@ as 128,000 tokens.
   built-in providers with a key when the list offers no entry, or when a
   role the agents run on is computed and the list has no model of its tier.
   A provider with `list_models: false` is in use but never listed.
+- **Startup uses the models the settings name at once**, and waits on a
+  listing only to fill a gap they leave: no `models` entry can run (the
+  list's fast, default and strong models come from the built-in providers'
+  listings), a role the agents run on is computed (it has no model of its
+  own: it takes the newest of its tier among the entries a listing serves, so
+  the start lists the provider of the entry it would take unless a cached
+  listing serves it, and with no entry of its tier the built-in providers),
+  or nothing describes a model the settings name (no cached listing has it,
+  no family rule of the shipped table matches it, and its `models` entry, if
+  any, does not give its `context_window` and `thinking`: its listing is
+  where its limits and thinking come from). Those listings run at once, each
+  for at most 10 seconds, and a provider the cache holds a listing or a
+  failure for is not waited on for the built-ins. Every other provider in use
+  is listed in the background after the start (one the cache holds nothing
+  for, an older or failed entry, or an entry that lacks a model the settings
+  name): that is how the models the settings name are checked. An app whose
+  list and settings name models the table knows starts without the network.
 - **Listings are cached** in `~/.my_app/model_cache.json` (private,
   versioned, holding no key) for 24 hours, one entry per provider with its
-  address and kind: a change to either lists it again. Startup waits only to
-  list a provider in use that can be called and has no cache entry yet: all
-  of them at once, each for at most 10 seconds. An older entry is used while
-  it is listed again in the background, and a listing counts as older once
-  it is 24 hours old in a long session too. A listing that fails at startup
+  address and kind: a change to either lists it again. An older entry is used
+  while it is listed again in the background, and a listing counts as older
+  once it is 24 hours old in a long session too. A listing that fails at startup
   is listed once more in the background: until one succeeds the provider's
   ids are not checked and its models' limits and thinking come from the
   shipped table (an OpenRouter or configured provider's models, which the
@@ -993,16 +1012,22 @@ as 128,000 tokens.
   of a newer release is neither read nor written: this process keeps its
   listings in memory and logs once that every start lists); a failed listing
   never replaces one of the provider's address and kind.
-- **Checking ids**: a model a provider does not list is rejected only when
-  that provider's listing is fresh (under 24 hours old, however long the
-  session has run); a failed, untried or older listing accepts any id. A
-  rejection read from the cache is confirmed by one new listing first, since
-  the cache can predate a model. A model a setting, a role or an agent names
-  that the provider does not serve fails at startup, listing the provider's
-  models. An entry only in `models` is left out of the list instead, with one
-  warning: an app's list does not stop it starting because a host retired one
-  model, and the cache records the absence (of every project's list that
-  shares the file), so it costs one listing, not one at every start.
+- **Checking ids**: a model the settings name (a `models` entry,
+  `default_model`, a role's model, an agent's or the manager's) is never
+  refused. The workflow starts on it as named, and the listings check it: at
+  startup when the start lists its provider anyway, else in the background.
+  When its provider does not serve it, one warning says so, naming the setting
+  (or the computed role that runs on it) and what to do, the list leaves it
+  out (`/models` says why), and a turn on it fails at the provider; a model
+  nothing describes runs on the conservative record (no thinking, the
+  128,000-token window floor) unless a `models` entry says otherwise. A listing read from the cache that lacks such
+  a model does not count until a new listing confirms it, since the cache can
+  predate a model. The cache records the absence (of every project's settings
+  that share the file), so a retired model costs one listing, not one at every
+  start. Any other id (one `/models` looks up) is rejected only when its
+  provider's listing is fresh (under 24 hours old, however long the session
+  has run); a failed, untried or older listing accepts it, and a rejection
+  read from the cache is confirmed by one new listing first.
 - **An OpenAI-compatible host's listing** may be `{"data": [...]}` or a bare
   array, and a model's window is read from its `context_length`,
   `context_window` or `max_model_len`, the first present. Its thinking comes
