@@ -1295,9 +1295,11 @@ are `AgentConfig`'s, and an unknown one is an error:
   function: one that is not is denied at every call, and named at startup by a
   `tool_not_registered` warning (see [Creating Tools](#creating-tools)).
 - **Load only YAML you trust.** A dotted path imports its module, which runs
-  its code, and an absolute `instruction_file` reads whatever it points at. The
-  framework never loads a YAML file on its own: your code names it. A native
-  ADK `root_agent.yaml` is a different thing, built by ADK itself
+  its code; an `mcp_servers` entry's `command` and `args` start that program
+  when the workflow starts, without a permission prompt; and an
+  `instruction_file`, absolute or relative (`../..`), reads whatever it points
+  at. The framework never loads a YAML file on its own: your code names it.
+  A native ADK `root_agent.yaml` is a different thing, built by ADK itself
   (`adk_config_path`; see [Sub-agent context](#sub-agent-context)).
 
 `examples/yaml_agents/` is a runnable app on this: a coordinator that delegates
