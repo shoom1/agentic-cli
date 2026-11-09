@@ -25,6 +25,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("deepagents")
 
@@ -538,6 +539,13 @@ class TestUnknownTool:
         assert message.name == "nope"
         assert _content(message) == unknown_tool_result("nope", ["pmw_read", "pmw_note"])
         engine.check.assert_not_awaited()
+
+    async def test_it_is_logged_at_info_not_as_a_warning(self):
+        """The model's mistake, as on ADK: nothing is shown over the prompt."""
+        with capture_logs() as logs:
+            await _gate(None, {}, engine=_engine(), name="nope", tools=[_convert(pmw_read)])
+
+        assert [(log["log_level"], log["event"]) for log in logs] == [("info", "tool_not_found")]
 
 
 class TestSyncPath:

@@ -1261,6 +1261,17 @@ the start of the entry's title.
 
 ### Changed
 
+- **A call to a tool name the agent does not have reads the same on ADK and
+  Deep Agents, and is no warning.** The model reads ADK's own first two
+  lines, "<name> failed: ValueError: Tool '<name>' not found." and the
+  agent's tools by name, without ADK's advice to a developer ("Possible
+  causes: …"); the log says `tool_not_found` at info, where ADK's
+  `ToolErrorPlugin` logged `tool_raised` as a warning, with a traceback,
+  over the prompt. It is the model's mistake, which it reads and corrects.
+  On ADK the permission gate lets ADK's stand-in for the name through
+  (`tool_error_plugin.is_unknown_tool`: a bare `BaseTool`, which runs
+  nothing) to `ToolErrorPlugin`.
+
 - **Every turn starts in `BaseWorkflowManager._turn`, and a job's resume and
   `can_resume` are the base's, over two backend hooks.**
   `resume_with_job_result` was not declared on the base: a backend wrote it

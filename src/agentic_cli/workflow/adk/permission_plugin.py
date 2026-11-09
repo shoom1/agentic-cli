@@ -7,6 +7,10 @@ capabilities — an EXEMPT one would be waved straight through), never the tool'
 class name, and never equality.
 
 Adapter check order (mirrors LangGraph wrapper for consistency):
+0. ADK's stand-in for a tool name the agent does not have (a bare
+   ``BaseTool``, ``tool_error_plugin.is_unknown_tool``) passes: it runs
+   nothing, and ``ToolErrorPlugin`` answers ADK's lookup error with ADK's
+   own text, as Deep Agents' gate does.
 1. Resolve the definition bound to this exact object. Framework-issued tools —
    registered callables, service-bound factory variants, and the native ADK
    tool objects the framework constructs (skill tools, and the delegation tool
@@ -42,6 +46,7 @@ from agentic_cli.tools.registry import (
     identify_tool,
     register_tool,
 )
+from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
 from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY, brings_outside_content
 from agentic_cli.workflow.permissions import EXEMPT
 from agentic_cli.workflow.permissions.capabilities import Capability, _CapabilityExempt
@@ -236,6 +241,10 @@ class PermissionPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: "ToolContext | None",
     ) -> dict | None:
+        if is_unknown_tool(tool):
+            # ADK's stand-in for a name the agent has no tool for: it runs
+            # nothing, and ToolErrorPlugin answers ADK's lookup error next.
+            return None
         defn = self._resolve_definition(tool)
         denial = await self._gate(tool, defn, tool_args, tool_context)
         if denial is None:

@@ -31,6 +31,7 @@ from google.adk.events import Event
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
 from agentic_cli.workflow.interrupts import INTERRUPTED, MARKER, OpenCalls
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
@@ -82,9 +83,13 @@ class InterruptedCallsPlugin(BasePlugin):
         self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext | None"
     ) -> None:
         """Mark the call running (``workflow.sessions.get_active_tool_call``):
-        a question it asks then knows which call waits on it."""
+        a question it asks then knows which call waits on it.
+
+        ADK's stand-in for an unknown tool name runs nothing, and ADK skips
+        the after-tool callbacks for it, which end the mark: it gets none.
+        """
         call_id = getattr(tool_context, "function_call_id", None)
-        if call_id:
+        if call_id and not is_unknown_tool(tool):
             self._active[call_id] = set_active_tool_call(ToolCallRef(call_id, tool.name))
         return None
 
