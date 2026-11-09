@@ -9,124 +9,180 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migrating from 0.6
 
-What an upgrade from 0.6.4 does by itself, what an app must change and what a
-user will notice; nothing needs doing by hand unless an item says so.
+Data from 0.6 migrates on its own; an app, and its settings, may need the
+changes listed below. Each item ends with its full entry: the section, then
+the start of the entry's title.
 
 #### What happens on its own
 
 - Each knowledge base folder is imported into one `kb.sqlite` at its first
-  open, its old files moved to `pre-0.7.0/`: going back to 0.6 means restoring
-  them by hand. (Changed: **The knowledge base keeps each folder…**)
-- 0.6's `memories.json` is imported once into the user memory scope, then
-  moved to `memory/pre-0.7.0/`. (Changed: **Memories are markdown files…**)
-- A saved grant on home or above it, or with a wildcard in its literal part,
-  is dropped at startup with a warning. (Security: **A grant for a file in
-  your home…**, **An approval is remembered only…**)
+  open, and every document is embedded again at the first open that has the
+  model; the old files move to `pre-0.7.0/` (going back to 0.6 means restoring
+  them by hand), and `embeddings/` is deleted. (Changed: **The knowledge base
+  keeps…**)
+- 0.6's `memories.json` is imported once into the user scope: the model's
+  memories as memories, the extracted ones as proposals in `/memory inbox`
+  (past its 100, only in `memory/pre-0.7.0/`), the archived ones not at all.
+  (Changed: **Memories are markdown files…**)
+- A saved grant on `/`, home or above it, or whose literal part holds a
+  wildcard, is dropped at startup with a warning. (Security: **A grant for a
+  file…**, **An approval is remembered…**)
 
 #### What an app must change
 
 - `BaseCLIApp` now defines `main`, `add_arguments`, `from_args`,
   `session_start` and `exit_status`: rename an app's own attributes of those
   names. (Added: **`BaseCLIApp.main()`…**)
-- For thinking-prompt 0.4: drop `AppInfo(echo_thinking=)`, define
-  `get_theme(name)` in place of `get_styles()`, catch `asyncio.CancelledError`
-  from `MessageProcessor.process()`, and pass `field_to_ui_item` its
-  `description=`. (Changed: **agentic-cli runs on thinking-prompt 0.4**)
-- `SettingsPersistence.save()` and a `save_settings` override take the `keys`
-  that changed, `load()` and the `path=` dump are gone, and a
-  `get_ui_setting_keys()` override extends `super()`'s list. (Removed:
-  **`SettingsPersistence.save()`…**; Changed: **`/settings` has a model…**)
-- `MemoryItem` is `Memory`, `MemoryStore(user_dir, project_dir=None)` takes no
-  embedding service, the memory tools take no `tags` or `importance`, and
-  `on_session_end` returns proposals. (Removed: **The 0.6 memory store API**)
-- `agentic_cli.knowledge_base` and `tools.kb_convert` are
-  `agentic_cli.memory.kb`; the FAISS and BM25 classes, the `kb_manager` keys,
-  properties and arguments, `memory_services.build_*` and `kb_ingest_url` are
-  gone: declare `requires="knowledge_base"`, ingest a page with `web_fetch`
-  then `kb_ingest_file`. (Removed: **`agentic_cli.knowledge_base`** and after)
+- thinking-prompt 0.4: drop `AppInfo(echo_thinking=)`; define
+  `get_theme(name)` for `get_styles()` (`get_default_styles()` is gone); catch
+  `asyncio.CancelledError` from `MessageProcessor.process()` and
+  `process_resume()`; pass `description=` and `max_width=` to
+  `field_to_ui_item`. (Changed: **agentic-cli runs on thinking-prompt…**)
+- `SettingsPersistence(app_name)` needs the app's name, `save(settings,
+  keys=...)` the fields to write; `load()` and the `path=` dump are gone. A
+  `save_settings` override takes `keys`, or `/settings` reports "Settings
+  applied but not saved". (Removed: **`SettingsPersistence.save()`…**)
+- A `get_ui_setting_keys()` override extends `super()`'s list, or `/settings`
+  shows only the pickers it names. (Changed: **`/settings` has a model
+  picker…**)
+- `MemoryItem` is `Memory`; `MemoryStore(user_dir, project_dir=None, ...)`
+  replaces `MemoryStore(base_dir, embedding_service=)` and
+  `memory_tools.MemoryStore(settings)`; `on_session_end` returns
+  `list[Proposal]`. (Removed: **The 0.6 memory store…**,
+  **`agentic_cli.tools.memory_tools.MemoryStore(settings)`**)
+- `save_memory(description, content, type, scope="project",
+  user_requested=False)` replaces `save_memory(content, tags, importance)`,
+  and no memory tool takes `tags`, `importance`, `include_archived` or
+  `purge`. (Removed: **The 0.6 memory store…**)
+- The knowledge base is `agentic_cli.memory.kb`; `agentic_cli.knowledge_base`,
+  `tools.kb_convert` and the FAISS and BM25 classes are gone.
+  `KnowledgeBaseManager(base_dir)` reads no settings: pass `embedding=` (under
+  another model a knowledge base re-embeds all its text) and `summarizer=`.
+  `list_documents` returns no text or chunks. (Removed:
+  **`agentic_cli.knowledge_base`**; Changed: **The knowledge base keeps…**)
+- A tool declares `requires="knowledge_base"`; the workflow's services are
+  `workflow.knowledge_base` and `workflow.memory_store`, built by
+  `memory_services.open_knowledge_base` and `open_memory_store`; the factories
+  take a `KnowledgeBase`. (Removed: **`requires="kb_manager"`** and the four
+  entries after it, to **`memory_services.build_memory_store`**)
+- `kb_ingest_url` is gone: `web_fetch` the page, then `kb_ingest_file` its
+  `saved_path`. (Removed: **The `kb_ingest_url` tool**)
 - A `filesystem.*`, `http.*` or `shell.*` capability needs `target_arg=` or
   `target=`, and `task` is a reserved tool name. (Changed: **A resource
-  capability that names no resource…**; Added: **`task` is a reserved…**)
+  capability…**; Added: **`task` is a reserved…**)
 - In an ADK app built from configs, a sub-agent is called as a tool and
   returns (no `transfer_to_agent`), seeing only its request unless
-  `context="inherit"`; a synchronous tool must be safe to run in a worker
-  thread beside other calls; and a prompt's `{name}` is no longer filled from
-  session state. (Changed: **ADK sub-agents are delegated…**, **On ADK,
-  synchronous tools…**, **On ADK, an agent's prompt…**)
-- `app_name` comes only from the settings class or the constructor, and ADK 2
+  `context="inherit"`; a synchronous tool must be safe in a worker thread
+  beside other calls; a prompt's `{name}` is not filled from session state.
+  (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
+  ADK, an agent's prompt…**)
+- `app_name` comes only from the settings class or the constructor; ADK 2
   refuses one that does not start with a letter, holds other than letters,
-  digits, `_` and `-`, or is `user`; code calling ADK itself follows ADK 2's
-  notes. (Changed: **`app_name` comes only…**, **agentic-cli runs on ADK 2**)
-- A settings class from the mixins must list them before pydantic-settings'
-  `BaseSettings`, and a skill path or `skills_dirs` entry must be absolute.
-  (Security: **A settings class composed…**, **A skill name is looked…**)
+  digits, `_` and `-`, or is `user`. Code calling ADK follows ADK 2's notes.
+  (Changed: **`app_name` comes only…**, **agentic-cli runs on ADK 2**)
+- A settings class built from the mixins lists them before pydantic-settings'
+  `BaseSettings`; a skill path or `skills_dirs` entry is absolute. (Security:
+  **A settings class composed…**, **A skill name is looked up…**)
 - `ModelRegistry`, `manager.model_registry`, the settings' model helpers and
-  the backends' model code give way to `manager.catalog`, `agentic_cli.models`
-  and the model factories; `manager.model` is a `provider:model` reference.
-  (Removed: **`agentic_cli.workflow.models`** and the entries around it)
-- `list_sessions` returns `SessionInfo` rows, and `search_arxiv` and
-  `URLValidator.resolve_and_validate` are coroutines. Gone: `ResumeCommand`,
-  `agentic_cli.tools.shell` (the OS sandbox is
+  the backends' private model code give way to `manager.catalog`,
+  `agentic_cli.models` and the model factories; `manager.model` is a
+  `provider:model` reference. (Removed: **`agentic_cli.workflow.models`**,
+  both **Settings helpers**; Changed: **`manager.model` is…**)
+- `list_sessions` returns `SessionInfo` rows (`session_id`, `updated`,
+  `turns`); an app's own session backend implements `session_info`. (Changed:
+  **`list_sessions` returns…**)
+- `search_arxiv` and `URLValidator.resolve_and_validate` are coroutines;
+  `load_agents_from_yaml` raises `ValueError` for a file it cannot use.
+  (Fixed: **arXiv requests are paced…**, **`load_agents_from_yaml` raises…**;
+  Changed: **`web_fetch` answers an error…**)
+- Gone: `agentic_cli.tools.shell` (the OS sandbox is
   `agentic_cli.tools.os_sandbox`), `ExecutionTimeoutError`,
-  `WorkflowEvent.tool_result(duration_ms=)`, `PaperResult`, `WebResult`,
-  `google_search_tool`, `SafePythonExecutor.effective_allowed_modules` and
-  unused members such as `ToolRegistry.get_functions`. (Removed: **The shell
-  toolset…**, **Public members nothing…**; the others in their own entries)
+  `WorkflowEvent.tool_result(duration_ms=)`, `UsageTracker.record()`'s
+  `context_trimmed_already`, `PaperResult`, `WebResult`, `google_search_tool`
+  and unused members such as `ToolRegistry.get_functions`. (Removed: **The
+  shell toolset…**, **`WorkflowEvent.tool_result(duration_ms=)`…**, **The
+  token-drop warning**, **`agentic_cli.tools.search_sources.PaperResult`**,
+  **`agentic_cli.tools.google_search_tool`**, **Public members nothing…**)
 
 #### Behaviour a user will notice
 
 - `execute_python` runs inside the OS sandbox or is refused
-  (`os_sandbox_strict` defaults to true), so on Windows, or Linux without a
-  usable bubblewrap, it is refused until `os_sandbox_enabled` is false; then
-  each call asks. (Security: **`execute_python` runs code only…**)
+  (`os_sandbox_strict` now defaults to true): on Windows, or Linux without a
+  usable bubblewrap, until `os_sandbox_enabled` is false, and then each call
+  asks. (Security: **`execute_python` runs…**)
+- On the `local` `sandbox_execute` backend (opt-in:
+  `stateful_executor_backend` is `none` by default) every call asks, no import
+  is blocked, and `!pip` installs into the app's own environment. (Security:
+  **`execute_python` runs…**; Changed: **The local `sandbox_execute`…**)
 - Once a conversation has run a tool that brings outside content, every memory
-  write asks; reading the credential stores, the app's keys or the project's
-  `.env` files is denied whatever the rules and grants say. (Security: **A web
-  page can no longer plant…**, **The default permission rules…**)
+  write in it asks; on ADK a conversation from before 0.7.0 counts as such.
+  (Security: **A web page can no longer…**)
+- Reading the credential stores, the app's keys and settings or the project's
+  `.env` files, and writing its `.git`, are denied whatever the rules and
+  grants say. (Security: **The default permission rules…**)
+- A project knowledge base that is a symlink, or one with a symlinked
+  subfolder, no longer opens, and staging a sandbox input from inside a
+  session's folder fails. (Security: **The knowledge base never follows…**,
+  **The sandbox's file transfer…**)
 - `edit_file` refuses text found more than once unless `replace_all=True`; a
-  result over `tool_result_max_chars` (50,000) is cut, its full output saved.
-  (Changed: **`edit_file` changes one place…**; Added: **A tool result…**)
+  tool result over `tool_result_max_chars` (50,000) is cut, its full output
+  saved. (Changed: **`edit_file` changes one place…**; Added: **A tool result
+  too big…**)
 - On ADK the main agent's conversation is summarized as it grows, and Claude
   and Gemini prompts are cached (`prompt_caching_enabled`, on by default).
-  (Added: **ADK summarizes…**; Changed: **The ADK backend caches prompts**)
+  (Added: **ADK summarizes…**; Changed: **The ADK backend caches…**)
 - With a Google key, no `models` list and no listing yet, an agent without a
-  model runs on `gemini-3.8-flash`, not `gemini-2.5-flash`. (Changed: **Models
-  are named by reference or role…**)
-- `/settings` saves only the fields the user changed, and its pickers offer
-  the `models` list, not a provider's whole listing; `/help` groups the
-  commands, `/memory` reviews memories and the proposals a conversation's end
-  now files, `/resume` reopens a conversation, and `/compact` and `/new` are
-  new. (Removed: **`SettingsPersistence.save()`…**; Changed and Added: each
-  command's entry)
+  model runs on `gemini-3.8-flash`, where 0.6 ran on `gemini-2.5-flash`.
+  (Changed: **Models are named…**)
+- `/settings` (Save or Cancel, no Ctrl+S) writes a pick equal to the default
+  too, and no save removes a key (delete it from `~/.{app_name}/settings.json`
+  to follow the app again); its pickers offer the `models` list. (Fixed: **A
+  pick of the class default…**; Changed: **`/settings` has a model picker…**)
+- `/resume` reopens a conversation and `/jobs resume` resumes finished jobs;
+  `/help` groups the commands; `/memory` reviews memories and the proposals a
+  conversation's end now files; `/compact` and `/new` are new. (Changed:
+  **`/resume` reopens…**, **`/help` lists…**; Added: **`/memory`, to
+  review…**, **`/compact [focus]`…**)
 
 #### Settings that moved or changed meaning
 
 - `model_providers` (user-only) defines every provider but Google, Anthropic
-  and OpenAI; `models` lists what the pickers offer; `model_roles` maps
+  and OpenAI; `models` is the list the pickers offer; `model_roles` maps
   `fast`, `strong` and an app's roles; `default_model` is never a role.
   (Added: **Model settings**; Changed: **`settings.set_model()`…**)
+- `budget` thinking on a model that takes levels (Gemini 3, Claude 4.6 and
+  later) fails at startup; an agent's bare `model` that is no model id is an
+  app role, run on the default model with a warning, where 0.6 refused it.
+  (Changed: **`budget` thinking…**, **Models are named…**)
 - `context_summarize_at` and `context_max_tokens` replace `context_window_*`,
   and a model whose window is 16,842 tokens or less no longer starts.
   (Removed: **The `context_window_enabled`…**; Changed: **When a conversation
   is summarized…**)
 - `permissions` joins every trusted source's rules, the environment's and the
   constructor's included. (Security: **The permission engine enforces…**)
-- A project file may set `models`, `model_roles`, `context_*` and
-  `tool_result_max_chars`, never `model_providers`, `app_name` or
-  `os_sandbox_enabled`. (Added, Changed and Security: each setting's entry)
-- `sandbox_packages`, `webfetch_model` and the `shell_*` settings are ignored
-  where still set, and `webfetch_max_content_bytes` limits a page's converted
-  text. (Removed: **Settings `webfetch_model`…**, **The shell toolset…**;
-  Changed: **`webfetch_max_content_bytes`…**)
+- A project file may set `models`, `model_roles`, `context_*`,
+  `tool_result_max_chars` and `arxiv_max_pdf_bytes`, never `model_providers`,
+  `ui_theme`, `dialog_placement`, `app_name` or `os_sandbox_enabled`. (Added:
+  **Model settings**, **Two user settings…**; Changed: **`app_name` comes
+  only…**; Security: **`execute_python` runs…**)
+- `webfetch_max_content_bytes` limits a page's converted text; it and
+  `webfetch_max_pdf_bytes` have bounds, and a value outside them stops the
+  settings from loading. (Changed: **`webfetch_max_content_bytes`…**)
+- `webfetch_model`, `sandbox_packages` and `shell_*` are ignored where still
+  set; `knowledge_base_documents_dir` and `knowledge_base_embeddings_dir` are
+  gone. (Removed: **Settings `webfetch_model`…**, **The shell toolset…**,
+  **`settings.knowledge_base_documents_dir`**)
 - The memory store uses no embedding model; `memory_index_enabled` and
-  `memory_index_max_bytes` are new. (Changed: **Memories are markdown
-  files…**; Added: **The main agent gets an index…**)
+  `memory_index_max_bytes` are new; `auto_extract_session_facts` files
+  proposals. (Changed: **Memories are markdown files…**; Added: **The main
+  agent gets an index…**)
 
 #### Deprecated
 
-- The LangGraph backend is removed in 0.8.0: install `agentic-cli[deepagents]`
-  and set `orchestrator` to `deepagents`. Its sessions do not carry over.
-  Nothing else is deprecated. (Deprecated: **The LangGraph backend**)
+- The LangGraph backend (`orchestrator="langgraph"`) is removed in 0.8.0:
+  install `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`.
+  Its sessions do not carry over. Nothing else is deprecated. (Deprecated:
+  **The LangGraph backend**)
 
 ### Security
 
