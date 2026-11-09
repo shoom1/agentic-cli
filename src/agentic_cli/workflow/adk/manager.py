@@ -576,11 +576,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return InMemorySessionService()
 
         if db_url.startswith("sqlite"):
-            # sqlite+aiosqlite:///<path>
+            # The file as SQLAlchemy reads the URL: without a query
+            # (?timeout=30), which goes to sqlite3.
+            from sqlalchemy.engine import make_url
+
             from agentic_cli.workflow.checkpointers import private_sqlite_file
 
             private_sqlite_file(
-                db_url.split(":///", 1)[-1],
+                make_url(db_url).database or "",
                 tighten_existing=not getattr(self._settings, "sqlite_uri", None),
             )
 

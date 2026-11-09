@@ -172,6 +172,21 @@ class TestAdkSessionServiceSelection:
 
         assert oct(_mode(db)) == oct(0o600)
 
+    async def test_a_uri_with_a_query_names_the_file_before_it(
+        self, tmp_path: Path, umask_022
+    ):
+        """SQLAlchemy passes a URI's query (``?timeout=30``) on to sqlite3:
+        the database file is the path before it, and no other file is made."""
+        db = tmp_path / "team" / "app.db"
+        mgr = self._manager(_settings(
+            tmp_path, session_store="sqlite", sqlite_uri=f"sqlite:///{db}?timeout=30"
+        ))
+        svc = mgr._make_session_service()
+        await svc.create_session(app_name="app", user_id="u", session_id="s")
+
+        assert sorted(path.name for path in db.parent.iterdir()) == ["app.db"]
+        assert oct(_mode(db)) == oct(0o600)
+
 
 class TestAdkNativeSessions:
     """Native session query/manage against a real sqlite DatabaseSessionService."""
