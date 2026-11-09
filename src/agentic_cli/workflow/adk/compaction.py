@@ -81,6 +81,8 @@ from agentic_cli.workflow.adk.model_factory import generate_text
 from agentic_cli.workflow.context import (
     ESTIMATE_MARGIN,
     MIN_SAVING,
+    SUMMARY_FAILED,
+    SUMMARY_FAILED_CODE,
     CompactResult,
     FailedSummaries,
     chars_per_token,
@@ -104,12 +106,6 @@ logger = Loggers.workflow()
 SUMMARY_MAX_TOKENS = 8_000
 #: The most of one tool call or result the summary call reads, in characters.
 TOOL_PAYLOAD_CHARS = 2_000
-
-#: What the user is told, once a turn, when a summary could not be written.
-SUMMARY_FAILED = (
-    "Could not summarize the earlier conversation; older turns are left out instead."
-)
-SUMMARY_FAILED_CODE = "summary_failed"
 
 #: Where the middle of a conversation too long for the summarizing model is left out.
 MIDDLE_OMITTED = "[... middle of the conversation omitted ...]"

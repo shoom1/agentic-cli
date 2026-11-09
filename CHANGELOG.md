@@ -797,13 +797,14 @@ the start of the entry's title.
     `(app_name, user_id, session_id)`, so two users, or two apps sharing a
     database, never share a conversation through one session id.
     `session_store` picks the checkpointer: sqlite (the default) in
-    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
-    (`sqlite_uri` may point ADK and Deep Agents at one file: their tables do
-    not collide), Postgres at `postgres_uri`, or memory. Every session hook
-    takes `user_id`. `list_sessions` gives each conversation's row
-    (`SessionInfo`, below) from its newest checkpoint, `delete_session` also
-    removes the sub-agents' checkpoints and returns False for an unknown id,
-    and `recent_messages` is the user's and the assistant's text.
+    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db` and,
+    as it is, owner-only (`sqlite_uri` may point ADK and Deep Agents at one
+    file: their tables do not collide), Postgres at `postgres_uri`, or
+    memory. Every session hook takes `user_id`. `list_sessions` gives each
+    conversation's row (`SessionInfo`, below) from its newest checkpoint,
+    `delete_session` also removes the sub-agents' checkpoints and returns
+    False for an unknown id, and `recent_messages` is the user's and the
+    assistant's text.
   - **Lifecycle, as on ADK** (the base's: see Changed). A cleanup or a model
     switch waits for the running turn. A failed initialization closes the
     checkpointer it opened. A model switch
@@ -980,10 +981,11 @@ the start of the entry's title.
   trigger leaves the shared session alone. ADK's own pass after each turn is
   switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
   for a summary after the answer. A summary that fails is one warning a
-  turn, "Could not summarize the earlier conversation; older turns are left
-  out instead.", and the next turn tries again (a later call of the same
-  turn only once the range has grown); Ctrl+C during one writes
-  nothing. A request still over its agent's input budget (the summary
+  turn, "Could not summarize the earlier conversation; the agent goes on
+  without a new summary." (the text Deep Agents gives; the fit guard below
+  says itself what it leaves out), and the next turn tries again (a later
+  call of the same turn only once the range has grown); Ctrl+C during one
+  writes nothing. A request still over its agent's input budget (the summary
   lags a call, a sub-agent may run on a smaller model, an unknown window
   counts as 128,000 tokens) has its oldest whole turns left out of that
   request only, by the fit guard (`workflow/adk/fit_guard_plugin.py`), which
@@ -1160,8 +1162,9 @@ the start of the entry's title.
   context. It says "Nothing to summarize yet." with nothing before the kept
   tail (or no conversation yet), "Could not summarize: <error>" once when
   the summary fails (the error's type when it has no words), and "/compact
-  is not supported on this backend" on LangGraph and in a native ADK YAML
-  app, with no events box. `/new` starts a new conversation without a
+  is not supported on this backend" on LangGraph, with no events box (a
+  native ADK YAML app, which no `BaseCLIApp` starts, has no `compact`
+  either). `/new` starts a new conversation without a
   restart, under the turn lock: memories are proposed from the conversation
   being left first when `auto_extract_session_facts` is on, as at exit,
   under the status line "Looking for memories to propose…" (a failure
@@ -1261,6 +1264,29 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **Importing the ADK backend changes no logger, and a manager no longer
+  re-registers Claude with ADK.** Importing `agentic_cli.workflow.adk.manager`
+  set the `google_genai.types` logger to ERROR for the whole process;
+  `configure_logging()`, which `BaseCLIApp` calls, does it now, beside the
+  other third-party loggers it quiets (an app that configures its own
+  logging may now see google-genai's "non-text parts in the response"
+  warning). Each `GoogleADKWorkflowManager` construction pointed ADK's
+  process-wide model registry at `DirectAnthropicLlm` for `claude-*` names
+  again and cleared its cache; the first one does it, once per process
+  (`anthropic_llm.ensure_direct_anthropic`; `register_direct_anthropic`
+  still registers when called).
+
+- **A call to a tool name the agent does not have reads the same on ADK and
+  Deep Agents, and is no warning.** The model reads ADK's own first two
+  lines, "<name> failed: ValueError: Tool '<name>' not found." and the
+  agent's tools by name, without ADK's advice to a developer ("Possible
+  causes: …"); the log says `tool_not_found` at info, where ADK's
+  `ToolErrorPlugin` logged `tool_raised` as a warning, with a traceback,
+  over the prompt. It is the model's mistake, which it reads and corrects.
+  On ADK the permission gate lets ADK's stand-in for the name through
+  (`tool_error_plugin.is_unknown_tool`: a bare `BaseTool`, which runs
+  nothing) to `ToolErrorPlugin`.
 
 - **Every turn starts in `BaseWorkflowManager._turn`, and a job's resume and
   `can_resume` are the base's, over two backend hooks.**
@@ -2001,9 +2027,9 @@ the start of the entry's title.
   model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
   window that works. A summary the model writes no text for (Claude can
   refuse one) is not stored: the request goes on in full, the user is told
-  "Could not summarize the earlier conversation; it is sent in full
-  instead." once a turn, and the next turn tries again (a later call of the
-  same turn only once the range has grown). Both settings are
+  "Could not summarize the earlier conversation; the agent goes on without
+  a new summary." once a turn, as on ADK, and the next turn tries again (a
+  later call of the same turn only once the range has grown). Both settings are
   project-settable, and a `/settings` change of either rebuilds the agents,
   keeping the conversation.
 - **google-adk 2.13 is supported, as is 2.12.** The OpenAI-compatible model
@@ -2351,6 +2377,34 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **`write_file` and `edit_file` of an existing file work on Windows with
+  Python 3.12.** Keeping the file's permission bits called `os.fchmod`,
+  which Python on Windows has only from 3.13, so every such call failed
+  with `AttributeError`. Where the platform has no `fchmod` (there the
+  bits mean nothing but read-only) the bits are no longer copied.
+
+- **The ADK conversation store is owner-only.** `sessions.db` (the default
+  `session_store`, sqlite) was created with the process's umask: 0644 in a
+  0755 folder under the usual 022, so another account on the machine could
+  read every conversation, though the raw LLM log of the same words is
+  0600. The file is now created 0600 before the database opens it, in a
+  folder created 0700 (a folder that exists is left as it is), and at the
+  default location a file from an earlier version is tightened to 0600 when
+  it is opened, with the `-journal`, `-wal` or `-shm` file a crash left
+  beside it (`workflow.checkpointers.private_sqlite_file`, over
+  `file_utils.make_private_file`; a symlink is left alone). A file that
+  `sqlite_uri` names and that exists keeps its permissions: it may be
+  shared on purpose (0660 in a team folder). Deep Agents' `checkpoints.db`
+  is made the same way.
+
+- **On ADK, an MCP tool's error result is a failed tool call.** A result
+  the server marks `isError` was a `TOOL_RESULT` with `success=True`, shown
+  as "Result: 2 items". It is now `success=False` with the result's text in
+  `metadata["error"]` (its text blocks, a line each, or Deep Agents' words
+  for one without text), shown "Failed: <text>", as Deep Agents reports
+  it; the model reads the result as before. A framework tool's failed
+  result names its error in `metadata["error"]` too, as on Deep Agents.
 
 - **A finished job's result is no longer given up when its delivery stops
   before reaching the agent.** The CLI claimed a job's delivery before it
@@ -3047,9 +3101,10 @@ step; each entry says what to use instead.
   OpenAI refuse, so every later turn of that conversation failed. Deep
   Agents reported a call that had finished beside the cancelled one as "did
   not complete", so a side effect could be repeated. Now a call that
-  finished keeps its result and the state it changed (`save_tasks`' tasks),
-  a running one is answered "Interrupted by the user before it finished; it
-  may have partly run. Check before running it again.", one waiting at its
+  finished keeps its result (as the tool result cap cut it, its full output
+  saved once) and the state it changed (`save_tasks`' tasks), a running one
+  is answered "Interrupted by the user before it finished; it may have
+  partly run. Check before running it again.", one waiting at its
   permission prompt or at a question "Not run: the user cancelled it.", a
   delegation to a sub-agent as interrupted, and a call whose job was already
   submitted with the job's state (found among the jobs the manager holds,

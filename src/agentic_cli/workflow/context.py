@@ -64,6 +64,15 @@ KEEP_FRACTION = 0.12
 MIN_SAVING = 0.2
 #: The ``error_code`` of the error a conversation too long for its model ends in.
 OVERFLOW_ERROR_CODE = "CONTEXT_OVERFLOW"
+#: What the user is told, once a turn, when a summary could not be written, on
+#: both backends. True whatever comes next: Deep Agents sends the conversation
+#: whole; ADK does too, unless it is over its budget, when the fit guard or the
+#: overflow handler leaves its oldest turns out and says so itself.
+SUMMARY_FAILED = (
+    "Could not summarize the earlier conversation; the agent goes on without a new summary."
+)
+#: The ``error_code`` of that warning.
+SUMMARY_FAILED_CODE = "summary_failed"
 
 #: The share of the window the input budget starts from (Deep Agents' margin).
 _WINDOW_SHARE = 95  # percent

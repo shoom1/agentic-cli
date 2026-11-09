@@ -7,6 +7,10 @@ capabilities — an EXEMPT one would be waved straight through), never the tool'
 class name, and never equality.
 
 Adapter check order (mirrors LangGraph wrapper for consistency):
+0. ADK's stand-in for a tool name the agent does not have (a bare
+   ``BaseTool``, ``tool_error_plugin.is_unknown_tool``) passes: it runs
+   nothing, and ``ToolErrorPlugin`` answers ADK's lookup error with ADK's
+   own text, as Deep Agents' gate does.
 1. Resolve the definition bound to this exact object. Framework-issued tools —
    registered callables, service-bound factory variants, and the native ADK
    tool objects the framework constructs (skill tools, and the delegation tool
@@ -42,6 +46,7 @@ from agentic_cli.tools.registry import (
     identify_tool,
     register_tool,
 )
+from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
 from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY, brings_outside_content
 from agentic_cli.workflow.permissions import EXEMPT
 from agentic_cli.workflow.permissions.capabilities import Capability, _CapabilityExempt
@@ -147,6 +152,22 @@ class _Sentinel:
         return f"<{self._label}>"
 
 
+def tool_definition(tool: "BaseTool") -> ToolDefinition | None:
+    """The registry's definition of this exact tool object, or None.
+
+    Bound to the object itself, or to the callable one of ADK's own
+    function-tool types runs (``_TRUSTED_FUNCTION_TOOL_TYPES``); never found
+    by a name. None for anything else: an MCP tool, or a tool the framework
+    did not issue. How the permission gate (steps 1 and 2) and the tool
+    result cap identify a tool.
+    """
+    defn = identify_tool(tool)
+    if defn is not None:
+        return defn
+    func = _trusted_wrapped_callable(tool)
+    return identify_tool(func) if func is not None else None
+
+
 # The tool carries no registry identity: deny.
 _UNVERIFIED = _Sentinel("unverified-tool")
 # A genuine MCP tool: gate under the synthetic ``mcp`` capability.
@@ -182,14 +203,16 @@ def _model_side_tool(llm_request: Any, callback_context: Any) -> str | None:
     ``code_execution``, and whatever ADK's genai adds) is the model's own: the
     field that is set names it. An agent's code executor runs the model's code
     blocks and puts their output in the conversation, which nothing in the
-    request shows.
+    request shows; it is read through ADK's public
+    ``get_invocation_context()``.
     """
     config = getattr(llm_request, "config", None)
     for tool in getattr(config, "tools", None) or ():
         for field in getattr(type(tool), "model_fields", ()):
             if field != "function_declarations" and getattr(tool, field, None) is not None:
                 return field
-    invocation = getattr(callback_context, "_invocation_context", None)
+    invocation_context = getattr(callback_context, "get_invocation_context", None)
+    invocation = invocation_context() if invocation_context is not None else None
     if getattr(getattr(invocation, "agent", None), "code_executor", None) is not None:
         return "code_executor"
     return None
@@ -236,6 +259,10 @@ class PermissionPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: "ToolContext | None",
     ) -> dict | None:
+        if is_unknown_tool(tool):
+            # ADK's stand-in for a name the agent has no tool for: it runs
+            # nothing, and ToolErrorPlugin answers ADK's lookup error next.
+            return None
         defn = self._resolve_definition(tool)
         denial = await self._gate(tool, defn, tool_args, tool_context)
         if denial is None:
@@ -352,15 +379,10 @@ class PermissionPlugin(BasePlugin):
         the framework did not issue, which the caller denies. There is no
         name-based path: a name is chosen by whoever built the tool.
         """
-        defn = identify_tool(tool)
+        defn = tool_definition(tool)
         if defn is not None:
             return defn
-
-        func = _trusted_wrapped_callable(tool)
-        if func is not None:
-            return identify_tool(func) or _UNVERIFIED
-
-        if _is_mcp_tool(tool):
+        if _trusted_wrapped_callable(tool) is None and _is_mcp_tool(tool):
             return _MCP
         return _UNVERIFIED
 

@@ -7,6 +7,8 @@ manager builds a DatabaseSessionService (durable) vs InMemory (ephemeral).
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,17 @@ from agentic_cli.config import BaseSettings
 
 def _settings(tmp_path: Path, **over) -> BaseSettings:
     return BaseSettings(workspace_dir=tmp_path, **over)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+@pytest.fixture
+def umask_022():
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
 
 
 @pytest.fixture
@@ -109,6 +122,84 @@ class TestAdkSessionServiceSelection:
         assert isinstance(svc, DatabaseSessionService)
         assert (tmp_path / "sessions").is_dir()
 
+    async def test_the_database_is_owner_only_in_an_owner_only_folder(
+        self, tmp_path: Path, umask_022
+    ):
+        """It holds every word of a conversation, as the raw LLM log does (0600)."""
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        svc = mgr._make_session_service()
+        await svc.create_session(app_name="app", user_id="u", session_id="s")
+
+        db = tmp_path / "sessions" / "sessions.db"
+        assert (oct(_mode(db)), oct(_mode(db.parent))) == (oct(0o600), oct(0o700))
+
+    async def test_a_database_from_before_is_tightened_when_opened(
+        self, tmp_path: Path, umask_022
+    ):
+        (tmp_path / "sessions").mkdir()
+        db = tmp_path / "sessions" / "sessions.db"
+        db.write_bytes(b"")
+        db.chmod(0o644)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o600)
+
+    async def test_a_journal_left_beside_a_database_from_before_is_tightened(
+        self, tmp_path: Path, umask_022
+    ):
+        (tmp_path / "sessions").mkdir()
+        for name in ("sessions.db", "sessions.db-journal"):
+            (tmp_path / "sessions" / name).write_bytes(b"")
+            (tmp_path / "sessions" / name).chmod(0o644)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        mgr._make_session_service()
+
+        assert oct(_mode(tmp_path / "sessions" / "sessions.db-journal")) == oct(0o600)
+
+    async def test_an_existing_database_the_user_names_is_left_as_it_is(
+        self, tmp_path: Path, umask_022
+    ):
+        """``sqlite_uri`` may name a file shared on purpose (0660 in a team
+        folder): tightening it at every start would lock the others out."""
+        team = tmp_path / "team"
+        team.mkdir()
+        db = team / "agent.db"
+        db.write_bytes(b"")
+        db.chmod(0o660)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite", sqlite_uri=str(db)))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o660)
+
+    async def test_a_missing_database_the_user_names_is_created_owner_only(
+        self, tmp_path: Path, umask_022
+    ):
+        db = tmp_path / "team" / "agent.db"
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite", sqlite_uri=str(db)))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o600)
+
+    async def test_a_uri_with_a_query_names_the_file_before_it(
+        self, tmp_path: Path, umask_022
+    ):
+        """SQLAlchemy passes a URI's query (``?timeout=30``) on to sqlite3:
+        the database file is the path before it, and no other file is made."""
+        db = tmp_path / "team" / "app.db"
+        mgr = self._manager(_settings(
+            tmp_path, session_store="sqlite", sqlite_uri=f"sqlite:///{db}?timeout=30"
+        ))
+        svc = mgr._make_session_service()
+        await svc.create_session(app_name="app", user_id="u", session_id="s")
+
+        assert sorted(path.name for path in db.parent.iterdir()) == ["app.db"]
+        assert oct(_mode(db)) == oct(0o600)
+
 
 class TestAdkNativeSessions:
     """Native session query/manage against a real sqlite DatabaseSessionService."""
@@ -144,6 +235,33 @@ class TestAdkNativeSessions:
                 content=types.Content(role="user", parts=[types.Part.from_text(text=text)]),
             ),
         )
+
+    async def test_existence_and_a_delete_read_only_what_they_need(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """``session_exists`` reads one event (a session without any is no
+        conversation), ``delete_session`` none: a long conversation read
+        whole costs tens of milliseconds."""
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-x", "remember the alpha value")
+        await mgr._session_service.create_session(
+            app_name=mgr.app_name, user_id=settings.default_user, session_id="empty"
+        )
+        asked: list = []
+        real = mgr._session_service.get_session
+
+        async def recording(**kwargs):
+            asked.append(kwargs.get("config"))
+            return await real(**kwargs)
+
+        monkeypatch.setattr(mgr._session_service, "get_session", recording)
+
+        assert await mgr.session_exists("sess-x") is True
+        assert await mgr.session_exists("empty") is False
+        assert await mgr.delete_session("sess-x") is True
+        assert await mgr.delete_session("missing") is False
+
+        assert [getattr(config, "num_recent_events", None) for config in asked] == [1, 1, 0, 0]
 
     async def test_exists_list_recent_delete(self, tmp_path: Path):
         mgr, settings = self._manager(tmp_path)

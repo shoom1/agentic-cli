@@ -125,12 +125,14 @@ class TestLLMLoggingPlugin:
         assert mode == 0o600
 
     def test_secrets_redacted_in_written_log(self, plugin):
-        from agentic_cli.workflow.adk.plugins import _redact_secrets
+        from agentic_cli.workflow.events import WorkflowEvent
 
-        line = "authorization: Bearer sk-ant-api03-ABCDEFGH1234567890ZYXW"
-        redacted = _redact_secrets(line)
-        assert "sk-ant-api03-ABCDEFGH1234567890ZYXW" not in redacted
-        assert "REDACTED" in redacted
+        secret = "sk-ant-api03-ABCDEFGH1234567890ZYXW"
+        plugin._write_to_log(WorkflowEvent.text(f"authorization: Bearer {secret}", "s"))
+
+        written = plugin._log_file.read_text()
+        assert secret not in written
+        assert "REDACTED" in written
 
     async def test_before_model_captures_request(self, plugin):
         """before_model_callback should capture request data and buffer an event."""

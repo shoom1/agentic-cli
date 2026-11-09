@@ -118,6 +118,11 @@ class OpenCalls:
         if call_id:
             self._finished.setdefault(get_active_turn(), {})[call_id] = result
 
+    def recorded(self, call_id: str | None) -> Any | None:
+        """What ``finished`` recorded for ``call_id`` in the active turn's
+        conversation, or None."""
+        return self._finished.get(get_active_turn(), {}).get(call_id) if call_id else None
+
     @contextmanager
     def asking(self, call_id: str | None) -> Iterator[None]:
         """Mark ``call_id`` as waiting at its prompt while the block runs.

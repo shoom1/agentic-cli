@@ -12,7 +12,9 @@ ADK does.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import sys
 import types
 from pathlib import Path
@@ -47,6 +49,10 @@ def isolated(tmp_path, monkeypatch) -> Path:
 
 def _settings(root: Path, **kwargs) -> BaseSettings:
     return BaseSettings(workspace_dir=root / "ws", **kwargs)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
 
 
 def _tables(path: Path) -> set[str]:
@@ -393,6 +399,91 @@ class TestDeepAgentsSqlitePath:
 
         assert path == target
         assert path.parent.is_dir()
+
+    async def test_the_file_is_owner_only_in_an_owner_only_folder(self, isolated):
+        """It holds every word of a conversation, as ADK's ``sessions.db`` and
+        the raw LLM log do (0600)."""
+        old = os.umask(0o022)
+        try:
+            path = deepagents_sqlite_path(_settings(isolated))
+            saver, cm = await open_checkpointer("sqlite", sqlite_path=path)
+            await cm.__aexit__(None, None, None)
+        finally:
+            os.umask(old)
+
+        assert (oct(_mode(path)), oct(_mode(path.parent))) == (oct(0o600), oct(0o700))
+        assert "checkpoints" in _tables(path)
+
+    def test_a_file_from_before_is_tightened(self, isolated):
+        settings = _settings(isolated)
+        settings.sessions_dir.mkdir(parents=True)
+        old = settings.sessions_dir / "checkpoints.db"
+        old.write_bytes(b"")
+        old.chmod(0o644)
+
+        path = deepagents_sqlite_path(settings)
+
+        assert oct(_mode(path)) == oct(0o600)
+
+    def test_sqlites_files_beside_one_from_before_are_tightened_too(self, isolated):
+        """A crash of an earlier build can leave ``-wal`` and ``-shm`` (or a
+        ``-journal``) 0644; SQLite writes the new pages into them until a
+        clean close."""
+        settings = _settings(isolated)
+        settings.sessions_dir.mkdir(parents=True)
+        names = ["checkpoints.db", "checkpoints.db-wal", "checkpoints.db-shm",
+                 "checkpoints.db-journal"]
+        for name in names:
+            (settings.sessions_dir / name).write_bytes(b"")
+            (settings.sessions_dir / name).chmod(0o644)
+
+        deepagents_sqlite_path(settings)
+
+        assert {name: oct(_mode(settings.sessions_dir / name)) for name in names} == {
+            name: oct(0o600) for name in names
+        }
+
+    def test_sqlites_files_beside_one_the_user_names_are_left_as_they_are(self, isolated):
+        team = isolated / "team"
+        team.mkdir()
+        for name in ("agent.db", "agent.db-wal"):
+            (team / name).write_bytes(b"")
+            (team / name).chmod(0o660)
+
+        deepagents_sqlite_path(_settings(isolated, sqlite_uri=str(team / "agent.db")))
+
+        assert oct(_mode(team / "agent.db-wal")) == oct(0o660)
+
+    def test_an_existing_file_the_user_names_is_left_as_it_is(self, isolated):
+        """``sqlite_uri`` may name a file shared on purpose (0660 in a team
+        folder): tightening it at every start would lock the others out."""
+        team = isolated / "team"
+        team.mkdir()
+        shared = team / "agent.db"
+        shared.write_bytes(b"")
+        shared.chmod(0o660)
+
+        path = deepagents_sqlite_path(_settings(isolated, sqlite_uri=str(shared)))
+
+        assert path == shared
+        assert oct(_mode(path)) == oct(0o660)
+
+    def test_a_missing_file_the_user_names_is_created_owner_only(self, isolated):
+        old = os.umask(0o022)
+        try:
+            path = deepagents_sqlite_path(
+                _settings(isolated, sqlite_uri=str(isolated / "team" / "agent.db"))
+            )
+        finally:
+            os.umask(old)
+
+        assert oct(_mode(path)) == oct(0o600)
+
+    def test_an_in_memory_database_names_no_file(self, isolated):
+        path = deepagents_sqlite_path(_settings(isolated, sqlite_uri="sqlite:///:memory:"))
+
+        assert str(path) == ":memory:"
+        assert not (isolated / ":memory:").exists()
 
 
 class TestLangGraphCreateCheckpointer:

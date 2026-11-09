@@ -46,7 +46,11 @@ from agentic_cli.models import ProviderKind  # noqa: E402
 from agentic_cli.workflow.adk.fit_guard_plugin import FIT_NOTE  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
-from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, overflow_message  # noqa: E402
+from agentic_cli.workflow.context import (  # noqa: E402
+    OVERFLOW_ERROR_CODE,
+    SUMMARY_FAILED,
+    overflow_message,
+)
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.models.fakes import openrouter_spec  # noqa: E402
@@ -531,6 +535,7 @@ class TestTheSummaryAnOverflowAsksFor:
         assert (warning.metadata["error_code"], warning.metadata["recoverable"]) == (
             "summary_failed", True
         )
+        assert warning.content == SUMMARY_FAILED  # the words both backends use
         assert texts(third) == ["A3."]
         assert FIT_NOTE in api.requests[-1].content.decode()
 

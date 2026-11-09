@@ -164,6 +164,10 @@ def configure_logging(settings: "BaseSettings | None" = None) -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("google").setLevel(logging.WARNING)
     logging.getLogger("anthropic").setLevel(logging.WARNING)
+    # google-genai warns when a response holding a function call is read as
+    # text ("there are non-text parts in the response"); the ADK event
+    # processor reads every part on its own (ADKEventProcessor.process_part).
+    logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
     # trafilatura (and its own dependencies) log raw ERROR lines to stderr
     # under the default logging setup (e.g. "parsed tree length: 0, wrong

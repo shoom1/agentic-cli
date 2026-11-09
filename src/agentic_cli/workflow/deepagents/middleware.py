@@ -173,7 +173,9 @@ class PermissionMiddleware(AgentMiddleware):
         call = request.tool_call
         if request.tool is None:
             available = [tool.name for tool in getattr(request.runtime, "tools", None) or ()]
-            logger.warning("tool_not_found", tool=call["name"], agent=self.agent_name)
+            # The model's own mistake, which it reads and corrects: at info,
+            # as on ADK, not a warning over the prompt.
+            logger.info("tool_not_found", tool=call["name"], agent=self.agent_name)
             return error_tool_message(unknown_tool_result(call["name"], available), call)
         denial = await self._check(request.tool, call)
         if denial is not None:

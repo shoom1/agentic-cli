@@ -10,6 +10,7 @@ tools before the model callbacks run.
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,3 +230,20 @@ async def test_a_plain_agent_stays_unmarked(monkeypatch):
         assert await _stored_mark(manager) == ""
     finally:
         await manager.cleanup()
+
+
+async def test_the_agent_is_read_through_adks_public_accessor(active_turn):
+    """``get_invocation_context()``, ADK's public way to the running agent,
+    not the private ``_invocation_context`` it copies."""
+    marks = OutsideContentMarks()
+    plugin = PermissionPlugin(marks=marks, root="root")
+    agent = SimpleNamespace(code_executor=UnsafeLocalCodeExecutor())
+    context = SimpleNamespace(
+        get_invocation_context=lambda: SimpleNamespace(agent=agent),
+        agent_name="root",
+        state={},
+    )
+
+    await plugin.before_model_callback(callback_context=context, llm_request=await _request())
+
+    assert marks.get(REF) == "code_executor"

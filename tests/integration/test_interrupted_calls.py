@@ -83,6 +83,17 @@ async def ic_fast(topic: str) -> dict:
     return {"success": True, "fact": f"{topic} is 42"}
 
 
+#: What ``ic_long`` answers with: longer than the cap the tests set.
+LONG_FACT = "x" * 5_000
+
+
+@register_tool(capabilities=EXEMPT, description="Answers at once, at length (a test tool).")
+async def ic_long(topic: str) -> dict:
+    """Look a topic up at once, at length."""
+    SIGNALS["finished"].set()
+    return {"success": True, "fact": f"{topic} is 42 {LONG_FACT}"}
+
+
 @register_tool(
     capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Reads a file (a test tool that needs permission).",
@@ -338,6 +349,74 @@ async def test_a_call_that_finished_beside_it_keeps_its_result(hermetic, monkeyp
     sent = results(claude.last("Answer"))
     assert claude.refused == []
     assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER not in sent["toolu_f"]
+    assert INTERRUPTED_BY_USER in sent["toolu_w"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
+    hermetic, monkeypatch, backend
+):
+    """A finished result the tool result cap cuts is still the call's result,
+    as the cap cut it, and its full output is saved once.
+
+    On ADK the plugin that records each finished result runs before the
+    cap, which returns its cut and so ends ADK's after-tool callbacks: after
+    the cap, it would never see a result the cap cut. The cancelled turn's
+    seal sends the cut the cap made, not a second one with a file of its own.
+    """
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_long", {"topic": "tea"}, "toolu_f"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_long, ic_wait, tool_result_max_chars=2_000)
+    try:
+        running = asyncio.create_task(turn(manager, "Both, please."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
+        await asyncio.sleep(0.05)  # the long call's result is recorded
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER not in sent["toolu_f"]
+    assert LONG_FACT not in sent["toolu_f"]
+    saved = [path.name for path in Path.cwd().glob(".agentic_cli/tool-output/ic_long-*")]
+    assert len(saved) == 1, saved
+    assert f"Full output: ./.agentic_cli/tool-output/{saved[0]};" in sent["toolu_f"]
+    assert INTERRUPTED_BY_USER in sent["toolu_w"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_call_to_an_unknown_tool_beside_it_keeps_its_answer(
+    hermetic, monkeypatch, backend
+):
+    """A call to a tool the agent does not have was answered at once, with
+    ADK's "not found": it keeps that answer, as a finished call does.
+
+    On ADK ``ToolErrorPlugin`` answers it and ADK skips the after-tool
+    callbacks, where a finished call's result is recorded.
+    """
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("nope", {}, "toolu_n"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_wait)
+    try:
+        await cancelled(manager, "Both, please.")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert INTERRUPTED_BY_USER not in sent["toolu_n"]
+    assert "nope failed: ValueError: Tool 'nope' not found." in sent["toolu_n"]
+    assert "Available tools: ic_wait" in sent["toolu_n"]
     assert INTERRUPTED_BY_USER in sent["toolu_w"]
 
 

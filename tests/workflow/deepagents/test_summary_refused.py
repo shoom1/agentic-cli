@@ -54,7 +54,9 @@ async def _turns(settings, monkeypatch, script, count: int) -> tuple[list, Scrip
 
 
 #: What the user reads, once a turn, when a summary could not be written.
-SUMMARY_FAILED = "Could not summarize the earlier conversation; it is sent in full instead."
+SUMMARY_FAILED = (
+    "Could not summarize the earlier conversation; the agent goes on without a new summary."
+)
 
 
 def _types(events) -> list:

@@ -58,7 +58,6 @@ from google.genai import types
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.adk.compaction import SUMMARY_FAILED, SUMMARY_FAILED_CODE
 from agentic_cli.workflow.adk.fit_guard_plugin import (
     drop_turns,
     fold_summary,
@@ -70,6 +69,8 @@ from agentic_cli.workflow.adk.fit_guard_plugin import (
 )
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
+    SUMMARY_FAILED,
+    SUMMARY_FAILED_CODE,
     is_context_overflow,
     is_overflow_text,
     overflow_message,
@@ -86,6 +87,14 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.context import ContextBudget
 
 logger = Loggers.workflow()
+
+#: The plugin's name, which ADK's plugin manager names when it wraps an error
+#: the plugin raised.
+OVERFLOW_PLUGIN = "context_overflow"
+#: How that wrapper starts: ``RuntimeError("Error in plugin 'context_overflow'
+#: during …")``, with the error as its ``__cause__`` (contract-tested). The
+#: manager unwraps it (``manager._plugin_cause``).
+OVERFLOW_PLUGIN_FAILED = f"Error in plugin '{OVERFLOW_PLUGIN}'"
 
 
 class OverflowPlugin(BasePlugin):
@@ -114,7 +123,7 @@ class OverflowPlugin(BasePlugin):
         summarize_now: Callable[["CallbackContext"], Awaitable["WrittenSummary | None"]],
         fit_guard: "FitGuardPlugin | None" = None,
     ) -> None:
-        super().__init__(name="context_overflow")
+        super().__init__(name=OVERFLOW_PLUGIN)
         self._root = root
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)

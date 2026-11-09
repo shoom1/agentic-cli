@@ -57,3 +57,52 @@ async def test_coordinator_with_sub_agents_builds():
     assert root.name == "coordinator"
     assert [a.name for a in root.sub_agents] == ["worker"]
     assert root.description == ""
+
+
+async def test_one_initialization_validates_the_graph_once(monkeypatch):
+    """The base validates it before anything is allocated; building the agents
+    takes that graph rather than validating it again. A second
+    initialization validates again, once."""
+    from agentic_cli.workflow.adk import manager as adk_manager
+
+    validated: list[list[str]] = []
+    real = adk_manager.validate_agent_graph
+
+    def counting(configs, *args, **kwargs):
+        validated.append([config.name for config in configs])
+        return real(configs, *args, **kwargs)
+
+    monkeypatch.setattr(adk_manager, "validate_agent_graph", counting)
+    configs = [
+        AgentConfig(name="coordinator", prompt="Route.", sub_agents=["worker"]),
+        AgentConfig(name="worker", prompt="Work."),
+    ]
+    with MockContext(google_api_key="test-key", session_store="memory") as ctx:
+        mgr = GoogleADKWorkflowManager(agent_configs=configs, settings=ctx.settings)
+        try:
+            await mgr.initialize_services()
+            assert validated == [["coordinator", "worker"]]
+            assert mgr._root_agent.name == "coordinator"
+            await mgr.reinitialize(preserve_sessions=True)
+            assert mgr._root_agent.name == "coordinator"
+        finally:
+            await mgr.cleanup()
+
+    assert validated == [["coordinator", "worker"]] * 2
+
+
+def test_claude_names_are_pointed_at_the_direct_api_once_per_process(monkeypatch):
+    """ADK's model registry is process-wide and a registration lasts: each
+    manager's construction no longer registers again and clears its cache."""
+    from agentic_cli.workflow.adk import anthropic_llm
+
+    registered: list[int] = []
+    monkeypatch.setattr(anthropic_llm, "register_direct_anthropic", lambda: registered.append(1))
+    monkeypatch.setattr(anthropic_llm, "_registered", False, raising=False)
+    with MockContext(google_api_key="test-key", session_store="memory") as ctx:
+        for _ in range(3):
+            GoogleADKWorkflowManager(
+                agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
+            )
+
+    assert registered == [1]

@@ -435,9 +435,6 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
 
 #: The custom run event a summary that could not be written reports: ``{"agent"}``.
 SUMMARY_NOT_WRITTEN = "agentic_cli.summary_not_written"
-#: What the user is told, once a turn, when a summary could not be written.
-SUMMARY_FAILED = "Could not summarize the earlier conversation; it is sent in full instead."
-SUMMARY_FAILED_CODE = "summary_failed"
 
 
 class NoSummaryWritten(Exception):
