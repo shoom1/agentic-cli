@@ -7,6 +7,185 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Migrating from 0.6
+
+Data from 0.6 migrates on its own; an app, and its settings, may need the
+changes listed below. Each item ends with its full entry: the section, then
+the start of the entry's title.
+
+#### What happens on its own
+
+- Each knowledge base folder is imported into one `kb.sqlite` at its first
+  open, and every document is embedded again at the first open that has the
+  model; the old files move to `pre-0.7.0/` (going back to 0.6 means restoring
+  them by hand), and `embeddings/` is deleted. (Changed: **The knowledge base
+  keeps…**)
+- 0.6's `memories.json` is imported once into the user scope: the model's
+  memories as memories, the extracted ones as proposals in `/memory inbox`
+  (past its 100, only in `memory/pre-0.7.0/`), the archived ones not at all.
+  (Changed: **Memories are markdown files…**)
+- A saved grant on `/`, home or above it, or whose literal part holds a
+  wildcard, is dropped at startup with a warning. (Security: **A grant for a
+  file…**, **An approval is remembered…**)
+
+#### What an app must change
+
+- `BaseCLIApp` now defines `main`, `add_arguments`, `from_args`,
+  `session_start` and `exit_status`: rename an app's own attributes of those
+  names. (Added: **`BaseCLIApp.main()`…**)
+- thinking-prompt 0.4: drop `AppInfo(echo_thinking=)`; define
+  `get_theme(name)` for `get_styles()` (`get_default_styles()` is gone); catch
+  `asyncio.CancelledError` from `MessageProcessor.process()` and
+  `process_resume()`; pass `description=` and `max_width=` to
+  `field_to_ui_item`. (Changed: **agentic-cli runs on thinking-prompt…**)
+- `SettingsPersistence(app_name)` needs the app's name, `save(settings,
+  keys=...)` the fields to write; `load()` and the `path=` dump are gone. A
+  `save_settings` override takes `keys`, or `/settings` reports "Settings
+  applied but not saved". (Removed: **`SettingsPersistence.save()`…**)
+- A `get_ui_setting_keys()` override extends `super()`'s list, or `/settings`
+  shows only the pickers it names. (Changed: **`/settings` has a model
+  picker…**)
+- `MemoryItem` is `Memory`; `MemoryStore(user_dir, project_dir=None, ...)`
+  replaces `MemoryStore(base_dir, embedding_service=)` and
+  `memory_tools.MemoryStore(settings)`; `on_session_end` returns
+  `list[Proposal]`. (Removed: **The 0.6 memory store…**,
+  **`agentic_cli.tools.memory_tools.MemoryStore(settings)`**)
+- `save_memory(description, content, type, scope="project",
+  user_requested=False)` replaces `save_memory(content, tags, importance)`,
+  and no memory tool takes `tags`, `importance`, `include_archived` or
+  `purge`. (Removed: **The 0.6 memory store…**)
+- The knowledge base is `agentic_cli.memory.kb`; `agentic_cli.knowledge_base`,
+  `tools.kb_convert` and the FAISS and BM25 classes are gone.
+  `KnowledgeBaseManager(base_dir)` reads no settings: pass `embedding=` (under
+  another model a knowledge base re-embeds all its text) and `summarizer=`.
+  `list_documents` returns no text or chunks. (Removed:
+  **`agentic_cli.knowledge_base`**; Changed: **The knowledge base keeps…**)
+- A tool declares `requires="knowledge_base"`; `workflow.kb_manager` and
+  `user_kb_manager` are `workflow.knowledge_base`, and
+  `workflow.memory_manager` is `workflow.memory_store`, built by
+  `memory_services.open_knowledge_base` and `open_memory_store`; the factories
+  take a `KnowledgeBase`. (Removed: **`requires="kb_manager"`** and the four
+  entries after it, to **`memory_services.build_memory_store`**)
+- `kb_ingest_url` is gone: `web_fetch` the page, then `kb_ingest_file` its
+  `saved_path`. (Removed: **The `kb_ingest_url` tool**)
+- A `filesystem.*`, `http.*` or `shell.*` capability needs `target_arg=` or
+  `target=`, and `task` is a reserved tool name. (Changed: **A resource
+  capability…**; Added: **`task` is a reserved…**)
+- In an ADK app built from configs, a sub-agent is called as a tool and
+  returns (no `transfer_to_agent`), seeing only its request unless
+  `context="inherit"`; a synchronous tool must be safe in a worker thread
+  beside other calls; a prompt's `{name}` is not filled from session state.
+  (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
+  ADK, an agent's prompt…**)
+- `app_name` comes only from the settings class or the constructor; ADK 2
+  refuses one that does not start with a letter, holds other than letters,
+  digits, `_` and `-`, or is `user`. Code calling ADK follows ADK 2's notes.
+  (Changed: **`app_name` comes only…**, **agentic-cli runs on ADK 2**)
+- A settings class built from the mixins must list them before
+  pydantic-settings' `BaseSettings`, and a skill path or `skills_dirs` entry
+  must be absolute. (Security: **A settings class composed…**, **A skill name
+  is looked up…**)
+- `ModelRegistry`, `manager.model_registry`, the settings' model helpers and
+  the backends' private model code give way to `manager.catalog`,
+  `agentic_cli.models` and the model factories; `manager.model` is a
+  `provider:model` reference. (Removed: **`agentic_cli.workflow.models`**,
+  both **Settings helpers**; Changed: **`manager.model` is…**)
+- `list_sessions` returns `SessionInfo` rows (`session_id`, `updated`,
+  `turns`); an app's own session backend implements `session_info`. (Changed:
+  **`list_sessions` returns…**)
+- `search_arxiv` and `URLValidator.resolve_and_validate` are coroutines;
+  `load_agents_from_yaml` raises `ValueError` for a file it cannot use.
+  (Fixed: **arXiv requests are paced…**, **`load_agents_from_yaml` raises…**;
+  Changed: **`web_fetch` answers an error…**)
+- Gone: `agentic_cli.tools.shell` (the OS sandbox is
+  `agentic_cli.tools.os_sandbox`), `ExecutionTimeoutError`,
+  `WorkflowEvent.tool_result(duration_ms=)`, `UsageTracker.record()`'s
+  `context_trimmed_already`, `PaperResult`, `WebResult`, `google_search_tool`
+  and unused members such as `ToolRegistry.get_functions`. (Removed: **The
+  shell toolset…**, **`WorkflowEvent.tool_result(duration_ms=)`…**, **The
+  token-drop warning**, **`agentic_cli.tools.search_sources.PaperResult`**,
+  **`agentic_cli.tools.google_search_tool`**, **Public members nothing…**)
+
+#### Behaviour a user will notice
+
+- `execute_python` runs inside the OS sandbox or is refused
+  (`os_sandbox_strict` now defaults to true): on Windows, or Linux without a
+  usable bubblewrap, until `os_sandbox_enabled` is false, and then each call
+  asks. (Security: **`execute_python` runs…**)
+- On the `local` `sandbox_execute` backend (opt-in:
+  `stateful_executor_backend` is `none` by default) every call asks, no import
+  is blocked, and `!pip` installs into the app's own environment. (Security:
+  **`execute_python` runs…**; Changed: **The local `sandbox_execute`…**)
+- Once a conversation has run a tool that brings outside content, every memory
+  write in it asks; on ADK a conversation from before 0.7.0 counts as such.
+  (Security: **A web page can no longer…**)
+- Reading the credential stores, the app's keys and settings or the project's
+  `.env` files, and writing its `.git`, are denied whatever the rules and
+  grants say. (Security: **The default permission rules…**)
+- A project knowledge base that is a symlink, or one with a symlinked
+  subfolder, no longer opens, and staging a sandbox input from inside a
+  session's folder fails. (Security: **The knowledge base never follows…**,
+  **The sandbox's file transfer…**)
+- `edit_file` refuses text found more than once unless `replace_all=True`; a
+  tool result over `tool_result_max_chars` (50,000) is cut, its full output
+  saved. (Changed: **`edit_file` changes one place…**; Added: **A tool result
+  too big…**)
+- On ADK the main agent's conversation is summarized as it grows, and Claude
+  and Gemini prompts are cached (`prompt_caching_enabled`, on by default).
+  (Added: **ADK summarizes…**; Changed: **The ADK backend caches…**)
+- With a Google key, no `models` list and no listing yet, an agent without a
+  model runs on `gemini-3.8-flash`, where 0.6 ran on `gemini-2.5-flash`.
+  (Changed: **Models are named…**)
+- `/settings` (Save or Cancel, no Ctrl+S) writes a pick equal to the default
+  too, and no save removes a key (delete it from `~/.{app_name}/settings.json`
+  to follow the app again); its pickers offer the `models` list. (Fixed: **A
+  pick of the class default…**; Changed: **`/settings` has a model picker…**)
+- `/resume` reopens a conversation and `/jobs resume` resumes finished jobs;
+  `/help` groups the commands; `/memory` reviews memories and the proposals a
+  conversation's end now files; `/compact` and `/new` are new. (Changed:
+  **`/resume` reopens…**, **`/help` lists…**; Added: **`/memory`, to
+  review…**, **`/compact [focus]`…**)
+
+#### Settings that moved or changed meaning
+
+- `model_providers` (user-only) defines every provider but Google, Anthropic
+  and OpenAI; `models` is the list the pickers offer; `model_roles` maps
+  `fast`, `strong` and an app's roles; `default_model` is never a role.
+  (Added: **Model settings**; Changed: **`settings.set_model()`…**)
+- `budget` thinking on a model that takes levels (Gemini 3, Claude 4.6 and
+  later) fails at startup; an agent's bare `model` that is no model id is an
+  app role, run on the default model with a warning, where 0.6 refused it.
+  (Changed: **`budget` thinking…**, **Models are named…**)
+- `context_summarize_at` and `context_max_tokens` replace `context_window_*`,
+  and a model whose window is 16,842 tokens or less no longer starts.
+  (Removed: **The `context_window_enabled`…**; Changed: **When a conversation
+  is summarized…**)
+- `permissions` joins every trusted source's rules, the environment's and the
+  constructor's included. (Security: **The permission engine enforces…**)
+- A project file may set `models`, `model_roles`, `context_*`,
+  `tool_result_max_chars` and `arxiv_max_pdf_bytes`, never `model_providers`,
+  `ui_theme`, `dialog_placement`, `app_name` or `os_sandbox_enabled`. (Added:
+  **Model settings**, **Two user settings…**; Changed: **`app_name` comes
+  only…**; Security: **`execute_python` runs…**)
+- `webfetch_max_content_bytes` limits a page's converted text; it and
+  `webfetch_max_pdf_bytes` have bounds, and a value outside them stops the
+  settings from loading. (Changed: **`webfetch_max_content_bytes`…**)
+- `webfetch_model`, `sandbox_packages` and `shell_*` are ignored where still
+  set; `knowledge_base_documents_dir` and `knowledge_base_embeddings_dir` are
+  gone. (Removed: **Settings `webfetch_model`…**, **The shell toolset…**,
+  **`settings.knowledge_base_documents_dir`**)
+- The memory store uses no embedding model; `memory_index_enabled` and
+  `memory_index_max_bytes` are new; `auto_extract_session_facts` files
+  proposals. (Changed: **Memories are markdown files…**; Added: **The main
+  agent gets an index…**)
+
+#### Deprecated
+
+- The LangGraph backend (`orchestrator="langgraph"`) is removed in 0.8.0:
+  install `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`.
+  Its sessions do not carry over. Nothing else is deprecated. (Deprecated:
+  **The LangGraph backend**)
+
 ### Security
 
 - **A web page can no longer plant a memory unnoticed.** A memory is read in
@@ -176,14 +355,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Saving settings keeps the project's deny rules.** The project
   `./.{app_name}/settings.json` may hold `permissions.deny` rules, which the
   permission engine reads from the file itself, but a settings save (any
-  `/settings` change, or `SettingsPersistence.save` without `path=`) rewrote
-  that file with its settings alone and dropped the section, so after the
-  next start a read the project denied was allowed (since 0.6.0). These
-  saves now keep the section as it is; a full save of a project file that is
-  not valid JSON raises instead of replacing it, as the `/settings` save
-  already did. The startup warning that called the section an ignored setting
-  is gone: its deny rules apply (its allow rules, as before, do not). A
-  `permissions` entry in a cwd `.env` is still reported as ignored.
+  `/settings` change, or a `SettingsPersistence.save`) rewrote that file
+  with its settings alone and dropped the section, so after the next start
+  a read the project denied was allowed (since 0.6.0). A save now keeps the
+  section as it is, and raises rather than replace a project file that is
+  not valid JSON. The startup warning that called the section an ignored
+  setting is gone: its deny rules apply (its allow rules, as before, do
+  not). A `permissions` entry in a cwd `.env` is still reported as ignored.
 - **`web_fetch` opens a connection for each request.** Its transport connects
   to the address it validated, so its connection pool is keyed by that IP,
   not the hostname, and it kept connections alive across fetches (since
@@ -253,9 +431,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pydantic warning. **Breaking:** a `permissions` value given to the
   constructor or the environment now applies, beside the user file's rules;
   a malformed `permissions` value in any trusted source stops the settings
-  from loading, even where another source also sets the field; and a full
-  settings save no longer writes `permissions` into the user file, nor does
-  a `SettingsPersistence.save(path=…)` dump.
+  from loading, even where another source also sets the field; and no
+  settings save writes `permissions` into the user file.
 - **`execute_python` runs code only inside the OS sandbox, unless you turn it
   off.** Where no sandbox backend existed (a Linux host without `bwrap`, with
   `os_sandbox_strict` off by default), when the sandbox could not be set up,
@@ -306,14 +483,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   create and replace its files in the folder linked to (another
   repository's `index.md`, say) or read another project's knowledge base.
   The `kb.*` tools need no approval, so nothing asked. Every file the knowledge
-  base reads or appends to (metadata, texts, summaries, concept pages, the
-  vector and keyword indexes, the lock) is now opened only when it is a
-  regular file, never through a symlink; one that is not counts as missing,
-  with a warning (`memory_file_refused`), and the next write replaces it,
-  except the ingest log, which is left alone (`kb_ingest_log_not_written`).
-  The log's title and arXiv ID are written on one line, control characters
-  removed. A knowledge base whose `documents`, `embeddings`, `files` or
-  `concepts` folder, or `.lock` file, is a symlink does not open
+  base reads or appends to (its `kb.sqlite`, summaries, concept pages, the
+  ingest log, and the 0.6 files it imports) is now opened only when it is a
+  regular file, never through a symlink; a summary or concept page that is
+  not counts as missing, with a warning (`memory_file_refused`), and the
+  next write replaces it, while the ingest log is left alone
+  (`kb_ingest_log_not_written`). The log's title and arXiv ID are written on
+  one line, control characters removed. A knowledge base whose `documents`,
+  `files`, `concepts` or `pre-0.7.0` folder, `kb.sqlite` (or a file SQLite
+  keeps beside it) or `.lock` file is a symlink does not open
   (`UnsafeKnowledgeBase`, exported from `agentic_cli.memory.kb`), nor does
   one reached through a symlink from the folder it is opened `within`
   (`KnowledgeBaseManager(within=)`, `KnowledgeBase.open(within=)`; the
@@ -2137,17 +2315,14 @@ step; each entry says what to use instead.
   entry that was not an object stopped the store from opening at all, one
   with a field of the wrong type (a content that is not text) broke every
   search, and when two entries shared an id the second silently replaced the
-  first. Each entry is now read on its own. One that does not parse, has a
-  field of the wrong type or repeats an earlier entry's id (the first is the
-  memory) is logged once (`memory_entry_unreadable`, with its position and
-  id), kept exactly as it was and written back by every save, so it costs
-  only itself and can be repaired by hand. A `memories.json` that does not
-  parse at all (not JSON, invalid UTF-8, empty, nested too deep, or neither a
-  list nor `{"items": [...]}`) is renamed to
-  `memories.json.unreadable-<UTC time>` before anything is written, and the
-  store starts empty beside it. A byte order mark, which some editors add, is
-  read past, and an unreadable `memories_embeddings.json` is ignored and the
-  vectors made again.
+  first. Each memory is now a file of its own (see Changed), and one that
+  cannot be used is listed as a problem, never rewritten, moved or deleted.
+  The import of 0.6's `memories.json` reads each entry on its own and skips
+  one it cannot use; a `memories.json` that does not parse at all (not
+  JSON, invalid UTF-8, empty, nested too deep, or neither a list nor
+  `{"items": [...]}`) is left where it is and listed as a problem
+  (`memory_import_unreadable`). A byte order mark, which some editors add,
+  is read past.
 - **A slow DNS server no longer freezes the app while `web_fetch` runs.** The
   fetcher's SSRF-safe transport resolved each host with `socket.getaddrinfo`
   on the event loop's thread: a fetch makes at least two lookups (robots.txt,
@@ -2216,10 +2391,10 @@ step; each entry says what to use instead.
   ripgrep gets one `--glob` for each, and every alternative is checked
   against the search root, so `{x,../*}` is refused.
 
-- **An app starts when a knowledge base scope, the embedding model or an
-  index cannot be opened.** Opening the knowledge base was all or nothing: a
-  scope that could not open (a read-only working directory, a document header
-  naming a source type the knowledge base does not know), an embedding model
+- **An app starts when a knowledge base scope or the embedding model cannot
+  be opened.** Opening the knowledge base was all or nothing: a scope that
+  could not open (a read-only working directory, a document header naming a
+  source type the knowledge base does not know), an embedding model
   that did not load (the first run with the `kb` extra while offline: the
   model is not cached yet), or an `index.faiss` FAISS cannot read (a git-LFS
   pointer) or its mappings in another shape, raised out of service
@@ -2227,15 +2402,12 @@ step; each entry says what to use instead.
   start. A scope that fails to open is now left out with a
   `kb_scope_unavailable` warning (the other scope takes the writes, and the
   one left out is not written to; `KnowledgeBase.open` raises only when no
-  scope opens); a model that does not load leaves the knowledge base
-  searching by keyword and the memory store by substring for the session,
-  with one warning each (`kb_keyword_search_only`,
-  `memory_substring_search_only`), and is not tried again by the same
-  `EmbeddingService`; what such a session writes makes the knowledge base's
-  model record name no model, so the next open with a working model embeds
-  the stored text again rather than keeping an index without those
-  documents; and an unreadable index counts as none, so the stored text is
-  embedded again (`kb_vector_index_unreadable`).
+  scope opens), and a model that does not load leaves the knowledge base
+  searching by keyword for the session, with one warning
+  (`kb_keyword_search_only`), and is not tried again by the same
+  `EmbeddingService`. The chunks such a session stores have no vector, and
+  the next open with a working model embeds them. The vectors are in
+  `kb.sqlite` now, so there is no separate index to fail (see Changed).
 
 - **Ingesting into the knowledge base no longer freezes the app.**
   `kb_ingest_text`, `kb_ingest_file` and `ingest_arxiv_paper` embedded every
@@ -2245,7 +2417,7 @@ step; each entry says what to use instead.
   there, so the spinner, Ctrl+C and every other task stopped for the whole
   embedding (0.87 s for 363 chunks at 2 ms each) and for as long as another
   process held the knowledge base's folder lock (one re-embedding a large
-  knowledge base on open holds it for minutes). Every synchronous
+  knowledge base on open held it for minutes). Every synchronous
   knowledge-base call those make, and `kb_ingest_file`'s read of the file,
   now runs on a worker thread; concept pages are still written one at a
   time. A thread cannot be stopped: an ingest cancelled with Ctrl+C is
@@ -2258,8 +2430,7 @@ step; each entry says what to use instead.
   importable, chunking split sentences with `nltk.sent_tokenize`, which
   raises `LookupError` ("Resource punkt_tab not found") until the punkt data
   is downloaded, the state nltk installs in (Anaconda's base environment
-  ships it so), and every ingest failed. Chunking now falls back to its own
-  sentence split, as it does without nltk.
+  ships it so), and every ingest failed. Chunking no longer uses nltk.
 
 - **Two terminals of one app no longer erase each other's model listings.**
   Each model catalog rewrote the whole model cache from what it had read at
@@ -2491,12 +2662,12 @@ step; each entry says what to use instead.
   queued behind it then fail at once for 30 s rather than each wait the
   timeout out. Each call reports its own error (the shared `last_error` let
   one search report another's), the feed is parsed off the event loop, and
-  `search_arxiv` is a coroutine, so on ADK, which runs a synchronous tool on
-  the event loop, a search no longer freezes the UI for seconds. Code that
-  called `search_arxiv` directly awaits it; `ArxivSearchSource` gains
-  `asearch` and `transport=`, keeps `search` as its synchronous form (which
-  now raises inside a running event loop, rather than block it), and loses
-  `wait_for_rate_limit`.
+  `search_arxiv` is a coroutine, so a search no longer freezes the UI for
+  seconds where ADK runs a synchronous tool on the event loop (a native ADK
+  YAML app). Code that called `search_arxiv` directly awaits it;
+  `ArxivSearchSource` gains `asearch` and `transport=`, keeps `search` as its
+  synchronous form (which now raises inside a running event loop, rather
+  than block it), and loses `wait_for_rate_limit`.
 - **A warning logged during a turn prints above the prompt.** structlog's and
   the standard library's log lines, and Python's warnings, were written
   straight to stderr, so one logged mid-turn (an arXiv rate limit, say)
@@ -2506,16 +2677,6 @@ step; each entry says what to use instead.
   line longer than the terminal is wrapped. With stderr redirected
   (`app 2>run.log`), they stay in the file. `agentic_cli.logging.log_lines_to`
   sends them to any sink.
-- **A memory edited without an embedding service is embedded again.** Where
-  no service runs (no `kb` extra, say), `MemoryStore.update` clears an edited
-  memory's vector, which was of its old text; when that was the only vector,
-  `memories_embeddings.json` was not rewritten, so the next store with a
-  service paired the new text with the old text's vector, and a search found
-  the memory by what it used to say. The file is now rewritten, empty if need
-  be, and the memory is embedded again when a store with a service opens it.
-  An edit whose embedding fails (a network error, say) now leaves the memory
-  as it was: it kept the new text with the old text's vector, which the next
-  save wrote.
 - **A request stopped with Ctrl+C, or cut off by a crash, leaves every tool
   call with one result** (`workflow/interrupts.py`), on both backends. ADK
   dropped a call a cancel left open from every later request, so the model
@@ -2621,11 +2782,12 @@ step; each entry says what to use instead.
   (`<workspace_dir>/memory`). Each kept the memories it read when it opened
   and rewrote the files from them on every change, so with two sessions
   open, a memory stored in one and then one in the other left only the
-  second, and an update or deletion could be undone the same way. Each read
-  or change now holds the folder's lock file (`.lock`, an `flock`) and first
-  reads again what another process wrote, so a change applies to the store
-  as it is now, and a session finds the others' new memories without
-  restarting.
+  second, and an update or deletion could be undone the same way. Each
+  memory is now a file of its own (see Changed): every call reads again the
+  files another process changed, and a change holds the folder's lock file
+  (`.lock`, an `flock`) and replaces files atomically, so a change applies
+  to the store as it is now, and a session finds the others' new memories
+  without restarting.
 - **On ADK, a model call's usage names the model of the agent that made
   it.** `LLM_USAGE` named the default model for every agent's call, so a
   sub-agent on a model of its own, or a root agent with its own `model`,
@@ -2648,9 +2810,9 @@ step; each entry says what to use instead.
   them on every change, so with two sessions open, a document ingested in
   one and then one in the other left only the second (the first's files
   stayed on disk, listed nowhere), and a deletion could be undone the same
-  way. Each read or change now holds the folder's lock file (`.lock`) and
-  first reads again, vectors and keyword index included, what another
-  process wrote; a session finds the others' new documents without
+  way. Each change is now one transaction on the folder's `kb.sqlite` (see
+  Changed), and each read sees what other processes wrote, vectors and
+  keyword index included; a session finds the others' new documents without
   restarting. A sidecar is written for a document that is still there, by
   id: a document another session deleted gets none.
 - **Ctrl+C while `/settings` restarts the workflow no longer leaves the new
@@ -2710,9 +2872,10 @@ step; each entry says what to use instead.
   document and dropped those the filters refuse, so a document with many
   matching chunks filled that list on its own: a filtered search for
   another document came back empty (with `top_k=2`; `top_k=100` found it),
-  and an unfiltered one returned fewer documents than matched. The ranked
-  list now widens, four times at a step, until `top_k` documents pass or
-  every chunk is ranked.
+  and an unfiltered one returned fewer documents than matched. Every
+  matching chunk of the documents the filters keep is now ranked, and each
+  document keeps its best one, so a search returns `top_k` documents
+  whenever that many match.
 - **The LangGraph backend showed no thinking text.** It read thinking only
   from a `text` field, which Claude's and Gemini's thinking blocks do not
   have. It now reads each answer's standard content blocks, so Claude's
