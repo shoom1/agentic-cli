@@ -34,7 +34,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
-from agentic_cli.cli.conversation_lock import ConversationLock, Taken
+from agentic_cli.cli.conversation import ConversationCore, Hold, Place
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
     SessionStart,
@@ -607,11 +607,6 @@ class BaseCLIApp:
     that one reads is set before ``super().__init__()``.
     """
 
-    #: A turn ran in the current conversation since it was opened (its memories
-    #: are proposed on leaving it). A class default: an app built with
-    #: ``__new__`` (tests, an application's own construction) reads it too.
-    _turned: bool = False
-
     #: (job, conversation) pairs whose "could not be resumed now" was said:
     #: the deliveries the CLI makes on its own say it once per conversation.
     #: An immutable class default, replaced on each write, for the same reason.
@@ -652,13 +647,13 @@ class BaseCLIApp:
         import uuid
 
         self._resume_requested = session_id is not None
-        self._session_id = session_id or uuid.uuid4().hex[:12]
+        # The conversation the turns run in: its id, whether a turn ran in it
+        # since it was opened, and the lock held on it against another
+        # process opening it (cli/conversation.py).
+        self._conversation_core = ConversationCore(session_id or uuid.uuid4().hex[:12])
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
         self._pending_resume: str | None = None
-        # The conversation this process has open, held against another
-        # process opening it (cli/conversation_lock.py; made on first use).
-        self._conversation_lock: ConversationLock | None = None
         # The command main() was run as, for the lines naming --resume.
         self._command: str | None = None
         #: The process's exit status after run(): 1 when the start was refused.
@@ -686,9 +681,6 @@ class BaseCLIApp:
         # a time, so it orders them against the startup resume
         # (_open_on_startup, a task of its own) and an app's own tasks.
         self._turn_lock = asyncio.Lock()
-        # Whether a turn ran in the current conversation since it was adopted:
-        # its memories are proposed on leaving it, or at exit, only then.
-        self._turned = False
         self.should_exit = False
 
         # === Commands: registered once the session exists (below) ===
@@ -999,6 +991,36 @@ class BaseCLIApp:
     def settings(self) -> BaseSettings:
         """Get the application settings."""
         return self._settings
+
+    @property
+    def _conversation(self) -> ConversationCore:
+        """The conversation the app is in (``cli/conversation.py``). An app
+        built with ``__new__`` (tests, an application's own construction) gets
+        one, with no id, on first use."""
+        try:
+            return self.__dict__["_conversation_core"]
+        except KeyError:
+            core = self.__dict__["_conversation_core"] = ConversationCore()
+            return core
+
+    @property
+    def _session_id(self) -> str | None:
+        """The conversation's id (``_conversation.session_id``)."""
+        return self._conversation.session_id
+
+    @_session_id.setter
+    def _session_id(self, value: str | None) -> None:
+        self._conversation.session_id = value
+
+    @property
+    def _turned(self) -> bool:
+        """A turn ran in the conversation since it was opened
+        (``_conversation.turned``): its memories are proposed on leaving it."""
+        return self._conversation.turned
+
+    @_turned.setter
+    def _turned(self, value: bool) -> None:
+        self._conversation.turned = value
 
     @property
     def session_id(self) -> str | None:
@@ -2077,22 +2099,16 @@ class BaseCLIApp:
     def _conversation_key(self, session_id: str) -> tuple:
         """What names a stored conversation for its lock: the same id in
         another backend or store is another conversation."""
-        orchestrator = getattr(self._settings, "orchestrator", "")
-        return (
-            getattr(orchestrator, "value", orchestrator), self._settings.session_store,
-            self._settings.app_name, self._settings.default_user, session_id,
-        )
+        return Place.of(self._settings).key(session_id)
 
-    def _acquire(self, session_id: str) -> "Taken | int | None":
+    def _acquire(self, session_id: str) -> Hold | int:
         """``_hold``'s first half: ``session_id`` held beside the one held now.
 
         Returns:
-            The hold to ``_commit`` or ``_abandon``; the process id holding it
-            elsewhere; None on the memory store, which locks nothing.
+            The hold to ``_commit`` or ``_abandon`` (one that locks nothing on
+            the memory store); the process id holding it elsewhere.
         """
-        if self._settings.session_store == "memory":
-            return None
-        return self._lock().acquire(self._conversation_key(session_id))
+        return self._conversation.acquire(session_id, Place.of(self._settings))
 
     @contextmanager
     def conversation_held(self, session_id: str) -> Iterator[int | None]:
@@ -2118,18 +2134,11 @@ class BaseCLIApp:
             if self._job_monitor is not None:
                 self._job_monitor.forget_conversations()
 
-    def _commit(self, taken: "Taken | None") -> None:
-        if taken is not None:
-            self._lock().commit(taken)
+    def _commit(self, taken: Hold) -> None:
+        self._conversation.commit(taken)
 
-    def _abandon(self, taken: "Taken | None") -> None:
-        if taken is not None:
-            self._lock().abandon(taken)
-
-    def _lock(self) -> ConversationLock:
-        if self._conversation_lock is None:
-            self._conversation_lock = ConversationLock(self._settings.sessions_dir / "locks")
-        return self._conversation_lock
+    def _abandon(self, taken: Hold) -> None:
+        self._conversation.abandon(taken)
 
     def _hold(self, session_id: str) -> int | None:
         """Hold ``session_id``'s conversation for this process, letting go of the one before.
@@ -2143,9 +2152,7 @@ class BaseCLIApp:
             None once it is held; else the process id of the one holding it
             (0 when unknown), and the conversation held before stays held.
         """
-        if self._settings.session_store == "memory":
-            return None
-        return self._lock().take(self._conversation_key(session_id))
+        return self._conversation.hold(session_id, Place.of(self._settings))
 
     def _resume_hint(self) -> str:
         """The exit line that names how to come back to the current conversation."""
@@ -2227,8 +2234,7 @@ class BaseCLIApp:
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
-        if self._conversation_lock is not None:
-            self._conversation_lock.release()
+        self._conversation.release()
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")
