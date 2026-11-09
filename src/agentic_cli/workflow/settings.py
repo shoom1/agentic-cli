@@ -386,7 +386,10 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         ge=1_000,
         le=100_000,
         title="Memory Index Size",
-        description="The memory index's size cap in bytes (1,000 to 100,000; at most 200 lines)",
+        description=(
+            "The memory index's size cap in bytes (1,000 to 100,000; at most 200 lines, "
+            "and a tenth of the main agent's input budget)"
+        ),
         json_schema_extra={"ui_order": 156},
     )
 

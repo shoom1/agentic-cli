@@ -3,13 +3,18 @@ conversation, taken once, dropped where the prompt prefix changes anyway (spec ย
 
 from __future__ import annotations
 
+import re
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.memory import MemoryStore
+from agentic_cli.models import ProviderKind
 from agentic_cli.tools import memory_tools
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.context import ContextBudget
 from agentic_cli.workflow.service_registry import MEMORY_STORE
 from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn
 from tests.workflow.test_memory_wiring import _FakeManager
@@ -119,3 +124,58 @@ def test_a_store_that_fails_gives_no_index_and_raises_nothing(tmp_path, ref, mon
 
     monkeypatch.setattr(store, "index", broken)
     assert mgr._memory_index_now() == ""
+
+
+# -- the root's budget limits it (spec ยง11.4: the index is never dropped from a request) ------
+
+
+def _on_a_budget(mgr, tokens: int, kind: ProviderKind = ProviderKind.GOOGLE) -> None:
+    """``mgr``'s root runs on a model whose input budget is ``tokens``."""
+    mgr._budgets = {"root": ContextBudget(window=tokens * 2, window_known=True, budget=tokens,
+                                          trigger=tokens * 85 // 100, keep=tokens // 10)}
+    mgr._resolved_models = {"root": SimpleNamespace(record=SimpleNamespace(kind=kind))}
+
+
+def _many(store: MemoryStore, count: int = 150) -> None:
+    """``count`` memories whose lines are about 180 bytes each."""
+    for n in range(count):
+        store.save(f"fact {n:03d} " + ("lorem ipsum " * 12)[:139], "c", "user", scope="user")
+
+
+@pytest.mark.parametrize(("kind", "cap"), [(ProviderKind.GOOGLE, 5_818), (ProviderKind.ANTHROPIC, 4_800)])
+def test_a_small_budget_root_gets_a_smaller_index(tmp_path, ref, kind, cap):
+    """A tenth of the root's budget, as the fit guard estimates it (a token is
+    4 characters, 3.3 on Claude, plus 10%): 1,600 tokens at the smallest budget."""
+    mgr, store = _manager(tmp_path)
+    _many(store)
+    _on_a_budget(mgr, 16_000, kind)
+    small = mgr._memory_index_now()
+    full, _ = _manager(tmp_path / "other")
+    _many(full._services[MEMORY_STORE], 150)
+    wide = full._memory_index_now()
+    assert len(small.encode()) <= cap < 25_000
+    assert small.count("\n") < wide.count("\n") and len(small) < len(wide)
+    # Still an index: opened and closed, with the rest counted.
+    assert small.startswith("<memory-index>") and small.endswith("</memory-index>")
+    assert re.search(r"\(\d+ more not shown\)", small)
+
+
+def test_a_roomy_budget_keeps_the_settings_cap(tmp_path, ref):
+    mgr, store = _manager(tmp_path)
+    _many(store)
+    _on_a_budget(mgr, 150_000)  # a tenth is 54,000 bytes: the 25,000 stands
+    assert 24_000 < len(mgr._memory_index_now().encode()) <= 25_000
+
+
+def test_the_settings_cap_still_applies_under_a_roomy_budget(tmp_path, ref):
+    mgr, store = _manager(tmp_path, memory_index_max_bytes=2_000)
+    _many(store)
+    _on_a_budget(mgr, 150_000)
+    assert 1_500 < len(mgr._memory_index_now().encode()) <= 2_000
+
+
+def test_never_under_a_thousand_bytes(tmp_path, ref):
+    mgr, store = _manager(tmp_path)
+    _many(store, 40)
+    _on_a_budget(mgr, 1_000)  # a tenth of it is 363 bytes
+    assert 363 < len(mgr._memory_index_now().encode()) <= 1_000

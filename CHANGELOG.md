@@ -361,8 +361,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folds it into the first user text; the overflow retry keeps it), on Deep
   Agents the first text of the first human message (the summarization counts
   it). Settings: `memory_index_enabled` (default on) and
-  `memory_index_max_bytes` (25,000, 1,000 to 100,000; at most 200 lines). An
-  app without memory tools is unchanged.
+  `memory_index_max_bytes` (25,000, 1,000 to 100,000; at most 200 lines, and
+  never more than a tenth of the main agent's input budget, so a model with a
+  small window gets a shorter index). An app without memory tools is
+  unchanged.
 - **`arxiv_max_pdf_bytes`** (default 50 MB, at most 500 MB): the largest paper
   PDF `ingest_arxiv_paper` downloads (`web_fetch` keeps
   `webfetch_max_pdf_bytes`, 5 MB). A project's settings file may set it,

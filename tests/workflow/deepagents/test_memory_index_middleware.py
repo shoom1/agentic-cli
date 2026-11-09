@@ -219,6 +219,22 @@ async def test_a_summary_in_a_turn_takes_a_new_index_with_the_request_that_carri
     assert seventh[:2] == sixth[:2]
 
 
+async def test_a_small_window_root_gets_an_index_that_leaves_room(hermetic, monkeypatch):
+    """The 20,000-token model's input budget is 19,000 tokens: the index may take
+    a tenth of it (1,900 tokens, about 6,900 bytes), not the 25,000 bytes of the setting."""
+    manager, chat, store = _small(hermetic, monkeypatch, [ai("One.")])
+    for n in range(150):
+        store.save(f"fact {n:03d} " + ("lorem ipsum " * 12)[:139], "c", "user", scope="user")
+    try:
+        await turn(manager, "Hello.")
+    finally:
+        await manager.cleanup()
+    index = _blocks(chat.conversation(0)[0])[0]
+    assert index.startswith(INDEX_OPEN) and index.endswith("</memory-index>")
+    assert 5_000 < len(index.encode()) <= 6_909
+    assert "more not shown" in index
+
+
 async def test_compact_takes_a_new_index_for_the_next_request(hermetic, monkeypatch):
     manager, chat, store = _small(hermetic, monkeypatch, [
         *(ai(f"Answer {n}.") for n in range(1, 4)), ai("A summary."), ai("Answer 4."),
