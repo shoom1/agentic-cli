@@ -908,7 +908,8 @@ class JobManager:
 
         So unless the caller owns the resume fields (the claim transitions,
         which set them under the lock), they are re-read from disk first and
-        adopted into ``rec``.
+        adopted into ``rec``, with the other fields any manager may write
+        (``_adopt_shared_fields``: the execution owner, a cancel request).
 
         Args:
             rec: The record to write.
