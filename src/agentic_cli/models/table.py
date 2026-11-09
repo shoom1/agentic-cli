@@ -11,7 +11,10 @@ listings and the ``models`` entries. Per provider kind it holds:
   bundled profiles (models.dev data), or for a model they lack from a
   provider's listing or documentation (each entry's ``source`` says which);
 - the **fallback** model lists used before or without a listing, and OpenAI's
-  curated list.
+  curated list;
+- Anthropic's **aliases**: the undated id it serves for each dated Claude
+  model, keyed by the dated id without its date (``claude-opus-4`` is served
+  as ``claude-opus-4-0``).
 
 A model no rule matches gets the conservative record: no thinking knob, tools
 assumed, numbers unknown. Every rule and entry carries a ``source`` note.
@@ -227,6 +230,8 @@ class _Provider(_Strict):
     fallback_source: str | None = None
     curated: list[str] = Field(default_factory=list)
     curated_source: str | None = None
+    aliases: dict[str, str] = Field(default_factory=dict)
+    aliases_source: str | None = None
     rules: list[_Rule] = Field(default_factory=list)
     models: dict[str, _Model] = Field(default_factory=dict)
 
@@ -236,6 +241,14 @@ class _Provider(_Strict):
             raise ValueError("fallback_models needs a fallback_source note")
         if self.curated and not self.curated_source:
             raise ValueError("curated needs a curated_source note")
+        if self.aliases and not self.aliases_source:
+            raise ValueError("aliases needs an aliases_source note")
+        for stripped, alias in self.aliases.items():
+            for model in (stripped, alias):
+                if not model.startswith("claude-") or claude_alias(model) != model:
+                    raise ValueError(
+                        f"aliases {stripped!r}: {alias!r}: {model!r} must be a Claude id without a date"
+                    )
         return self
 
 
@@ -320,19 +333,24 @@ class ShippedTable:
         )
         return ModelRecord(provider=provider, kind=kind, model=model, sources=sources, **values)
 
-    def is_claude_alias(self, model_id: str) -> bool:
-        """Whether ``model_id`` is an undated alias Anthropic serves for its dated ids.
+    def served_alias(self, stripped: str) -> str | None:
+        """The undated alias Anthropic serves for the dated Claude ids that lose
+        their date to give ``stripped``, or None when it serves none the table lists.
 
-        ``claude-sonnet-4-5`` is the alias of ``claude-sonnet-4-5-20250929``. The 3.x
-        line puts the version first and has no alias of that shape (3.5 Haiku's is
-        ``claude-3-5-haiku-latest``, and 3 Haiku has none), so a date-stripped id is
-        an alias only for a family the table names: one of its Anthropic rules other
-        than the catch-all matches it.
+        ``claude-sonnet-4-5-20250929`` is served as ``claude-sonnet-4-5``, but
+        ``claude-opus-4-20250514`` as ``claude-opus-4-0``, and the 3.x line has
+        none the table describes: no rule can say which, so the table's alias
+        map (``aliases``, keyed by the date-stripped id) does.
         """
-        return any(
-            compiled.rule.match != _CLAUDE_CATCH_ALL and compiled.matches(model_id)
-            for compiled in self._rules.get(ProviderKind.ANTHROPIC, ())
-        )
+        table = self._providers.get(ProviderKind.ANTHROPIC)
+        return table.aliases.get(stripped) if table is not None else None
+
+    def is_claude_alias(self, model_id: str) -> bool:
+        """Whether ``model_id`` is an undated alias the table lists Anthropic as
+        serving (a value of its alias map): ``claude-opus-4-0`` is, ``claude-opus-4``
+        and ``claude-3-5-haiku`` are not."""
+        table = self._providers.get(ProviderKind.ANTHROPIC)
+        return table is not None and model_id in table.aliases.values()
 
     def generic_claude_thinking(self, mechanism: ThinkingMechanism) -> ThinkingRule:
         """The thinking rule of a Claude model of no known family that thinks as

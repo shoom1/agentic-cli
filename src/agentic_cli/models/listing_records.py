@@ -10,12 +10,12 @@ Two maps come out. The provider's listing holds every model it **serves**, and
 the catalog accepts each of their ids; the provider **shows** fewer, the
 models it shows (``ModelCatalog.records``). Where "shown" is decided
 depends on the provider: Google's lister marks the text models; Anthropic's
-marks a dated id with its date-stripped id, which this module takes as the
-dated id's alias, serves and shows (it takes the first dated id listed's
-facts) only for a family the table names (``ShippedTable.is_claude_alias``),
-since Anthropic serves no ``claude-3-5-haiku`` for ``claude-3-5-haiku-20241022``,
-and otherwise shows the dated id itself; OpenAI's curated list and its
-reasoning models are picked here. Every value in a record keeps its source
+marks a dated id with its date-stripped id, for which this module serves and
+shows the alias the table lists (``ShippedTable.served_alias``: ``claude-opus-4-0``
+for ``claude-opus-4-20250514``; it takes the first dated id listed's facts)
+and, with none listed (``claude-3-5-haiku-20241022``: Anthropic serves no
+``claude-3-5-haiku``), shows the dated id itself; OpenAI's curated list and
+its reasoning models are picked here. Every value in a record keeps its source
 (``ModelRecord.sources``), highest precedence first: the ``models`` entry
 (``config``, ``with_entry``), the listing (``listing``), the shipped table
 (``table``).
@@ -131,18 +131,19 @@ def _records_for(
     for listed in listing.models:
         if listed.id not in accepted:
             accepted[listed.id] = _listed_record(name, kind, listed, table)
-        if listed.alias is None or not table.is_claude_alias(listed.alias):
-            # A dated id whose alias Anthropic does not serve (the 3.x line's)
-            # is shown as it is, and its date-stripped id is no id at all.
+        served = table.served_alias(listed.alias) if listed.alias is not None else None
+        if served is None:
+            # A dated id the table lists no alias for (the 3.x line's) is shown
+            # as it is, and its date-stripped id is no id at all.
             if listed.shown or listed.alias is not None:
                 shown.setdefault(listed.id, accepted[listed.id])
             continue
         # Anthropic: a dated id is shown as its alias, which takes the
         # first one listed's facts, as in 0.6.
-        if listed.alias not in accepted:
-            alias = dataclasses.replace(listed, id=listed.alias)
-            accepted[listed.alias] = _listed_record(name, kind, alias, table)
-        shown.setdefault(listed.alias, accepted[listed.alias])
+        if served not in accepted:
+            alias = dataclasses.replace(listed, id=served)
+            accepted[served] = _listed_record(name, kind, alias, table)
+        shown.setdefault(served, accepted[served])
     if kind is not ProviderKind.OPENAI:
         return accepted, list(shown.values())
     # R15: the curated ids the account has, then any other reasoning

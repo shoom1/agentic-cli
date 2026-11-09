@@ -2534,15 +2534,19 @@ step; each entry says what to use instead.
   `generateContent`: not its embedding, Imagen or Veo models), each marked
   whether it is shown: every such id is accepted and found by
   `/models <text>`, while the list the pickers offer, `/models`, the roles'
-  tier picks and the "not available" message show what they showed. Without
-  a listing, a dated Claude id is described as its alias is
+  tier picks and the "not available" message show only the shown ones:
+  Google's text models, Anthropic's dated ids under their aliases (below)
+  and OpenAI's curated and reasoning models. Without a listing, a dated Claude id is described as its alias is
   (`claude-sonnet-5-5-20261001` cannot turn thinking off and takes no
   sampling parameters, like `claude-sonnet-5-5`). A dated Claude id is shown
-  as its undated alias only for a family the shipped table names (Sonnet,
-  Opus, Haiku and Fable: `claude-sonnet-4-5`); a 3.x id such as
-  `claude-3-5-haiku-20241022` is shown and accepted as itself, since
-  Anthropic serves no `claude-3-5-haiku` (its alias is `-latest`; 3 Haiku has
-  none), which 0.6 offered by stripping the date. Google's `-latest` aliases
+  as the undated alias the shipped table lists for it (`claude-sonnet-4-5`,
+  `claude-haiku-4-5`, `claude-opus-4-1`, `claude-opus-4-5`, and `claude-opus-4-0`
+  and `claude-sonnet-4-0` for the 20250514 models), and no other date-stripped
+  id is accepted: `claude-opus-4` and `claude-sonnet-4`, which 0.6 offered by
+  stripping the date, are not served (the `-4-0` aliases are), and a dated id
+  the table lists no alias for, such as `claude-3-5-haiku-20241022`, is shown
+  and accepted as itself (Claude Haiku 3 has no alias, and the `-latest`
+  aliases of 3.5 Haiku and 3.7 Sonnet are retired). Google's `-latest` aliases
   (`gemini-flash-latest`, `-flash-lite-latest`, `-pro-latest`) are described
   as the Gemini 3 family they point at (tier, thinking levels), so a pinned
   one thinks.

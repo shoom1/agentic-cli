@@ -99,51 +99,65 @@ class TestAnthropic:
         assert shown == ["claude-sonnet-4-5", "claude-opus-4-7"]
 
     @pytest.mark.parametrize(
-        ("dated", "alias"),
+        ("dated", "stripped", "alias"),
         [
-            ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
-            ("claude-opus-4-1-20250805", "claude-opus-4-1"),
-            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
-            ("claude-fable-5-20261101", "claude-fable-5"),
-            ("claude-sonnet-4-5@2025-09-29", "claude-sonnet-4-5"),
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5", "claude-haiku-4-5"),
+            ("claude-opus-4-1-20250805", "claude-opus-4-1", "claude-opus-4-1"),
+            ("claude-opus-4-5-20251101", "claude-opus-4-5", "claude-opus-4-5"),
+            ("claude-sonnet-4-5@2025-09-29", "claude-sonnet-4-5", "claude-sonnet-4-5"),
+            # The alias is not always the date-stripped id: Anthropic's are ``-4-0``.
+            ("claude-opus-4-20250514", "claude-opus-4", "claude-opus-4-0"),
+            ("claude-sonnet-4-20250514", "claude-sonnet-4", "claude-sonnet-4-0"),
         ],
     )
-    def test_a_dated_id_of_a_family_the_table_names_is_shown_as_its_alias(self, dated, alias):
-        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=alias, shown=False))
+    def test_a_dated_id_is_shown_as_the_alias_the_table_lists_for_it(self, dated, stripped, alias):
+        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=stripped, shown=False))
 
         assert list(served) == [dated, alias]
         assert shown == [alias]
+        assert stripped == alias or stripped not in served
 
     @pytest.mark.parametrize(
-        ("dated", "invented"),
+        ("dated", "stripped"),
         [
             ("claude-3-5-haiku-20241022", "claude-3-5-haiku"),
             ("claude-3-haiku-20240307", "claude-3-haiku"),
             ("claude-3-7-sonnet-20250219", "claude-3-7-sonnet"),
             ("claude-nova-5-20261101", "claude-nova-5"),
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
+            ("claude-fable-5-20261101", "claude-fable-5"),
         ],
     )
-    def test_a_dated_id_of_any_other_family_has_no_alias_and_is_shown_as_it_is(self, dated, invented):
-        """Anthropic serves no ``claude-3-5-haiku``: the date-stripped id of a family the
-        table does not name is no alias, so it is neither accepted nor shown (a listing
-        the cache holds from before carries it as an alias too)."""
-        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=invented, shown=False))
+    def test_a_dated_id_the_table_lists_no_alias_for_is_shown_as_it_is(self, dated, stripped):
+        """Anthropic serves no ``claude-3-5-haiku``: a date-stripped id is no alias unless
+        the table's alias map lists it, so it is neither accepted nor shown (a listing the
+        cache holds from before carries it as an alias too)."""
+        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=stripped, shown=False))
 
         assert list(served) == [dated]
         assert shown == [dated]
 
-    def test_a_table_without_family_rules_gives_no_alias(self):
+    @pytest.mark.parametrize("drop", ["the map", "the provider's rules"])
+    def test_a_table_without_an_alias_map_gives_no_alias(self, drop):
         raw = json.loads(
             resources.files("agentic_cli.models").joinpath("data", "table.json").read_text("utf-8")
         )
-        rules = raw["providers"]["anthropic"]["rules"]
-        raw["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] == "^claude-"]
+        if drop == "the map":
+            del raw["providers"]["anthropic"]["aliases"]
+            del raw["providers"]["anthropic"]["aliases_source"]
+        else:  # the rules decide nothing about aliases
+            raw["providers"]["anthropic"]["rules"] = [
+                r for r in raw["providers"]["anthropic"]["rules"] if r["match"] == "^claude-"
+            ]
         listed = ListedModel("claude-sonnet-4-5-20250929", alias="claude-sonnet-4-5", shown=False)
 
         served, shown = records_for(PROVIDERS["anthropic"], listing("anthropic", listed), ShippedTable(raw))
 
-        assert list(served) == ["claude-sonnet-4-5-20250929"]
-        assert [record.model for record in shown] == ["claude-sonnet-4-5-20250929"]
+        if drop == "the map":
+            assert list(served) == ["claude-sonnet-4-5-20250929"]
+            assert [record.model for record in shown] == ["claude-sonnet-4-5-20250929"]
+        else:
+            assert list(served) == ["claude-sonnet-4-5-20250929", "claude-sonnet-4-5"]
 
     def test_the_alias_takes_the_facts_of_the_first_id_listed_under_it(self):
         served, shown = served_and_shown(
@@ -161,19 +175,30 @@ class TestAnthropic:
     def test_a_dated_id_is_described_by_its_alias_s_rule(self):
         served, _ = served_and_shown(
             "anthropic",
-            ListedModel("claude-sonnet-5-5-20261001", alias="claude-sonnet-5-5", shown=False,
-                        reasoning=True, thinking_types=("adaptive",)),
+            ListedModel("claude-opus-4-5-20251101", alias="claude-opus-4-5", shown=False),
         )
 
-        dated, alias = served["claude-sonnet-5-5-20261001"], served["claude-sonnet-5-5"]
+        dated, alias = served["claude-opus-4-5-20251101"], served["claude-opus-4-5"]
 
-        # The table's entry for the alias: no sampling parameters, thinking cannot be turned off.
-        assert (dated.thinking.mechanism, dated.thinking.can_disable) == (ADAPTIVE, False)
-        assert dated.sampling == "never"
+        assert (dated.tier, dated.thinking.mechanism) == ("strong", BUDGET)
         # Only the alias's name (its table entry's) is not the dated id's own.
         assert dataclasses.replace(dated, display_name=alias.display_name, sources=alias.sources) == (
             dataclasses.replace(alias, model=dated.model)
         )
+
+    def test_a_dated_id_with_no_alias_is_described_by_the_table_as_its_date_stripped_id(self):
+        """Claude Sonnet 5.5 cannot turn thinking off and takes no sampling parameters (its
+        table entry), under a dated id too."""
+        served, _ = served_and_shown(
+            "anthropic",
+            ListedModel("claude-sonnet-5-5-20261001", alias="claude-sonnet-5-5", shown=False,
+                        reasoning=True, thinking_types=("adaptive",)),
+        )
+
+        dated = served["claude-sonnet-5-5-20261001"]
+
+        assert (dated.thinking.mechanism, dated.thinking.can_disable) == (ADAPTIVE, False)
+        assert dated.sampling == "never"
 
     def test_the_listing_decides_the_mechanism_and_whether_it_can_be_turned_off(self):
         served, _ = served_and_shown(

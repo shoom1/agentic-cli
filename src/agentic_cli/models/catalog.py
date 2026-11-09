@@ -36,14 +36,16 @@ provider is not defined or whose listing lacks its model.
 
 **Served and shown.** A listing holds every model the provider serves, and
 the catalog accepts each id it lists (``record()``, ``search``), and for
-Anthropic the undated alias of a dated id of a family the table names
-(``claude-sonnet-4-5`` for ``claude-sonnet-4-5-20250929``; the 3.x line has no
-alias of that shape, so ``claude-3-5-haiku`` is accepted by no listing). A
+Anthropic the undated alias the table lists for a dated id (``claude-sonnet-4-5``
+for ``claude-sonnet-4-5-20250929``, ``claude-opus-4-0`` for
+``claude-opus-4-20250514``: ``ShippedTable.served_alias``). No other
+date-stripped id is accepted: ``claude-opus-4`` and ``claude-3-5-haiku`` are not
+served. A
 provider shows fewer (``records()``, the tier picks above, the models an "is
 not available" message names, the status count ``ProviderStatus.model_count``):
 Google its text models, without aliases, snapshots or variants; Anthropic each
-dated id as its alias where it has one, which takes the first one listed's
-facts, else as itself; OpenAI its curated and reasoning models.
+dated id as its alias where the table lists one, which takes the first one
+listed's facts, else as itself; OpenAI its curated and reasoning models.
 ``listing_records.records_for`` makes both maps, each record with its entry.
 
 **Validation.** An unknown id is rejected only when its provider's listing is

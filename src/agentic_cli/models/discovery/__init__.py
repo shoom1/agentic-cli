@@ -74,9 +74,10 @@ class ListedModel:
     #: not served).
     shown: bool = True
     #: Anthropic: a dated id without its date (``claude-sonnet-4-5`` for
-    #: ``claude-sonnet-4-5-20250929``); None for any other id. It is an alias
-    #: the provider serves only for a family the shipped table names, which
-    #: ``listing_records`` decides: the 3.x line has none.
+    #: ``claude-sonnet-4-5-20250929``); None for any other id. It is not the
+    #: alias Anthropic serves: ``listing_records`` takes that from the shipped
+    #: table's alias map (``claude-opus-4-0`` for ``claude-opus-4``), and the
+    #: 3.x line has none.
     alias: str | None = None
 
 

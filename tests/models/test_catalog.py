@@ -621,10 +621,10 @@ async def test_google_serves_for_chat_only_the_models_that_generate_content():
         catalog.record(ModelRef("google", "text-embedding-004"))
 
 
-async def test_what_is_shown_does_not_change():
-    """Each provider's records, the tiers a list with no entry offers, the
-    status counts and the "not available" message: the same as when the
-    listers dropped what they do not show."""
+async def test_what_each_provider_shows():
+    """Each provider's shown records, the tiers a list with no entry offers, the
+    status counts and the "not available" message, for the recorded listings: a
+    dated 3.x Claude id is shown as itself, since Anthropic serves no alias for it."""
     catalog = await loaded(references=ON_OPENROUTER, openrouter="r-test-key", **KEYS)
 
     assert {name: ids(catalog.records(name)) for name in (*KEYS, "openrouter")} == {
@@ -709,12 +709,74 @@ async def test_a_dated_id_of_a_family_with_no_alias_is_accepted_and_shown_as_it_
         assert model in ids(catalog.records("anthropic"))
 
 
-async def test_the_families_the_table_names_keep_their_aliases():
+async def test_the_aliases_the_table_lists_are_accepted_and_shown():
     catalog = await loaded(anthropic=KEYS["anthropic"])
 
     for model in ("claude-sonnet-4-5", "claude-haiku-4-5"):
         assert catalog.record(ModelRef("anthropic", model)).model == model
         assert model in ids(catalog.records("anthropic"))
+
+
+def anthropic_shaped(*model_ids: str) -> dict:
+    """An Anthropic listing of ``model_ids``, each with the recorded Sonnet 4.5's capabilities."""
+    shape = next(m for m in recorded("anthropic")["data"] if m["id"] == "claude-sonnet-4-5-20250929")
+    data = [dict(shape, id=model_id, display_name=model_id) for model_id in model_ids]
+    return {"data": data, "has_more": False, "first_id": model_ids[0], "last_id": model_ids[-1]}
+
+
+#: What Anthropic serves, of the ids a listing of its dated 4.x models and two 3.x ones
+#: suggests: its documented aliases (``claude-opus-4-0`` and ``claude-sonnet-4-0`` for the
+#: 20250514 models, the rest the date-stripped id), and not the date-stripped ids
+#: ``claude-opus-4`` and ``claude-sonnet-4``, nor any 3.x one.
+ALIASES_SERVED = (
+    "claude-opus-4-0", "claude-sonnet-4-0", "claude-opus-4-1", "claude-opus-4-5",
+    "claude-sonnet-4-5", "claude-haiku-4-5",
+)
+ALIASES_NOT_SERVED = (
+    "claude-opus-4", "claude-sonnet-4", "claude-3-7-sonnet", "claude-3-7-sonnet-latest",
+    "claude-3-5-haiku", "claude-3-5-haiku-latest", "claude-3-haiku",
+)
+DATED_4X = (
+    "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929",
+    "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+    "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
+)
+
+
+async def test_the_aliases_are_those_the_table_lists_not_every_date_stripped_id():
+    """Anthropic's aliases for Opus 4 and Sonnet 4 end in -4-0: the date-stripped ids are
+    not served, and the aliases that are must not be rejected as "not available"."""
+    payload = anthropic_shaped("claude-opus-4-7", "claude-sonnet-4-6", *DATED_4X)
+    catalog = await loaded(ProviderAPI(anthropic=payload), anthropic=KEYS["anthropic"])
+    shown = ids(catalog.records("anthropic"))
+
+    for model in ALIASES_SERVED:
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in shown
+    for model in ALIASES_NOT_SERVED:
+        with pytest.raises(ModelResolutionError, match=f"anthropic:{model} is not available"):
+            catalog.record(ModelRef("anthropic", model))
+        assert model not in shown
+    for model in DATED_4X:
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+    # A dated id whose alias is shown is not; the 3.x ones, with none, are shown as they are.
+    assert shown == [
+        "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5",
+        "claude-sonnet-4-5", "claude-opus-4-1", "claude-opus-4-0", "claude-sonnet-4-0",
+        "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
+    ]
+
+
+async def test_an_alias_that_is_not_its_date_stripped_id_is_described_by_its_family():
+    payload = anthropic_shaped("claude-opus-4-20250514", "claude-sonnet-4-20250514")
+    catalog = await loaded(ProviderAPI(anthropic=payload), anthropic=KEYS["anthropic"])
+
+    opus = catalog.record(ModelRef("anthropic", "claude-opus-4-0"))
+    sonnet = catalog.record(ModelRef("anthropic", "claude-sonnet-4-0"))
+
+    assert (opus.tier, sonnet.tier) == ("strong", "default")
+    assert (opus.thinking.mechanism, sonnet.thinking.mechanism) == (BUDGET, BUDGET)
+    assert opus.context_window == 200_000 and opus.sources["context_window"] == "listing"
 
 
 async def test_a_listed_dated_claude_id_is_described_as_its_alias_is():

@@ -453,6 +453,8 @@ class TestTableFile:
                 assert provider.get("fallback_source"), kind
             if provider.get("curated"):
                 assert provider.get("curated_source"), kind
+            if provider.get("aliases"):
+                assert provider.get("aliases_source"), kind
 
     def test_the_file_is_valid_against_its_loader(self):
         ShippedTable(_raw())
@@ -486,37 +488,104 @@ class TestTableFile:
             ShippedTable(raw)
 
 
-class TestIsClaudeAlias:
-    """Anthropic serves an undated alias (``claude-sonnet-4-5``) for the dated ids of the
-    families the table names; the 3.x line's ids put the version first, and its aliases
-    are ``-latest`` ones (or none), never the date-stripped id."""
+class TestClaudeAliases:
+    """Anthropic's undated aliases are table data: a map from a dated id's date-stripped
+    id to the alias Anthropic serves. They are not always the stripped id (the Opus 4 and
+    Sonnet 4 aliases end in ``-4-0``) and the 3.x line has none that the table describes
+    (its ``-latest`` aliases are retired), so no rule can say which ids are aliases."""
+
+    ALIASES = {
+        "claude-opus-4": "claude-opus-4-0",
+        "claude-sonnet-4": "claude-sonnet-4-0",
+        "claude-opus-4-1": "claude-opus-4-1",
+        "claude-opus-4-5": "claude-opus-4-5",
+        "claude-sonnet-4-5": "claude-sonnet-4-5",
+        "claude-haiku-4-5": "claude-haiku-4-5",
+    }
+
+    @pytest.mark.parametrize(("stripped", "alias"), list(ALIASES.items()))
+    def test_the_table_lists_the_alias_of_a_date_stripped_id(self, stripped, alias):
+        assert load_table().served_alias(stripped) == alias
+
+    @pytest.mark.parametrize(
+        "stripped",
+        [
+            "claude-3-5-haiku", "claude-3-haiku", "claude-3-7-sonnet", "claude-3-opus",
+            "claude-sonnet-5-5", "claude-fable-5", "claude-nova-5", "claude-opus-4-0", "claude",
+        ],
+    )
+    def test_any_other_id_has_none(self, stripped):
+        assert load_table().served_alias(stripped) is None
+
+    @pytest.mark.parametrize("alias", sorted(set(ALIASES.values())))
+    def test_an_id_the_table_lists_as_an_alias_is_one(self, alias):
+        assert load_table().is_claude_alias(alias)
 
     @pytest.mark.parametrize(
         "model",
         [
-            "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-opus-4",
-            "claude-sonnet-5-5", "claude-opus-5", "claude-haiku-5-5", "claude-fable-5",
+            "claude-opus-4", "claude-sonnet-4",  # date-stripped, but Anthropic's are -4-0
+            "claude-3-5-haiku", "claude-3-haiku", "claude-3-7-sonnet", "claude-3-5-haiku-latest",
+            "claude-sonnet-5-5", "claude-nova-5", "claude-sonnet-4-5-20250929", "claude",
         ],
     )
-    def test_a_family_the_table_names_has_one(self, model):
-        assert load_table().is_claude_alias(model)
-
-    @pytest.mark.parametrize(
-        "model",
-        ["claude-3-5-haiku", "claude-3-haiku", "claude-3-7-sonnet", "claude-3-opus", "claude-nova-5", "claude"],
-    )
-    def test_any_other_id_does_not(self, model):
+    def test_no_other_id_is_one(self, model):
         assert not load_table().is_claude_alias(model)
 
-    def test_a_table_without_family_rules_names_no_alias(self):
+    def test_the_rules_decide_nothing(self):
         raw = _raw()
         rules = raw["providers"]["anthropic"]["rules"]
         raw["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] == "^claude-"]
+        table = ShippedTable(raw)
 
-        assert not ShippedTable(raw).is_claude_alias("claude-sonnet-4-5")
+        assert table.served_alias("claude-sonnet-4-5") == "claude-sonnet-4-5"
+        assert table.is_claude_alias("claude-opus-4-0")
 
-    def test_a_table_without_an_anthropic_provider_names_no_alias(self):
+    @pytest.mark.parametrize("drop", ["the map", "the provider"])
+    def test_a_table_without_a_map_lists_none(self, drop):
         raw = _raw()
-        del raw["providers"]["anthropic"]
+        if drop == "the map":
+            del raw["providers"]["anthropic"]["aliases"]
+            del raw["providers"]["anthropic"]["aliases_source"]
+        else:
+            del raw["providers"]["anthropic"]
+        table = ShippedTable(raw)
 
-        assert not ShippedTable(raw).is_claude_alias("claude-sonnet-4-5")
+        assert table.served_alias("claude-sonnet-4-5") is None
+        assert not table.is_claude_alias("claude-sonnet-4-5")
+
+    def test_a_table_with_another_map_gives_its_own(self):
+        raw = _raw()
+        raw["providers"]["anthropic"]["aliases"] = {"claude-nova-5": "claude-nova-latest"}
+
+        table = ShippedTable(raw)
+
+        assert table.served_alias("claude-nova-5") == "claude-nova-latest"
+        assert table.served_alias("claude-sonnet-4-5") is None
+        assert table.is_claude_alias("claude-nova-latest")
+
+    @pytest.mark.parametrize(
+        "corrupt",
+        [
+            lambda aliases: aliases.update({"claude-sonnet-4-5-20250929": "claude-sonnet-4-5"}),
+            lambda aliases: aliases.update({"claude-nova-5": "claude-nova-5-20261101"}),
+            lambda aliases: aliases.update({"claude-nova-5": ""}),
+            lambda aliases: aliases.update({"": "claude-nova-5"}),
+            lambda aliases: aliases.update({"gemini-flash": "claude-nova-5"}),
+            lambda aliases: aliases.update({"claude-nova-5": "gemini-flash-latest"}),
+        ],
+        ids=["dated key", "dated alias", "empty alias", "empty key", "key not Claude", "alias not Claude"],
+    )
+    def test_a_malformed_map_is_rejected(self, corrupt):
+        raw = copy.deepcopy(_raw())
+        corrupt(raw["providers"]["anthropic"]["aliases"])
+
+        with pytest.raises(ValueError):
+            ShippedTable(raw)
+
+    def test_a_map_needs_a_source_note(self):
+        raw = _raw()
+        del raw["providers"]["anthropic"]["aliases_source"]
+
+        with pytest.raises(ValueError, match="aliases_source"):
+            ShippedTable(raw)
