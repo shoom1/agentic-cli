@@ -348,6 +348,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An agent's tool the registry did not issue is named at startup.** The
+  permission gate denies every call to a plain callable in
+  `AgentConfig.tools` that `@register_tool` did not issue, and an app learned
+  it only from the model's refusals. Building the agents now logs one
+  `tool_not_registered` warning per agent and tool (shown above the prompt in
+  the CLI), naming both; a backend's tool object, such as ADK's
+  `GoogleSearchTool`, is not named.
+
 - **`/memory`, to review what memory holds.** `/memory` lists both scopes,
   newest first (date, scope, type, source, description, id), with the
   proposals waiting and a row for any file the store cannot use; choosing one
@@ -1962,6 +1970,15 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
+  tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,
+  so every call was denied ("tool is not registered"); they now register them
+  `EXEMPT`, as `hello_deepagents.py` does. Their `calculate` evaluated the
+  expression with `eval` and stripped builtins, which an expression such as
+  `().__class__.__base__.__subclasses__()` gets past; it is now
+  `hello_deepagents.py`'s evaluator of numbers, operators and a few math
+  names, which also refuses a power too large to compute (`9 ** 9 ** 9` hung).
 
 - **Knowledge base: one header that cannot be read no longer loses the
   documents after it.** `metadata.json` was read in one step, so a header
