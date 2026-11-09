@@ -634,9 +634,10 @@ class TestTheMixinsComeBeforePydanticSettings:
 
     def test_the_examples_settings_classes_are_accepted(self, tmp_path):
         """Each example module defines its settings class when it loads: a
-        refused one would raise there. They load in a child process, since
-        some register tools in the global registry, which the suite's own
-        loads of them would then find taken."""
+        refused one would raise there. Each loads in a child process of its
+        own: some register tools in the global registry, which the suite's own
+        loads of them would then find taken, and the hello examples register
+        the same three names."""
         import os
         import subprocess
         import sys
@@ -649,20 +650,20 @@ class TestTheMixinsComeBeforePydanticSettings:
         script = (
             "import importlib.util, sys, warnings\n"
             "warnings.simplefilter('ignore')\n"
-            "for i, path in enumerate(sys.argv[1:]):\n"
-            "    spec = importlib.util.spec_from_file_location(f'_example_{i}', path)\n"
-            "    spec.loader.exec_module(importlib.util.module_from_spec(spec))\n"
-            "print('loaded', len(sys.argv) - 1)\n"
+            "spec = importlib.util.spec_from_file_location('_example', sys.argv[1])\n"
+            "spec.loader.exec_module(importlib.util.module_from_spec(spec))\n"
+            "print('loaded')\n"
         )
         (tmp_path / "home").mkdir()
-        done = subprocess.run(
-            [sys.executable, "-c", script, *map(str, files)],
-            cwd=tmp_path, env={**os.environ, "HOME": str(tmp_path / "home")},
-            capture_output=True, text=True,
-        )
+        for path in files:
+            done = subprocess.run(
+                [sys.executable, "-c", script, str(path)],
+                cwd=tmp_path, env={**os.environ, "HOME": str(tmp_path / "home")},
+                capture_output=True, text=True,
+            )
 
-        assert done.returncode == 0, done.stderr[-2000:]
-        assert done.stdout.strip() == f"loaded {len(files)}"
+            assert done.returncode == 0, f"{path.name}: {done.stderr[-2000:]}"
+            assert done.stdout.strip() == "loaded", path.name
 
 
 class TestSecretsDir:
