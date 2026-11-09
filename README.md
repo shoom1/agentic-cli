@@ -1296,7 +1296,8 @@ are `AgentConfig`'s, and an unknown one is an error:
   `tool_not_registered` warning (see [Creating Tools](#creating-tools)).
 - **Load only YAML you trust.** A dotted path imports its module, which runs
   its code; an `mcp_servers` entry's `command` and `args` start that program
-  when the workflow starts, without a permission prompt; and an
+  without a permission prompt (Deep Agents starts it with the workflow, ADK
+  when it first lists the agent's tools); and an
   `instruction_file`, absolute or relative (`../..`), reads whatever it points
   at. The framework never loads a YAML file on its own: your code names it.
   A native ADK `root_agent.yaml` is a different thing, built by ADK itself
