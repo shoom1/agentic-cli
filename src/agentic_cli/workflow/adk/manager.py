@@ -1073,36 +1073,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     if progress_event:
                         yield progress_event
 
-    async def can_resume(self, record) -> bool:
-        """True iff the originating ADK session still exists to resume into.
-
-        Requires the record's session and user (and, for a native ADK YAML
-        app, whose job answers its pending call, the call's id). The session
-        service is durable by default (``session_store='sqlite'``), so the
-        session normally survives a CLI restart and the job stays resumable.
-        This returns False — and the harness surfaces a notice instead of a
-        dead resume turn — when the session is genuinely gone: it was
-        deleted, the record lacks those ids, or the run used the explicitly
-        ephemeral ``session_store='memory'`` and the process restarted.
-        """
-        if not (record.session_id and record.user_id):
-            return False
-        if self._adk_config_path and not record.call_id:
-            return False
-        if self._session_service is None:
-            return False
-        session = await self._session_service.get_session(
-            app_name=self.app_name, user_id=record.user_id, session_id=record.session_id,
-        )
-        return session is not None
-
     @property
     def _answers_job_calls(self) -> bool:
         """A native ADK YAML app's job answers its pending call, so its record needs the call."""
         return bool(self._adk_config_path)
 
     async def _conversation_exists(self, ref: SessionRef) -> bool:
-        """Whether ``ref``'s ADK session is stored (with events or none)."""
+        """Whether ``ref``'s ADK session is stored, with events or none.
+
+        What ``can_resume`` and a job's resume ask (the base's templates).
+        The session service is durable by default (``session_store='sqlite'``),
+        so a session normally survives a CLI restart; it is gone once deleted,
+        or with ``session_store='memory'`` once the process restarted.
+        """
         if self._session_service is None:
             return False
         session = await self._session_service.get_session(

@@ -16,7 +16,8 @@ thread (``JobManager.result`` takes the jobs directory's cross-process lock,
 so on the event loop it froze the prompt while another CLI held it), builds
 the notice (``tools/jobs/resume.py``) and hands it to the backend's
 ``_deliver_job_notice``. ``supports_job_resume`` is derived from the hook,
-as ``supports_compact`` is.
+as ``supports_compact`` is. ``can_resume`` is the same checks without the
+turn: the record names its conversation, and the conversation is there.
 
 Offline: catalogs never list (``tests/conftest.py``), and no model is called.
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import time
 from collections.abc import Callable
 from typing import Any
@@ -67,6 +69,7 @@ class _Stub(BaseWorkflowManager):
         self.release = asyncio.Event()
         self.release.set()
         self.conversations: set[SessionRef] = set()
+        self.looked_up: list[SessionRef] = []
         self.told: list[tuple[str, Any, Any, SessionRef]] = []
 
     @property
@@ -103,6 +106,7 @@ class _Stub(BaseWorkflowManager):
             yield WorkflowEvent.text(message, ref.session_id)
 
     async def _conversation_exists(self, ref: SessionRef) -> bool:
+        self.looked_up.append(ref)
         return ref in self.conversations
 
     async def _deliver_job_notice(self, notice, record, result, ref):
@@ -430,3 +434,117 @@ class TestEachBackendReadsTheResultOffTheLoop:
 
         assert events == ["sess-r"]
         assert harness.told == [job_notice(record, jobs.result(record.job_id))]
+
+
+# ---------------------------------------------------------------------------
+# can_resume
+# ---------------------------------------------------------------------------
+
+
+class TestCanResume:
+    async def test_a_live_conversation_can_be_resumed(self, stub):
+        stub.conversations.add(_ref(stub, "alice", "s1"))
+
+        assert await stub.can_resume(_job(user="alice", session="s1")) is True
+        assert stub.looked_up == [_ref(stub, "alice", "s1")]
+
+    @pytest.mark.parametrize("missing", ["session_id", "user_id"])
+    async def test_a_record_without_its_conversation_cannot(self, stub, missing):
+        stub.conversations.add(_ref(stub))
+
+        assert await stub.can_resume(_job(**{missing: None})) is False
+        assert stub.looked_up == [], "it looked a conversation up"
+
+    async def test_a_conversation_that_is_not_there_cannot(self, stub):
+        assert await stub.can_resume(_job()) is False
+
+    async def test_it_starts_no_turn(self, stub):
+        stub.conversations.add(_ref(stub))
+        stub.release.clear()
+        turn = asyncio.create_task(_reply(stub, "first"))
+        await asyncio.wait_for(stub.entered.wait(), timeout=2)
+
+        assert await asyncio.wait_for(stub.can_resume(_job()), timeout=2) is True
+
+        stub.release.set()
+        await turn
+
+    async def test_a_backend_without_job_resume_cannot(self, ctx):
+        manager = _Plain([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+        assert await manager.can_resume(_job()) is False
+
+    async def test_a_backend_with_its_own_resume_and_no_hook_cannot(self, ctx):
+        """As before the template: the base knows no conversation."""
+        manager = _OwnResume([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+        assert await manager.can_resume(_job()) is False
+
+
+async def _adk_conversation(monkeypatch, settings):
+    from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+
+    manager = GoogleADKWorkflowManager([AgentConfig(name="a", prompt="p")], settings=settings)
+    await manager.initialize_services()
+    await manager._session_service.create_session(
+        app_name=manager.app_name, user_id="u", session_id="s"
+    )
+    return manager
+
+
+async def _deep_agents_conversation(monkeypatch, settings):
+    pytest.importorskip("deepagents")
+    from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+    from agentic_cli.workflow.deepagents import manager as manager_module
+    from tests.workflow.deepagents.fakes import ScriptedModels, ai
+
+    monkeypatch.setattr(manager_module, "build_chat_model", ScriptedModels(a=[ai("Hi.")]))
+    manager = DeepAgentsWorkflowManager([AgentConfig(name="a", prompt="p")], settings=settings)
+    assert "Hi." in await _reply(manager)
+    return manager
+
+
+@pytest.fixture(params=["adk", "deepagents"])
+def conversation(request, monkeypatch):
+    """A real manager of each backend with one stored conversation, ("u", "s")."""
+    start = _adk_conversation if request.param == "adk" else _deep_agents_conversation
+    with MockContext(google_api_key="test-key", session_store="memory") as context:
+        yield functools.partial(start, monkeypatch, context.settings)
+
+
+class TestEachBackendCanResume:
+    async def test_a_live_conversation(self, conversation):
+        manager = await conversation()
+        try:
+            assert await manager.can_resume(_job()) is True
+        finally:
+            await manager.cleanup()
+
+    @pytest.mark.parametrize("missing", ["session_id", "user_id"])
+    async def test_a_record_without_its_conversation(self, conversation, missing):
+        manager = await conversation()
+        try:
+            assert await manager.can_resume(_job(**{missing: None})) is False
+        finally:
+            await manager.cleanup()
+
+    async def test_a_deleted_conversation(self, conversation):
+        manager = await conversation()
+        try:
+            assert await manager.delete_session("s", user_id="u") is True
+            assert await manager.can_resume(_job()) is False
+        finally:
+            await manager.cleanup()
+
+    async def test_another_users_conversation(self, conversation):
+        manager = await conversation()
+        try:
+            assert await manager.can_resume(_job(user="mallory")) is False
+        finally:
+            await manager.cleanup()
+
+    async def test_after_a_cleanup(self, conversation):
+        manager = await conversation()
+        await manager.cleanup()
+
+        assert await manager.can_resume(_job()) is False

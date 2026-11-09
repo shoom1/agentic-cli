@@ -455,26 +455,16 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 async for event in events:
                     yield event
 
-    async def can_resume(self, record) -> bool:
-        """True iff the job's conversation is still there to resume into.
-
-        It needs the record's session and user, and that conversation in this
-        app, holding a message. The call id is not needed: the root agent is
-        told in a message of its own, not as a second result for the call.
-        With a durable ``session_store`` (sqlite, the default, or postgres) a
-        job that finishes after a restart still resumes. After the session
-        was deleted, or with ``memory`` once the process restarted, it does
-        not, and the CLI says the job finished while its conversation was
-        unavailable.
-        """
-        if not (record.session_id and record.user_id) or self._sessions is None:
-            return False
-        return await self._sessions.exists(
-            self.session_ref(record.session_id, record.user_id)
-        )
-
     async def _conversation_exists(self, ref: "SessionRef") -> bool:
-        """Whether ``ref``'s root thread holds at least one message in this app."""
+        """Whether ``ref``'s root thread holds at least one message, in this app.
+
+        What ``can_resume`` and a job's resume ask (the base's templates).
+        With a durable ``session_store`` (sqlite, the default, or postgres) a
+        job that finishes after a restart still resumes; after the session
+        was deleted, or with ``memory`` once the process restarted, it does
+        not. The call id is not needed: the root agent is told in a message
+        of its own, not as a second result for the call.
+        """
         return self._sessions is not None and await self._sessions.exists(ref)
 
     async def _deliver_job_notice(

@@ -1072,24 +1072,6 @@ class BaseWorkflowManager(ABC):
         ref = get_active_turn()
         return ref.user_id if ref else None
 
-    async def can_resume(self, record) -> bool:
-        """Whether a finished job can be resumed into its conversation now.
-
-        Base default: False (no resume support). Backends that implement
-        ``resume_with_job_result`` override this to report whether the
-        originating conversation is still available: on ADK its session, on
-        Deep Agents the conversation's thread. Used by the harness to resume vs. surface a
-        "finished while its conversation was unavailable" notice.
-
-        Sessions are durable by default (``session_store='sqlite'``), so a
-        conversation normally survives a CLI restart and stays resumable. It is
-        unavailable when, for example, it was deleted, the record is missing the
-        identifiers the backend needs (session and user; a native ADK YAML
-        app's call id too), or the run used the explicitly ephemeral
-        ``session_store='memory'`` and the process restarted.
-        """
-        return False
-
     # ---- Job resume: the base's template over the backend's hooks ----
 
     @property
@@ -1126,6 +1108,29 @@ class BaseWorkflowManager(ABC):
         if not (record.session_id and record.user_id):
             return False
         return bool(getattr(record, "call_id", None)) or not self._answers_job_calls
+
+    async def can_resume(self, record: Any) -> bool:
+        """Whether a finished job can be resumed into its conversation now.
+
+        The checks ``resume_with_job_result`` makes, without its turn: the
+        backend can resume (``supports_job_resume``), the record names its
+        conversation (session and user, and its call where a job answers it:
+        a native ADK YAML app's), and the conversation is in the backend's
+        store (:meth:`_conversation_exists`). The CLI asks it to resume a
+        job or to say "finished while its conversation was unavailable", and
+        whether a job's conversation is gone.
+
+        Sessions are durable by default (``session_store='sqlite'``), so a
+        conversation normally survives a CLI restart and stays resumable. It is
+        unavailable when, for example, it was deleted, the record is missing the
+        identifiers the backend needs, or the run used the explicitly
+        ephemeral ``session_store='memory'`` and the process restarted.
+        """
+        if not self.supports_job_resume or not self._record_resumable(record):
+            return False
+        return await self._conversation_exists(
+            self.session_ref(record.session_id, record.user_id)
+        )
 
     async def resume_with_job_result(
         self, record: Any, result: Any = None
