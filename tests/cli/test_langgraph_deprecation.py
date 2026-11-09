@@ -331,7 +331,8 @@ def test_the_orchestrator_setting_says_langgraph_is_deprecated():
     description = BaseSettings.model_fields["orchestrator"].description
 
     assert description == (
-        "Workflow orchestrator backend: adk (the default), deepagents "
+        "The backend new conversations run on (each stays on its own): "
+        "adk (the default), deepagents "
         "(pip install 'agentic-cli[deepagents]') or langgraph (deprecated, "
         "removed in 0.8.0)"
     )

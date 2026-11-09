@@ -178,7 +178,7 @@ class Around:
                 reset_context=lambda: self.done.append("context reset"),
             ),
             propose=propose,
-            status=lambda swapped: self.done.append(f"status swapped={swapped}"),
+            status=lambda: self.done.append("status"),
         )
 
 
@@ -201,7 +201,7 @@ class TestTheSwitch:
         assert (core.session_id, around.workflow.adopted) == ("b", "b")
         assert held_elsewhere(place(tmp_path), "b") == os.getpid()
         assert held_elsewhere(place(tmp_path), "a") is None
-        assert around.done == ["tasks reset", "usage reset", "status swapped=False"]
+        assert around.done == ["tasks reset", "usage reset", "status"]
 
     async def test_one_open_elsewhere_is_refused_and_nothing_changes(self, tmp_path):
         core, around = self.core_in(tmp_path), Around(FakeWorkflow("b"))
@@ -313,7 +313,7 @@ class TestTheSwitch:
         assert switched.made and core.place == there and core.turned is False
         assert held_elsewhere(there, "a") == os.getpid()
         assert held_elsewhere(place(tmp_path), "a") is None
-        assert around.done == ["tasks reset", "context reset", "status swapped=True"]
+        assert around.done == ["tasks reset", "context reset", "status"]
 
     async def test_a_hold_taken_before_is_the_one_kept(self, tmp_path):
         """At startup the target is held before the prompt, and opened once it is up."""
@@ -379,7 +379,7 @@ class TestTheSwitchAtOnce:
         assert held_elsewhere(place(tmp_path), "b") == os.getpid()
         assert held_elsewhere(place(tmp_path), "a") is None
         assert around.workflow.calls == []
-        assert around.done == ["tasks reset", "usage reset", "status swapped=False"]
+        assert around.done == ["tasks reset", "usage reset", "status"]
 
     def test_one_open_elsewhere_is_refused_and_nothing_changes(self, tmp_path):
         core, around = TestTheSwitch.core_in(tmp_path), Around()

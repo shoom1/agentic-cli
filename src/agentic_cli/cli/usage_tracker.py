@@ -176,8 +176,9 @@ class UsageTracker:
     def reset_context(self) -> None:
         """Forget the main agent's context; the totals stay.
 
-        For a conversation the tracker has not seen (another backend's, after
-        an orchestrator swap): the segment shows nothing until its first call.
+        For a context the tracker has not seen (the same conversation kept
+        in another place, a backend or store the workflow's next start
+        builds): the segment shows nothing until its first call.
         """
         self.last_prompt_tokens = 0
         self.context_trigger = None

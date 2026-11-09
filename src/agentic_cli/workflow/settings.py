@@ -406,7 +406,8 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         default=OrchestratorType.ADK,
         title="Orchestrator",
         description=(
-            "Workflow orchestrator backend: adk (the default), deepagents "
+            "The backend new conversations run on (each stays on its own): "
+            "adk (the default), deepagents "
             "(pip install 'agentic-cli[deepagents]') or langgraph (deprecated, "
             "removed in 0.8.0)"
         ),
@@ -725,8 +726,7 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral). "
             "ADK keeps them in {workspace}/sessions/sessions.db and Deep Agents in "
             "{workspace}/sessions/checkpoints.db; sessions do not move between "
-            "backends, so after an orchestrator switch the conversation goes on "
-            "from empty under its id (its history stays with the other backend)."
+            "backends: a conversation stays on the backend it began on."
         ),
         json_schema_extra={"ui_order": 145},
     )

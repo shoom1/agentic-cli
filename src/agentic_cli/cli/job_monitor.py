@@ -123,8 +123,8 @@ class JobMonitor:
         """Forget what it was told of jobs' conversations: the next tick asks again.
 
         For when an answer kept may be wrong: a conversation was deleted
-        (``/sessions --delete``). A workflow replaced (an orchestrator
-        switch) is noticed on its own.
+        (``/sessions --delete``). A workflow replaced (a new conversation on
+        another backend) is noticed on its own.
         """
         self._opens.clear()
 
@@ -195,8 +195,9 @@ class JobMonitor:
     async def _conversation_opens(self, record: Any) -> bool:
         """``workflow.can_resume(record)``, its answer kept ``_CONVERSATION_RECHECK_S``.
 
-        Kept for the workflow that gave it: another one (an orchestrator
-        switch, whose backend holds other conversations) is asked afresh. A
+        Kept for the workflow that gave it: another one (a new conversation
+        on another backend, which holds other conversations) is asked
+        afresh. A
         failed lookup is not kept: the rule takes it as "it can be opened",
         and the next tick asks again.
         """

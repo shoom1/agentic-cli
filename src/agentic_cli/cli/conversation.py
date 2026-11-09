@@ -8,9 +8,11 @@ it, or at exit, only then), and the lock this process holds on it, at its
 ``Place``: the backend and the store it is kept in, the app and the user (the
 same id in another backend or store is another conversation).
 
-Every change of conversation goes through one protocol, ``switch``: ``/new``,
+Every change of conversation goes through one protocol, ``switch``: ``/new``
+(on the running backend or another: a conversation never changes backend),
 ``/resume``, the conversation a run starts in (``--continue``, ``--resume``, a
-new one) and an orchestrator switch, which keeps the id in another backend.
+new one), and the same id in another place, while the workflow is down and
+its next start builds on another backend or store.
 So the conversation the turns write to is always the one held and loaded,
 whichever way it changed and wherever a Ctrl+C lands.
 """
@@ -99,17 +101,17 @@ class SwitchParts:
         processor: The message processor, whose task list is forgotten
             (``reset()``).
         tracker: The usage tracker, zeroed (``reset()``), or only its context
-            after a backend switch (``reset_context()``: the session's totals
-            stay); None for none.
+            for the same conversation in another place (``reset_context()``:
+            the session's totals stay); None for none.
         propose: Proposes the memories of a conversation left, by its id.
-        status: Draws the status line again; told True after a backend switch.
+        status: Draws the status line again.
     """
 
     workflow: Any
     processor: Any
     tracker: Any
     propose: Callable[[str], Awaitable[None]]
-    status: Callable[[bool], None]
+    status: Callable[[], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,14 +281,14 @@ class ConversationCore:
                 return Switch(made=False, holder=taken)
             hold = taken
         elsewhere = hold.place != self.place
-        swapped = elsewhere and to == left  # the same conversation, in another place
+        moved = elsewhere and to == left  # the same conversation, in another place
         workflow = parts.workflow
         made = told = False
         loaded: bool | None = None
         try:
             if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
                 fresh = self.fresh if to == left else not stored
-                self._make(hold, parts, swapped=swapped, fresh=fresh)
+                self._make(hold, parts, moved=moved, fresh=fresh)
                 made = True
             elif propose and self.turned:
                 await parts.propose(left)
@@ -299,14 +301,14 @@ class ConversationCore:
                 if loaded:  # it holds what an earlier run stored
                     self.fresh = False
             if not made:
-                self._make(hold, parts, swapped=swapped, fresh=not (stored or loaded))
+                self._make(hold, parts, moved=moved, fresh=not (stored or loaded))
                 made = True
         finally:
             if not made:
                 self.abandon(hold)
                 if told and left is not None:
                     await _give_back(workflow, left)
-        parts.status(swapped)
+        parts.status()
         return Switch(made=True, loaded=loaded)
 
     def switch_now(self, to: str | None, parts: SwitchParts) -> int | None:
@@ -337,11 +339,11 @@ class ConversationCore:
         taken = self.acquire(to)
         if isinstance(taken, int):
             return taken
-        self._make(taken, parts, swapped=False, fresh=False)  # what it holds is unknown
-        parts.status(False)
+        self._make(taken, parts, moved=False, fresh=False)  # what it holds is unknown
+        parts.status()
         return None
 
-    def _make(self, hold: Hold, parts: SwitchParts, *, swapped: bool, fresh: bool) -> None:
+    def _make(self, hold: Hold, parts: SwitchParts, *, moved: bool, fresh: bool) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters."""
         self.commit(hold)
@@ -349,7 +351,7 @@ class ConversationCore:
         self.session_id = hold.session_id
         self.turned = False
         self.fresh = fresh
-        _start_over(parts, swapped=swapped)
+        _start_over(parts, moved=moved)
 
     def _at(self, place: Place | None) -> Place:
         place = place or self.place
@@ -382,13 +384,13 @@ async def _give_back(workflow: Any, session_id: str) -> None:
     await asyncio.shield(asyncio.ensure_future(give()))
 
 
-def _start_over(parts: SwitchParts, *, swapped: bool) -> None:
+def _start_over(parts: SwitchParts, *, moved: bool) -> None:
     """A conversation switched to starts without the task list and the usage
-    counters of the one left (only the context after a backend switch: the
-    session's totals stay)."""
+    counters of the one left (only the context when the same conversation
+    ``moved`` to another place: the session's totals stay)."""
     parts.processor.reset()
     if parts.tracker is not None:
-        if swapped:
+        if moved:
             parts.tracker.reset_context()
         else:
             parts.tracker.reset()

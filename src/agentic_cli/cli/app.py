@@ -370,12 +370,6 @@ _LANGGRAPH_DEPRECATION = (
 )
 
 
-#: What an orchestrator swap says: sessions do not move between backends.
-_SWAP_NOTE = (
-    "This conversation's history stays with the previous backend: switch back "
-    "to continue it. Here it starts empty."
-)
-
 #: What setting ``BaseCLIApp.session_id`` warns, deprecated in 0.7.0: a setter
 #: cannot run the switch, which awaits the workflow.
 _SESSION_ID_SETTER_DEPRECATED = (
@@ -1280,7 +1274,6 @@ class BaseCLIApp:
 
         # Reinitialize workflow if needed
         switched: list[str] = []
-        swap_note: str | None = None
         interrupted: asyncio.CancelledError | None = None
         if needs_reinit and controller.is_ready and not starts_anew:
             previous = controller.workflow
@@ -1288,34 +1281,26 @@ class BaseCLIApp:
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
                 await controller.reinitialize(model=new_model)
-            except asyncio.CancelledError as cancel:
-                if not (controller.is_ready and controller.workflow is not previous):
-                    # Ctrl+C stopped /settings mid-restart. Nothing of the
-                    # Save stays, as on a failure, and nothing is said: the
-                    # session's interruption is not a cancel of the dialog.
-                    _restore_settings(self._settings, snapshot)
-                    if not controller.is_ready:
-                        try:
-                            await controller.reinitialize(model=previous_model)
-                        except Exception as restore_error:
-                            # Down, on the old model: the next request
-                            # retries, and reports a failure then.
-                            logger.warning(
-                                "settings_restore_failed", error=str(restore_error)
-                            )
-                    raise
-                # The switch was made, and Ctrl+C came while the old backend
-                # was released (which goes on): too late to undo. The change
-                # is finished and reported, then the cancel goes on.
-                interrupted = cancel
+            except asyncio.CancelledError:
+                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
+                # stays, as on a failure, and nothing is said: the session's
+                # interruption is not a cancel of the dialog.
+                _restore_settings(self._settings, snapshot)
+                if not controller.is_ready:
+                    try:
+                        await controller.reinitialize(model=previous_model)
+                    except Exception as restore_error:
+                        # Down, on the old model: the next request retries,
+                        # and reports a failure then.
+                        logger.warning("settings_restore_failed", error=str(restore_error))
+                raise
             except Exception as e:
                 _restore_settings(self._settings, snapshot)
                 self.session.add_error(
                     f"Failed to reinitialize workflow: {e}. Settings were not changed."
                 )
-                # A failed orchestrator swap leaves the old manager running; a
-                # failed in-place reinitialize leaves it down, holding the new
-                # model. Bring it back on the model it had.
+                # A failed reinitialize leaves the manager down, holding the
+                # new model. Bring it back on the model it had.
                 if not controller.is_ready:
                     try:
                         await controller.reinitialize(model=previous_model)
@@ -1325,16 +1310,8 @@ class BaseCLIApp:
                             f"{restore_error}"
                         )
                 return False
-            # An orchestrator swap starts another manager: nothing carries over.
-            if controller.workflow is previous:
-                switched = _provider_switches(
-                    previous_models, getattr(previous, "agent_models", {})
-                )
-            else:
-                swap_note = await self._open_here(controller.workflow)
-            _show_new_context(
-                controller, self.session, swapped=controller.workflow is not previous
-            )
+            switched = _provider_switches(previous_models, getattr(previous, "agent_models", {}))
+            _show_new_context(controller, self.session)
 
         if starts_anew:
             try:
@@ -1361,7 +1338,7 @@ class BaseCLIApp:
         # Where conversations are kept changed while the workflow is down, and
         # its next start builds a manager from the settings as they are now
         # (no manager is kept to revive): the conversation is held there from
-        # now on, as an orchestrator swap holds it, before a turn writes there.
+        # now on, before a turn writes there (nothing of it is stored yet).
         moved = [key for key in changes if _ui_key_target_field(key) in _PLACE_KEYS]
         if moved and not controller.is_ready and controller.next_start_builds:
             place = Place.of(
@@ -1392,8 +1369,6 @@ class BaseCLIApp:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
             _warn_if_langgraph(self._settings, self.session)
-        if swap_note is not None:
-            self.session.add_message("system", swap_note)
         if self._settings.ui_theme != theme_before:
             # Repaint: text printed before would keep the old theme's colors.
             # The transcript is printed again, the lines above included.
@@ -1403,59 +1378,12 @@ class BaseCLIApp:
             raise interrupted
         return True
 
-    async def _open_here(self, workflow: Any) -> str:
-        """The conversation's id on a new backend after a swap, and what to say.
-
-        Sessions do not move between backends (neither reads the other's
-        store), so the new one continues the id from empty; adopting it there
-        keeps ``/status`` and the memories proposed at exit on this conversation,
-        not on the manager's default session. It is the switch every change of
-        conversation makes (``ConversationCore.switch``), to the same id in
-        the new backend's place, under the turn lock: the lock moves to the
-        new backend's key and the old one's is let go, the old backend's task
-        list and usage context are forgotten (the session's totals stay), and
-        the conversation counts as unused, so the exit proposes memories only
-        from what runs here (the backend that holds the earlier ones is gone).
-        The switch is made before the load: the backend has changed already.
-
-        One another process has open on the new backend (it resumed this id
-        there) is left to it: a new conversation starts here, and says so.
-        """
-        place = Place.of(self._settings)  # the backend the swap started
-        async with self._turn_lock:
-            parts = dataclasses.replace(self._switch_parts(), workflow=workflow)
-            try:
-                switched = await self._conversation.switch(
-                    self._session_id, parts, place=place, propose=False
-                )
-            except Exception:  # noqa: BLE001 - the next turn names its conversation anyway
-                logger.debug("swap_adopt_failed", session_id=self._session_id, exc_info=True)
-                return _SWAP_NOTE
-            if switched.made:
-                return _SWAP_NOTE
-            import uuid
-
-            held = (
-                f"This conversation is open in another process ({switched.holder}) on "
-                f"{place.backend}"
-            )
-            new = uuid.uuid4().hex[:12]
-            try:
-                await self._conversation.switch(new, parts, place=place, propose=False)
-            except Exception as error:  # noqa: BLE001 - said; the next turn retries the store
-                logger.debug("swap_adopt_failed", session_id=new, exc_info=True)
-                reason = str(error) or type(error).__name__
-                return f"{held}, and a new one could not start: {reason}."
-            return (
-                f"{held}: a new one starts here, {new}. Its history stays with the "
-                "previous backend: switch back to continue it."
-            )
-
     async def _hold_it_at(self, place: Place) -> int | None:
         """Hold the conversation at ``place`` (another backend or session
         store), letting go of where it was held, before the workflow runs
-        there: the switch an orchestrator swap makes (``_open_here``), with
-        no workflow to load it (the next start's builds from the settings).
+        there: the switch to the same id in another place, with no workflow
+        to load it (the next start builds from the settings). Only while the
+        workflow is down: nothing of the conversation is stored anywhere yet.
 
         Returns:
             None once it is held there (or was); else the process id of
@@ -2062,9 +1990,9 @@ class BaseCLIApp:
         controller = self._workflow_controller
         self._place()  # known before anything is held (an app built with __new__)
 
-        def status(swapped: bool) -> None:
+        def status() -> None:
             if drawn:  # the trigger as a /settings rebuild shows it; no prompt yet
-                _show_new_context(controller, self.session, swapped=swapped)
+                _show_new_context(controller, self.session)
 
         return SwitchParts(
             workflow=controller.workflow if controller.is_ready else None,
@@ -2566,30 +2494,24 @@ def _resolved_role(
         return None
 
 
-def _show_new_context(
-    controller: WorkflowController, session: Any, *, swapped: bool
-) -> None:
+def _show_new_context(controller: WorkflowController, session: Any) -> None:
     """Show ``ctx`` against the rebuilt agents' trigger now, not after the next call.
 
     A reinitialize may move the main agent's trigger (a model of another
     window, ``context_summarize_at``, ``context_max_tokens``), and the last
-    prompt may already be past the new one. The usage tracker takes the
+    prompt may already be past the new one; a switch of conversation starts
+    one whose trigger the workflow knows. The usage tracker takes the
     trigger and the window flag from ``workflow.context_budget()``: none when
     the manager manages no context (``KeyError``), has no such method, or
-    is not ready (it failed to start; the status bar then says so). An
-    orchestrator swap starts another manager, whose conversation is another
-    one: the tracker forgets the context (the session's totals stay). The
+    is not ready (it failed to start; the status bar then says so). The
     status bar is then drawn again.
 
     Args:
         controller: The app's workflow controller, after the reinitialize.
         session: The UI session whose status bar is drawn.
-        swapped: The reinitialize replaced the manager.
     """
     tracker = controller.usage_tracker
-    if tracker is not None and swapped:
-        tracker.reset_context()
-    elif tracker is not None:
+    if tracker is not None:
         budget = None
         # A workflow that is not ready (it failed to start) has no budget,
         # and the controller hands out none: the status bar says why.
