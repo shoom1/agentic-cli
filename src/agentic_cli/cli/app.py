@@ -453,6 +453,44 @@ def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -
         session.add_warning(_LANGGRAPH_DEPRECATION)
 
 
+# === A finished job's delivery ===
+
+
+async def _claim_delivery(jm: Any, job_id: str) -> bool:
+    """Claim the job's delivery (``jm.begin_resume``) on a worker thread.
+
+    The claim takes the jobs directory's lock, which another CLI of the app
+    may hold, so it runs off the event loop. A Ctrl+C while it is taken stops
+    the wait, not the claim, which its thread may still take: a claim taken
+    then is closed as a cancelled delivery ("resume cancelled"), as one a
+    Ctrl+C lands right after is, and never left ``RESUMING``.
+
+    Returns:
+        True if this process now delivers the job.
+    """
+    claim = asyncio.ensure_future(asyncio.to_thread(jm.begin_resume, job_id))
+    try:
+        return await asyncio.shield(claim)
+    except asyncio.CancelledError:
+        claim.add_done_callback(lambda done: _close_abandoned_claim(jm, job_id, done))
+        raise
+
+
+def _close_abandoned_claim(jm: Any, job_id: str, claim: "asyncio.Future[bool]") -> None:
+    """Close, on a worker thread, a claim taken for a delivery Ctrl+C stopped."""
+    if claim.cancelled() or claim.exception() is not None or not claim.result():
+        return
+    logger.info("job_resume_cancelled", job_id=job_id)
+
+    def close() -> None:
+        try:
+            jm.complete_resume(job_id, delivered=False, error="resume cancelled")
+        except Exception:  # noqa: BLE001 - startup recovery fails it once we are gone
+            logger.warning("job_resume_close_failed", job_id=job_id, exc_info=True)
+
+    asyncio.get_running_loop().run_in_executor(None, close)
+
+
 # === Slash Command Completer ===
 
 
@@ -1103,7 +1141,7 @@ class BaseCLIApp:
             # is not taken half way. Ctrl+C stops the wait before anything
             # changed. A start that fails leaves the workflow down, and the
             # change is applied for the next start, as for any failed workflow.
-            with _says_so_when_stopped(self.session):
+            async with _says_so_when_stopped(self.session):
                 await controller.ensure_initialized(self.session)
 
         new_model = changes.get("model")
@@ -1362,7 +1400,7 @@ class BaseCLIApp:
 
         attempted = 0
         workflow = self._workflow_controller.workflow
-        for record in jm.awaiting_resume():
+        for record in await asyncio.to_thread(jm.awaiting_resume):
             if await self._waits_for_its_conversation(workflow, record):
                 continue  # told when its conversation is opened
             if await self._deliver_resume(jm, record) is not None:
@@ -1420,6 +1458,11 @@ class BaseCLIApp:
         exception records failed with the reason, and a cancellation records
         failed before re-raising (cancellation still propagates).
 
+        The job manager is called on a worker thread (``_claim_delivery``,
+        ``complete_resume``): it takes the jobs directory's lock, which
+        another CLI of the app may hold. Each call is awaited before the next
+        step, and one a second Ctrl+C stops waiting for still finishes.
+
         Args:
             jm: The JobManager.
             record: The job record.
@@ -1436,7 +1479,7 @@ class BaseCLIApp:
                     self._workflow_controller.workflow, record
                 ):
                     return None
-                if not jm.begin_resume(record.job_id):
+                if not await _claim_delivery(jm, record.job_id):
                     return None
                 claimed = True
                 if getattr(record, "session_id", None) == self._session_id:
@@ -1450,15 +1493,18 @@ class BaseCLIApp:
                 )
         except asyncio.CancelledError:
             if claimed:
-                jm.complete_resume(
-                    record.job_id, delivered=False, error="resume cancelled"
-                )
                 logger.info("job_resume_cancelled", job_id=record.job_id)
+                await asyncio.to_thread(
+                    jm.complete_resume, record.job_id, delivered=False,
+                    error="resume cancelled",
+                )
             raise
         except Exception as exc:  # noqa: BLE001 - the claim must always close
             if not claimed:
                 raise
-            jm.complete_resume(record.job_id, delivered=False, error=str(exc))
+            await asyncio.to_thread(
+                jm.complete_resume, record.job_id, delivered=False, error=str(exc)
+            )
             logger.warning(
                 "job_resume_raised", job_id=record.job_id, error=str(exc)
             )
@@ -1467,8 +1513,9 @@ class BaseCLIApp:
             )
             return False
 
-        jm.complete_resume(
-            record.job_id, delivered=result.delivered, error=result.error
+        await asyncio.to_thread(
+            jm.complete_resume, record.job_id, delivered=result.delivered,
+            error=result.error,
         )
         if not result.delivered:
             logger.info(
@@ -1533,7 +1580,7 @@ class BaseCLIApp:
         """
         import uuid
 
-        with _says_so_when_stopped(self.session):
+        async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
                 old = self._session_id
                 controller = self._workflow_controller
@@ -1582,7 +1629,7 @@ class BaseCLIApp:
             found.", also when it is deleted while it opens), or could not
             be read ("Could not open '<id>': ...").
         """
-        with _says_so_when_stopped(self.session):
+        async with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(session_id)
         if opened:
             await self._tell_its_finished_jobs()
@@ -1598,16 +1645,20 @@ class BaseCLIApp:
         """
         opened = await self._open_conversation(session_id)
         if opened:
-            self._name_its_waiting_jobs()
+            await self._name_its_waiting_jobs()
         return opened
 
-    def _name_its_waiting_jobs(self) -> None:
-        """Say how many finished jobs wait for this conversation, and how to tell them."""
+    async def _name_its_waiting_jobs(self) -> None:
+        """Say how many finished jobs wait for this conversation, and how to tell them.
+
+        The job manager is asked on a worker thread: it takes the jobs
+        directory's lock, which another CLI of the app may hold.
+        """
         jm = getattr(self._workflow_controller.workflow, "job_manager", None)
         if jm is None:
             return
         waiting = [
-            r for r in jm.awaiting_resume()
+            r for r in await asyncio.to_thread(jm.awaiting_resume)
             if getattr(r, "session_id", None) == self._session_id and self._job_belongs_here(r)
         ]
         if len(waiting) == 1:

@@ -134,23 +134,28 @@ class JobMonitor:
         while True:
             await asyncio.sleep(self._interval)
             try:
-                self.poll_once()
+                await self.poll_once()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - a transient error must not kill the loop
                 logger.debug("job_monitor_poll_failed", exc_info=True)
 
-    def poll_once(self) -> str | None:
+    async def poll_once(self) -> str | None:
         """Reconcile jobs, publish the segment, and refresh the bar on change.
 
-        Returns the segment string (or ``None``). Exposed for tests so the tick
-        logic can be exercised without the asyncio loop.
+        Returns the segment string (or ``None``). Exposed for tests so one
+        tick runs without the poll loop.
+
+        ``list()`` runs on a worker thread: it takes the jobs directory's
+        lock, which another CLI of the app may hold, and the tick must not
+        freeze the prompt meanwhile. A stop during it (``stop()``) ends the
+        tick; the thread's ``list()`` finishes on its own.
         """
         jm = self._job_manager()
         if jm is None:
             return self._last_segment
         # ``list()`` reconciles non-terminal jobs and returns all records.
-        recs = jm.list()
+        recs = await asyncio.to_thread(jm.list)
         segment = self._build_segment(recs)
         self._controller.jobs_status_segment = segment
         if segment != self._last_segment:

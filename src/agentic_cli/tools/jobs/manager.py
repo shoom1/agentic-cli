@@ -647,6 +647,18 @@ class JobManager:
             recs = [r for r in recs if tag in r.tags]
         return sorted(recs, key=lambda r: r.submitted_at, reverse=True)
 
+    def known(self) -> list[JobRecord]:
+        """The jobs this manager holds, as it last read them: no refresh, no lock.
+
+        It never waits, neither for another CLI holding the jobs directory's
+        lock nor for a thread of this manager's in a transaction or a cancel,
+        so a caller on the event loop can ask (``workflow/interrupts.py``,
+        answering a stopped turn's calls). For what a job never changes after
+        submit (its call, its conversation, its name); its state here may be
+        behind, where ``list`` refreshes it first.
+        """
+        return list(self._records.copy().values())
+
     def tail(self, job_id: str, n: int = 50, stream: str = "stdout") -> list[str]:
         with self._lock:
             rec = self._records.get(job_id)

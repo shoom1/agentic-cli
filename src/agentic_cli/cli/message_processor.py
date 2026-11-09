@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import aclosing, contextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -20,9 +20,7 @@ from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.workflow.sessions import ConversationChangedError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
-
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
@@ -59,10 +57,10 @@ NOTHING_TO_SUMMARIZE = "Nothing to summarize yet."
 COMPACT_NOT_SUPPORTED = "/compact is not supported on this backend"
 
 
-@contextmanager
-def _says_so_when_stopped(
+@asynccontextmanager
+async def _says_so_when_stopped(
     ui: "ThinkingPromptSession", jobs: "Callable[[], Any] | None" = None
-) -> "Iterator[None]":
+) -> "AsyncIterator[None]":
     """Say ``CANCELLED_LINE`` once when the request inside is stopped.
 
     A request can be stopped at any stage: while it waits for the workflow to
@@ -73,6 +71,8 @@ def _says_so_when_stopped(
     Ctrl+C stops the request, not the jobs it put in the background: they
     run on, and each one it submitted that is still queued or running is
     named, with how to stop it (``jobs`` returns the job manager, or None).
+    The job manager is asked on a worker thread, after the line is said: a
+    second Ctrl+C while it answers leaves the jobs unnamed.
     """
     started = time.time()
     try:
@@ -80,7 +80,11 @@ def _says_so_when_stopped(
     except asyncio.CancelledError:
         ui.add_message("system", CANCELLED_LINE)
         logger.info("message_cancelled_by_user")
-        running = _jobs_started_since(jobs, started)
+        manager = jobs() if jobs is not None else None
+        running = (
+            [] if manager is None
+            else await asyncio.to_thread(_jobs_started_since, manager, started)
+        )
         if running:
             names = ", ".join(f"{r.name} ({r.job_id})" for r in running)
             ui.add_message(
@@ -99,11 +103,11 @@ def _job_manager(controller: "WorkflowController") -> Any | None:
     return getattr(workflow, "job_manager", None)
 
 
-def _jobs_started_since(jobs: "Callable[[], Any] | None", started: float) -> list[Any]:
-    """The jobs submitted since ``started`` that are still queued or running, oldest first."""
-    manager = jobs() if jobs is not None else None
-    if manager is None:
-        return []
+def _jobs_started_since(manager: Any, started: float) -> list[Any]:
+    """The jobs submitted since ``started`` that are still queued or running, oldest first.
+
+    It takes the jobs directory's lock: called on a worker thread.
+    """
     try:
         records = manager.list(active_only=True)
     except Exception:  # noqa: BLE001 - the cancel line is said; the jobs are a courtesy
@@ -389,7 +393,7 @@ class MessageProcessor:
                 request: thinking-prompt cancels the input handler running it.
                 ``CANCELLED_LINE`` has been said, once.
         """
-        with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
+        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
             # Wait for initialization if needed
             if not await workflow_controller.ensure_initialized(ui):
                 ui.add_error(
@@ -445,7 +449,7 @@ class MessageProcessor:
                 user turn, at any stage: the conversation's lookup included.
                 ``CANCELLED_LINE`` has been said, once.
         """
-        with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
+        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
             if not await workflow_controller.ensure_initialized(ui):
                 return TurnResult(
                     TurnStatus.UNAVAILABLE, error="workflow not initialized"
@@ -536,7 +540,7 @@ class MessageProcessor:
                 ``CANCELLED_LINE`` has been said, once, and nothing was
                 written.
         """
-        with _says_so_when_stopped(ui):
+        async with _says_so_when_stopped(ui):
             if not await workflow_controller.ensure_initialized(ui):
                 ui.add_error(
                     "Cannot summarize - workflow not initialized. "

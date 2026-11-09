@@ -185,31 +185,31 @@ class TestSegmentLogic:
 
 
 class TestPollOnce:
-    def test_publishes_segment_and_refreshes_on_change(self, jm: JobManager):
+    async def test_publishes_segment_and_refreshes_on_change(self, jm: JobManager):
         ui = FakeUI()
         ctrl = FakeController(ui, jm)
         mon = JobMonitor(ui, ctrl)
 
         jm.submit(tool="run_shell_job", backend="subprocess", spec={"command": "sleep 2"})
-        seg = mon.poll_once()
+        seg = await mon.poll_once()
         assert seg is not None and "running" in seg
         assert ctrl.jobs_status_segment == seg
         assert ui.statuses and "running" in ui.statuses[-1]
 
-    def test_no_redraw_when_segment_unchanged(self, jm: JobManager):
+    async def test_no_redraw_when_segment_unchanged(self, jm: JobManager):
         ui = FakeUI()
         ctrl = FakeController(ui, jm)
         mon = JobMonitor(ui, ctrl)
         # No jobs → segment None on every tick → no status updates at all.
-        mon.poll_once()
-        mon.poll_once()
+        await mon.poll_once()
+        await mon.poll_once()
         assert ctrl.status_updates == 0
 
-    def test_no_manager_is_safe(self, tmp_path: Path):
+    async def test_no_manager_is_safe(self, tmp_path: Path):
         ui = FakeUI()
         ctrl = FakeController(ui, None)  # workflow has no job_manager
         mon = JobMonitor(ui, ctrl)
-        assert mon.poll_once() is None
+        assert await mon.poll_once() is None
         assert ctrl.status_updates == 0
 
 
