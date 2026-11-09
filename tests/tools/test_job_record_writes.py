@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -479,4 +480,25 @@ class TestCompleteResumeWithoutTheLock:
             assert rec.resume_state == ResumeState.RESUMING.value
         finally:
             monkeypatch.undo()
+            owner.close()
+
+
+class TestAReadThatChangesNothingWritesNothing:
+    """The job monitor lists every job every two seconds: a refresh that
+    finds nothing new leaves each record's file as it is."""
+
+    def test_the_file_is_not_rewritten(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner = _manager(base, _Scripted())
+        try:
+            job = _submit(owner)
+            before = os.stat(_meta(base, job.job_id)).st_ino
+
+            owner.get(job.job_id)
+            owner.list()
+            owner.result(job.job_id)
+            owner.awaiting_resume()
+
+            assert os.stat(_meta(base, job.job_id)).st_ino == before
+        finally:
             owner.close()

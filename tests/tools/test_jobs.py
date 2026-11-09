@@ -603,7 +603,7 @@ class TestResumeLifecycle:
             session_id="s", user_id="u", finished_at=1.0,
         )
         jm._records[rec.job_id] = rec
-        jm._persist(rec)
+        jm._create(rec)
         return rec
 
     def test_new_job_is_pending(self, tmp_path):
@@ -728,7 +728,7 @@ class TestCrossProcessResumeClaims:
         )
         seeder._records[rec.job_id] = rec
         seeder._job_dir(rec.job_id).mkdir(parents=True, exist_ok=True)
-        seeder._persist(rec)
+        seeder._create(rec)
         seeder.close()
 
     def test_exactly_one_of_two_managers_claims(self, tmp_path: Path):
@@ -876,7 +876,7 @@ class TestResumeStateIsAtomicAcrossProcesses:
         )
         seeder._records[rec.job_id] = rec
         seeder._job_dir(rec.job_id).mkdir(parents=True, exist_ok=True)
-        seeder._persist(rec)
+        seeder._create(rec)
         seeder.close()
 
     def test_observer_persist_does_not_erase_a_claim(self, tmp_path: Path):
@@ -1137,7 +1137,7 @@ class TestExecutionOwnership:
             )
             first._records["q1"] = queued
             first._job_dir("q1").mkdir(parents=True, exist_ok=True)
-            first._persist(queued)
+            first._create(queued)
             # The second process loaded its own copy while it was still queued.
             second._records["q1"] = JobRecord.from_dict(queued.to_dict())
 
@@ -1172,7 +1172,7 @@ class TestExecutionOwnership:
         )
         seeder._records["q1"] = queued
         seeder._job_dir("q1").mkdir(parents=True, exist_ok=True)
-        seeder._persist(queued, owns_shared_state=True)
+        seeder._create(queued)
         seeder.close()
 
         reloaded = self._manager(base, _CountingBackend(starts))
@@ -1198,7 +1198,7 @@ class TestExecutionOwnership:
             )
             jm._records["q1"] = queued
             jm._job_dir("q1").mkdir(parents=True, exist_ok=True)
-            jm._persist(queued)
+            jm._create(queued)
 
             def _boom(fd):
                 raise OSError("flock unavailable")
@@ -1585,9 +1585,8 @@ class TestJobRecordLifecycleCoherence:
         jm = JobManager(base_dir=base)
         try:
             rec = jm._records["j1"]
-            rec.state = JobState.CANCELLED  # a stale view, about to be written
-
-            jm._persist(rec)
+            with jm._mutate(rec):
+                rec.state = JobState.CANCELLED  # a stale decision, about to be written
 
             on_disk = json.loads((base / "j1" / "meta.json").read_text())
             assert on_disk["state"] == JobState.SUCCEEDED.value
@@ -1917,6 +1916,8 @@ class TestNoUnsafeUnlockedWrites:
         under test is therefore the absence of the write itself: an unlocked
         persist must not touch a record another process may be inside.
         """
+        from agentic_cli.tools.jobs.manager import ClaimLockUnavailable
+
         base = tmp_path / "jobs"
         TestCrossProcessResumeClaims._seed_finished_job(base)
         jm = JobManager(base_dir=base)
@@ -1927,8 +1928,9 @@ class TestNoUnsafeUnlockedWrites:
             before = meta.read_text()
 
             self._no_lock(monkeypatch)
-            rec.state = JobState.CANCELLED  # an ordinary change we would persist
-            jm._persist(rec)
+            with pytest.raises(ClaimLockUnavailable):
+                with jm._mutate(rec):
+                    rec.state = JobState.CANCELLED  # an ordinary change to write
 
             assert meta.read_text() == before, (
                 "an unlocked persist rewrote a record it could not lock"
@@ -1947,7 +1949,6 @@ class TestNoUnsafeUnlockedWrites:
         jm = JobManager(base_dir=base)
         try:
             assert jm.begin_resume("j1") is True
-            rec = jm._records["j1"]
 
             self._no_lock(monkeypatch)
             # Between our read and our write, the delivery completes elsewhere.
@@ -1958,7 +1959,12 @@ class TestNoUnsafeUnlockedWrites:
                 resume_owner=None,
             )
 
-            jm._persist(rec)  # an ordinary metadata write
+            # Every call that writes a record, without the lock.
+            jm.get("j1")
+            jm.list()
+            jm.result("j1")
+            jm.cancel("j1")
+            jm.begin_resume("j1")
 
             on_disk = json.loads((base / "j1" / "meta.json").read_text())
             assert on_disk["resume_state"] == ResumeState.DELIVERED.value, (
@@ -1975,14 +1981,9 @@ class TestNoUnsafeUnlockedWrites:
         jm = JobManager(base_dir=base)
         try:
             self._no_lock(monkeypatch)
-            rec = JobRecord(
-                job_id="new", tool="t", backend="subprocess", name="n",
-                state=JobState.QUEUED,
-            )
-            jm._job_dir("new").mkdir(parents=True, exist_ok=True)
-            jm._persist(rec)
+            rec = jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
 
-            assert (base / "new" / "meta.json").exists()
+            assert (base / rec.job_id / "meta.json").exists()
         finally:
             jm.close()
 
@@ -2085,7 +2086,7 @@ class TestResumeTransitionGuards:
         fields.update(over)
         rec = JobRecord(**fields)
         jm._records[rec.job_id] = rec
-        jm._persist(rec)
+        jm._create(rec)
         return rec
 
     def test_running_job_cannot_be_claimed(self, tmp_path):
@@ -2148,7 +2149,7 @@ class TestStartupRecoveryHonorsDurableReads:
         )
         jm._records["j1"] = rec
         jm._job_dir("j1").mkdir(parents=True, exist_ok=True)
-        jm._persist(rec)
+        jm._create(rec)
         return jm
 
     @staticmethod
@@ -2167,9 +2168,9 @@ class TestStartupRecoveryHonorsDurableReads:
             base, state=JobState.SUCCEEDED, resume_on_complete=True, finished_at=1.0
         )
         rec = jm._records["j1"]
-        rec.resume_state = ResumeState.RESUMING.value
-        rec.resume_owner = f"{_this_host()}:{_dead_pid()}"
-        jm._persist(rec, owns_shared_state=True)
+        with jm._mutate(rec):
+            rec.resume_state = ResumeState.RESUMING.value
+            rec.resume_owner = f"{_this_host()}:{_dead_pid()}"
         return jm
 
     @pytest.mark.parametrize("kind", ["launches", "resumes"])

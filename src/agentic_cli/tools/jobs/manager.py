@@ -119,8 +119,8 @@ class ClaimLockUnavailable(RuntimeError):
 def _file_lock(path: Path) -> Iterator[None]:
     """Exclusive lock over ``path``, held across processes.
 
-    Resume claims are the one piece of job state two CLI processes contend
-    for, so every read-modify-write of the resume fields happens inside this.
+    Every CLI of the app shares the jobs directory, so every read-modify-write
+    of a job record happens inside this (``JobManager._mutate``).
 
     Raises:
         ClaimLockUnavailable: If no real lock could be taken — the lock file
@@ -424,7 +424,7 @@ def _reload_fields(rec: JobRecord, data: dict) -> None:
             continue
         if rule is _FieldRule.STATE:
             try:
-                rec.state = JobState(data[name])
+                setattr(rec, name, JobState(data[name]))
             except (KeyError, ValueError):  # pragma: no cover - none, or unknown
                 pass
         elif rule is _FieldRule.STICKY:
@@ -465,10 +465,6 @@ class JobManager:
         # in the same process is as unable to poll it as another CLI would be.
         self._instance_id = uuid.uuid4().hex[:8]
         self._records: dict[str, JobRecord] = {}
-        # Job ids this manager has seen on disk. A record that was persisted
-        # and is now missing was *deleted* by another manager; one that was
-        # never persisted is simply new. Writing must tell them apart.
-        self._persisted: set[str] = set()
         # Jobs whose unregistered backend has been logged at warning, which
         # happens once per job, when a caller asks for it (``_backend_of``).
         self._backendless_warned: set[str] = set()
@@ -792,7 +788,6 @@ class JobManager:
                             continue
                         removed.append(rec)
                         self._records.pop(rec.job_id, None)
-                        self._persisted.discard(rec.job_id)
                         shutil.rmtree(self._job_dir(rec.job_id), ignore_errors=True)
                     return len(removed)
             except ClaimLockUnavailable as exc:
@@ -1076,15 +1071,16 @@ class JobManager:
 
     @property
     def _claim_lock_path(self) -> Path:
-        """One lock for the whole jobs directory; claims are rare and brief."""
+        """One lock for the whole jobs directory, held by every record's write."""
         return self.base_dir / ".resume.lock"
 
     @contextlib.contextmanager
     def _claim_transaction(self) -> Iterator[None]:
-        """Serialize a read-modify-write of the resume fields, cross-process.
+        """Serialize a read-modify-write of job records, cross-process.
 
-        Re-entrant within this manager (see ``_claim_depth``) so a claim path
-        can persist without deadlocking against its own ``flock``.
+        Re-entrant within this manager (see ``_claim_depth``) so a path that
+        holds it (a reconcile, a cancel) can write a record (``_mutate``)
+        without deadlocking against its own ``flock``.
 
         Raises:
             ClaimLockUnavailable: propagated from :func:`_file_lock`.
@@ -1177,72 +1173,6 @@ class JobManager:
             )
             self._write(rec, {})
 
-    def _persist(self, rec: JobRecord, *, owns_shared_state: bool = False) -> None:
-        """Write a record's metadata, never clobbering a newer delivery state.
-
-        ``meta.json`` holds both this process's job bookkeeping *and* the
-        cross-process resume fields. A plain state write (a poll that finds the
-        job finished, a cancel, a launch) carries whatever resume fields this
-        manager last read, which may be older than what another process has
-        since written — persisting them verbatim erased that process's claim,
-        and the job could then be claimed and delivered twice.
-
-        So unless the caller owns the resume fields (the claim transitions,
-        which set them under the lock), they are re-read from disk first and
-        adopted into ``rec``, with the other fields any manager may write
-        (``_adopt_shared_fields``: the execution owner, a cancel request).
-
-        Args:
-            rec: The record to write.
-            owns_shared_state: True only for a caller holding the claim
-                transaction that just set these fields.
-        """
-        if owns_shared_state:
-            self._write(rec, {})
-            return
-        try:
-            with self._claim_transaction():
-                status, data = self._read_persisted(rec.job_id)
-                if status is DurableRead.UNREADABLE:
-                    logger.warning("job_persist_skipped_unreadable", job_id=rec.job_id)
-                    return
-                if status is DurableRead.MISSING and rec.job_id in self._persisted:
-                    # Another manager cleaned this job away; writing it back
-                    # would resurrect a deleted record.
-                    self._forget(rec.job_id)
-                    return
-                if data is not None:
-                    durable = data.get("state")
-                    if durable in _TERMINAL_VALUES and durable != rec.state.value:
-                        # Terminal transitions are monotonic: some manager has
-                        # already recorded how this job ended, and a snapshot
-                        # taken before that cannot say otherwise. Adopt it.
-                        self._reload_durable(rec)
-                        logger.info(
-                            "job_terminal_state_preserved",
-                            job_id=rec.job_id,
-                            state=durable,
-                        )
-                        return
-                    self._adopt_shared_fields(rec, data)
-                self._write(rec, data or {})
-        except ClaimLockUnavailable as exc:
-            # No lock means no safe read-modify-write: re-reading and rewriting
-            # is exactly the race the lock prevents, so an interleaved delivery
-            # would be regressed. Skip the write entirely — the in-memory
-            # change is retried by the next reconcile — unless there is nothing
-            # on disk yet to clobber, in which case creating the record is safe.
-            meta = self._job_dir(rec.job_id) / "meta.json"
-            if meta.exists() or rec.job_id in self._persisted:
-                logger.warning(
-                    "job_persist_skipped_unlocked", job_id=rec.job_id, error=str(exc)
-                )
-                return
-            logger.warning(
-                "job_persist_created_unlocked", job_id=rec.job_id, error=str(exc)
-            )
-            self._write(rec, {})
-
     def _read_persisted(self, job_id: str) -> "tuple[DurableRead, dict | None]":
         """Read a record from disk, distinguishing *gone* from *unreadable*.
 
@@ -1272,34 +1202,8 @@ class JobManager:
 
     def _forget(self, job_id: str) -> None:
         """Drop a record another manager deleted. Never recreate it."""
-        self._persisted.discard(job_id)
         if self._records.pop(job_id, None) is not None:
             logger.info("job_record_deleted_elsewhere", job_id=job_id)
-
-    def _adopt_shared_fields(self, rec: JobRecord, data: dict) -> None:
-        """Adopt the fields any manager may write from a persisted snapshot.
-
-        The ownership and delivery fields, and a cancel request: a second CLI
-        that cannot stop a job records one for the manager running it, which
-        holds the slot until the job ends and records it CANCELLED. Once
-        requested it stays requested, so no write drops it.
-        """
-        if "exec_owner" in data:
-            rec.exec_owner = data["exec_owner"]
-        if data.get("cancel_requested"):
-            rec.cancel_requested = True
-        state = data.get("resume_state")
-        if state is None:
-            # A record written before the lifecycle existed.
-            legacy = data.get("resumed")
-            if legacy is None:
-                return
-            state = (
-                ResumeState.DELIVERED.value if legacy else ResumeState.PENDING.value
-            )
-        rec.resume_state = state
-        rec.resume_error = data.get("resume_error")
-        rec.resume_owner = data.get("resume_owner")
 
     def _write(self, rec: JobRecord, read: dict) -> None:
         """Write ``rec`` onto ``read``, what its ``meta.json`` held.
@@ -1307,57 +1211,11 @@ class JobManager:
         A key this version does not declare is kept: a later version's, which
         it would otherwise erase. The legacy ``resumed`` is not: the
         ``resume_state`` written with it replaces it, and every version since
-        the delivery lifecycle reads that first. Remembers that the record
-        now exists on disk.
+        the delivery lifecycle reads that first.
         """
         data = {**read, **rec.to_dict()}
         data.pop("resumed", None)
         atomic_write_json(self._job_dir(rec.job_id) / "meta.json", data)
-        self._persisted.add(rec.job_id)
-
-    def _reload_durable(self, rec: JobRecord) -> DurableRead:
-        """Reload the whole persisted lifecycle into ``rec``, by ``_FIELD_RULES``.
-
-        A manager's in-memory record is a snapshot; the file is the shared
-        truth. Every mutator reloads before deciding, so a stale view cannot
-        overwrite an outcome another manager already recorded, an observer
-        learns that a foreign job finished, and a *terminal* record still picks
-        up the delivery lifecycle that moves after it.
-
-        Returns:
-            What the read found. ``MISSING`` means another manager deleted the
-            record and the caller must forget it rather than write it back;
-            ``UNREADABLE`` means the caller must not act on it at all.
-        """
-        status, data = self._read_persisted(rec.job_id)
-        if status is not DurableRead.PRESENT:
-            return status
-        _reload_fields(rec, data)
-        return status
-
-    def _recovery_target(self, rec: JobRecord) -> bool:
-        """Whether startup recovery may judge — and rewrite — this record.
-
-        The durable read is the *decision*, not a side effect. Recovery writes
-        with ``owns_shared_state=True``, which by design does not re-check the
-        file, so both non-PRESENT answers have to be handled here:
-
-        - ``MISSING`` — another manager cleaned the job away between our load
-          and now. Forget it; writing a verdict would resurrect a deleted job.
-        - ``UNREADABLE`` — we have no basis for a verdict at all, and rewriting
-          would destroy exactly the state we failed to read. Leave it alone.
-
-        Returns:
-            True only if the record was reloaded and may be acted on.
-        """
-        status = self._reload_durable(rec)
-        if status is DurableRead.PRESENT:
-            return True
-        if status is DurableRead.MISSING:
-            self._forget(rec.job_id)
-        else:
-            logger.warning("job_recovery_skipped_unreadable", job_id=rec.job_id)
-        return False
 
     def _backend_of(
         self, rec: JobRecord, *, asked: bool = False
@@ -1595,9 +1453,8 @@ class JobManager:
                     continue
                 # In-memory handles (Popen / Future) are gone after a restart,
                 # so non-restart-safe running jobs become UNKNOWN — unless a
-                # live process still owns their execution (see _refresh).
+                # live process still owns their execution (see _poll).
                 self._records[rec.job_id] = rec
-                self._persisted.add(rec.job_id)
             # Recover before reconciling: reconcile() starts queued jobs, and
             # an interrupted launch must never be one of them.
             self._recover_interrupted_launches()
