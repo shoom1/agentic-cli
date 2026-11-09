@@ -374,6 +374,15 @@ _SWAP_NOTE = (
     "to continue it. Here it starts empty."
 )
 
+#: What setting ``BaseCLIApp.session_id`` warns, deprecated in 0.7.0: a setter
+#: cannot run the switch, which awaits the workflow.
+_SESSION_ID_SETTER_DEPRECATED = (
+    "Setting BaseCLIApp.session_id is deprecated: use `await app.resume_session(id)` "
+    "or `await app.start_new_session()`. The setter holds the conversation and starts "
+    "its task list and usage counters over, but the workflow does not load it until "
+    "the next turn names it, and the memories of the conversation left are not proposed."
+)
+
 #: How ``/settings`` reports a change of a key read only as the app starts
 #: (``settings_persistence.RESTART_KEYS``).
 _AT_NEXT_START = "(takes effect at the next start)"
@@ -1033,13 +1042,30 @@ class BaseCLIApp:
 
     @property
     def session_id(self) -> str | None:
-        """Get the persistent session ID, if any."""
+        """The id of the conversation the turns run in.
+
+        Setting it is deprecated (0.7.0): switch with ``await
+        resume_session(id)`` or ``await start_new_session()``, which the
+        workflow loads and which propose the memories of the conversation
+        left. The setter still switches, as far as a setter can (the switch
+        awaits the workflow): it holds the conversation, letting go of the
+        one before, and starts the task list and the usage counters over,
+        with a ``DeprecationWarning``. The workflow is not told until the next
+        turn names the id, and the memories of the conversation left are not
+        proposed. Set it between turns.
+
+        Raises:
+            RuntimeError: On setting an id another process has open; nothing
+                changes.
+        """
         return self._session_id
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
-        """Set the persistent session ID."""
-        self._session_id = value
+        warnings.warn(_SESSION_ID_SETTER_DEPRECATED, DeprecationWarning, stacklevel=2)
+        holder = self._conversation.switch_now(value, self._switch_parts())
+        if holder is not None:
+            raise RuntimeError(f"Conversation '{value}' is open in another process ({holder}).")
 
     @property
     def session_start(self) -> SessionStart:

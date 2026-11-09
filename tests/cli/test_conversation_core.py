@@ -365,6 +365,38 @@ class TestTheSwitch:
         assert "tasks reset" not in around.done
 
 
+class TestTheSwitchAtOnce:
+    """``switch_now``: what the switch does without an await (the deprecated
+    ``session_id`` setter)."""
+
+    def test_it_holds_the_target_and_starts_over_without_the_workflow(self, tmp_path):
+        core, around = TestTheSwitch.core_in(tmp_path), Around(FakeWorkflow())
+        core.turned = True
+
+        assert core.switch_now("b", around.parts()) is None
+
+        assert (core.session_id, core.turned) == ("b", False)
+        assert held_elsewhere(place(tmp_path), "b") == os.getpid()
+        assert held_elsewhere(place(tmp_path), "a") is None
+        assert around.workflow.calls == []
+        assert around.done == ["tasks reset", "usage reset", "status swapped=False"]
+
+    def test_one_open_elsewhere_is_refused_and_nothing_changes(self, tmp_path):
+        core, around = TestTheSwitch.core_in(tmp_path), Around()
+        ConversationLock(tmp_path).take(place(tmp_path).key("b"))
+
+        assert core.switch_now("b", around.parts()) == os.getpid()
+        assert core.session_id == "a" and around.done == []
+
+    def test_none_holds_nothing(self, tmp_path):
+        core, around = TestTheSwitch.core_in(tmp_path), Around()
+
+        assert core.switch_now(None, around.parts()) is None
+
+        assert core.session_id is None
+        assert held_elsewhere(place(tmp_path), "a") is None
+
+
 def _row():
     async def row():
         return object()

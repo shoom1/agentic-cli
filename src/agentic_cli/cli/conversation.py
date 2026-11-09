@@ -287,6 +287,35 @@ class ConversationCore:
         parts.status(swapped)
         return Switch(made=True, loaded=loaded)
 
+    def switch_now(self, to: str | None, parts: SwitchParts) -> int | None:
+        """What ``switch`` does without an await, for a caller that cannot
+        wait (``BaseCLIApp``'s deprecated ``session_id`` setter).
+
+        ``to``'s lock is taken and the one before let go, ``to`` is the
+        conversation, unused, its task list and usage counters start over,
+        and the status line is drawn. The workflow does not load it (the next
+        turn names it), and the memories of the conversation left are not
+        proposed. None holds nothing: the turns run in the workflow's own
+        default session.
+
+        Returns:
+            None once ``to`` is the conversation (or was); else the process
+            id of another process that has it open, and nothing changed.
+        """
+        if to == self.session_id:
+            return None
+        if to is None:
+            self.release()
+            self.session_id, self.turned = None, False
+            _start_over(parts, swapped=False)
+        else:
+            hold = self.acquire(to)
+            if isinstance(hold, int):
+                return hold
+            self._make(hold, parts, swapped=False)
+        parts.status(False)
+        return None
+
     def _make(self, hold: Hold, parts: SwitchParts, *, swapped: bool) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters."""
@@ -294,12 +323,8 @@ class ConversationCore:
         self.place = hold.place
         self.session_id = hold.session_id
         self.turned = False
-        parts.processor.reset()
-        if parts.tracker is not None:
-            if swapped:
-                parts.tracker.reset_context()
-            else:
-                parts.tracker.reset()
+        _start_over(parts, swapped=swapped)
+
 
     def _at(self, place: Place | None) -> Place:
         place = place or self.place
@@ -330,3 +355,15 @@ async def _give_back(workflow: Any, session_id: str) -> None:
             logger.debug("session_readopt_failed", session_id=session_id, exc_info=True)
 
     await asyncio.shield(asyncio.ensure_future(give()))
+
+
+def _start_over(parts: SwitchParts, *, swapped: bool) -> None:
+    """A conversation switched to starts without the task list and the usage
+    counters of the one left (only the context after a backend switch: the
+    session's totals stay)."""
+    parts.processor.reset()
+    if parts.tracker is not None:
+        if swapped:
+            parts.tracker.reset_context()
+        else:
+            parts.tracker.reset()

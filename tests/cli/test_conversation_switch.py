@@ -301,3 +301,53 @@ class TestAnOrchestratorSwitch:
             f"a new one starts here, {new}. Its history stays with the previous "
             "backend: switch back to continue it."
         )
+
+
+class TestTheSessionIdSetter:
+    """``app.session_id = <id>`` moved the turns to another conversation with
+    no lock, no load and no reset: the next turn wrote to a conversation
+    another process could have open, under the old one's task list. A
+    setter cannot run the switch (it is async): it does what can be done at
+    once, holding the conversation and starting the task list and the usage
+    counters over, and warns that ``resume_session`` is the way."""
+
+    async def test_it_holds_the_conversation_and_starts_over_with_a_warning(self, home):
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        old = app.session_id
+        assert app._hold(old) is None
+        app._message_processor._last_task_progress = "- [ ] a task"
+        app._turned = True
+
+        with pytest.warns(DeprecationWarning, match="resume_session"):
+            app.session_id = "theirs"
+
+        assert app.session_id == "theirs"
+        assert not free(app, app._conversation_key("theirs"))
+        assert free(app, app._conversation_key(old))
+        assert app._message_processor._last_task_progress is None
+        assert app._turned is False
+
+    async def test_one_open_elsewhere_is_refused_and_nothing_changes(self, home):
+        app = app_on(Workflow(), BaseSettings(session_store="sqlite"))
+        old = app.session_id
+        assert app._hold(old) is None
+        other = open_elsewhere(app, app._conversation_key("theirs"))
+
+        with pytest.warns(DeprecationWarning), pytest.raises(
+            RuntimeError, match=rf"'theirs' is open in another process \({os.getpid()}\)"
+        ):
+            app.session_id = "theirs"
+        other.release()
+
+        assert app.session_id == old and not free(app, app._conversation_key(old))
+
+    async def test_the_next_turn_runs_in_it(self, project):
+        workflow = Workflow()
+        app = app_on(workflow, fake_settings())
+
+        with pytest.warns(DeprecationWarning):
+            app.session_id = "theirs"
+        await app.process_input("Hello.")
+
+        assert workflow.turns == ["theirs"]
