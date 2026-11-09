@@ -980,13 +980,16 @@ as 128,000 tokens.
 - **Startup uses the models the settings name at once**, and waits on a
   listing only to fill a gap they leave: no `models` entry can run (the
   list's fast, default and strong models come from the built-in providers'
-  listings), a role the agents run on is computed and the list has no model
-  of its tier (it takes the newest of its tier), or nothing describes a model
-  the settings name (no `models` entry sets a fact of it, no family rule of
-  the shipped table matches it, and no cached listing has it: its listing is
+  listings), a role the agents run on is computed (it has no model of its
+  own: it takes the newest of its tier among the entries a listing serves, so
+  the start lists the provider of the entry it would take unless a cached
+  listing serves it, and with no entry of its tier the built-in providers),
+  or nothing describes a model the settings name (no cached listing has it,
+  no family rule of the shipped table matches it, and its `models` entry, if
+  any, does not give its `context_window` and `thinking`: its listing is
   where its limits and thinking come from). Those listings run at once, each
   for at most 10 seconds, and a provider the cache holds a listing or a
-  failure for is not waited on for the first two. Every other provider in use
+  failure for is not waited on for the built-ins. Every other provider in use
   is listed in the background after the start (one the cache holds nothing
   for, an older or failed entry, or an entry that lacks a model the settings
   name): that is how the models the settings name are checked. An app whose
@@ -1014,10 +1017,10 @@ as 128,000 tokens.
   refused. The workflow starts on it as named, and the listings check it: at
   startup when the start lists its provider anyway, else in the background.
   When its provider does not serve it, one warning says so, naming the setting
-  and what to do, the list leaves it out (`/models` says why), and a turn on
-  it fails at the provider; a model nothing describes runs on the
-  conservative record (no thinking, the 128,000-token window floor) unless a
-  `models` entry says otherwise. A listing read from the cache that lacks such
+  (or the computed role that runs on it) and what to do, the list leaves it
+  out (`/models` says why), and a turn on it fails at the provider; a model
+  nothing describes runs on the conservative record (no thinking, the
+  128,000-token window floor) unless a `models` entry says otherwise. A listing read from the cache that lacks such
   a model does not count until a new listing confirms it, since the cache can
   predate a model. The cache records the absence (of every project's settings
   that share the file), so a retired model costs one listing, not one at every

@@ -1530,10 +1530,11 @@ the start of the entry's title.
   `initialize_services()` resolves the default model and every agent before
   it builds anything, and raises one `SettingsValidationError` that lists
   every agent that cannot run (a provider neither built in nor defined in
-  `model_providers`, a provider that cannot be called, a model the
-  provider's fresh listing lacks, a thinking mode the model does not take),
-  each naming the agent, the model and the allowed values; a role nothing
-  can fill is said once, whatever the number of agents on it.
+  `model_providers`, a provider that cannot be called, a thinking mode the
+  model does not take), each naming the agent, the model and the allowed
+  values; a role nothing can fill is said once, whatever the number of
+  agents on it. A model its provider does not serve is not among them: it is
+  warned of (see **A model the settings name is used…**).
   `validate=False` skips only the static checks of `validate_settings`. A
   bare agent `model` that is not a model id (such as `"mystery-model"`) is
   now an app role: it runs on the default model, with a warning once per
@@ -1571,13 +1572,16 @@ the start of the entry's title.
   it.
   Startup uses the models the settings name at once, and waits on a listing
   only to fill a gap they leave: no `models` entry can run (the list's tier
-  models come from the built-in providers' listings), a computed role has no
-  model of its tier in the list, or nothing describes a model they name (no
-  `models` entry sets a fact of it, no family rule of the shipped table
-  matches it, no cached listing has it). Those listings run at once, each for
-  at most 10 seconds, and a second round lists the built-in providers the
-  first one's results put in use; a provider the cache holds a listing or a
-  failure for is not waited on for the first two gaps. Every other provider
+  models come from the built-in providers' listings), a role is computed (it
+  has no model of its own: the start lists the provider of the entry of its
+  tier it would take, unless a cached listing serves that entry, and with no
+  such entry the built-in providers), or nothing describes a model they name
+  (no cached listing has it, no family rule of the shipped table matches it,
+  and its `models` entry, if any, does not give its `context_window` and
+  `thinking`). Those listings run at once, each for at most 10 seconds, and a
+  second round lists the built-in providers the first one's results put in
+  use; a provider the cache holds a listing or a failure for is not waited on
+  for the built-ins. Every other provider
   in use is listed in the background: one the cache holds nothing for, an
   older entry, an entry that lacks a model the settings name, and a listing
   that failed at startup (once). Until one succeeds the provider's ids are
@@ -1761,16 +1765,19 @@ the start of the entry's title.
   and one warning names it, the setting that names it and what to do ("Model
   google:gemini-9-ultra (agent 'writer') is not served by google: its listing
   lacks it, so a turn on it will fail at the provider. Choose a model google
-  serves for agent 'writer' (/models google: lists what it serves)."; for an
-  entry only, "… in models is not offered: not served by google. Remove it
-  from models, or name a model google serves …"). A model nothing describes
-  either (no `models` entry setting a fact, no family rule of the shipped
-  table) runs on the conservative record, no thinking and the 128,000-token
-  window floor, which the warning says. A listing under 24 hours old read
-  from the cache can predate a model the provider now serves (one released
-  since, or newly open to the account), so its absence counts only once a
-  new listing confirms it (in the background, once); the cache records the
-  absence, so a retired model costs one listing, not one at every start.
+  serves for agent 'writer' (`/models google:` lists what it serves)."; for an
+  entry a computed role took at the start, that the role runs on it and to
+  set the role or restart; for any other entry, "… in models is not offered:
+  not served by google. Remove it from models, or name a model google serves
+  …"). A computed role never takes an entry no listing has served: the start
+  lists its provider first. A model nothing describes either runs on the
+  conservative record (no thinking, the 128,000-token window floor, or the
+  one of the two its entry does not give), which the warning says. A listing
+  under 24 hours old read from the cache can predate a model the provider
+  now serves (one released since, or newly open to the account), so its
+  absence counts only once a new listing confirms it (in the background,
+  once); the cache records the absence, so a retired model costs one
+  listing, not one at every start.
 - **`settings.set_model()` checks only the reference** (a role, or a
   malformed one, raises `ValueError`); `/settings` reinitializes the workflow
   and rolls the change back if the model cannot run. `default_model` must be
@@ -2210,7 +2217,8 @@ step; each entry says what to use instead.
   `get_family(model)` is `parse_ref(model).provider`;
   `get_default(family)` is `manager.model`;
   `resolve_model(model)` is `catalog.record(parse_ref(model))`, which raises
-  `ModelResolutionError` when the provider's fresh listing lacks the model;
+  `ModelResolutionError` when the provider's fresh listing lacks a model the
+  settings do not name (one they name is accepted, and warned of);
   `is_authoritative_for(model)` is
   `catalog.is_authoritative(parse_ref(model).provider)`;
   `supports_thinking(model)` is
