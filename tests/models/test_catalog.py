@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import time
 
+import httpx
 import pytest
 
 from agentic_cli.models import (
@@ -1300,3 +1301,85 @@ class TestRefresh:
 
         assert task.done()
         assert catalog.start_background_refresh() is None
+
+
+# --- a listing that failed at startup is tried once more --------------------------
+
+
+def fails_first(payload):
+    """An answer that fails the first request (a network blip) and serves ``payload`` after."""
+    asked: list[httpx.Request] = []
+
+    def answer(request):
+        asked.append(request)
+        return refuse(request) if len(asked) == 1 else payload
+
+    return answer
+
+
+class TestAFailedStartupListing:
+    """Without a listing an OpenRouter model has no thinking knob and no window
+    (the shipped table's conservative record): the background refresh lists the
+    provider once more, so a blip at startup does not last the session."""
+
+    async def test_the_background_refresh_lists_it_again_and_the_record_gets_the_listing_s_facts(
+        self,
+    ):
+        api = ProviderAPI(openrouter=fails_first(recorded("openrouter")))
+        catalog = await loaded(api, references=ON_OPENROUTER, openrouter="r-test-key")
+        assert catalog.status()[0].state is ProviderState.DEGRADED
+        before = catalog.record(QWEN)
+        assert (before.thinking.mechanism, before.context_window) == (ThinkingMechanism.NONE, None)
+
+        task = catalog.start_background_refresh()
+        assert task is not None
+        await task
+
+        assert api.calls == ["openrouter", "openrouter"]
+        assert catalog.status()[0].state is ProviderState.FRESH
+        after = catalog.record(QWEN)
+        assert (after.thinking.mechanism, after.context_window) == (
+            ThinkingMechanism.EFFORT, 131072,
+        )
+
+    async def test_it_is_tried_once_more_and_no_more(self, tmp_path):
+        cache = tmp_path / "model_cache.json"
+        api = ProviderAPI(openrouter=500)
+        keyed = providers(openrouter="r-test-key")
+        catalog = ModelCatalog(providers=keyed, references=ON_OPENROUTER, cache_path=cache,
+                               transport=api.transport, clock=Clock())
+        await catalog.load()
+
+        task = catalog.start_background_refresh()
+        assert task is not None
+        await task
+
+        assert api.calls == ["openrouter", "openrouter"]
+        assert catalog.status()[0].state is ProviderState.DEGRADED
+        assert catalog.start_background_refresh() is None  # no loop
+        # The failure is cached, so the next start tries again, as before.
+        again = ModelCatalog(providers=keyed, references=ON_OPENROUTER, cache_path=cache,
+                             transport=ProviderAPI(openrouter=500).transport, clock=Clock())
+        await again.load()
+        assert again.start_background_refresh() is not None
+        await again.aclose()
+
+    async def test_a_refresh_or_search_that_fails_is_not_tried_again_by_itself(self):
+        api = ProviderAPI()
+        catalog = await loaded(api, google=KEYS["google"])
+        api.answers["google"] = 500
+        await catalog.refresh()
+
+        assert catalog.start_background_refresh() is None
+
+    async def test_the_warning_says_what_it_means_for_the_models(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await loaded(
+                ProviderAPI(openrouter=fails_first(recorded("openrouter"))),
+                references=ON_OPENROUTER, openrouter="r-test-key",
+            )
+
+        (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning.startswith("Could not list openrouter models (")
+        assert "ids are not checked" in warning
+        assert "limits and thinking" in warning and "shipped table" in warning

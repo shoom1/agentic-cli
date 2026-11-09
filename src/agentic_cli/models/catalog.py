@@ -61,7 +61,10 @@ it is shown) and the entries' models it lacked, never a key. Startup reads it
 and waits on the network only for a provider in use that has credentials and
 no entry for its address and kind; a fresh entry needs no listing, and an
 older one (or a cached failure) is used while ``start_background_refresh``
-lists it again. A broken file, one from an older version, an entry this
+lists it again. A listing that fails at startup is listed once more there (a
+blip should not last the session: until a listing succeeds, the provider's ids
+are not checked and its models' limits and thinking come from the table); if
+that fails too, the next start tries again. A broken file, one from an older version, an entry this
 version cannot read, or an entry for another address or kind is ignored and
 listed again; a file of a newer version is not used, and never written (the
 listings stay in memory). A listing writes its own provider's entry and
@@ -166,7 +169,8 @@ class _ProviderState:
     listing: Listing | None = None
     #: The last attempt, while it is a failure.
     failure: Listing | None = None
-    #: A cached entry that a background refresh should replace.
+    #: A listing the background refresh should replace: a cached one that is
+    #: not fresh or failed, or one that failed at startup.
     due: bool = False
     #: The listing was read from the cache, not listed by this catalog.
     from_cache: bool = False
@@ -289,10 +293,12 @@ class ModelCatalog:
 
     def start_background_refresh(self) -> "asyncio.Task[None] | None":
         """List again, in a task, each provider in use or searched whose cached
-        listing is not fresh.
+        listing is not fresh, or whose listing failed at startup.
 
-        Each result is swapped in as it arrives. Returns the task, or None
-        when nothing is due or the catalog is closed. ``aclose()`` cancels it.
+        Each provider is listed once: if that fails too, only the next start
+        tries again. Each result is swapped in as it arrives. Returns the
+        task, or None when nothing is due or the catalog is closed.
+        ``aclose()`` cancels it.
         """
         if self._closed:
             return None
@@ -605,7 +611,8 @@ class ModelCatalog:
             logger.warning("Background model-list refresh failed", exc_info=True)
 
     async def _list_now(self, names: Iterable[str]) -> None:
-        """List ``names`` concurrently, as startup does (a failure is a warning)."""
+        """List ``names`` concurrently, as startup does: a failure is a warning,
+        and the background refresh lists that provider again."""
         await asyncio.gather(*(self._list(name, startup=True) for name in dict.fromkeys(names)))
 
     async def _list(self, name: str, *, startup: bool = False) -> None:
@@ -618,15 +625,20 @@ class ModelCatalog:
         else:
             state.failure = listing
             # At startup this is the first run's validation going missing, as
-            # 0.6 reported it; later it only means a refresh will retry.
+            # 0.6 reported it, and the models' limits and thinking with it;
+            # later it only means a refresh will retry.
             logger.log(
                 logging.WARNING if startup else logging.INFO,
-                "Could not list %s models (%s); its model ids are not checked "
+                "Could not list %s models (%s); its model ids are not checked, "
+                "and its models' limits and thinking come from the shipped table, "
                 "until a listing succeeds",
                 name,
                 listing.error,
             )
-        state.due = False
+        # A failure at startup is listed once more by the background refresh
+        # (a blip should not last the session); any other attempt is not
+        # retried by itself.
+        state.due = startup and not listing.ok
         state.from_cache = False
         self._rebuild(state)
         if listing.ok:

@@ -966,7 +966,12 @@ as 128,000 tokens.
   list a provider in use that can be called and has no cache entry yet: all
   of them at once, each for at most 10 seconds. An older entry is used while
   it is listed again in the background, and a listing counts as older once
-  it is 24 hours old in a long session too. Every process of the app shares
+  it is 24 hours old in a long session too. A listing that fails at startup
+  is listed once more in the background: until one succeeds the provider's
+  ids are not checked and its models' limits and thinking come from the
+  shipped table (the agents are resolved once, at startup, so they keep
+  what they started with; the listing reaches the next start, `/models` and
+  the pickers). Every process of the app shares
   the file, and a listing writes only its own provider's entry and keeps the
   others as the file holds them (an entry this release cannot read too; a file
   of a newer release is neither read nor written: this process keeps its
