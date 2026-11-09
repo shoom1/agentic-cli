@@ -27,7 +27,8 @@ credentials the first time it is searched, and any whose listing is not
 fresh.
 
 **The list** (``offered``) is what the model pickers offer: the entries that
-can run, then the models the references and the caller name, each once; when
+can run, then the models the references and the caller name that can run (one
+rule for all of them: ``not_offered`` gives its reasons), each once; when
 no entry can run, each built-in provider's newest fast, default and strong
 models, of those it shows. Listings never add to it. ``not_offered`` says why
 an entry is left out, and ``load`` warns, once per process, of an entry whose
@@ -453,13 +454,14 @@ class ModelCatalog:
         1. The ``models`` entries that can run, in their order (``not_offered``
            says why the others cannot).
         2. The references, then ``extra`` (the roles' models, say), that can
-           run: a provider with credentials, and a model its fresh listing
-           does not lack. A string that is no reference is skipped.
+           run, by the same rule: a provider with credentials, and a model
+           neither its fresh listing lacks nor the listing in use recorded as
+           absent. A string that is no reference is skipped.
         3. Only when no entry can run: each built-in provider with a key, in
            the order Google, Anthropic, OpenAI, its newest fast, default and
            strong model, from its listing or else the table's fallback models.
         """
-        chosen = [ref for ref in self._entries if self._entry_left_out(ref) is None]
+        chosen = [ref for ref in self._entries if self._runs(ref)]
         tiers = not chosen
         chosen += [ref for ref in (*self._references, *_parsed(extra)) if self._runs(ref)]
         if tiers:
@@ -470,18 +472,18 @@ class ModelCatalog:
         """The ``models`` entries the list leaves out, each with why: its
         provider is not defined, has no key, or does not serve it (a fresh
         listing lacks it, or the listing in use recorded it as absent)."""
-        left_out = ((ref, self._entry_left_out(ref)) for ref in self._entries)
+        left_out = ((ref, self._left_out(ref)) for ref in self._entries)
         return {str(ref): reason for ref, reason in left_out if reason is not None}
 
     def entry_records(self) -> list[ModelRecord]:
         """The records of the ``models`` entries the list offers, in its order."""
-        return [self.record(ref) for ref in self._entries if self._entry_left_out(ref) is None]
+        return [self.record(ref) for ref in self._entries if self._runs(ref)]
 
     # --- the providers in use and the list ------------------------------------
 
     def _providers_in_use(self) -> tuple[str, ...]:
         """The providers in use, from the settings alone (no listing)."""
-        can_run = [ref for ref in self._entries if self._can_run(ref.provider)]
+        can_run = [ref for ref in self._entries if self._runs(ref)]
         used = {ref.provider for ref in can_run}
         used.update(ref.provider for ref in self._references if ref.provider in self._states)
         if self._needs_builtins(can_run):
@@ -512,7 +514,7 @@ class ModelCatalog:
         offered, and load the built-ins they now need: from the cache when it
         holds their listing, else listed once (a retired entry may have been
         the only one that could run, or the one of a computed role's tier)."""
-        offered = [ref for ref in self._entries if self._entry_left_out(ref) is None]
+        offered = [ref for ref in self._entries if self._runs(ref)]
         if not self._needs_builtins(offered):
             return
         needed = [name for name in self._keyed_builtins() if name not in self._in_use]
@@ -538,9 +540,9 @@ class ModelCatalog:
         return state is not None and state.provider.has_credentials
 
     def _runs(self, ref: ModelRef) -> bool:
-        """Whether ``ref`` can run: a provider with credentials whose fresh
-        listing, if it has one, serves the model (``record()`` would not raise)."""
-        return self._can_run(ref.provider) and not self._rejected(ref)
+        """Whether ``ref`` can run: the one rule the list uses for the entries,
+        the references and the roles' models alike (``_left_out`` says why not)."""
+        return self._left_out(ref) is None
 
     def _rejected(self, ref: ModelRef) -> bool:
         """Whether a fresh listing of ``ref``'s provider lacks the model."""
@@ -551,8 +553,10 @@ class ModelCatalog:
             and ref.model not in state.accepted
         )
 
-    def _entry_left_out(self, ref: ModelRef) -> str | None:
-        """Why the list leaves out the entry ``ref``; None when it offers it."""
+    def _left_out(self, ref: ModelRef) -> str | None:
+        """Why the list leaves out ``ref``: its provider is not defined, has no
+        key, or does not serve the model (a fresh listing lacks it, or the
+        listing in use recorded it as absent); None when it can run."""
         state = self._states.get(ref.provider)
         if state is None:
             return f"provider {ref.provider!r} is not defined in model_providers"
@@ -597,7 +601,7 @@ class ModelCatalog:
             state = self._states.get(ref.provider)
             if state is not None and not state.provider.has_credentials:
                 continue
-            reason = self._entry_left_out(ref)
+            reason = self._left_out(ref)
             if reason is not None and (str(ref), reason) not in _WARNED_ENTRIES:
                 _WARNED_ENTRIES.add((str(ref), reason))
                 logger.warning("Model %s in models is not offered: %s", ref, reason)

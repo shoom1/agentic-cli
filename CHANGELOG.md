@@ -1707,7 +1707,8 @@ the start of the entry's title.
   Default Model (`default_model`), has two companions: Fast Model and Strong
   Model, which write `model_roles["fast"]` and `model_roles["strong"]`. Each
   offers the list, as `provider:model` references: the `models` entries
-  that can run, then each model the settings, the agents and the roles name;
+  that can run, then each model the settings, the agents and the roles name
+  that can run by the same rule (a model is never both offered and left out);
   when the list offers no entry, each built-in provider with a key's newest
   fast, default and strong model. A listing never adds to it, where 0.6's
   picker offered every model the providers listed. A role's picker shows

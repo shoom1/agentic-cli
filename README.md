@@ -911,14 +911,15 @@ lacks fails with one error that names each agent concerned.
 A model can run when its provider can be called: a built-in provider with
 its key, or a configured provider whose `api_key_env` is set (or that names
 none). An entry is not offered when its provider is not defined, cannot be
-called, or does not serve it (its fresh listing lacks the model); the first
-and the last are warned of once at startup. Listings never add to the list.
-Each model appears once. Picking writes `default_model`, or the role's
-`model_roles` entry, to the project settings file and restarts the workflow
-on it, keeping the conversation. Before the workflow is ready, the pickers
-offer the list from the entries and the shipped table. An app adds a
-picker for a role of its own with the key `model_role:<role>` in
-`get_ui_setting_keys()`.
+called, or does not serve it (its fresh listing lacks the model, or the older
+listing in use recorded it as absent); the first and the last are warned of
+once at startup. The same rule leaves out a model a setting names. Listings
+never add to the list. Each model appears once. Picking writes
+`default_model`, or the role's `model_roles` entry, to the project settings
+file and restarts the workflow on it, keeping the conversation. Before the
+workflow is ready, the pickers offer the list from the entries and the
+shipped table. An app adds a picker for a role of its own with the key
+`model_role:<role>` in `get_ui_setting_keys()`.
 
 - **`/models`** shows the list, then each entry it leaves out with why ("no
   key: set TOGETHER_API_KEY", "provider 'together' is not defined in

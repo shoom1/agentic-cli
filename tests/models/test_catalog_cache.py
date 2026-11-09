@@ -978,6 +978,48 @@ async def test_a_stale_listing_keeps_out_an_entry_it_recorded_as_absent(cache):
     assert default.model in {record.model for record in catalog.records("anthropic")}
 
 
+async def test_a_model_is_never_both_offered_and_not_offered(cache):
+    """The retired model is an entry and the default model, and the listing in
+    use is a day old: one rule says whether a model can run, for the entries and
+    for the references alike, so /models shows it once, as not served."""
+    clock = Clock()
+    good = ModelRef("anthropic", "claude-sonnet-4-6")
+    entries = {RETIRED: ModelEntry(), good: ModelEntry()}
+    await make(
+        cache, entries=entries, references=(RETIRED,), anthropic=KEYS["anthropic"], clock=clock
+    ).load()
+    clock.now += DAY + 600
+
+    catalog = make(
+        cache, NoNetwork(), entries=entries, references=(RETIRED,),
+        anthropic=KEYS["anthropic"], clock=clock,
+    )
+    await catalog.load()
+
+    assert states(catalog)["anthropic"] is ProviderState.STALE
+    assert catalog.offered() == [str(good)]
+    assert catalog.offered(extra=[str(RETIRED)]) == [str(good)]
+    assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
+
+
+async def test_a_reference_the_listing_in_use_recorded_as_absent_is_left_out_too(cache):
+    """Another project's list recorded the model absent; here it is named by a
+    setting, not by an entry. It is accepted (a stale listing proves nothing) but
+    the list, which a role may be computed from, does not offer it."""
+    clock = Clock()
+    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += DAY + 600
+
+    catalog = make(
+        cache, NoNetwork(), references=(RETIRED,), anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+
+    assert states(catalog)["anthropic"] is ProviderState.STALE
+    assert str(RETIRED) not in catalog.offered()
+    assert catalog.record(RETIRED).model == RETIRED.model
+
+
 async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache):
     """With the network down, a start does not try the listing again for the
     retired model, so the fresh cached listing still rejects a typo."""
