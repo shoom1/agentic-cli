@@ -31,14 +31,15 @@ uses them at once. It waits on a listing only to fill a gap they leave
 built-in providers' listings), a role is computed (it has no model of its
 own: it waits on the provider of the entry of its tier it would take, unless
 a listing in hand serves that entry, and with none on the built-in
-providers), or nothing describes a model they name (no ``models`` entry sets
-a fact of it, no table rule or entry matches it, and no listing in hand
-serves it). Those listings run concurrently, each within the timeout, and a
-second round lists the built-in providers the first one's results put in use;
-there is no third. ``start_background_refresh`` lists every other provider in use: one
-nothing is known of, one whose cached listing is not fresh or failed, and one
-whose cached listing lacks a model the settings name (it may predate the
-model). That is how the models the settings name are checked.
+providers), or nothing describes a model they name (no listing in hand
+serves it, no table rule or entry matches it, and its ``models`` entry, if
+any, does not give its window and its thinking). Those listings run
+concurrently, each within the timeout, and a second round lists the built-in
+providers the first one's results put in use; there is no third.
+``start_background_refresh`` lists every other provider in use: one nothing is
+known of, one whose cached listing is not fresh or failed, and one whose
+cached listing lacks a model the settings name (it may predate the model).
+That is how the models the settings name are checked.
 
 **The list** (``offered``) is what the model pickers offer: the entries that
 can run, then the models the references and the caller name that can run (one
@@ -616,13 +617,19 @@ class ModelCatalog:
 
     def _described(self, ref: ModelRef) -> bool:
         """Whether something describes ``ref`` without a new listing: the listing
-        in hand serves it, or its ``models`` entry or the table gives a fact of it."""
+        in hand serves it; or the table does (a family rule or the table's own
+        numbers: the built-in providers' models); or, for a provider the table
+        knows nothing of, its ``models`` entry gives what a run needs, the window
+        and the thinking. An entry that gives less (``tools`` alone) leaves the
+        listing as the source of the rest."""
         state = self._states[ref.provider]
-        if state.listing is not None and ref.model in state.accepted:
+        if self._served(ref):
             return True
         table = self._table.record_for(ref.provider, state.provider.kind, ref.model)
-        record = with_entry(table, self._entries.get(ref))
-        return any(source != "default" for source in record.sources.values())
+        if any(source == "table" for source in table.sources.values()):
+            return True
+        entry = self._entries.get(ref)
+        return entry is not None and entry.context_window is not None and entry.thinking is not None
 
     def _check_later(self, listed: Collection[str]) -> None:
         """Mark for the background refresh each provider in use this start did
@@ -768,11 +775,33 @@ class ModelCatalog:
             f"{where} ({find})."
         )
         if not self._described(ref):
-            message += (
-                f" Nothing describes it either: it runs {_CONSERVATIVE}, unless a models "
-                "entry says otherwise."
-            )
+            message += self._unknown_limits(ref)
         return message
+
+    def _unknown_limits(self, ref: ModelRef) -> str:
+        """What a model nothing describes runs with, for the warning: what its
+        record lacks (the window, the thinking, or both), and the conservative
+        value it runs on instead. A built-in provider's entry may set the window,
+        never the thinking (``entries.THINKING_FIELDS``)."""
+        record = self.record(ref)
+        builtin = self._states[ref.provider].provider.builtin
+        no_thinking = record.sources.get("thinking", "default") == "default"
+        no_window = record.context_window is None
+        if no_thinking and no_window:
+            unless = "sets its context_window" if builtin else "says otherwise"
+            return (
+                f" Nothing describes it either: it runs {_CONSERVATIVE}, unless a models "
+                f"entry {unless}."
+            )
+        if no_thinking:
+            unless = "" if builtin else ", unless its models entry sets thinking"
+            return f" Nothing gives its thinking either: it runs without thinking{unless}."
+        if no_window:
+            return (
+                " Nothing gives its window either: it runs with a 128,000-token window (the "
+                "floor for an unknown one), unless its models entry sets context_window."
+            )
+        return ""
 
     # --- listings ------------------------------------------------------------
 

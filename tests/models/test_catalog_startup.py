@@ -73,13 +73,14 @@ def states(catalog: ModelCatalog) -> dict[str, ProviderState]:
 
 async def test_settings_that_name_described_models_wait_on_no_listing():
     """Every model is named and something describes each (a table rule, or a models
-    entry's facts), and the default role is mapped (a computed one has no model of
-    its own: see below): the start lists nothing, and the background refresh then
-    lists each provider in use, whose listing reaches the records."""
+    entry that gives its window and thinking), and the default role is mapped (a
+    computed one has no model of its own: see below): the start lists nothing, and
+    the background refresh then lists each provider in use, whose listing reaches
+    the records."""
     api = Slow()
     entries = {
         ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(),
-        QWEN: ModelEntry(context_window=131072),
+        QWEN: ModelEntry(context_window=131072, thinking="none"),
     }
     references = (ModelRef("openai", "gpt-5.5"), ModelRef("google", "gemini-2.5-flash"))
     catalog = make(api, entries=entries, references=references)
@@ -92,16 +93,34 @@ async def test_settings_that_name_described_models_wait_on_no_listing():
     named = [*map(str, entries), *map(str, references)]
     assert [str(catalog.record(ref).ref) for ref in (*entries, *references)] == named
     assert catalog.offered() == named
-    assert catalog.record(QWEN).thinking.mechanism is ThinkingMechanism.NONE  # no listing yet
+    assert catalog.record(QWEN).max_output is None  # no listing yet
 
     await catalog.start_background_refresh()
 
     assert sorted(api.calls) == ALL
     assert set(states(catalog).values()) == {ProviderState.FRESH}
     assert catalog.offered() == named
-    assert catalog.record(QWEN).thinking.mechanism is ThinkingMechanism.EFFORT
-    assert catalog.record(QWEN).context_window == 131072  # the entry still wins
+    assert (catalog.record(QWEN).max_output, catalog.record(QWEN).sources["max_output"]) == (
+        8192, "listing",
+    )
+    assert catalog.record(QWEN).thinking.mechanism is ThinkingMechanism.NONE  # the entry wins
     await catalog.aclose()
+
+
+async def test_an_entry_that_leaves_out_the_window_or_the_thinking_describes_nothing():
+    """A configured provider's model is described only by an entry that gives what a
+    run needs, its window and its thinking (the table knows nothing of it): one that
+    sets only ``tools`` waits on the listing, which gives the model's reasoning and
+    window, rather than run the session without thinking on the window floor."""
+    api = Slow()
+    catalog = make(api, entries={QWEN: ModelEntry(tools=True)}, references=(QWEN,))
+
+    await catalog.load()
+
+    assert api.calls == ["openrouter"]
+    record = catalog.record(QWEN)
+    assert (record.thinking.mechanism, record.context_window) == (ThinkingMechanism.EFFORT, 131072)
+    assert record.sources["tools"] == "config"
 
 
 async def test_the_listings_a_start_needs_run_at_once():

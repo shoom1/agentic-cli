@@ -1397,8 +1397,8 @@ class TestAModelItsProviderDoesNotServe:
     async def test_a_model_an_entry_describes_says_nothing_of_its_limits(self, caplog):
         typo = ModelRef("openrouter", "qwen/qwen3-235b-a2")
         catalog = catalog_for(
-            entries={typo: ModelEntry(context_window=32768)}, references=[typo],
-            named_by={typo: "default_model"}, openrouter="r-test-key",
+            entries={typo: ModelEntry(context_window=32768, thinking="effort")},
+            references=[typo], named_by={typo: "default_model"}, openrouter="r-test-key",
         )
 
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
@@ -1406,8 +1406,47 @@ class TestAModelItsProviderDoesNotServe:
 
         (warning,) = self.warnings(caplog)
         assert warning.startswith("Model openrouter:qwen/qwen3-235b-a2 (default_model) is not")
-        assert "Nothing describes it" not in warning
+        assert "Nothing" not in warning
         assert catalog.record(typo).context_window == 32768
+
+    async def test_a_built_in_model_nothing_describes_is_told_what_an_entry_can_set(
+        self, caplog
+    ):
+        """No family rule matches a Gemini 2.0 id: its thinking comes only from the
+        listing (an entry on a built-in provider may not set it), its window from an
+        entry too."""
+        typo = ModelRef("google", "gemini-2.0-flash-typo")
+        catalog = catalog_for(
+            references=[typo], named_by={typo: "default_model"}, google=KEYS["google"]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        (warning,) = self.warnings(caplog)
+        assert warning.endswith(
+            "Nothing describes it either: it runs without thinking and with a 128,000-token "
+            "window (the floor for an unknown one), unless a models entry sets its "
+            "context_window."
+        )
+
+    async def test_the_warning_names_only_what_nothing_gives(self, caplog):
+        """The entry gives the window, not the thinking: the warning says the model
+        runs without thinking, and nothing of the window."""
+        typo = ModelRef("openrouter", "qwen/qwen3-235b-a2")
+        catalog = catalog_for(
+            entries={typo: ModelEntry(context_window=32768)}, references=[typo],
+            named_by={typo: "default_model"}, openrouter="r-test-key",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        (warning,) = self.warnings(caplog)
+        assert warning.endswith(
+            "Nothing gives its thinking either: it runs without thinking, unless its models "
+            "entry sets thinking."
+        )
 
     async def test_once_per_process(self, caplog):
         missing = ModelRef("google", "gemini-9-ultra")

@@ -14,10 +14,11 @@ It waits on a provider's listing only to fill a gap the settings leave:
   settings' word alone) waits on its provider's listing; with no entry of
   its tier, the role takes the newest model of its tier from the built-in
   providers with a key;
-- **nothing describes a model the settings name**: no ``models`` entry sets a
-  fact of it, no table rule or entry matches it, and no listing in hand
-  serves it, so its provider's listing is the only source of its limits and
-  thinking.
+- **nothing describes a model the settings name**: no listing in hand serves
+  it, no table rule or entry matches it (the built-in providers' models), and
+  its ``models`` entry, if any, does not give what a run needs, its window
+  and its thinking (``tools`` alone describes nothing), so its provider's
+  listing is the only source of its limits and thinking.
 
 Without an entry to wait on, the first two wait on each built-in provider with
 a key that nothing is known of; the third on the model's provider. A provider
