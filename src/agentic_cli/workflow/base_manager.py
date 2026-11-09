@@ -1454,23 +1454,31 @@ class BaseWorkflowManager(ABC):
     def supports_compact(self) -> bool:
         """Whether this backend can summarize a conversation on demand (``compact``).
 
-        Derived from the subclass overriding ``compact``, as
-        ``supports_sessions`` is, so it cannot drift from the code.
+        Derived, as ``supports_sessions`` is, so it cannot drift from the
+        code: True when the subclass implements :meth:`_compact_turn` (the
+        base's ``compact`` runs it) or overrides ``compact`` itself. A backend
+        that cannot in some configuration narrows it (ADK, for a native ADK
+        YAML app).
         """
-        return type(self).compact is not BaseWorkflowManager.compact
+        cls = type(self)
+        return (
+            cls._compact_turn is not BaseWorkflowManager._compact_turn
+            or cls.compact is not BaseWorkflowManager.compact
+        )
 
     async def compact(
         self, session: SessionRef, focus: str | None = None
     ) -> "CompactResult | None":
         """Summarize the main agent's conversation in ``session`` now (``/compact``).
 
-        A backend that implements it runs it as a turn runs: under turn
-        admission, so it never interleaves with a turn or a job's resume, and
-        inside the workflow context of ``session``. It summarizes as its
-        conversations are summarized when they grow, but whatever the prompt's
-        size, keeping the same tail word for word; ``focus`` tells the summary
-        what to keep above all. What it reports goes to the caller's live
-        events (``workflow/live_events.py``), when there are any:
+        A template: it runs as one turn of ``session`` (:meth:`_turn`: under
+        turn admission, so it never interleaves with a turn or a job's
+        resume, and inside the conversation's workflow context), in which the
+        backend's :meth:`_compact_turn` summarizes as its conversations are
+        summarized when they grow, but whatever the prompt's size, keeping
+        the same tail word for word; ``focus`` tells the summary what to keep
+        above all. What it reports goes to the caller's live events
+        (``workflow/live_events.py``), when there are any:
         ``CONTEXT_SUMMARIZING``, the summary's ``LLM_USAGE``
         (``purpose="summarization"``) and ``CONTEXT_TRIMMED``
         (``source="compact"``). A cancel writes nothing.
@@ -1484,11 +1492,35 @@ class BaseWorkflowManager(ABC):
             conversation yet, or none before the tail kept word for word).
 
         Raises:
-            NotImplementedError: The backend cannot (``supports_compact``).
+            NotImplementedError: The backend cannot (``supports_compact``),
+                raised before any turn.
             Exception: Why the summary could not be written (the provider's
                 error).
         """
-        raise NotImplementedError(
+        if not self.supports_compact:
+            raise self._no_compact_support()
+        async with self._turn(session.session_id, session.user_id):
+            return await self._compact_turn(session, focus)
+
+    async def _compact_turn(
+        self, session: SessionRef, focus: str | None
+    ) -> "CompactResult | None":
+        """Summarize ``session``'s main-agent conversation now, inside its turn.
+
+        The backend hook of ``compact``: the base calls it inside the
+        conversation's turn, and implementing it is what makes
+        ``supports_compact`` True. It returns and raises what ``compact``
+        documents, and writes nothing until the summary is written.
+
+        Args:
+            session: The conversation, as the caller named it.
+            focus: What the summary should keep above all, if anything.
+        """
+        raise self._no_compact_support()
+
+    def _no_compact_support(self) -> NotImplementedError:
+        """The error for ``compact`` on a backend that cannot (``supports_compact``)."""
+        return NotImplementedError(
             f"{type(self).__name__} cannot summarize a conversation on demand "
             "(compact). Check ``supports_compact`` before calling."
         )

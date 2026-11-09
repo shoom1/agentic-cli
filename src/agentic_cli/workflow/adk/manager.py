@@ -1165,69 +1165,65 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         return not self._adk_config_path
 
-    async def compact(
-        self, session: SessionRef, focus: str | None = None
+    def _no_compact_support(self) -> NotImplementedError:
+        """Why a native ADK YAML app has no ``compact``."""
+        return NotImplementedError(
+            "A native ADK YAML app (adk_config_path) cannot be summarized on "
+            "demand: its agents' context is ADK's own."
+        )
+
+    async def _compact_turn(
+        self, session: SessionRef, focus: str | None
     ) -> CompactResult | None:
-        """Summarize the main agent's conversation now (``/compact``).
+        """Summarize the main agent's conversation now (the base's ``compact``, ``/compact``).
 
         ADK's compaction runs once on a fresh read of the session
         (``compact_session``), with the main agent's summarizer asked for now
         (``manual``): written whatever the last prompt's size and the saving,
         ``focus`` spliced into its prompt. The range, the call, the event and
         what is reported are a summary's in a turn, but ``CONTEXT_TRIMMED``
-        names ``"compact"`` and comes once ADK has stored the summary. It
-        runs under turn admission, so a turn or a job's resume never writes
-        to the session between its read and the summary's append (ADK's
+        names ``"compact"`` and comes once ADK has stored the summary. The
+        base runs it as a turn, so a turn or a job's resume never writes to
+        the session between its read and the summary's append (ADK's
         ``StaleSessionError``), and nothing is written until the summary is:
-        a cancel leaves the session as it was, and says nothing was made.
-
-        Args:
-            session: The conversation.
-            focus: What the summary should keep above all, if anything.
+        a cancel leaves the session as it was, and says nothing was made. A
+        native ADK YAML app has none (``supports_compact``).
 
         Returns:
             What the summary did; None with no conversation yet, or nothing
             before the kept tail.
 
         Raises:
-            NotImplementedError: A native ADK YAML app, whose agents ADK
-                builds: the framework manages none of their context.
             Exception: Why the summary failed (the summarizer's
                 ``last_error``, the provider's error).
         """
-        if self._adk_config_path:
-            raise NotImplementedError(
-                "A native ADK YAML app (adk_config_path) cannot be summarized on "
-                "demand: its agents' context is ADK's own."
-            )
-        async with self._turn(session.session_id, session.user_id):
-            stored = await self._session_service.get_session(
-                app_name=session.app_name,
-                user_id=session.user_id,
-                session_id=session.session_id,
-            )
-            if stored is None:
-                return None
-            summarizer = self._summarizer(manual=True, focus=focus)
-            if await compact_session(
-                session=stored,
-                session_service=self._session_service,
-                root_agent=self._root_agent,
-                summarizer=summarizer,
-            ):
-                summarizer.report_stored()
-                result = summarizer.last_result
-                logger.info(
-                    "conversation_compacted",
-                    messages=result.messages_summarized,
-                    tokens_before=result.tokens_before,
-                    tokens_after=result.tokens_after,
-                    focus=focus is not None,
-                )
-                return result
-            if summarizer.last_error is not None:
-                raise summarizer.last_error
+        stored = await self._session_service.get_session(
+            app_name=session.app_name,
+            user_id=session.user_id,
+            session_id=session.session_id,
+        )
+        if stored is None:
             return None
+        summarizer = self._summarizer(manual=True, focus=focus)
+        if await compact_session(
+            session=stored,
+            session_service=self._session_service,
+            root_agent=self._root_agent,
+            summarizer=summarizer,
+        ):
+            summarizer.report_stored()
+            result = summarizer.last_result
+            logger.info(
+                "conversation_compacted",
+                messages=result.messages_summarized,
+                tokens_before=result.tokens_before,
+                tokens_after=result.tokens_after,
+                focus=focus is not None,
+            )
+            return result
+        if summarizer.last_error is not None:
+            raise summarizer.last_error
+        return None
 
     # -------------------------------------------------------------------------
     # Sessions (native — DatabaseSessionService persists events continuously)

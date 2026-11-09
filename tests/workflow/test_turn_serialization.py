@@ -33,6 +33,10 @@ from agentic_cli.workflow.events import (  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 
 
+class _StoppedAtItsRead(Exception):
+    """What a harness's store raises where ``compact`` first reads it."""
+
+
 class _Harness:
     """A manager whose stream is driven by the test, with no real backend.
 
@@ -106,6 +110,15 @@ class _ADKHarness(_Harness):
         self.manager._get_or_create_session = _get_or_create
         self.manager._run_and_stream = _stream
 
+    def stop_compact_at_its_read(self) -> None:
+        """``compact``'s read of the session records itself and stops there."""
+
+        async def _get_session(**kwargs):
+            self.events.append(f"compact:{kwargs['session_id']}")
+            raise _StoppedAtItsRead
+
+        self.manager._session_service = SimpleNamespace(get_session=_get_session)
+
     def revive(self) -> None:
         async def _get_session(**kwargs):
             return SimpleNamespace(id=kwargs["session_id"], events=[], state={})
@@ -133,6 +146,15 @@ class _DeepAgentsHarness(_Harness):
                 yield event
 
         self.manager._run_turn = _run_turn
+
+    def stop_compact_at_its_read(self) -> None:
+        """``compact``'s read of the thread records itself and stops there."""
+
+        async def _aget_state(config):
+            self.events.append(f"compact:{config['metadata']['session_id']}")
+            raise _StoppedAtItsRead
+
+        self.manager._root = SimpleNamespace(name="root", aget_state=_aget_state)
 
     def revive(self) -> None:
         async def _exists(ref) -> bool:
@@ -288,6 +310,28 @@ class TestTurnSerialization:
             assert h.events == [
                 "start:sess-a", "end:sess-a", "start:sess-r", "end:sess-r",
             ]
+        finally:
+            ctx.__exit__(None, None, None)
+
+
+    async def test_compact_shares_the_lock(self, backend):
+        h, ctx = turn_harness(backend)
+        try:
+            first = asyncio.create_task(h.drain("sess-a"))
+            await asyncio.wait_for(h.entered.wait(), timeout=2)
+            h.stop_compact_at_its_read()
+
+            compact = asyncio.create_task(
+                h.manager.compact(h.manager.session_ref("sess-c", "u"))
+            )
+            await asyncio.sleep(0.05)
+            assert h.events == ["start:sess-a"], "a compact ran during a user turn"
+
+            h.release.set()
+            await first
+            with pytest.raises(_StoppedAtItsRead):
+                await compact
+            assert h.events == ["start:sess-a", "end:sess-a", "compact:sess-c"]
         finally:
             ctx.__exit__(None, None, None)
 

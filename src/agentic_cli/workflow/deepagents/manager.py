@@ -497,10 +497,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             async for event in events:
                 yield event
 
-    async def compact(
-        self, session: "SessionRef", focus: str | None = None
+    async def _compact_turn(
+        self, session: "SessionRef", focus: str | None
     ) -> CompactResult | None:
-        """Summarize the root agent's conversation now (``/compact``).
+        """Summarize the root agent's conversation now (the base's ``compact``, ``/compact``).
 
         With the root's own summarization middleware, as Deep Agents
         summarizes when the conversation grows: the thread's messages with
@@ -518,9 +518,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         ``CONTEXT_TRIMMED`` (``source="compact"``) follows. The checkpoint
         keeps every message.
 
-        Under turn admission, so a turn or a job's resume never runs on the
-        thread meanwhile. Nothing is written until the summary is: a cancel
-        leaves the thread as it was.
+        The base runs it as a turn, so a turn or a job's resume never runs
+        on the thread meanwhile. Nothing is written until the summary is: a
+        cancel leaves the thread as it was.
 
         Args:
             session: The conversation.
@@ -534,67 +534,66 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             ValueError: The model wrote an empty summary.
             Exception: The summary call failed (the provider's error).
         """
-        async with self._turn(session.session_id, session.user_id):
-            config = run_config(session)
-            values = (await self._root.aget_state(config)).values
-            middleware = self._root_summarization
-            previous = values.get(SUMMARIZATION_EVENT_KEY)
-            messages = values.get("messages") or []
-            sent = middleware._apply_event_to_messages(messages, previous)
-            root = self._root_agent_name
-            model = self._resolved_models[root]
-            cut = compact_cutoff(
-                sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
-            )
-            if cut is None:
-                return None
-            kept = sent[cut:]
-            callback = RunCallback(
-                root=root,
-                agent_models=self._resolved_models,
-                llm_log=self._raw_llm_log(),
-                # Called outside a reporting context there is no one to
-                # report to: what it reports is queued where nothing reads.
-                live=live_events.current() or LiveEvents(),
-                budgets=self._budgets,
-            )
-            summary = await write_summary(
-                middleware, sent[:cut], focus=focus, callbacks=[callback]
-            )
-            if not summary:
-                raise ValueError(f"{model.ref} wrote an empty summary")
-            newest = newest_answer(sent)
-            event = summary_event(
-                middleware, previous, cut, summary,
-                after=newest.id if newest is not None else None,
-                messages=messages,
-            )
-            await self._root.aupdate_state(
-                config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
-            )
-            # The prompt prefix changes here anyway: the conversation's
-            # next request takes a new memory index.
-            self._forget_memory_index(session)
-            await asyncio.shield(self._recording(session))
-            result = CompactResult(
-                messages_summarized=cut,
-                tokens_before=middleware.token_counter(sent),
-                tokens_after=middleware.token_counter([event["summary_message"], *kept]),
-            )
-            live_events.report(WorkflowEvent.context_trimmed(
-                len(sent), len(kept) + 1, "compact", root,
-                messages_summarized=result.messages_summarized,
-                tokens_before=result.tokens_before,
-                tokens_after=result.tokens_after,
-            ))
-            logger.info(
-                "conversation_compacted",
-                messages=result.messages_summarized,
-                tokens_before=result.tokens_before,
-                tokens_after=result.tokens_after,
-                focus=focus is not None,
-            )
-            return result
+        config = run_config(session)
+        values = (await self._root.aget_state(config)).values
+        middleware = self._root_summarization
+        previous = values.get(SUMMARIZATION_EVENT_KEY)
+        messages = values.get("messages") or []
+        sent = middleware._apply_event_to_messages(messages, previous)
+        root = self._root_agent_name
+        model = self._resolved_models[root]
+        cut = compact_cutoff(
+            sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
+        )
+        if cut is None:
+            return None
+        kept = sent[cut:]
+        callback = RunCallback(
+            root=root,
+            agent_models=self._resolved_models,
+            llm_log=self._raw_llm_log(),
+            # Called outside a reporting context there is no one to
+            # report to: what it reports is queued where nothing reads.
+            live=live_events.current() or LiveEvents(),
+            budgets=self._budgets,
+        )
+        summary = await write_summary(
+            middleware, sent[:cut], focus=focus, callbacks=[callback]
+        )
+        if not summary:
+            raise ValueError(f"{model.ref} wrote an empty summary")
+        newest = newest_answer(sent)
+        event = summary_event(
+            middleware, previous, cut, summary,
+            after=newest.id if newest is not None else None,
+            messages=messages,
+        )
+        await self._root.aupdate_state(
+            config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
+        )
+        # The prompt prefix changes here anyway: the conversation's
+        # next request takes a new memory index.
+        self._forget_memory_index(session)
+        await asyncio.shield(self._recording(session))
+        result = CompactResult(
+            messages_summarized=cut,
+            tokens_before=middleware.token_counter(sent),
+            tokens_after=middleware.token_counter([event["summary_message"], *kept]),
+        )
+        live_events.report(WorkflowEvent.context_trimmed(
+            len(sent), len(kept) + 1, "compact", root,
+            messages_summarized=result.messages_summarized,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+        ))
+        logger.info(
+            "conversation_compacted",
+            messages=result.messages_summarized,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+            focus=focus is not None,
+        )
+        return result
 
     def _take_notices(self) -> list[WorkflowEvent]:
         """The pending notices, through ``on_event``; they open one turn only."""

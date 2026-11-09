@@ -19,6 +19,10 @@ the notice (``tools/jobs/resume.py``) and hands it to the backend's
 as ``supports_compact`` is. ``can_resume`` is the same checks without the
 turn: the record names its conversation, and the conversation is there.
 
+``compact`` (``/compact``) runs under the same entry, by template rather
+than by each backend's convention: the backend implements
+``_compact_turn``, and ``supports_compact`` is derived from it.
+
 Offline: catalogs never list (``tests/conftest.py``), and no model is called.
 """
 
@@ -40,12 +44,17 @@ from agentic_cli.tools.jobs.resume import job_notice
 from agentic_cli.workflow import base_manager as base_manager_module
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
+from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.sessions import SessionRef, get_active_turn
 from tests.conftest import MockContext
 from tests.loop_guard import no_blocking_calls
-from tests.workflow.test_turn_serialization import _job_record, turn_harness
+from tests.workflow.test_turn_serialization import (
+    _job_record,
+    _StoppedAtItsRead,
+    turn_harness,
+)
 
 # ---------------------------------------------------------------------------
 # A backend written to the turn's hooks alone
@@ -113,6 +122,21 @@ class _Stub(BaseWorkflowManager):
         self.told.append((notice, record, result, ref))
         await self._hold(f"resume {record.job_id}")
         yield WorkflowEvent.text(notice, ref.session_id)
+
+    async def _compact_turn(self, session, focus):
+        await self._hold(f"compact {focus}")
+        return CompactResult(messages_summarized=2, tokens_before=10, tokens_after=4)
+
+
+class _NotHere(_Stub):
+    """A backend whose summaries this configuration cannot make (a native ADK YAML app's)."""
+
+    @property
+    def supports_compact(self) -> bool:
+        return False
+
+    def _no_compact_support(self) -> NotImplementedError:
+        return NotImplementedError("not in this configuration")
 
 
 class _Plain(BaseWorkflowManager):
@@ -266,6 +290,16 @@ class TestEachBackendEntersThroughIt:
 
         assert events == ["sess-r"]
         assert entered == [_ref(harness.manager, "u", "sess-r")]
+
+    async def test_a_compact(self, harness):
+        entered = _record_turns(harness.manager)
+        harness.stop_compact_at_its_read()
+
+        with pytest.raises(_StoppedAtItsRead):
+            await harness.manager.compact(_ref(harness.manager, "u", "sess-c"))
+
+        assert harness.events == ["compact:sess-c"]
+        assert entered == [_ref(harness.manager, "u", "sess-c")]
 
 
 # ---------------------------------------------------------------------------
@@ -548,3 +582,70 @@ class TestEachBackendCanResume:
         await manager.cleanup()
 
         assert await manager.can_resume(_job()) is False
+
+
+# ---------------------------------------------------------------------------
+# compact
+# ---------------------------------------------------------------------------
+
+
+class TestTheCompactTemplate:
+    async def test_it_runs_as_a_turn_of_the_conversation(self, stub):
+        ref = _ref(stub, "alice", "s1")
+
+        result = await stub.compact(ref, "the API decisions")
+
+        assert result == CompactResult(2, 10, 4)
+        assert stub.seen == [
+            ("start compact the API decisions", ref), ("end compact the API decisions", ref),
+        ]
+        assert stub.logged_as[0]["session_id"] == "s1"
+        assert get_active_turn() is None
+
+    async def test_it_waits_for_a_running_turn(self, stub):
+        stub.release.clear()
+        turn = asyncio.create_task(_reply(stub, "first"))
+        await asyncio.wait_for(stub.entered.wait(), timeout=2)
+
+        compact = asyncio.create_task(stub.compact(_ref(stub)))
+        await asyncio.sleep(0.05)
+        assert [what for what, _ in stub.seen] == ["start turn first"], "it ran in a turn"
+
+        stub.release.set()
+        await turn
+        assert await compact == CompactResult(2, 10, 4)
+        assert [what for what, _ in stub.seen][-2:] == ["start compact None", "end compact None"]
+
+    async def test_a_turn_waits_for_it(self, stub):
+        stub.release.clear()
+        compact = asyncio.create_task(stub.compact(_ref(stub), "focus"))
+        await asyncio.wait_for(stub.entered.wait(), timeout=2)
+
+        turn = asyncio.create_task(_reply(stub, "next"))
+        await asyncio.sleep(0.05)
+        assert [what for what, _ in stub.seen] == ["start compact focus"], "a turn ran in it"
+
+        stub.release.set()
+        await compact
+        assert await turn == ["next"]
+
+    async def test_supports_compact_is_derived_from_the_hook(self, ctx, stub):
+        plain = _Plain([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+        assert stub.supports_compact is True
+        assert plain.supports_compact is False
+
+    async def test_a_backend_without_it_raises_before_any_turn(self, ctx):
+        manager = _Plain([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+        with pytest.raises(NotImplementedError, match="supports_compact"):
+            await manager.compact(_ref(manager))
+        assert manager.is_initialized is False
+
+    async def test_a_configuration_without_it_says_why_before_any_turn(self, ctx):
+        manager = _NotHere([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+        with pytest.raises(NotImplementedError, match="not in this configuration"):
+            await manager.compact(_ref(manager))
+        assert manager.seen == []
+        assert manager.is_initialized is False
