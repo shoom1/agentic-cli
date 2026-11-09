@@ -1691,6 +1691,8 @@ it under its `name` (one of the same name is replaced), beside the two a
 manager starts with, `subprocess` and `inprocess`; a starter then submits to
 it with `submit(backend="<name>")`. The manager is `workflow.job_manager`, or
 `get_service("job_manager")` in a tool that declares `requires="job_manager"`.
+It exists only when some agent's tool declares that need (`job_status` and the
+other `job_*` tools do), and `workflow.job_manager` is `None` before then.
 A backend implements `start`, `poll` and `cancel`, and may override `logs`,
 `result`, `pin` and `close`.
 
