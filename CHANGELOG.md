@@ -1741,6 +1741,23 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **`SettingsPersistence.save()` without `keys=`, its `path=` dump,
+  `SettingsPersistence.load()`, the default `app_name`, and
+  `BaseCLIApp.save_settings()` without `keys`.** Settings are read by
+  constructing the settings class and written by `save(settings, keys=...)`,
+  which `/settings` calls through `save_settings(keys=...)`: `keys` is now
+  required (and `SettingsPersistence(app_name)` needs its app name: the
+  default, `"agentic"`, was no app's). The keyless save wrote every
+  allowlisted field's live value, so a value from the environment or the
+  app's defaults was frozen into `./.{app_name}/settings.json`, and a
+  user-scoped field set to `None` never left the user file; the `path=` dump
+  wrote the whole object to any file; `load()` returned the project file if
+  there was one, else the user file, raw (no environment, no merge, no
+  allowlist), and nothing called it. For a save of every field, name them:
+  `keys=type(settings).model_fields`. `save_settings` runs the file writes on
+  a worker thread, off the event loop, and `/settings` no longer falls back on
+  `save_settings()` for an override that cannot take `keys`: it reports
+  "Settings applied but not saved: …".
 - **`WorkflowEvent.tool_result(duration_ms=)` and `ExecutionTimeoutError`.** No
   backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
   showed: the parameter, the `duration_ms` metadata key it set and the suffix
@@ -1984,6 +2001,17 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **A pick of the class default in `/settings` survives an app that starts
+  elsewhere.** "Back at default" was judged against the settings class's
+  default, so for an app that sets its own default in `model_post_init` (the
+  pattern `examples/research_demo` teaches), `ui_theme="light"` say, a user who
+  picked the class default (`dark`) had the key removed from the user file:
+  the dialog said "Settings saved" and the next start showed `light` again. A
+  save now writes what the user picked, and removes a user-scoped key from the
+  user file only when the pick is what the app itself starts on without that
+  file (the class defaults and its `model_post_init`, read through
+  `model_construct()`); when they cannot be read that way, the pick is written.
 
 - **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
   tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,

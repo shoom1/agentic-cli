@@ -166,3 +166,65 @@ def test_one_set_back_to_its_default_leaves_the_user_file(isolated):
 
     assert _read(_user_file(isolated)) == {"dialog_placement": "inline", "other": 1}
     assert BaseSettings().ui_theme == "dark"
+
+
+# --- an app that starts on its own value -----------------------------------------------
+
+
+class _LightApp(BaseSettings):
+    """An app that starts on its own theme, set in ``model_post_init`` when no
+    source gave one: the pattern ``examples/research_demo/settings.py`` teaches."""
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if "ui_theme" not in self.model_fields_set:
+            object.__setattr__(self, "ui_theme", "light")
+
+
+class _BareConstructionFails(BaseSettings):
+    """An app whose ``model_post_init`` cannot run with no source at all, so
+    its own default cannot be read back (a real start has sources, such as the
+    user file)."""
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if not self.model_fields_set:
+            raise RuntimeError("needs a source")
+
+
+def test_a_pick_of_the_class_default_survives_an_app_that_starts_elsewhere(isolated):
+    """The class default is ``dark``; this app starts on ``light``. A user who
+    picks ``dark`` chose something, and the next start must show it."""
+    settings = _LightApp()
+    assert settings.ui_theme == "light"
+    settings.update_setting("ui_theme", "dark")
+
+    result = SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "dark"}
+    assert result.user_scoped_keys == ("ui_theme",)
+    assert _LightApp().ui_theme == "dark"
+
+
+def test_a_pick_of_the_app_s_own_default_leaves_the_user_file(isolated):
+    _write(_user_file(isolated), {"ui_theme": "dark", "other": 1})
+    settings = _LightApp()
+    assert settings.ui_theme == "dark"
+    settings.update_setting("ui_theme", "light")  # what the app starts on
+
+    SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"other": 1}
+    assert _LightApp().ui_theme == "light"
+
+
+def test_a_pick_is_written_when_the_app_s_default_cannot_be_read(isolated):
+    """Never removed on a guess: a class whose default cannot be computed
+    keeps what the user chose, even a value equal to the class default."""
+    _write(_user_file(isolated), {"ui_theme": "light"})
+    settings = _BareConstructionFails()
+    settings.update_setting("ui_theme", "dark")
+
+    SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "dark"}

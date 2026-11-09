@@ -551,7 +551,22 @@ configured is reported (`settings_secrets_dir_ignored`).
 | `retry_max_attempts` | `AGENTIC_RETRY_MAX_ATTEMPTS` | 3 | Max retries on transient errors |
 | `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
 
-Settings are persisted by `SettingsPersistence` (atomic writes) and editable at runtime via the `/settings` command.
+Settings are **read** by constructing the settings class: `MySettings()`, or
+`get_settings()` / `reload_settings()` for the framework's own instance. The
+constructor, the environment, the project file's allowlisted keys, the user
+file and the env files (see [Precedence](#precedence-and-the-trust-boundary))
+are its sources, and nothing else reads them. They are **written** one way:
+`/settings` calls `BaseCLIApp.save_settings(keys=...)`, which calls
+`SettingsPersistence(app_name).save(settings, keys=...)` (atomic writes). A save
+writes only the keys it names, as they stand, each into the file the loader
+reads it from: allowlisted keys into `./.{app_name}/settings.json`, the others
+into `~/.{app_name}/settings.json`; a credential is never written. Nothing
+saves the whole settings object, which would freeze values that came from the
+environment or the app's defaults.
+
+`config.set_settings(settings)` sets the settings a script uses when it calls
+tools outside a workflow manager (`get_settings()` returns them there); a
+manager's own turns use the settings it was built with.
 
 ### Theme and dialog placement
 
@@ -571,8 +586,10 @@ class MyApp(BaseCLIApp):
         return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]
 ```
 
-A Save writes them to the user file, and one set back to its default leaves
-it, so the next start follows the default again. `examples/research_demo`
+A Save writes the value picked to the user file. One set to what the app starts
+on without that file (the field's default, or the one the app sets in
+`model_post_init`) leaves it, so the next start follows the app again; a pick of
+the class default by an app that starts elsewhere is kept. `examples/research_demo`
 lists both.
 
 - **The theme** switches at once, through `get_theme(name)`. thinking-prompt

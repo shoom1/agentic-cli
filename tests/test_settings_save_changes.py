@@ -14,6 +14,7 @@ it was back to its default on the next start.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -87,6 +88,62 @@ class TestSaveOnlyGivenKeys:
         assert not fs["user"].exists()
 
 
+class TestTheSaveTakesTheKeysToWrite:
+    """One writer: a save names the keys it writes. The keyless save wrote
+    every allowlisted field's live value, which froze what came from the
+    environment, the app's defaults and the start-up into files."""
+
+    def test_keys_are_required(self, fs):
+        with pytest.raises(TypeError, match="keys"):
+            SettingsPersistence(APP).save(BaseSettings(raw_llm_logging=True))
+        assert not fs["project"].exists()
+        assert not fs["user"].exists()
+
+    def test_a_path_is_not_taken(self, fs, tmp_path):
+        with pytest.raises(TypeError):
+            SettingsPersistence(APP).save(
+                BaseSettings(), path=tmp_path / "dump.json", keys={"thinking_effort"}
+            )
+
+    def test_the_app_name_is_required(self):
+        with pytest.raises(TypeError, match="app_name"):
+            SettingsPersistence()
+
+    @pytest.mark.asyncio
+    async def test_the_app_s_save_requires_keys(self, fs):
+        from agentic_cli.cli.app import BaseCLIApp
+
+        app = SimpleNamespace(_settings=BaseSettings(raw_llm_logging=True))
+        with pytest.raises(TypeError, match="keys"):
+            await BaseCLIApp.save_settings(app)
+        assert not fs["project"].exists()
+        assert not fs["user"].exists()
+
+    @pytest.mark.asyncio
+    async def test_the_app_s_save_writes_off_the_event_loop(self, fs, monkeypatch):
+        """The files are written on a worker thread, as any async code must
+        keep its blocking work off the loop."""
+        from agentic_cli.cli.app import BaseCLIApp
+
+        threads: list[threading.Thread] = []
+        save = SettingsPersistence.save
+
+        def recording(self, settings, **kwargs):
+            threads.append(threading.current_thread())
+            return save(self, settings, **kwargs)
+
+        monkeypatch.setattr(SettingsPersistence, "save", recording)
+        settings = BaseSettings()
+        settings.update_setting("thinking_effort", "low")
+        app = SimpleNamespace(_settings=settings)
+
+        saved = await BaseCLIApp.save_settings(app, keys={"thinking_effort"})
+
+        assert threads and threads[0] is not threading.current_thread()
+        assert saved.project_path == fs["project"]
+        assert _read(fs["project"]) == {"thinking_effort": "low"}
+
+
 class AppSettings(BaseSettings):
     mistral_api_key: str | None = Field(default=None)
     service_token: SecretStr | None = Field(default=None)
@@ -96,12 +153,12 @@ class AppSettings(BaseSettings):
 
 
 class TestCredentialFieldsAreNeverWritten:
-    def test_full_save_skips_domain_credentials(self, fs):
+    def test_a_save_naming_every_field_skips_domain_credentials(self, fs):
         settings = AppSettings(
             mistral_api_key="value-1", service_token="value-2", github_token="value-3",
             report_style="fancy",
         )
-        SettingsPersistence(APP).save(settings)
+        SettingsPersistence(APP).save(settings, keys=set(AppSettings.model_fields))
         written = {**_read(fs["project"]), **_read(fs["user"])}
         assert written.get("report_style") == "fancy"
         assert "mistral_api_key" not in written
@@ -121,9 +178,9 @@ class TestTokenCountsAreSaved:
         SettingsPersistence(APP).save(settings, keys={"context_max_tokens"})
         assert _read(fs["project"]) == {"context_max_tokens": 50000}
 
-    def test_a_full_save_writes_token_counts(self, fs):
+    def test_a_keyed_save_writes_token_counts(self, fs):
         settings = AppSettings(context_max_tokens=50000, summary_max_tokens=2000)
-        SettingsPersistence(APP).save(settings)
+        SettingsPersistence(APP).save(settings, keys={"context_max_tokens", "summary_max_tokens"})
         written = {**_read(fs["project"]), **_read(fs["user"])}
         assert written["context_max_tokens"] == 50000
         assert written["summary_max_tokens"] == 2000
@@ -195,22 +252,30 @@ class TestSettingsCommandSavesTheChanges:
         app.save_settings.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_an_override_without_keys_is_still_called(self, fs, monkeypatch):
-        """An app that overrode save_settings() before keys= existed keeps
-        working (it gets its own full save)."""
+    async def test_an_override_without_keys_fails_at_the_save_with_its_reason(
+        self, fs, monkeypatch
+    ):
+        """The change stays applied; the dialog says it was not saved, and why."""
         from agentic_cli.cli.settings_command import SettingsCommand
 
         settings = BaseSettings()
         app = self._app(settings, monkeypatch, {"thinking_effort": "high"})
         calls = []
 
-        async def legacy_save_settings():
+        async def save_settings_without_keys():
             calls.append("called")
-            return SimpleNamespace(project_path=Path("p"), user_path=None, user_scoped_keys=())
 
-        app.save_settings = legacy_save_settings
+        app.save_settings = save_settings_without_keys
         await SettingsCommand().execute("", app)
-        assert calls == ["called"]
+
+        assert calls == []
+        assert settings.thinking_effort == "high"
+        (warning,) = [c.args[0] for c in app.session.add_warning.call_args_list]
+        assert warning.startswith("Settings applied but not saved: ")
+        assert "keys" in warning
+        assert not any(
+            "saved" in call.args[0].lower() for call in app.session.add_success.call_args_list
+        )
 
 
 class TestTheProjectPermissionRules:
@@ -255,27 +320,27 @@ class TestTheProjectPermissionRules:
         assert _read(fs["project"])["permissions"] == self.DENY
         assert self._project_denials() == denied
 
-    def test_a_full_save_keeps_the_project_permission_rules(self, fs):
+    def test_a_save_naming_every_field_keeps_the_project_permission_rules(self, fs):
         self._seed(fs, {"log_level": "debug", "permissions": self.DENY})
         denied = self._project_denials()
 
-        SettingsPersistence(APP).save(BaseSettings())
+        SettingsPersistence(APP).save(BaseSettings(), keys=set(BaseSettings.model_fields))
 
         assert _read(fs["project"])["permissions"] == self.DENY
         assert self._project_denials() == denied
 
-    def test_a_full_save_leaves_a_malformed_project_file_as_it_is(self, fs):
+    def test_a_save_leaves_a_malformed_project_file_as_it_is(self, fs):
         """Rewriting a file that cannot be read would drop any rules it holds."""
         settings = BaseSettings()  # loaded before the file broke
         fs["project"].parent.mkdir(parents=True)
         fs["project"].write_text('{"permissions": {"deny": [')
 
         with pytest.raises(ValueError):
-            SettingsPersistence(APP).save(settings)
+            SettingsPersistence(APP).save(settings, keys={"thinking_effort"})
 
         assert fs["project"].read_text() == '{"permissions": {"deny": ['
 
-    def test_a_full_save_takes_no_project_rule_into_the_user_file(self, fs):
+    def test_a_save_takes_no_project_rule_into_the_user_file(self, fs):
         """The project file is untrusted, so its allow rules never apply; a
         save must not carry them into the trusted user file."""
         allow = {"allow": [{"capability": "filesystem.write", "target": "/**"}], **self.DENY}
@@ -285,7 +350,7 @@ class TestTheProjectPermissionRules:
             call_default_factory=True
         )
 
-        SettingsPersistence(APP).save(settings)
+        SettingsPersistence(APP).save(settings, keys=set(BaseSettings.model_fields))
 
         assert "permissions" not in _read(fs["user"])
         assert _read(fs["project"])["permissions"] == allow
@@ -330,8 +395,8 @@ class TestTheUnionOfRulesIsNeverSaved:
         assert _read(fs["user"])["permissions"] == self.USER
         assert _read(fs["project"])["permissions"] == self.PROJECT
 
-    def test_a_full_save(self, fs, loaded):
-        SettingsPersistence(APP).save(loaded)
+    def test_a_save_naming_every_field(self, fs, loaded):
+        SettingsPersistence(APP).save(loaded, keys=set(type(loaded).model_fields))
 
         self._assert_each_file_keeps_its_own_section(fs)
 
