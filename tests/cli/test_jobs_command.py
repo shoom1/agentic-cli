@@ -83,3 +83,31 @@ async def test_resume_with_nothing_finished_says_so():
     app.session.add_message.assert_called_once_with(
         "system", "No finished background jobs to resume."
     )
+
+
+async def test_a_job_that_was_not_cancelled_is_a_warning():
+    """Another process runs it, out of reach: it is not reported cancelled."""
+    record = SimpleNamespace(state=SimpleNamespace(value="running"), cancel_requested=False)
+    manager = MagicMock()
+    manager.cancel.return_value = record
+    app = SimpleNamespace(workflow=SimpleNamespace(job_manager=manager), session=autospec_session())
+
+    await JobsCommand().execute("cancel j1", app)
+
+    app.session.add_success.assert_not_called()
+    (text,) = app.session.add_warning.call_args.args
+    assert "'j1' was not cancelled" in text and "still running" in text
+
+
+async def test_a_job_that_had_already_finished_says_nothing_was_cancelled():
+    record = SimpleNamespace(state=SimpleNamespace(value="succeeded"), cancel_requested=False)
+    manager = MagicMock()
+    manager.cancel.return_value = record
+    app = SimpleNamespace(workflow=SimpleNamespace(job_manager=manager), session=autospec_session())
+
+    await JobsCommand().execute("cancel j1", app)
+
+    app.session.add_success.assert_not_called()
+    app.session.add_message.assert_called_once_with(
+        "system", "Job 'j1' had already finished (succeeded): nothing was cancelled."
+    )

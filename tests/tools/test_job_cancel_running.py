@@ -238,3 +238,61 @@ class TestAJobThatHasAlreadyEnded:
         assert (on_disk["state"], on_disk["cancel_requested"]) == ("succeeded", False)
         owner_view = jobs.get(rec.job_id)
         assert (owner_view.state, owner_view.exit_code) == (JobState.SUCCEEDED, 0)
+
+
+def _cancel_with(manager: JobManager, job_id: str) -> dict:
+    """``job_cancel`` as the model calls it, against ``manager``."""
+    token = set_service_registry({"job_manager": manager})
+    try:
+        return job_cancel(job_id)
+    finally:
+        token.var.reset(token)
+
+
+class TestTheToolSaysWhatHappened:
+    """``job_cancel`` reported success for a job it had not cancelled.
+
+    A job running in another live manager whose backend cannot cancel it from
+    here, an unreadable record, the lock unavailable: ``cancel`` returns the
+    record as it is, still running, and the tool said ``success`` with
+    ``state: running``, so a model told the user the job was stopped. And a
+    job that had already ended was reported as if this call had acted on it.
+    """
+
+    def test_a_job_it_could_not_reach_was_not_cancelled(self, jobs, tmp_path):
+        gate = _Gate()
+        first = _submit(jobs, gate, "first")
+        _until(lambda: gate.running == ["first"])
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            result = _cancel_with(other, first.job_id)  # a thread elsewhere: out of reach
+        finally:
+            other.close()
+            gate.release.set()
+
+        assert result["success"] is False
+        assert result["state"] == "running"
+        assert "was not cancelled" in result["error"]
+        assert "still running" in result["error"]
+        assert "cancel_requested" not in result
+
+    def test_a_job_that_had_ended_was_not_cancelled(self, jobs):
+        rec = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": "true"})
+        _until(lambda: jobs.get(rec.job_id).state is JobState.SUCCEEDED)
+
+        result = _cancel_with(jobs, rec.job_id)
+
+        assert result["success"] is True
+        assert result["state"] == "succeeded"
+        assert "already finished" in result.get("message", "")
+        assert "nothing was cancelled" in result.get("message", "")
+
+    def test_a_cancelled_job_is_reported_cancelled(self, jobs):
+        gate = _Gate()
+        _submit(jobs, gate, "first")
+        second = _submit(jobs, gate, "second")  # queued: cancelled at once
+
+        result = _cancel_with(jobs, second.job_id)
+        gate.release.set()
+
+        assert result == {"success": True, "state": "cancelled"}

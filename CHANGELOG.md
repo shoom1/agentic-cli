@@ -2210,6 +2210,18 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
+  a job the cancel could not reach (another CLI of the app runs it and its
+  backend cannot stop it from there, or its record could not be read or
+  locked), `job_cancel` answered `{"success": true, "state": "running"}` and
+  `/jobs cancel` printed "Job 'x' → running." as a success, so a model told
+  the user the job was stopped. `job_cancel` now returns `success: false`
+  with an `error` saying the job was not cancelled and is still running, to
+  try again later or tell the user, and `/jobs cancel` shows it as a
+  warning. A job that had already finished keeps `success: true` and its
+  state, with a `message` that nothing was cancelled, which `/jobs cancel`
+  says too.
+
 - **A queued in-process job runs in the app that submitted it.** Its
   callable cannot be saved, yet any job manager that read the jobs
   directory while it was queued (another CLI of the app, or the manager an

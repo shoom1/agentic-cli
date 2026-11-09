@@ -118,21 +118,51 @@ def job_logs(job_id: str, last_n: int = 50, stream: str = "stdout") -> dict:
     requires="job_manager",
 )
 def job_cancel(job_id: str) -> dict:
-    """Best-effort cancel a running job."""
+    """Best-effort cancel a running job.
+
+    Says what happened: cancelled, already finished (nothing to cancel),
+    requested (it stops later), or not cancelled at all, which is no success.
+    """
+    from agentic_cli.tools.jobs.backends import TERMINAL_STATES, JobState
+
     jm = _manager()
     if isinstance(jm, dict):
         return jm
     rec = jm.cancel(job_id)
     if rec is None:
         return {"success": False, "error": f"no such job: {job_id}"}
-    out = {"success": True, "state": rec.state.value}
-    if rec.cancel_requested and rec.state.value == "running":
-        out["cancel_requested"] = True
-        out["message"] = (
-            "Cancellation requested, but the job is still running: it cannot be "
-            "interrupted now. It is recorded as cancelled when it ends."
-        )
-    return out
+    state = rec.state.value
+    if rec.state in TERMINAL_STATES:
+        out = {"success": True, "state": state}
+        if rec.state is not JobState.CANCELLED:
+            out["message"] = (
+                f"Job {job_id} had already finished ({state}) before the cancel: "
+                "nothing was cancelled."
+            )
+        return out
+    if rec.cancel_requested:
+        return {
+            "success": True,
+            "state": state,
+            "cancel_requested": True,
+            "message": (
+                "Cancellation requested, but the job is still running: it cannot be "
+                "interrupted now. It is recorded as cancelled when it ends."
+            ),
+        }
+    # Out of reach (another process runs it and its backend cannot stop it
+    # from here), or its record could not be read or locked: cancel()
+    # returned it as it was.
+    return {
+        "success": False,
+        "state": state,
+        "error": (
+            f"Job {job_id} was not cancelled: it is still {state}, and could not be "
+            "stopped from here (another process of this app may be running it, or "
+            "its record could not be updated just now). Try again later, or tell "
+            "the user."
+        ),
+    }
 
 
 @register_tool(
