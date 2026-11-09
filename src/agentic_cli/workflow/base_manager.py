@@ -66,7 +66,7 @@ from agentic_cli.workflow.service_registry import (
     SANDBOX_MANAGER,
     WORKFLOW,
 )
-from agentic_cli.logging import Loggers
+from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -1601,6 +1601,34 @@ class BaseWorkflowManager(ABC):
             f"{type(self).__name__} was released while this turn waited for "
             "admission and could not be reinitialized. Retry the request."
         )
+
+    @contextlib.asynccontextmanager
+    async def _turn(
+        self, session_id: str | None = None, user_id: str | None = None
+    ) -> "AsyncGenerator[SessionRef, None]":
+        """Run the block as one turn of a conversation, and yield the conversation.
+
+        How every turn-shaped entry point starts (``process``,
+        ``resume_with_job_result``, ``compact``): the conversation is
+        resolved as ``session_ref`` resolves it (the manager's current
+        session and the default user for what is omitted) and named in the
+        log context; then turn admission (:meth:`_turn_admission`: the
+        manager initialized outside the turn lock, the lock taken, the
+        backend re-checked under it) and the workflow context
+        (:meth:`_workflow_context`: the settings, the services and the
+        active turn, reset as the block ends) are entered, in that order.
+
+        Yields:
+            The turn's conversation.
+
+        Raises:
+            RuntimeError: The backend cannot be made ready (``_turn_admission``).
+        """
+        ref = self.session_ref(session_id, user_id)
+        bind_context(session_id=ref.session_id, user_id=ref.user_id)
+        async with self._turn_admission():
+            with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
+                yield ref
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False

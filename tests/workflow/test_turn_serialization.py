@@ -2,14 +2,16 @@
 
 The active session/user identity is a ContextVar, so it is already per-turn.
 Everything *else* a turn touches is manager-scoped: the HITL input callback
-(``set_input_callback``) and the ADK plugins' event buffers (drained by
-``_run_and_stream``). Two overlapping turns would route a permission/HITL answer
-to the wrong request and let one invocation drain the other's events, and a
-cleanup could tear the runner down mid-stream.
+(``set_input_callback``), the ADK plugins' event buffers (drained by
+``_run_and_stream``) and Deep Agents' pending notices and open-call record.
+Two overlapping turns would route a permission/HITL answer to the wrong
+request and let one invocation drain the other's events, and a cleanup could
+tear the backend down mid-stream.
 
 ``process()``/``resume_with_job_result()`` therefore hold a turn lock, and
 ``cleanup()``/``reinitialize()`` take it too. Initialization happens *before*
-the turn lock so the two lock orders can never deadlock.
+the turn lock so the two lock orders can never deadlock. Every test runs on
+both backends that implement the contract (ADK and Deep Agents).
 """
 
 from __future__ import annotations
@@ -32,19 +34,15 @@ from tests.conftest import MockContext  # noqa: E402
 
 
 class _Harness:
-    """A manager whose stream is driven by the test, with no real ADK runner."""
+    """A manager whose stream is driven by the test, with no real backend.
 
-    def __init__(self, ctx) -> None:
-        self.manager = GoogleADKWorkflowManager(
-            agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
-        )
-        self.manager._initialized = True
-        self.manager._event_processor = SimpleNamespace(model=None)
-        # Turn admission re-checks readiness while holding the turn lock, so
-        # the double presents a complete backend (runner + agent + sessions).
-        self.manager._session_service = SimpleNamespace()
-        self.manager._runner = SimpleNamespace(name="runner")
-        self.manager._root_agent = SimpleNamespace(name="a")
+    Its turn holds at ``release`` (and may ask a question first), and records
+    when it starts and ends in ``events``. ``revive()`` presents a live
+    backend, as an initialization would.
+    """
+
+    def __init__(self, manager) -> None:
+        self.manager = manager
         self.events: list[str] = []
         self.release = asyncio.Event()
         self.entered = asyncio.Event()
@@ -55,28 +53,28 @@ class _Harness:
         async def _ensure() -> None:
             return None
 
-        async def _get_or_create(user_id, session_id):
-            return SimpleNamespace(id=session_id, state={}, events=[])
-
-        async def _stream(*, session_id, user_id, new_message, state_delta=None):
-            self.events.append(f"start:{session_id}")
-            self.entered.set()
-            await self.release.wait()
-            if self.prompt_mid_turn:
-                answer = await self.manager.request_user_input(
-                    UserInputRequest(
-                        request_id=f"req-{session_id}",
-                        tool_name="ask_clarification",
-                        prompt="which?",
-                    )
-                )
-                self.events.append(f"answer:{session_id}:{answer}")
-            yield WorkflowEvent(type=EventType.TEXT, content=session_id)
-            self.events.append(f"end:{session_id}")
-
         self.manager._ensure_initialized = _ensure
-        self.manager._get_or_create_session = _get_or_create
-        self.manager._run_and_stream = _stream
+        self.revive()
+
+    def revive(self) -> None:
+        """Present a complete backend: turn admission re-checks it under the lock."""
+        raise NotImplementedError
+
+    async def stream(self, session_id: str):
+        self.events.append(f"start:{session_id}")
+        self.entered.set()
+        await self.release.wait()
+        if self.prompt_mid_turn:
+            answer = await self.manager.request_user_input(
+                UserInputRequest(
+                    request_id=f"req-{session_id}",
+                    tool_name="ask_clarification",
+                    prompt="which?",
+                )
+            )
+            self.events.append(f"answer:{session_id}:{answer}")
+        yield WorkflowEvent(type=EventType.TEXT, content=session_id)
+        self.events.append(f"end:{session_id}")
 
     async def drain(self, session_id: str) -> list[str]:
         return [
@@ -85,15 +83,92 @@ class _Harness:
         ]
 
 
-def _harness():
+class _ADKHarness(_Harness):
+    """An ADK manager with no real runner."""
+
+    def __init__(self, ctx) -> None:
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
+        )
+        manager._event_processor = SimpleNamespace(model=None)
+        super().__init__(manager)
+
+        async def _get_or_create(user_id, session_id):
+            return SimpleNamespace(id=session_id, state={}, events=[])
+
+        async def _stream(*, session_id, user_id, new_message, state_delta=None):
+            async for event in self.stream(session_id):
+                yield event
+
+        self.manager._get_or_create_session = _get_or_create
+        self.manager._run_and_stream = _stream
+
+    def revive(self) -> None:
+        async def _get_session(**kwargs):
+            return SimpleNamespace(id=kwargs["session_id"], events=[], state={})
+
+        self.manager._initialized = True
+        self.manager._session_service = SimpleNamespace(get_session=_get_session)
+        self.manager._runner = SimpleNamespace(name="runner")
+        self.manager._root_agent = SimpleNamespace(name="a")
+
+
+class _DeepAgentsHarness(_Harness):
+    """A Deep Agents manager with no compiled agents."""
+
+    def __init__(self, ctx) -> None:
+        from agentic_cli.workflow.deepagents import DeepAgentsWorkflowManager
+
+        manager = DeepAgentsWorkflowManager(
+            agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
+        )
+        super().__init__(manager)
+
+        async def _run_turn(ref, graph_input):
+            async for event in self.stream(ref.session_id):
+                yield event
+
+        self.manager._run_turn = _run_turn
+
+    def revive(self) -> None:
+        async def _exists(ref) -> bool:
+            return True
+
+        async def _outside_content(ref) -> str:
+            return ""
+
+        self.manager._initialized = True
+        self.manager._sessions = SimpleNamespace(
+            exists=_exists, outside_content=_outside_content
+        )
+        self.manager._root = SimpleNamespace(name="root")
+
+
+@pytest.fixture(params=["adk", "deepagents"])
+def backend(request) -> str:
+    return request.param
+
+
+def turn_harness(backend: str):
+    if backend == "deepagents":
+        pytest.importorskip("deepagents")
     ctx = MockContext(google_api_key="test-key")
     ctx.__enter__()
-    return _Harness(ctx), ctx
+    harness = _DeepAgentsHarness if backend == "deepagents" else _ADKHarness
+    return harness(ctx), ctx
+
+
+def _job_record() -> SimpleNamespace:
+    return SimpleNamespace(
+        job_id="j1", session_id="sess-r", user_id="u", call_id="c1",
+        call_name="t", tool="t", state=SimpleNamespace(value="succeeded"),
+        exit_code=0, error=None,
+    )
 
 
 class TestTurnSerialization:
-    async def test_second_turn_waits_for_the_first(self):
-        h, ctx = _harness()
+    async def test_second_turn_waits_for_the_first(self, backend):
+        h, ctx = turn_harness(backend)
         try:
             first = asyncio.create_task(h.drain("sess-a"))
             await asyncio.wait_for(h.entered.wait(), timeout=2)
@@ -113,7 +188,7 @@ class TestTurnSerialization:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_running_turn_keeps_its_own_hitl_callback(self):
+    async def test_running_turn_keeps_its_own_hitl_callback(self, backend):
         """A second consumer's callback must not capture the first turn's prompt.
 
         The turn lock only serialises ``process()``; callbacks are installed
@@ -122,7 +197,7 @@ class TestTurnSerialization:
         consumer's ``clear_input_callback()`` unregistered the second's).
         The callback is therefore context-local.
         """
-        h, ctx = _harness()
+        h, ctx = turn_harness(backend)
         try:
             h.prompt_mid_turn = True
             observed: list[str] = []
@@ -157,9 +232,9 @@ class TestTurnSerialization:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_clearing_one_callback_does_not_unregister_another(self):
+    async def test_clearing_one_callback_does_not_unregister_another(self, backend):
         """One consumer tidying up must not unregister a concurrent consumer."""
-        h, ctx = _harness()
+        h, ctx = turn_harness(backend)
         try:
             ready = asyncio.Event()
 
@@ -187,27 +262,16 @@ class TestTurnSerialization:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_resume_turn_shares_the_lock(self):
-        h, ctx = _harness()
+    async def test_resume_turn_shares_the_lock(self, backend):
+        h, ctx = turn_harness(backend)
         try:
-            record = SimpleNamespace(
-                job_id="j1", session_id="sess-r", user_id="u", call_id="c1",
-                call_name="t", tool="t", state=SimpleNamespace(value="succeeded"),
-                exit_code=0, error=None,
-            )
-
-            async def _get_session(**kwargs):
-                return SimpleNamespace(id="sess-r", events=[], state={})
-
-            h.manager._session_service = SimpleNamespace(get_session=_get_session)
-
             first = asyncio.create_task(h.drain("sess-a"))
             await asyncio.wait_for(h.entered.wait(), timeout=2)
 
             async def _drain_resume():
                 return [
                     e.content
-                    async for e in h.manager.resume_with_job_result(record, "ok")
+                    async for e in h.manager.resume_with_job_result(_job_record(), "ok")
                 ]
 
             resume = asyncio.create_task(_drain_resume())
@@ -216,14 +280,17 @@ class TestTurnSerialization:
 
             h.release.set()
             await first
-            await resume
+            assert await resume == ["sess-r"]
+            assert h.events == [
+                "start:sess-a", "end:sess-a", "start:sess-r", "end:sess-r",
+            ]
         finally:
             ctx.__exit__(None, None, None)
 
 
 class TestCancellationReleasesTheLock:
-    async def test_cancelled_turn_frees_the_manager(self):
-        h, ctx = _harness()
+    async def test_cancelled_turn_frees_the_manager(self, backend):
+        h, ctx = turn_harness(backend)
         try:
             first = asyncio.create_task(h.drain("sess-a"))
             await asyncio.wait_for(h.entered.wait(), timeout=2)
@@ -240,8 +307,8 @@ class TestCancellationReleasesTheLock:
 
 
 class TestLifecycleWaitsForTurns:
-    async def test_cleanup_does_not_run_during_a_turn(self):
-        h, ctx = _harness()
+    async def test_cleanup_does_not_run_during_a_turn(self, backend):
+        h, ctx = turn_harness(backend)
         try:
             order: list[str] = []
             real_release = h.manager._release_resources
@@ -266,8 +333,8 @@ class TestLifecycleWaitsForTurns:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_reinitialize_does_not_run_during_a_turn(self):
-        h, ctx = _harness()
+    async def test_reinitialize_does_not_run_during_a_turn(self, backend):
+        h, ctx = turn_harness(backend)
         try:
             order: list[str] = []
 
@@ -291,9 +358,9 @@ class TestLifecycleWaitsForTurns:
         finally:
             ctx.__exit__(None, None, None)
 
-    async def test_turn_after_cleanup_reinitializes_without_deadlock(self):
+    async def test_turn_after_cleanup_reinitializes_without_deadlock(self, backend):
         """Lock order (lifecycle → turn) must not deadlock a turn that inits."""
-        h, ctx = _harness()
+        h, ctx = turn_harness(backend)
         try:
             h.release.set()
             await h.manager.cleanup()
@@ -304,10 +371,7 @@ class TestLifecycleWaitsForTurns:
                 inits.append(1)
                 # A real _ensure_initialized rebuilds the backend; admission
                 # verifies that it did.
-                h.manager._initialized = True
-                h.manager._session_service = SimpleNamespace()
-                h.manager._runner = SimpleNamespace(name="runner")
-                h.manager._root_agent = SimpleNamespace(name="a")
+                h.revive()
 
             h.manager._ensure_initialized = _ensure
             assert await asyncio.wait_for(h.drain("sess-x"), timeout=2) == ["sess-x"]
