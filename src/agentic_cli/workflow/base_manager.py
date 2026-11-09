@@ -209,6 +209,13 @@ class BaseWorkflowManager(ABC):
         or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
 
+        The base also computes each agent's context numbers (``_budgets``),
+        once the models are resolved and before any service is built, so a
+        model too small to work in fails the start with nothing allocated: a
+        backend that summarizes and trims by them says so
+        (``_manages_context``) and reads ``_budgets`` in ``_do_initialize``,
+        and computes none itself.
+
     Turn contract:
         Every turn starts with ``async with self._turn(session_id, user_id)
         as ref:``: the conversation is resolved (``session_ref``) and named in
@@ -349,8 +356,9 @@ class BaseWorkflowManager(ABC):
         self._resolved_models: dict[str, ResolvedModel] = {}
 
         # Context. The root agent's name comes from the validated agent graph;
-        # each agent's numbers are computed by the backend when it builds the
-        # agents, and stay empty on a backend that manages no context.
+        # each agent's numbers are computed by the base when the models are
+        # resolved (_compute_budgets), and stay empty on a backend that manages
+        # no context.
         self._root_agent_name: str | None = None
         self._budgets: dict[str, "ContextBudget"] = {}
 
@@ -1449,7 +1457,8 @@ class BaseWorkflowManager(ABC):
 
         Its window (or the 128k floor), input budget, summary trigger and the
         tail a summary keeps (``workflow/context.py``), computed when the
-        agents were built: the numbers ``/status`` shows.
+        models were resolved, before any service was built: the numbers
+        ``/status`` shows.
 
         Args:
             agent_name: The agent; None for the root agent (``root_agent_name``).
@@ -1463,7 +1472,7 @@ class BaseWorkflowManager(ABC):
         if not self._initialized:
             raise RuntimeError(
                 f"{type(self).__name__} is not initialized: its agents' context "
-                "budgets are computed when they are built."
+                "budgets are computed when it initializes."
             )
         name = self.root_agent_name if agent_name is None else agent_name
         if name is None or name not in self._budgets:
@@ -1589,6 +1598,10 @@ class BaseWorkflowManager(ABC):
             # before services are built: a model that cannot run fails startup
             # with nothing else allocated.
             await self._load_models()
+            # Each agent's context numbers need only those models: a model too
+            # small to work in (ContextBudgetError) fails here too, before a
+            # service or a session store is built.
+            self._budgets = self._compute_budgets()
             # Create services BEFORE backend init so _build_tools() can
             # produce factory-bound tools during agent/graph creation.
             # Construction is offloaded to a worker thread (heavy constructors)
@@ -1608,6 +1621,39 @@ class BaseWorkflowManager(ABC):
         self._catalog.start_background_refresh()
 
     # --- models ------------------------------------------------------------
+
+    def _manages_context(self) -> bool:
+        """Whether this backend summarizes and trims its agents' conversations by context budgets.
+
+        A backend hook of the initialization (:meth:`_compute_budgets`). True
+        gives every agent a budget (``context_budget``) once the models are
+        resolved, and a model whose window is too small to work in fails the
+        start before any service is built. The base says no: a backend that
+        keeps its own history (LangGraph), and an app whose agents ADK owns (a
+        native ADK YAML app), have none.
+        """
+        return False
+
+    def _compute_budgets(self) -> "dict[str, ContextBudget]":
+        """Each agent's context numbers, by name; none for a backend that manages none.
+
+        Called by ``_initialize_locked`` with the models resolved and nothing
+        else built, so the failure it raises leaves nothing to release but the
+        catalog. A backend that computes its own overrides this rather than
+        assigning ``_budgets`` in ``_do_initialize``.
+
+        Raises:
+            ContextBudgetError: An agent's model leaves too small an input
+                budget to work in; the message names the agent and the model.
+        """
+        if not self._manages_context():
+            return {}
+        from agentic_cli.workflow.context import context_budget
+
+        return {
+            name: context_budget(model, self._settings)
+            for name, model in self._resolved_models.items()
+        }
 
     def _validate_model_settings(self) -> None:
         """The static model checks (``validate_settings``), with this manager's override.

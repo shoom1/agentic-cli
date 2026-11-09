@@ -30,7 +30,7 @@ from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager, Closer
-from agentic_cli.workflow.context import CompactResult, context_budget
+from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
@@ -585,18 +585,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         An app built from agent configs summarizes its main agent's
         conversation (``_compaction_config``) with ADK's after-turn pass
-        switched off (``NoAfterTurnCompactionRunner``); each agent's context
-        numbers are computed first, so a model whose budget is too small to
-        work in fails here, before anything is built. A native ADK YAML app
+        switched off (``NoAfterTurnCompactionRunner``), at the trigger of the
+        agents' context numbers (``_budgets``, which the base computed before
+        any service was built: ``_manages_context``). A native ADK YAML app
         gets neither.
         """
         logger.info("initializing_services", app_name=self.app_name)
         native = bool(self._adk_config_path)
-        # Each agent's context numbers, by name (agents built from configs).
-        self._budgets = {} if native else {
-            name: context_budget(model, self._settings)
-            for name, model in self._resolved_models.items()
-        }
 
         # Create the session service (durable DatabaseSessionService by
         # default; InMemory only when session_store='memory') — unless one is
@@ -801,6 +796,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return RunConfig(
             tool_thread_pool_config=ToolThreadPoolConfig(max_workers=_TOOL_THREADS)
         )
+
+    def _manages_context(self) -> bool:
+        """True for an app built from agent configs; a native ADK YAML app's agents are ADK's own."""
+        return not self._adk_config_path
 
     def _validate_agent_graph(self) -> AgentGraph | None:
         """Reject an unbuildable agent graph before anything is allocated.

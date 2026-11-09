@@ -737,9 +737,9 @@ class TestLifecycle:
     async def test_a_model_too_small_for_its_budget_starts_nothing(
         self, ctx, servers, monkeypatch
     ):
-        """Each agent's budget is computed before any MCP server starts: a
-        model whose window leaves no room to work in fails initialization
-        with no server started and the checkpointer's connection closed."""
+        """Each agent's budget is computed before anything is opened: a model
+        whose window leaves no room to work in fails initialization with no
+        server started and no checkpointer connection opened."""
         opened: list = []
         closed: list = []
         real_open = manager_module.open_checkpointer
@@ -769,8 +769,7 @@ class TestLifecycle:
             await manager.initialize_services()
         try:
             assert servers.pids() == []  # no MCP server was ever started
-            assert len(opened) == 1 and opened[0] is not None
-            assert closed == opened  # the sqlite connection, closed by the rollback
+            assert opened == [] and closed == []  # no sqlite connection was opened
             assert (manager._checkpointer, manager._sessions, manager._budgets) == (
                 None, None, {}
             )

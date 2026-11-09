@@ -58,7 +58,7 @@ from agentic_cli.workflow.config import (
     validate_agent_graph,
 )
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.context import CompactResult, context_budget
+from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
@@ -205,6 +205,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """Reject an unbuildable agent graph before anything is allocated."""
         return validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
+    def _manages_context(self) -> bool:
+        """Every agent is summarized by its own context numbers."""
+        return True
+
     def _backend_ready(self) -> bool:
         """True when the root agent and the session store are live."""
         return bool(
@@ -220,12 +224,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         if self._checkpointer is None:
             await self._open_session_store()
 
-        # Each agent's context numbers, as its summarization uses them; a
-        # budget too small to work in fails here (ContextBudgetError).
-        self._budgets = {
-            name: context_budget(model, self._settings)
-            for name, model in self._resolved_models.items()
-        }
         service_map = self._get_service_tool_map()
 
         from agentic_cli.config import SettingsContext
