@@ -2467,3 +2467,33 @@ class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
         jm.close()
 
         assert "job_close_skipped_unlocked" not in logged
+
+
+class TestTheSnapshot:
+    """``snapshot()``: the jobs a manager holds, read without a lock.
+
+    A caller on the event loop (a stopped turn's calls answered on ADK) asks
+    it, where waiting for the jobs directory's lock, which another CLI may
+    hold, froze the app.
+    """
+
+    def test_it_never_waits_for_the_jobs_directory(self, tmp_path: Path):
+        import fcntl
+        import threading
+
+        jm = JobManager(base_dir=tmp_path / "jobs")
+        try:
+            rec = jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+            with open(jm.base_dir / ".resume.lock", "a") as held:  # another CLI's
+                fcntl.flock(held, fcntl.LOCK_EX)
+                answered: list = []
+                asking = threading.Thread(target=lambda: answered.append(jm.snapshot()))
+                asking.start()
+                asking.join(2)
+                fcntl.flock(held, fcntl.LOCK_UN)
+            asking.join(10)
+        finally:
+            jm.close()
+
+        assert answered, "snapshot() waited for the jobs directory's lock"
+        assert [r.job_id for r in answered[0]] == [rec.job_id]

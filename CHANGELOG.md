@@ -2883,8 +2883,8 @@ step; each entry says what to use instead.
   permission prompt or at a question "Not run: the user cancelled it.", a
   delegation to a sub-agent as interrupted, and a call whose job was already
   submitted with the job's state (found among the jobs the manager holds,
-  `JobManager.known()`, which takes no lock: the event loop never waits for
-  another CLI); a request stopped before its reply (also
+  `JobManager.snapshot()`, which takes no lock: the event loop never waits
+  for another CLI); a request stopped before its reply (also
   after tool results) leaves "(Interrupted by the user.)" as the main
   agent's reply, so the next turn answers the new message alone. A turn
   ends only once that is stored: closed by its consumer (`aclosing`), or

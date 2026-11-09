@@ -121,7 +121,7 @@ class Jobs:
     def __init__(self, *records: SimpleNamespace) -> None:
         self.records = list(records)
 
-    def known(self) -> list[SimpleNamespace]:
+    def snapshot(self) -> list[SimpleNamespace]:
         return list(self.records)
 
 
