@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 
     from thinking_prompt import Field
 
+    from agentic_cli.cli.job_monitor import JobMonitor
     from agentic_cli.models import CatalogView, ModelRef, Provider, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
@@ -615,6 +616,10 @@ class BaseCLIApp:
     #: the deliveries the CLI makes on its own say it once per conversation.
     #: An immutable class default, replaced on each write, for the same reason.
     _said_not_told: frozenset[tuple[str, str]] = frozenset()
+
+    #: The status bar's job monitor while ``run()`` runs (None before, and
+    #: for an app built with ``__new__``).
+    _job_monitor: "JobMonitor | None" = None
 
     def __init__(
         self,
@@ -2093,7 +2098,9 @@ class BaseCLIApp:
     def conversation_held(self, session_id: str) -> Iterator[int | None]:
         """Hold ``session_id``'s conversation for the block, beside the one
         this process is in, so no other process opens it meanwhile
-        (``/sessions --delete``).
+        (``/sessions --delete``). When the block ends, the status bar's
+        job monitor forgets what it knew of jobs' conversations: one may be
+        gone, and its jobs told here.
 
         Yields:
             None while it is held (on the memory store nothing is held, nor
@@ -2108,6 +2115,8 @@ class BaseCLIApp:
             yield None
         finally:
             self._abandon(taken)
+            if self._job_monitor is not None:
+                self._job_monitor.forget_conversations()
 
     def _commit(self, taken: "Taken | None") -> None:
         if taken is not None:
@@ -2167,6 +2176,7 @@ class BaseCLIApp:
             self.session, self._workflow_controller, settings=self._settings,
             conversation=lambda: (self._settings.default_user, self._session_id),
         )
+        self._job_monitor = job_monitor  # told when a conversation is deleted
 
         # Once, before anything waits for the workflow: a backend that cannot
         # start (its extra missing, or a key) is still deprecated.

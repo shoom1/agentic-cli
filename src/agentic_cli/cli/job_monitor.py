@@ -96,8 +96,9 @@ class JobMonitor:
         # Last segment we published, to avoid redundant status-bar redraws.
         self._last_segment: str | None = None
         # Per job id: whether its conversation can be opened, and when that
-        # was asked (``_conversation_opens``).
+        # was asked (``_conversation_opens``), of the workflow ``_opens_of``.
         self._opens: dict[str, tuple[bool, float]] = {}
+        self._opens_of: Any = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -117,6 +118,15 @@ class JobMonitor:
             except asyncio.CancelledError:
                 pass
         self._task = None
+
+    def forget_conversations(self) -> None:
+        """Forget what it was told of jobs' conversations: the next tick asks again.
+
+        For when an answer kept may be wrong: a conversation was deleted
+        (``/sessions --delete``). A workflow replaced (an orchestrator
+        switch) is noticed on its own.
+        """
+        self._opens.clear()
 
     @asynccontextmanager
     async def running(self) -> AsyncIterator["JobMonitor"]:
@@ -185,14 +195,20 @@ class JobMonitor:
     async def _conversation_opens(self, record: Any) -> bool:
         """``workflow.can_resume(record)``, its answer kept ``_CONVERSATION_RECHECK_S``.
 
-        A failed lookup is not kept: the rule takes it as "it can be
-        opened", and the next tick asks again.
+        Kept for the workflow that gave it: another one (an orchestrator
+        switch, whose backend holds other conversations) is asked afresh. A
+        failed lookup is not kept: the rule takes it as "it can be opened",
+        and the next tick asks again.
         """
+        workflow = self._controller.workflow
+        if workflow is not self._opens_of:
+            self._opens.clear()
+            self._opens_of = workflow
         kept = self._opens.get(record.job_id)
         now = time.monotonic()
         if kept is not None and now - kept[1] < _CONVERSATION_RECHECK_S:
             return kept[0]
-        can_resume = getattr(self._controller.workflow, "can_resume", None)
+        can_resume = getattr(workflow, "can_resume", None)
         if can_resume is None:
             return True  # it cannot say: the job waits for its conversation
         opens = bool(await can_resume(record))

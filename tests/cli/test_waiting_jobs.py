@@ -161,3 +161,49 @@ def test_a_record_says_whether_it_waits_for_delivery():
     unflagged = finished("j", "s", "u")
     unflagged.resume_on_complete = False
     assert not unflagged.awaiting_resume
+
+
+class TestTheStatusBarAsksAgain:
+    """The answers the status bar keeps are dropped when they may be wrong:
+    a conversation deleted (``/sessions --delete``), or the workflow replaced
+    (an orchestrator switch: another backend's conversations)."""
+
+    def _setup(self, project):
+        jobs = Jobs([])
+        workflow = JobsWorkflow(jobs)
+        stored = {"other"}
+
+        async def can_resume(record) -> bool:
+            return record.session_id in stored
+
+        async def delete_session(session_id, user_id=None) -> bool:
+            stored.discard(session_id)
+            return True
+
+        workflow.can_resume = can_resume
+        workflow.delete_session = delete_session
+        app = app_on(workflow, fake_settings())
+        jobs.records.append(finished("elsewhere", "other", app.settings.default_user))
+        monitor = monitor_of(app)
+        app._job_monitor = monitor  # as run() keeps it
+        return app, monitor, jobs
+
+    async def test_after_a_conversation_is_deleted(self, project):
+        app, monitor, _ = self._setup(project)
+        assert await monitor.poll_once() is None  # it waits for its conversation
+
+        await app.process_input("/sessions --delete=other")
+
+        assert await monitor.poll_once() == "↻1: /jobs resume"  # gone: told here
+
+    async def test_after_an_orchestrator_switch(self, project):
+        app, monitor, jobs = self._setup(project)
+        assert await monitor.poll_once() is None
+
+        class Swapped(JobsWorkflow):
+            async def can_resume(self, record) -> bool:
+                return False  # sessions do not move between backends
+
+        app._workflow_controller._workflow = Swapped(jobs)
+
+        assert await monitor.poll_once() == "↻1: /jobs resume"
