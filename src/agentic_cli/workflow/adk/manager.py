@@ -517,14 +517,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
-        # exception into an error result the model can read.
+        # exception into an error result the model can read. It records its
+        # answer to an unknown tool, whose after-tool callbacks ADK skips.
         plugins: list = [
             PermissionPlugin(
                 self._open_calls,
                 marks=self._outside_marks,
                 root=self._root_agent.name if self._root_agent else None,
             ),
-            ToolErrorPlugin(),
+            ToolErrorPlugin(self._open_calls),
         ]
 
         # Task progress tracking via ToolContext.state

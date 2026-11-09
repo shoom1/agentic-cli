@@ -88,7 +88,7 @@ agentic-cli/
 │   │   │   ├── permission_plugin.py # PermissionPlugin (gates tool calls; marks the conversation when an allowed call brings outside content); tool_definition: a tool object's registry identity, the gate's and the tool result cap's
 │   │   │   ├── interrupted_calls_plugin.py # InterruptedCallsPlugin: a cancelled turn's seals worded (finished results kept, as the cap cut them); left_open: a crash's calls answered at the next turn
 │   │   │   ├── task_progress_plugin.py # Emits TASK_PROGRESS events
-│   │   │   ├── tool_error_plugin.py # Tool exception → error result (turn survives); a call to an unknown tool name → ADK's own text (is_unknown_tool: ADK's stand-in, which the gate lets through)
+│   │   │   ├── tool_error_plugin.py # Tool exception → error result (turn survives); a call to an unknown tool name → ADK's own text (is_unknown_tool: ADK's stand-in, which the gate lets through), recorded in OpenCalls since ADK skips its after-tool callbacks, so a cancelled turn keeps it
 │   │   │   ├── tool_result_cap_plugin.py # ToolResultCapPlugin: every tool result through cap_tool_result (after TaskProgressPlugin)
 │   │   │   ├── context_cache_plugin.py # One Gemini cache attempt a turn
 │   │   │   ├── foreign_reasoning_plugin.py # No model is sent another provider's thoughts

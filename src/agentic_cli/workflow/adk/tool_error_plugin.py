@@ -13,7 +13,10 @@ resolves the name to a stand-in (``is_unknown_tool``), lets the before-tool
 callbacks see it (the permission gate lets it through: it runs nothing), and
 then reports its lookup ``ValueError`` here. The model reads ADK's first two
 lines, the agent's tools by name (``tool_errors.unknown_tool_result``), and
-the log says so at info, not as a warning over the prompt.
+the log says so at info, not as a warning over the prompt. ADK skips the
+after-tool callbacks for it, where a finished call's result is recorded, so
+this plugin records that answer itself (``OpenCalls.finished``): a turn the
+user stops then keeps it, as it keeps any finished call's.
 
 The results come from ``workflow/tool_errors.py``, which the Deep Agents
 backend's middleware uses too, so both answer the model in the same words.
@@ -33,6 +36,8 @@ from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_res
 
 if TYPE_CHECKING:
     from google.adk.tools.tool_context import ToolContext
+
+    from agentic_cli.workflow.interrupts import OpenCalls
 
 logger = Loggers.workflow()
 
@@ -63,10 +68,16 @@ def _available_tools(error: BaseException) -> list[str] | None:
 
 
 class ToolErrorPlugin(BasePlugin):
-    """Return an error result for a tool call that raised."""
+    """Return an error result for a tool call that raised.
 
-    def __init__(self) -> None:
+    Args:
+        open_calls: The manager's record of its calls, where the answer to
+            a call to an unknown tool is recorded; None records nothing.
+    """
+
+    def __init__(self, open_calls: "OpenCalls | None" = None) -> None:
         super().__init__(name="tool_error")
+        self._open_calls = open_calls
 
     async def on_tool_error_callback(
         self,
@@ -84,5 +95,10 @@ class ToolErrorPlugin(BasePlugin):
                     tool=tool.name,
                     agent=getattr(tool_context, "agent_name", None),
                 )
-                return unknown_tool_result(tool.name, available)
+                answer = unknown_tool_result(tool.name, available)
+                if self._open_calls is not None:
+                    self._open_calls.finished(
+                        getattr(tool_context, "function_call_id", None), answer
+                    )
+                return answer
         return tool_error_result(tool.name, error)

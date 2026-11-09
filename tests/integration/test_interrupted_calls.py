@@ -392,6 +392,35 @@ async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_call_to_an_unknown_tool_beside_it_keeps_its_answer(
+    hermetic, monkeypatch, backend
+):
+    """A call to a tool the agent does not have was answered at once, with
+    ADK's "not found": it keeps that answer, as a finished call does.
+
+    On ADK ``ToolErrorPlugin`` answers it and ADK skips the after-tool
+    callbacks, where a finished call's result is recorded.
+    """
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("nope", {}, "toolu_n"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_wait)
+    try:
+        await cancelled(manager, "Both, please.")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert INTERRUPTED_BY_USER not in sent["toolu_n"]
+    assert "nope failed: ValueError: Tool 'nope' not found." in sent["toolu_n"]
+    assert "Available tools: ic_wait" in sent["toolu_n"]
+    assert INTERRUPTED_BY_USER in sent["toolu_w"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 async def test_a_call_waiting_at_its_permission_prompt_is_not_run(
     hermetic, monkeypatch, backend
 ):
