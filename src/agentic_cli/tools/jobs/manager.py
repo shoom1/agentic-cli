@@ -392,6 +392,12 @@ _FIELD_RULES: dict[str, _FieldRule] = {
     "cancel_requested": _FieldRule.STICKY,
 }
 
+# The fields a manager may change after submit: a transaction writes the
+# record when its block changed one of them.
+_CHANGING_FIELDS = tuple(
+    name for name, rule in _FIELD_RULES.items() if rule is not _FieldRule.IMMUTABLE
+)
+
 
 def _claim_on_disk(data: dict) -> str | None:
     """The delivery state ``data`` records, or None when it records none."""
@@ -613,7 +619,6 @@ class JobManager:
             try:
                 with self._claim_transaction():
                     if self._refresh(rec) is DurableRead.MISSING:
-                        self._forget(job_id)
                         return None
                     self._maybe_start_queued()
             except ClaimLockUnavailable as exc:
@@ -651,11 +656,25 @@ class JobManager:
             return backend.logs(rec, self._job_dir(job_id), n, stream)
 
     def result(self, job_id: str) -> Any:
+        """The job's result once it has ended, else None.
+
+        The job is brought up to date first, as ``get`` does: its record
+        read back, its backend polled and how it ended decided in one
+        cross-process transaction, so a cancel another manager requested
+        meanwhile is not decided past. Without the lock it is judged as this
+        manager has it.
+        """
         with self._lock:
             rec = self._records.get(job_id)
             if rec is None:
                 return None
-            self._refresh(rec)
+            try:
+                if self._refresh(rec) is DurableRead.MISSING:
+                    return None
+            except ClaimLockUnavailable as exc:
+                logger.warning(
+                    "job_refresh_skipped_unlocked", job_id=job_id, error=str(exc)
+                )
             if rec.state not in TERMINAL_STATES:
                 return None
             backend = self._backend_of(rec, asked=True)
@@ -740,13 +759,8 @@ class JobManager:
         with self._lock:
             try:
                 with self._claim_transaction():
-                    gone = [
-                        rec.job_id
-                        for rec in list(self._records.values())
-                        if self._refresh(rec) is DurableRead.MISSING
-                    ]
-                    for job_id in gone:
-                        self._forget(job_id)
+                    for rec in list(self._records.values()):
+                        self._refresh(rec)  # forgets one another manager removed
                     self._maybe_start_queued()
             except ClaimLockUnavailable as exc:
                 logger.warning("job_reconcile_skipped_unlocked", error=str(exc))
@@ -1110,6 +1124,58 @@ class JobManager:
                 finally:
                     self._claim_depth = 0
 
+    @contextlib.contextmanager
+    def _mutate(
+        self, rec: JobRecord, *, create: bool = False
+    ) -> Iterator[DurableRead]:
+        """One read-modify-write of a job's ``meta.json``.
+
+        Inside the cross-process transaction (``_claim_transaction``), the
+        record is read from disk and each field read back into ``rec`` by its
+        rule (``_FIELD_RULES``): the block decides on what every manager has
+        written, and changes ``rec``. When the block ends and has changed a
+        field, ``rec`` is written onto the dict that was read, so a key this
+        version does not declare (a later version's) is kept. A block that
+        raises writes nothing.
+
+        Yields what the read found, for the block to act on: ``PRESENT``;
+        ``MISSING``, when another manager removed the record, which is then
+        forgotten and never written back (unless ``create``: a new job's
+        first write, of the whole record); ``UNREADABLE``, when nothing is
+        read back or written, since writing would destroy state we failed to
+        read.
+
+        A terminal state on disk is never replaced: how a job ended, once
+        recorded, is how it ended. A block that changed it is undone (the
+        record read back again, nothing written), and logged.
+
+        Raises:
+            ClaimLockUnavailable: from ``_claim_transaction``; nothing was
+                read or written.
+        """
+        with self._claim_transaction():
+            status, data = self._read_persisted(rec.job_id)
+            if status is DurableRead.PRESENT:
+                _reload_fields(rec, data)
+            elif status is DurableRead.MISSING and not create:
+                self._forget(rec.job_id)
+            before = [getattr(rec, name) for name in _CHANGING_FIELDS]
+            yield status
+            if status is DurableRead.MISSING and create:
+                self._write(rec, {})
+            if status is not DurableRead.PRESENT:
+                return
+            if [getattr(rec, name) for name in _CHANGING_FIELDS] == before:
+                return
+            durable = data.get("state")
+            if durable in _TERMINAL_VALUES and durable != rec.state.value:
+                _reload_fields(rec, data)
+                logger.info(
+                    "job_terminal_state_preserved", job_id=rec.job_id, state=durable
+                )
+                return
+            self._write(rec, data)
+
     def _persist(self, rec: JobRecord, *, owns_shared_state: bool = False) -> None:
         """Write a record's metadata, never clobbering a newer delivery state.
 
@@ -1131,7 +1197,7 @@ class JobManager:
                 transaction that just set these fields.
         """
         if owns_shared_state:
-            self._write(rec)
+            self._write(rec, {})
             return
         try:
             with self._claim_transaction():
@@ -1158,7 +1224,7 @@ class JobManager:
                         )
                         return
                     self._adopt_shared_fields(rec, data)
-                self._write(rec)
+                self._write(rec, data or {})
         except ClaimLockUnavailable as exc:
             # No lock means no safe read-modify-write: re-reading and rewriting
             # is exactly the race the lock prevents, so an interleaved delivery
@@ -1174,7 +1240,7 @@ class JobManager:
             logger.warning(
                 "job_persist_created_unlocked", job_id=rec.job_id, error=str(exc)
             )
-            self._write(rec)
+            self._write(rec, {})
 
     def _read_persisted(self, job_id: str) -> "tuple[DurableRead, dict | None]":
         """Read a record from disk, distinguishing *gone* from *unreadable*.
@@ -1234,9 +1300,18 @@ class JobManager:
         rec.resume_error = data.get("resume_error")
         rec.resume_owner = data.get("resume_owner")
 
-    def _write(self, rec: JobRecord) -> None:
-        """Write the record and remember that it now exists on disk."""
-        atomic_write_json(self._job_dir(rec.job_id) / "meta.json", rec.to_dict())
+    def _write(self, rec: JobRecord, read: dict) -> None:
+        """Write ``rec`` onto ``read``, what its ``meta.json`` held.
+
+        A key this version does not declare is kept: a later version's, which
+        it would otherwise erase. The legacy ``resumed`` is not: the
+        ``resume_state`` written with it replaces it, and every version since
+        the delivery lifecycle reads that first. Remembers that the record
+        now exists on disk.
+        """
+        data = {**read, **rec.to_dict()}
+        data.pop("resumed", None)
+        atomic_write_json(self._job_dir(rec.job_id) / "meta.json", data)
         self._persisted.add(rec.job_id)
 
     def _reload_durable(self, rec: JobRecord) -> DurableRead:
@@ -1336,9 +1411,28 @@ class JobManager:
     def _refresh(self, rec: JobRecord) -> DurableRead:
         """Bring a job up to date: durable state first, then the backend.
 
-        The durable record comes first for *every* record, terminal ones
-        included — a finished job's delivery lifecycle keeps moving, and that
-        is state another manager owns.
+        One transaction (``_mutate``): the record read back, the backend
+        polled and what it says recorded, so the decision is made on what
+        every manager has written. The durable record comes first for *every*
+        record, terminal ones included — a finished job's delivery lifecycle
+        keeps moving, and that is state another manager owns.
+
+        Returns:
+            The durable read status. A record another manager deleted
+            (``MISSING``) has been forgotten.
+
+        Raises:
+            ClaimLockUnavailable: nothing was read or written.
+        """
+        with self._mutate(rec) as status:
+            if status is DurableRead.PRESENT:
+                self._poll(rec)
+        return status
+
+    def _poll(self, rec: JobRecord) -> None:
+        """Ask the backend how a job is doing, and record what it says.
+
+        Caller holds ``_mutate`` on the record, which writes the change.
 
         A foreign job is still polled: backends publish their outcome durably
         (the ``exit_code`` sentinel), so the observer can read it. What it must
@@ -1347,35 +1441,27 @@ class JobManager:
         it at face value would mark a healthy job terminal and hand its
         "result" to a resume. Nor does a manager without the job's backend
         judge it: the job is left as it is (``_backend_of``).
-
-        Returns:
-            The durable read status, so callers can forget a deleted record.
         """
-        status = self._reload_durable(rec)
-        if status is not DurableRead.PRESENT:
-            return status
         if rec.state in TERMINAL_STATES or rec.state == JobState.QUEUED:
-            return status
+            return
         backend = self._backend_of(rec)
         if backend is None:
-            return status
+            return
         new_state = backend.poll(rec, self._job_dir(rec.job_id))
         if new_state == rec.state:
-            return status
+            return
         if new_state is JobState.UNKNOWN and self._execution_is_foreign(rec):
             logger.debug(
                 "job_poll_unknown_foreign",
                 job_id=rec.job_id,
                 owner=rec.exec_owner,
             )
-            return status
+            return
         if new_state in TERMINAL_STATES and rec.cancel_requested:
             new_state = JobState.CANCELLED  # it ended after it was cancelled
         rec.state = new_state
         if new_state in TERMINAL_STATES and rec.finished_at is None:
             rec.finished_at = _now()
-        self._persist(rec)
-        return status
 
     def _maybe_start_queued(self) -> None:
         """Start queued jobs up to the concurrency cap (caller holds the lock)."""
