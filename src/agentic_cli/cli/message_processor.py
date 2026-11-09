@@ -468,13 +468,15 @@ class MessageProcessor:
             bind_context(user_id=settings.default_user)
             icon = "✓" if record.state.value == "succeeded" else "✗"
 
-            # Resume only if the backend supports it AND the originating
-            # conversation is still available (with session_store='memory' it
-            # is gone after a restart, on ADK and Deep Agents alike, and a
-            # deleted one is gone too). Otherwise surface a notice — the result
-            # stays reachable by job id.
-            resumable = hasattr(
-                workflow, "resume_with_job_result"
+            # Resume only if the backend supports it (every manager has a
+            # resume_with_job_result, the base's template; supports_job_resume
+            # says whether it can run) AND the originating conversation is
+            # still available (with session_store='memory' it is gone after a
+            # restart, on ADK and Deep Agents alike, and a deleted one is gone
+            # too). Otherwise surface a notice — the result stays reachable by
+            # job id.
+            resumable = getattr(
+                workflow, "supports_job_resume", False
             ) and await workflow.can_resume(record)
             if claim is not None and not await claim():
                 return TurnResult(

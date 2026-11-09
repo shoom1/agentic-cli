@@ -79,6 +79,8 @@ class Workflow:
     input callback the turn installs.
     """
 
+    supports_job_resume = True
+
     def __init__(self, events=(), *, hang: bool = True, asks: bool = False) -> None:
         self.events = list(events)
         self.hang = hang

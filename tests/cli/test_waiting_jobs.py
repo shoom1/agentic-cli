@@ -73,6 +73,8 @@ class Jobs:
 class JobsWorkflow(Workflow):
     """Conversations: the open one, ``other`` (stored), ``deleted`` (gone)."""
 
+    supports_job_resume = True
+
     def __init__(self, jobs: Jobs) -> None:
         super().__init__()
         self.job_manager = jobs
