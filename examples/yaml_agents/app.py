@@ -3,7 +3,7 @@
 ``agents.yaml`` declares a coordinator and a researcher, their prompts in
 ``prompts/``; ``load_agents_from_yaml`` turns it into the same ``AgentConfig``s
 the other examples write by hand. The researcher's tool, ``word_count``, is a
-registered name: ``tools.py`` registers it, and this module imports that
+registered name: ``tools.py`` registers it, and this module loads that
 before it builds the agents, since a name is looked up when the manager is built.
 
 Run with: python examples/yaml_agents/app.py
@@ -17,6 +17,7 @@ It runs on Google ADK. To run it on Deep Agents instead, install the extra
 """
 
 import asyncio
+import importlib.util
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -29,13 +30,15 @@ from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
 from agentic_cli.workflow import load_agents_from_yaml
 
-# tools.py sits beside this file. Run as a script, Python puts this folder on
-# sys.path; loaded by path (a test), it is not, so add it: either way `tools`
-# imports, once, and registers word_count before the agents are built.
+# tools.py sits beside this file: load it by path, under a name of its own, so
+# it registers word_count before the agents are built however this file is run.
+# (`import tools` would get any other module named so that was imported first.)
+# Kept in sys.modules, so a second load of this file does not register it again.
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-import tools  # noqa: E402,F401
+if "yaml_agents_tools" not in sys.modules:
+    _spec = importlib.util.spec_from_file_location("yaml_agents_tools", _HERE / "tools.py")
+    sys.modules["yaml_agents_tools"] = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(sys.modules["yaml_agents_tools"])
 
 
 # =============================================================================

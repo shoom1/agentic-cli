@@ -83,6 +83,39 @@ print(json.dumps({{"configs": len(found), "unregistered": unregistered}}))
 """
 _CHECK_TOOLS = _LOAD + _REPORT
 
+# yaml_agents/app.py loaded after another app's ``tools`` module, which a plain
+# ``import tools`` would hand it in place of its own.
+_COLLIDE = """
+import importlib.util, json, sys
+
+sys.path[:0] = [{src!r}, {repo!r}, {other!r}]
+import tools  # another app's module, imported first
+before = list(sys.path)
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, {path!r})
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+
+load("yaml_agents_app")
+load("yaml_agents_app_again")  # a second load registers nothing twice
+
+from agentic_cli.tools.registry import identify_tool
+from agentic_cli.tools.tool_resolver import resolve_tool
+
+try:
+    registered = identify_tool(resolve_tool("word_count")) is not None
+except ValueError as error:
+    registered = str(error)
+print(json.dumps({{
+    "registered": registered,
+    "other_tools_module": tools.__file__ == {other_tools!r},
+    "sys_path_unchanged": sys.path == before,
+}}))
+"""
+
 _CALCULATE = _LOAD + """
 expressions = {expressions!r}
 print(json.dumps([module.calculate(expression) for expression in expressions]))
@@ -153,6 +186,20 @@ def test_the_yaml_example_agent_tools_are_registered(tmp_path):
 
     assert report["configs"] == 2
     assert report["unregistered"] == [], report["unregistered"]
+
+
+def test_the_yaml_example_registers_its_tool_whatever_other_modules_are_named(tmp_path):
+    """Apps copy this pattern: a module of another app named ``tools`` must not stand in for it."""
+    other = tmp_path / "otherapp"
+    other.mkdir()
+    (other / "tools.py").write_text("NOT_THE_EXAMPLES_TOOLS = True\n")
+    app = _REPO_ROOT / "examples" / "yaml_agents" / "app.py"
+
+    report = _run(
+        _script(_COLLIDE, app, other=str(other), other_tools=str(other / "tools.py")), tmp_path
+    )
+
+    assert report == {"registered": True, "other_tools_module": True, "sys_path_unchanged": True}
 
 
 _SAFE = ["sqrt(16)", "2 + 3 * 4", "round(pi, 2)"]
