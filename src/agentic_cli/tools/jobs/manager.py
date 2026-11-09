@@ -689,8 +689,18 @@ class JobManager:
                 return 0
 
     def running_count(self) -> int:
+        """Running jobs this manager knows, which count toward its cap.
+
+        A job whose backend this manager has not registered is left out: it
+        is never judged here, so it never ends here, and counted it would hold
+        a slot for good once the app no longer registers its backend.
+        """
         with self._lock:
-            return sum(1 for r in self._records.values() if r.state == JobState.RUNNING)
+            return sum(
+                1
+                for r in self._records.values()
+                if r.state == JobState.RUNNING and r.backend in self._backends
+            )
 
     def awaiting_resume(self) -> list[JobRecord]:
         """Terminal jobs flagged for resume whose result is still undelivered.

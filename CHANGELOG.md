@@ -2261,10 +2261,10 @@ step; each entry says what to use instead.
   a job is now left as it is until a manager that has its backend looks at
   it (`job_backend_not_registered` is logged once per job): it is not
   polled, claimed, launched or cancelled, `cancel` returns it unchanged,
-  `tail` returns no lines and `result` None. So a job on a backend the app
-  no longer registers stays as it was, RUNNING (holding a slot of the
-  concurrency cap) or queued, until its folder under `~/.<app>/jobs/` is
-  removed: `/jobs clean` removes finished jobs only.
+  `tail` returns no lines and `result` None, and a running one holds no slot
+  of the manager's concurrency cap. So a job on a backend the app no longer
+  registers stays as it was, RUNNING or queued, until its folder under
+  `~/.<app>/jobs/` is removed: `/jobs clean` removes finished jobs only.
 
 - **Cancelling a job that has already ended records how it ended.**
   `JobManager.cancel` (and so `job_cancel` and `/jobs cancel`) reloaded the

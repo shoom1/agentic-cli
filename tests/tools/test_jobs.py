@@ -1341,6 +1341,22 @@ class TestAJobWhoseBackendIsNotRegistered:
                 other.close()
             owner.close()
 
+    def test_it_holds_no_slot_of_the_cap(self, tmp_path: Path):
+        """It is never judged here, so it never ends here: counted, it starved the cap."""
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        stale = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+
+        other = JobManager(base_dir=base, max_concurrent=1)  # no "remote" here
+        try:
+            job = other.submit(tool="t", backend="subprocess", spec={"command": "true"})
+
+            assert job.state is JobState.RUNNING, "the cap was full of a job it cannot judge"
+            assert other.get(stale.job_id).state is JobState.RUNNING
+        finally:
+            other.close()
+
     def test_it_is_logged_once_per_job_at_warning(self, tmp_path: Path, monkeypatch):
         from agentic_cli.tools.jobs import manager as jobs_manager
 
