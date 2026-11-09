@@ -177,15 +177,50 @@ class BaseWorkflowManager(ABC):
         so it stays correct for nested and task-spawned work.
 
     Example:
-        class CustomWorkflowManager(BaseWorkflowManager):
-            async def initialize_services(self) -> None:
-                # Setup custom backend
-                pass
+        A minimal backend. ``initialize_services`` is the base's: it validates
+        the agent graph, resolves the models, builds the services the tools
+        declare and then calls ``_do_initialize``. The backend takes both
+        locks to tear down, and resets what it set up in ``_release_resources``
+        (the base closes the catalog and the services only)::
 
-            async def process(self, message, user_id, session_id=None):
-                # Process through custom backend
-                async for event in self._process_internal():
-                    yield event
+            from typing import Callable
+
+            from agentic_cli import BaseWorkflowManager, WorkflowEvent
+
+            class CustomWorkflowManager(BaseWorkflowManager):
+                @property
+                def backend_type(self) -> str:
+                    return "custom"
+
+                def _get_state_tools(self) -> list[Callable]:
+                    return []  # the backend's plan and task tools
+
+                async def _do_initialize(self) -> None:
+                    ...  # build the backend's agents or graph
+
+                async def process(self, message, user_id, session_id=None):
+                    async with self._turn_admission():
+                        with self._workflow_context(session_id=session_id, user_id=user_id):
+                            yield WorkflowEvent.text(f"echo: {message}", session_id)
+
+                async def reinitialize(self, model=None, preserve_sessions=True):
+                    async with self._lifecycle_lock:
+                        async with self._turn_lock:
+                            with self._carrying_services(preserve_sessions):
+                                await self._release_resources()
+                                self._reset_model(model)
+                                await self._initialize_locked()
+
+                async def cleanup(self) -> None:
+                    async with self._lifecycle_lock:
+                        async with self._turn_lock:
+                            await self._release_resources()
+
+                async def _release_resources(self) -> None:
+                    self._initialized = False
+                    self._budgets = {}
+                    self._index_snapshots.clear()
+                    await super()._release_resources()
     """
 
     def __init__(
