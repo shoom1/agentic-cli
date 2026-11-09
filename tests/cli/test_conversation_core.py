@@ -302,8 +302,9 @@ class TestTheSwitch:
     async def test_another_place_keys_the_lock_there_and_resets_the_context_only(
         self, tmp_path
     ):
-        """An orchestrator switch: the same id in another backend. The usage
-        counters keep the session's totals; the context is another one's."""
+        """The same id in another place (a backend or store the workflow's
+        next start builds, while it is down). The usage counters keep the
+        session's totals; the context is another one's."""
         core, around = self.core_in(tmp_path), Around(FakeWorkflow())
         core.turned = True
         there = place(tmp_path, backend="deepagents")

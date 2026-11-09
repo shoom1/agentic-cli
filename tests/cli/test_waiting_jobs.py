@@ -166,7 +166,7 @@ def test_a_record_says_whether_it_waits_for_delivery():
 class TestTheStatusBarAsksAgain:
     """The answers the status bar keeps are dropped when they may be wrong:
     a conversation deleted (``/sessions --delete``), or the workflow replaced
-    (an orchestrator switch: another backend's conversations)."""
+    (a new conversation on another backend: its conversations)."""
 
     def _setup(self, project):
         jobs = Jobs([])

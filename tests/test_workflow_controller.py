@@ -1,10 +1,10 @@
 """Tests for workflow controller factory and orchestrator routing.
 
-The backend is chosen purely by ``settings.orchestrator`` and is model-agnostic:
-ADK runs Claude natively via the direct-API ``AnthropicLlm`` (no LiteLLM), so
-Claude is no longer auto-routed to LangGraph. A model switch alone never forces an
-orchestrator swap; only an orchestrator-setting change (leaving a stale manager)
-does.
+The factory builds the backend ``settings.orchestrator`` names, or the one it is
+given, and is model-agnostic: ADK runs Claude natively via the direct-API
+``AnthropicLlm`` (no LiteLLM), so Claude is no longer auto-routed to LangGraph.
+The controller runs the conversation's backend: a model switch never changes it,
+and only ``switch_backend`` (a new conversation on another backend) does.
 """
 
 from types import SimpleNamespace

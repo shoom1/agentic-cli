@@ -2,8 +2,10 @@
 
 A conversation lives in one CLI process at a time (``cli/conversation_lock.py``),
 so the lock must follow the conversation the app is in, however it changes:
-``/new``, ``/resume``, the conversation a run starts in (``--continue``,
-``--resume``, a new one), an orchestrator switch in ``/settings``, and the
+``/new`` (on any backend: a conversation never changes backend, so another
+backend is a new conversation's), ``/resume``, the conversation a run starts
+in (``--continue``, ``--resume``, a new one), a ``/settings`` change of
+``orchestrator`` or ``session_store`` while the workflow is down, and the
 ``session_id`` setter. Each goes through one protocol
 (``ConversationCore.switch``): the target's lock is taken (one another
 process holds is refused), the memories of the conversation left are
@@ -13,10 +15,10 @@ or abandoned, and the status line is drawn. A Ctrl+C at any step leaves the
 app in exactly one conversation, holding exactly its lock.
 
 The place a conversation is held at (its backend and store) is the one the
-workflow runs it in: recorded as the app starts, and moved by an
-orchestrator switch, or by a ``/settings`` change of the orchestrator or
-``session_store`` while the workflow is down (its next start builds on the
-new values). A change of ``session_store`` while the workflow runs takes
+workflow runs it in: recorded as the app starts, and for a new conversation
+on another backend, and moved by a ``/settings`` change of the orchestrator
+or ``session_store`` while the workflow is down (its next start builds on
+the new values). A change of ``session_store`` while the workflow runs takes
 effect at the next start, and the lock keeps the store the workflow runs.
 
 The app is a real ``BaseCLIApp`` whose session is a fake and whose
@@ -331,8 +333,8 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     rebuilt: the next message's start builds a manager from the settings as
     they are then. The lock stayed on the place recorded as the app started,
     so a second terminal could open the conversation where the turns now
-    write. It now moves there with the change, through the same switch an
-    orchestrator swap makes."""
+    write. It now moves there with the change, through the switch every
+    change of conversation makes (nothing of it is stored anywhere yet)."""
 
     class Manager(Workflow):
         """A manager of one backend; ``fails`` makes its start fail."""

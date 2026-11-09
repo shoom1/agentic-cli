@@ -79,7 +79,7 @@ def home(tmp_path, monkeypatch) -> Path:
 
 
 class FakeManager:
-    """What the app's startup and an orchestrator swap touch, for any backend."""
+    """What the app's startup and a new conversation on a backend touch, for any backend."""
 
     catalog = None
 
