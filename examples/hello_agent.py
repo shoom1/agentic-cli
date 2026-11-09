@@ -3,7 +3,10 @@
 Run with: python examples/hello_agent.py
 """
 
+import ast
 import asyncio
+import math
+import operator
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -15,7 +18,9 @@ from pydantic_settings import SettingsConfigDict
 
 from agentic_cli import BaseCLIApp, BaseSettings
 from agentic_cli.cli import AppInfo
+from agentic_cli.tools import ToolCategory, register_tool
 from agentic_cli.workflow import AgentConfig
+from agentic_cli.workflow.permissions import EXEMPT
 
 
 # =============================================================================
@@ -44,28 +49,96 @@ def get_settings() -> Settings:
 # =============================================================================
 # Tools
 # =============================================================================
+#
+# Every tool call passes the permission engine, which denies a tool the
+# registry did not issue. These three touch nothing, so they are EXEMPT.
 
+@register_tool(category=ToolCategory.OTHER, capabilities=EXEMPT)
 def get_current_time() -> dict:
     """Get the current date and time."""
     now = datetime.now()
-    return {"date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M:%S")}
+    return {"success": True, "date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M:%S")}
 
 
+_OPERATORS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
+    ast.USub: operator.neg, ast.UAdd: operator.pos,
+}
+_MAX_BITS = 10_000  # about 3,000 digits: quick to compute, and to print
+
+
+def _round(number, ndigits=None):
+    """``round``, with few digits: an int's ``round(1, -10**8)`` computes 10**10**8."""
+    if ndigits is not None and abs(ndigits) > 100:
+        raise ValueError("ndigits too large")
+    return round(number, ndigits)
+
+
+_FUNCTIONS = {
+    "abs": abs, "round": _round, "min": min, "max": max,
+    "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+}
+_CONSTANTS = {"pi": math.pi, "e": math.e}
+
+
+def _sized(value: float) -> float:
+    """``value``, unless it is an int too large to work with."""
+    if isinstance(value, int) and value.bit_length() > _MAX_BITS:
+        raise ValueError("number too large")
+    return value
+
+
+def _evaluate(node: ast.AST) -> float:
+    """Evaluate arithmetic: numbers, operators, and the names above, nothing else.
+
+    It runs in the tool's thread and holds the GIL, so every step is bounded:
+    no int grows past ``_MAX_BITS``, and a power that would is refused before
+    it is computed.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
+        left, right = _evaluate(node.left), _evaluate(node.right)
+        if isinstance(node.op, ast.Pow):
+            if abs(right) > 100:
+                raise ValueError("exponent too large")  # 9**9**9 would never finish
+            if (
+                isinstance(left, int) and isinstance(right, int)
+                and left.bit_length() * right > _MAX_BITS
+            ):
+                raise ValueError("number too large")  # nor (((10**100)**100)**100)**100
+        return _sized(_OPERATORS[type(node.op)](left, right))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+        return _OPERATORS[type(node.op)](_evaluate(node.operand))
+    if isinstance(node, ast.Name) and node.id in _CONSTANTS:
+        return _CONSTANTS[node.id]
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _FUNCTIONS
+        and not node.keywords
+    ):
+        return _sized(_FUNCTIONS[node.func.id](*(_evaluate(arg) for arg in node.args)))
+    raise ValueError(f"unsupported expression: {ast.unparse(node)}")
+
+
+@register_tool(category=ToolCategory.OTHER, capabilities=EXEMPT)
 def calculate(expression: str) -> dict:
     """Evaluate a mathematical expression (e.g., "2 + 2" or "sqrt(16)")."""
-    import math
-    allowed = {"abs": abs, "round": round, "min": min, "max": max, "sum": sum,
-               "pow": pow, "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos,
-               "tan": math.tan, "pi": math.pi, "e": math.e}
     try:
-        return {"expression": expression, "result": eval(expression, {"__builtins__": {}}, allowed)}
-    except Exception as e:
-        return {"expression": expression, "error": str(e)}
+        result = _evaluate(ast.parse(expression, mode="eval").body)
+    except (
+        SyntaxError, ValueError, TypeError, ArithmeticError, RecursionError, MemoryError
+    ) as e:
+        return {"success": False, "expression": expression, "error": str(e)}
+    return {"success": True, "expression": expression, "result": result}
 
 
+@register_tool(category=ToolCategory.OTHER, capabilities=EXEMPT)
 def echo(message: str) -> dict:
     """Echo back a message."""
-    return {"echoed": message, "length": len(message)}
+    return {"success": True, "echoed": message, "length": len(message)}
 
 
 # =============================================================================
