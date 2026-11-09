@@ -1071,10 +1071,11 @@ the start of the entry's title.
   and trims by them, the root agent's by default. A frozen `ContextBudget`
   (`workflow/context.py`): the model's `window` (128,000 with `window_known`
   False when the model's is unknown), the input `budget`, the summary
-  `trigger` and the `keep` tail, computed when the agents are built. It
-  raises `RuntimeError` before the manager initializes and `KeyError` for an
-  agent whose context the manager does not manage: LangGraph and a native
-  ADK YAML app manage none, and their `root_agent_name` is None. On ADK and
+  `trigger` and the `keep` tail, computed when the models are resolved,
+  before any service is built. It raises `RuntimeError` before the manager
+  initializes and `KeyError` for an agent whose context the manager does not
+  manage: LangGraph and a native ADK YAML app manage none, and their
+  `root_agent_name` is None. On ADK and
   Deep Agents every `LLM_USAGE` an agent's call reports now carries `agent`,
   that agent's `context_trigger` and `window_known`; a summary's carries
   those of the agent it summarized. A sub-agent's call stays
@@ -1306,7 +1307,11 @@ the start of the entry's title.
   implements `backend_type`, `_get_state_tools`, `_do_initialize`, `process`
   and the hooks for what it holds, as the class docstring's example does; one
   that overrides `cleanup` or `reinitialize` keeps its own (the LangGraph
-  backend does).
+  backend does). The base also computes each agent's context numbers, once
+  the models are resolved and before any service is built; a backend that
+  summarizes by them says so in `_manages_context()` and reads `_budgets` in
+  `_do_initialize` (ADK for an app built from agent configs, and Deep Agents,
+  do; LangGraph and a native ADK YAML app have none).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -1988,10 +1993,12 @@ the start of the entry's title.
   as 128,000 tokens instead of getting Deep Agents' fixed 170,000 tokens or 6
   messages, which never fired on a 32k model. A model whose budget is under
   16,000 tokens fails to start with a `ContextBudgetError`, an
-  `AgentGraphError` naming the agent, its model and its `max_tokens`. That is
-  a `max_tokens` close to the window, or **a window of 16,842 tokens or
-  less, whatever its `max_tokens` (breaking): an 8k or 16k local model
-  that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
+  `AgentGraphError` naming the agent, its model and its `max_tokens`, before
+  any service is built or session store opened (the base computes the
+  budgets once the models are resolved, so no embedding model loads first).
+  That is a `max_tokens` close to the window, or **a window of 16,842
+  tokens or less, whatever its `max_tokens` (breaking): an 8k or 16k local
+  model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
   window that works. A summary the model writes no text for (Claude can
   refuse one) is not stored: the request goes on in full, the user is told
   "Could not summarize the earlier conversation; it is sent in full
