@@ -277,6 +277,28 @@ class TestResolution:
         assert manager.services == {}
         assert manager.catalog is None
 
+    async def test_the_manager_loads_then_resolves_with_no_second_try(
+        self, providers, monkeypatch
+    ):
+        """Loading is the catalog's alone: the manager knows no confirmation
+        protocol, so a start that fails to resolve (a thinking level the model
+        lacks) fails at once, without asking the catalog to list again."""
+        keys(monkeypatch, "google")
+        confirmed: list[ModelCatalog] = []
+
+        async def confirm(catalog: ModelCatalog) -> bool:
+            confirmed.append(catalog)
+            return True
+
+        monkeypatch.setattr(ModelCatalog, "confirm_rejections", confirm)
+        writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))  # Gemini 2.5 has none
+        manager = adk(team("gemini-2.5-flash", model_settings=writer), settings())
+
+        with pytest.raises(SettingsValidationError, match="'xhigh' is not available"):
+            await manager.initialize_services(validate=False)
+
+        assert confirmed == []
+
     async def test_a_static_problem_costs_no_listing(self, providers, monkeypatch):
         keys(monkeypatch, "google")
         manager = adk(team("nowhere:some-model"), settings())

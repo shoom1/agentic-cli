@@ -288,7 +288,8 @@ class ModelCatalog:
         self._searched: set[str] = set()
         self._refresh_task: asyncio.Task[None] | None = None
         self._closed = False
-        # Providers whose cached listing rejected an id (``confirm_rejections``).
+        # Providers whose cached listing rejected an id no setting names
+        # (``record()`` notes them for ``confirm_rejections``).
         self._cached_rejections: set[str] = set()
 
     @property
@@ -391,10 +392,15 @@ class ModelCatalog:
         """List again each provider whose cached listing rejected an id.
 
         A listing read from the cache can predate a model the provider now
-        serves (a release, a plan upgrade, another account's key). A caller
-        about to refuse to start lists those providers again, once, and asks
-        ``record()`` again: the new listing decides, and a failed one accepts
-        the id, as any failed listing does.
+        serves (a release, a plan upgrade, another account's key).
+        ``record()`` notes each provider whose cached listing rejected an id,
+        which can only be one no setting names (a lookup in ``/models``, say):
+        a caller about to act on that rejection lists those providers again,
+        once, and asks ``record()`` again. The new listing decides, and a
+        failed one accepts the id, as any failed listing does. A model the
+        settings name is never rejected (``load`` and the background refresh
+        check those, and nothing waits on this), so after ``load`` there is
+        nothing to confirm until such a lookup.
 
         Returns:
             Whether any provider was listed again.
@@ -459,7 +465,8 @@ class ModelCatalog:
         A model the settings name (an entry, or a reference) is never refused:
         the settings decide what runs, and a provider that does not serve it
         is said by the list (``not_offered``) and the warnings, not here. Its
-        record is then its entry's and the table's.
+        record is then its entry's and the table's. A rejection by a listing
+        read from the cache is noted for ``confirm_rejections``.
 
         Raises:
             ModelResolutionError: If the provider is neither built in nor
