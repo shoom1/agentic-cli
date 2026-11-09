@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
@@ -77,6 +78,28 @@ logger = Loggers.workflow()
 MEMORY_INDEX_BUDGET_SHARE = 0.1
 #: The least the memory index is given, whatever the budget.
 MEMORY_INDEX_MIN_BYTES = 1_000
+
+#: Where the backends' tool classes live: an object of one is the backend's
+#: to judge, not a plain callable the registry should have issued.
+_TOOL_CLASS_MODULES = ("google.adk.tools", "langchain_core.tools")
+
+
+def _is_plain_callable(tool: Any) -> bool:
+    """Whether ``tool`` is a function, method, partial or other callable object
+    rather than a backend's tool object (an ADK built-in such as
+    ``GoogleSearchTool`` runs inside the model and never reaches the gate)."""
+    if not callable(tool) or isinstance(tool, type):
+        return False
+    return not any(
+        (klass.__module__ or "").startswith(_TOOL_CLASS_MODULES)
+        for klass in type(tool).__mro__
+    )
+
+
+def _tool_name(tool: Any) -> str:
+    """The name a model would see for a plain callable."""
+    inner = tool.func if isinstance(tool, functools.partial) else tool
+    return getattr(inner, "__name__", None) or type(inner).__name__
 
 
 class BaseWorkflowManager(ABC):
@@ -199,6 +222,8 @@ class BaseWorkflowManager(ABC):
         # The memory index each conversation's main agent gets (spec §11.1):
         # taken once, so the prompt prefix stays cached.
         self._index_snapshots: dict[SessionRef, str] = {}
+        # The (agent, tool) pairs already named as unregistered: once each.
+        self._unregistered_named: set[tuple[str, str]] = set()
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -317,7 +342,8 @@ class BaseWorkflowManager(ABC):
         substituting the service-bound variant for it would silently run
         different code. It is therefore passed through untouched, as is a tool
         registered into some other ``ToolRegistry``. A callable passed through
-        is denied at permission time; an ADK built-in tool (such as
+        is denied at permission time, and named once in a
+        ``tool_not_registered`` warning; an ADK built-in tool (such as
         ``GoogleSearchTool``) runs inside the model and never reaches the
         permission check at all.
 
@@ -337,6 +363,7 @@ class BaseWorkflowManager(ABC):
         for tool in config.tools or []:
             definition = identify_tool(tool)
             if definition is None:
+                self._name_unregistered(config.name, tool)
                 result.append(tool)
                 continue
             variant = service_map.get(definition.name)
@@ -356,6 +383,23 @@ class BaseWorkflowManager(ABC):
             result.extend(self._injectable_state_tools(result))
 
         return result
+
+    def _name_unregistered(self, agent: str, tool: Any) -> None:
+        """Warn that the gate will deny every call to ``tool``: a plain callable
+        the registry did not issue. Once per agent and tool, however often the
+        agent is built (a model switch builds it again)."""
+        if not _is_plain_callable(tool):
+            return
+        key = (agent, _tool_name(tool))
+        if key in self._unregistered_named:
+            return
+        self._unregistered_named.add(key)
+        logger.warning(
+            "tool_not_registered",
+            agent=agent,
+            tool=key[1],
+            hint="register it with @register_tool; every call to it is denied",
+        )
 
     def _injectable_state_tools(self, assembled: list) -> list[Callable]:
         """State tools worth auto-injecting, given what the agent already has.
