@@ -83,7 +83,6 @@ from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
 from agentic_cli.workflow.outside_content import JOB_RESULT
-from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -474,76 +473,39 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self.session_ref(record.session_id, record.user_id)
         )
 
-    async def resume_with_job_result(
-        self, record, result: Any = None
+    async def _conversation_exists(self, ref: "SessionRef") -> bool:
+        """Whether ``ref``'s root thread holds at least one message in this app."""
+        return self._sessions is not None and await self._sessions.exists(ref)
+
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: "SessionRef"
     ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Tell the root agent a long-running job finished, in a turn of its own.
+        """Run the root agent on a finished job's notice (the base's ``resume_with_job_result``).
 
-        The turn's input is one ``HumanMessage`` (``sessions.job_notification``):
-        ``JOB_NOTICE_HEADER``, then the payload ADK sends, as JSON, marked so
-        ``recent_messages`` leaves it out. It cannot be the call's
-        ``ToolMessage``: the call already has its pending result, and
-        Anthropic and OpenAI take one result per call. The root receives it
-        whichever agent started the job, since a sub-agent's run ended when
-        its ``task`` returned. Otherwise it is a turn like any other: it waits
-        for the turn lock and runs under the record's session and user. A
-        record without its session or user, or whose conversation is not
-        there (deleted, or another user's or app's), runs nothing and starts
-        no conversation.
-
-        Args:
-            record: The finished ``JobRecord``.
-            result: The job's result; fetched from the JobManager if omitted.
-
-        Yields:
-            The turn's ``WorkflowEvent``s, each through ``on_event``.
+        The turn's input is one ``HumanMessage`` (``sessions.job_notification``),
+        the notice as its text, marked so ``recent_messages`` leaves it out.
+        It cannot be the call's ``ToolMessage``: the call already has its
+        pending result, and Anthropic and OpenAI take one result per call.
+        The root receives it whichever agent started the job, since a
+        sub-agent's run ended when its ``task`` returned. Otherwise it is a
+        turn like any other: the pending notices open it, and the job's
+        output marks the conversation as having read outside content, in its
+        checkpoint too.
         """
-        session_id, user_id = record.session_id, record.user_id
-        if not session_id or not user_id:
-            logger.warning(
-                "job_resume_missing_ids",
-                job_id=getattr(record, "job_id", None),
-                have_session=bool(session_id),
-                have_user=bool(user_id),
-            )
-            return
-
-        async with self._turn(session_id, user_id) as ref:
-            # Streaming into a thread that is not there would start one.
-            if not await self._sessions.exists(ref):
-                logger.warning(
-                    "job_resume_session_missing",
-                    job_id=record.job_id,
-                    session_id=session_id,
-                )
-                return
-
-            # The job's output is outside content: its notice marks the conversation.
-            self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
-            self._outside_marks.mark(ref, JOB_RESULT)
-
-            if result is None:
-                jobs = self._services.get(JOB_MANAGER)
-                if jobs is not None:
-                    result = jobs.result(record.job_id)
-
-            logger.info(
-                "job_resume_started",
-                job_id=record.job_id,
-                call_id=record.call_id,
-                state=record.state.value,
-            )
-            for notice in self._take_notices():
-                yield notice
-            async with contextlib.aclosing(self._run_turn(
-                ref,
-                {
-                    "messages": [job_notification(record, result)],
-                    "outside_content": JOB_RESULT,
-                },
-            )) as events:
-                async for event in events:
-                    yield event
+        # The job's output is outside content: its notice marks the conversation.
+        self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+        self._outside_marks.mark(ref, JOB_RESULT)
+        for pending in self._take_notices():
+            yield pending
+        async with contextlib.aclosing(self._run_turn(
+            ref,
+            {
+                "messages": [job_notification(record, notice=notice)],
+                "outside_content": JOB_RESULT,
+            },
+        )) as events:
+            async for event in events:
+                yield event
 
     async def compact(
         self, session: "SessionRef", focus: str | None = None

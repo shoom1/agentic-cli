@@ -60,7 +60,6 @@ from agentic_cli.workflow.outside_content import (
     JOB_RESULT,
     OUTSIDE_CONTENT_KEY,
 )
-from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
 
@@ -70,7 +69,7 @@ from agentic_cli.config import (
 )
 from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_notice, job_result_payload
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.sessions import SessionRef
@@ -1097,97 +1096,82 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return session is not None
 
-    async def resume_with_job_result(
-        self, record, result: Any = None
+    @property
+    def _answers_job_calls(self) -> bool:
+        """A native ADK YAML app's job answers its pending call, so its record needs the call."""
+        return bool(self._adk_config_path)
+
+    async def _conversation_exists(self, ref: SessionRef) -> bool:
+        """Whether ``ref``'s ADK session is stored (with events or none)."""
+        if self._session_service is None:
+            return False
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        return session is not None
+
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: SessionRef
     ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Resume the agent with a finished long-running job's result.
+        """Run the root agent on a finished job's notice (the base's ``resume_with_job_result``).
 
         In an app built from agent configs the root agent runs on one
-        user-role text, ``job_notice`` (``JOB_NOTICE_HEADER`` and the payload),
-        as on Deep Agents, whoever started the job: the call already has its
-        result (the job's id, or "pending"), and a result for the call itself
-        made ADK send the call, that result and nothing between (its
-        rearranger), so the agent answered without the turns since. A native
-        ADK YAML app's job still answers its pending call, as an ADK
-        ``FunctionResponse`` matching ``record.call_id``. The originating
-        session must still exist; if it's gone or the record lacks the ids
-        needed to resume, this yields nothing.
-
-        Args:
-            record: The terminal ``JobRecord`` to resume from.
-            result: The job's result; fetched from the JobManager if omitted.
+        user-role text, the notice, as on Deep Agents, whoever started the
+        job: the call already has its result (the job's id, or "pending"),
+        and a result for the call itself made ADK send the call, that result
+        and nothing between (its rearranger), so the agent answered without
+        the turns since. A call still open (a starter that returned nothing,
+        a crash's) is answered first. A native ADK YAML app's job still
+        answers its pending call, as an ADK ``FunctionResponse`` matching
+        ``record.call_id`` whose response is ``job_result_payload``. The
+        notice marks the conversation as having read outside content, in its
+        state too.
         """
-        session_id = record.session_id
-        user_id = record.user_id
-        native = bool(self._adk_config_path)
-        if not session_id or not user_id or (native and not record.call_id):
-            logger.warning(
-                "job_resume_missing_ids",
-                job_id=getattr(record, "job_id", None),
-                have_session=bool(session_id),
-                have_user=bool(user_id),
-                have_call_id=bool(record.call_id),
-            )
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        if session is None:  # deleted since the base looked
+            logger.warning("job_resume_session_missing", job_id=record.job_id,
+                           session_id=ref.session_id)
             return
+        native = self._answers_job_calls
+        if not native:
+            # A call still open gets its result before the notice: Claude
+            # and OpenAI refuse a call without one.
+            session = await self._answer_left_open(session)
 
-        # The same turn as process(): a resume must not interleave with a user
-        # turn, and must not run against a released backend.
-        async with self._turn(session_id, user_id) as ref:
-            # The job's conversation must exist; don't create a new empty
-            # one (it never saw the job).
-            session = await self._session_service.get_session(
-                app_name=self.app_name, user_id=user_id, session_id=session_id,
+        # The job's output is outside content: its notice marks the conversation.
+        state_delta = self._seed_outside_content(ref, session)
+        if self._outside_marks.mark(ref, JOB_RESULT):
+            state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
+
+        if not native:
+            # The root is told, as on Deep Agents.
+            new_message = types.Content(
+                role="user", parts=[types.Part.from_text(text=notice)],
             )
-            if session is None:
-                logger.warning("job_resume_session_missing", job_id=record.job_id,
-                               session_id=session_id)
-                return
-            if not native:
-                # A call still open (a starter that returned nothing, a
-                # crash's) gets its result before the notice: Claude and
-                # OpenAI refuse a call without one.
-                session = await self._answer_left_open(session)
+        else:
+            function_response = types.FunctionResponse(
+                id=record.call_id,
+                name=record.call_name or record.tool,
+                # A summary and a pointer, not the raw result.
+                response=job_result_payload(record, result),
+            )
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(function_response=function_response)],
+            )
 
-            # The job's output is outside content: its notice marks the conversation.
-            state_delta = self._seed_outside_content(ref, session)
-            if self._outside_marks.mark(ref, JOB_RESULT):
-                state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
-
-            if result is None:
-                jm = self._services.get(JOB_MANAGER)
-                if jm is not None:
-                    result = jm.result(record.job_id)
-
-            author = _author_of_call(session, record.call_id)
-            if not native:
-                # The root is told, as on Deep Agents.
-                new_message = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=job_notice(record, result))],
-                )
-            else:
-                function_response = types.FunctionResponse(
-                    id=record.call_id,
-                    name=record.call_name or record.tool,
-                    # A summary and a pointer, not the raw result.
-                    response=job_result_payload(record, result),
-                )
-                new_message = types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=function_response)],
-                )
-
-            logger.info("job_resume_started", job_id=record.job_id,
-                        call_id=record.call_id, state=record.state.value,
-                        caller=author)
-            async with contextlib.aclosing(self._run_and_stream(
-                session_id=session_id,
-                user_id=user_id,
-                new_message=new_message,
-                state_delta=state_delta or None,
-            )) as events:
-                async for event in events:
-                    yield event
+        logger.debug("job_resume_caller", job_id=record.job_id,
+                     caller=_author_of_call(session, record.call_id))
+        async with contextlib.aclosing(self._run_and_stream(
+            session_id=ref.session_id,
+            user_id=ref.user_id,
+            new_message=new_message,
+            state_delta=state_delta or None,
+        )) as events:
+            async for event in events:
+                yield event
 
     @property
     def supports_compact(self) -> bool:

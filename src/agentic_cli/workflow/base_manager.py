@@ -1090,6 +1090,158 @@ class BaseWorkflowManager(ABC):
         """
         return False
 
+    # ---- Job resume: the base's template over the backend's hooks ----
+
+    @property
+    def supports_job_resume(self) -> bool:
+        """Whether this backend can tell a conversation that a job of it finished.
+
+        Derived, as ``supports_compact`` is, so it cannot drift from the
+        code: True when the subclass implements :meth:`_deliver_job_notice`
+        (the base's ``resume_with_job_result`` runs it) or overrides
+        ``resume_with_job_result`` itself, as a backend written before the
+        template does.
+        """
+        cls = type(self)
+        return (
+            cls._deliver_job_notice is not BaseWorkflowManager._deliver_job_notice
+            or cls.resume_with_job_result is not BaseWorkflowManager.resume_with_job_result
+        )
+
+    @property
+    def _answers_job_calls(self) -> bool:
+        """Whether a finished job answers its pending call, so its record must name the call.
+
+        False: the root agent is told in a message of its own, which needs
+        only the job's conversation. A backend whose job answers the call
+        instead (a native ADK YAML app's) says True, and a record without
+        ``call_id`` cannot be resumed there.
+        """
+        return False
+
+    def _record_resumable(self, record: Any) -> bool:
+        """Whether ``record`` names what a resume needs: its conversation
+        (session and user), and its call where a job answers it
+        (:attr:`_answers_job_calls`)."""
+        if not (record.session_id and record.user_id):
+            return False
+        return bool(getattr(record, "call_id", None)) or not self._answers_job_calls
+
+    async def resume_with_job_result(
+        self, record: Any, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Tell the root agent a long-running job finished, in a turn of its own.
+
+        One template for every backend. The record must name its
+        conversation (its session and user, and its call where the job
+        answers it); then, as one turn of that conversation (:meth:`_turn`:
+        after any turn running, never against a released backend), the
+        conversation must be there (:meth:`_conversation_exists`: telling one
+        that is not would start it, and it never saw the job). The job's
+        result, when not given, is read from this manager's job manager on a
+        worker thread: it takes the jobs directory's cross-process lock,
+        which on the event loop froze the app while another process held
+        it. The notice is ``tools/jobs/resume.py::job_notice`` (the header,
+        what the agent is asked, the payload), and the backend tells it
+        (:meth:`_deliver_job_notice`), whose events this yields. A record
+        that names too little, or a conversation that is not there, runs
+        nothing and yields nothing (logged).
+
+        Args:
+            record: The finished ``JobRecord``.
+            result: The job's result; read from the job manager if omitted.
+
+        Yields:
+            The turn's ``WorkflowEvent``s.
+
+        Raises:
+            NotImplementedError: The backend cannot (``supports_job_resume``),
+                raised as iteration starts, before any turn.
+        """
+        if not self.supports_job_resume:
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot tell a conversation that its job "
+                "finished (resume_with_job_result). Check ``supports_job_resume`` "
+                "before calling."
+            )
+        if not self._record_resumable(record):
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(record.session_id),
+                have_user=bool(record.user_id),
+                have_call_id=bool(getattr(record, "call_id", None)),
+            )
+            return
+        from agentic_cli.tools.jobs.resume import job_notice
+
+        async with self._turn(record.session_id, record.user_id) as ref:
+            if not await self._conversation_exists(ref):
+                logger.warning(
+                    "job_resume_session_missing",
+                    job_id=record.job_id,
+                    session_id=ref.session_id,
+                )
+                return
+            if result is None:
+                jobs = self._services.get(JOB_MANAGER)
+                if jobs is not None:
+                    result = await asyncio.to_thread(jobs.result, record.job_id)
+            logger.info(
+                "job_resume_started",
+                job_id=record.job_id,
+                call_id=getattr(record, "call_id", None),
+                state=record.state.value,
+            )
+            # aclosing: a consumer that closes this generator closes the
+            # backend's run now, inside the turn.
+            async with contextlib.aclosing(self._deliver_job_notice(
+                job_notice(record, result), record, result, ref
+            )) as events:
+                async for event in events:
+                    yield event
+
+    async def _conversation_exists(self, ref: SessionRef) -> bool:
+        """Whether ``ref``'s conversation is in this backend's store now.
+
+        A backend hook of the job resume (``resume_with_job_result`` asks it
+        inside the turn, before it tells the conversation anything). It
+        answers False before initialization and after a release, and never
+        creates the conversation. The base knows of no conversation, so it
+        answers False: a backend that implements :meth:`_deliver_job_notice`
+        implements this too.
+        """
+        return False
+
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: SessionRef
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Tell the root agent ``notice`` as one user-role message, and yield the turn's events.
+
+        A backend hook of the job resume: the base calls it inside the turn
+        of ``ref``'s conversation (the active turn, the services and the
+        settings set, the conversation there), and implementing it is what
+        makes ``supports_job_resume`` True. The backend marks the
+        conversation as having read outside content (a job's output is), runs
+        its root agent on the notice and yields what it yields, each event
+        through ``_apply_event_hook``. Closing the generator stops the run.
+
+        Args:
+            notice: What the root agent is told
+                (``tools/jobs/resume.py::job_notice``).
+            record: The finished ``JobRecord`` (its ids, for a backend that
+                marks the message with them).
+            result: The job's result as read, or None: what a backend whose
+                job answers its call instead sends
+                (``job_result_payload(record, result)``).
+            ref: The conversation, the turn's.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot tell a conversation that its job finished."
+        )
+        if False:  # pragma: no cover - an async generator
+            yield  # type: ignore[unreachable]
+
     @contextlib.contextmanager
     def _workflow_context(
         self, session_id: str | None = None, user_id: str | None = None

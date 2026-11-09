@@ -37,13 +37,15 @@ class _Harness:
     """A manager whose stream is driven by the test, with no real backend.
 
     Its turn holds at ``release`` (and may ask a question first), and records
-    when it starts and ends in ``events``. ``revive()`` presents a live
-    backend, as an initialization would.
+    when it starts and ends in ``events``, and the text each run was given
+    in ``told``. ``revive()`` presents a live backend, as an initialization
+    would.
     """
 
     def __init__(self, manager) -> None:
         self.manager = manager
         self.events: list[str] = []
+        self.told: list[str] = []
         self.release = asyncio.Event()
         self.entered = asyncio.Event()
         # When set, the stream asks the user a question mid-turn (as a HITL
@@ -97,6 +99,7 @@ class _ADKHarness(_Harness):
             return SimpleNamespace(id=session_id, state={}, events=[])
 
         async def _stream(*, session_id, user_id, new_message, state_delta=None):
+            self.told.append(new_message.parts[0].text)
             async for event in self.stream(session_id):
                 yield event
 
@@ -125,6 +128,7 @@ class _DeepAgentsHarness(_Harness):
         super().__init__(manager)
 
         async def _run_turn(ref, graph_input):
+            self.told.append(graph_input["messages"][0].content)
             async for event in self.stream(ref.session_id):
                 yield event
 
