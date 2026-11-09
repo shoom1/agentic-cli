@@ -1752,12 +1752,26 @@ cancel jobs (the user does that with `/jobs`).
 `JobManager.register_backend(backend)` takes a `JobBackend` instance and keeps
 it under its `name` (one of the same name is replaced), beside the two a
 manager starts with, `subprocess` and `inprocess`; a starter then submits to
-it with `submit(backend="<name>")`. The manager is `workflow.job_manager`, or
-`get_service("job_manager")` in a tool that declares `requires="job_manager"`.
+it with `submit(backend="<name>")`. A manager reads the jobs on disk when it
+is built, before the app registers its backends, and leaves a job whose
+backend it has not registered as it is (not polled, launched or cancelled)
+until one that has it looks at it; `has_backend(name)` says whether one is
+registered. So a job on a backend the app no longer registers stays as it
+was, RUNNING or queued, until its folder under `~/.{app_name}/jobs/` is
+removed (`/jobs clean` removes finished jobs only). The manager is
+`workflow.job_manager`, or `get_service("job_manager")` in a tool that
+declares `requires="job_manager"`.
 It exists only when some agent's tool declares that need (`job_status` and the
 other `job_*` tools do), and `workflow.job_manager` is `None` before then.
 A backend implements `start`, `poll` and `cancel`, and may override `logs`,
-`result`, `pin` and `close`.
+`result`, `pin` and `close`. Its `survives_restart` says whether a manager
+other than the one that submitted a job may launch it from its saved record
+(another CLI, or the app after a restart or an orchestrator switch):
+`subprocess` sets it, since its command and working directory are saved;
+`inprocess` does not, since its callable cannot be, and nor does a backend
+that keeps the default, False. A job on such a backend is claimed at submit
+by the manager that submitted it, and one still queued when that manager
+closes is recorded FAILED.
 
 ## Context management
 

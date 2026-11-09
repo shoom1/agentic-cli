@@ -327,16 +327,38 @@ class JobsCommand(Command):
             if len(parts) < 2:
                 app.session.add_warning("Usage: /jobs cancel <id>")
                 return
+            from agentic_cli.tools.jobs.backends import TERMINAL_STATES
+
             rec = manager.cancel(parts[1])
             if rec is None:
                 app.session.add_warning(f"No such job: {parts[1]}")
-            elif rec.cancel_requested and rec.state.value == "running":
+                return
+            state = rec.state.value
+            if state == "cancelled":
+                app.session.add_success(f"Job '{parts[1]}' → cancelled.")
+            elif state in {s.value for s in TERMINAL_STATES}:
+                app.session.add_message(
+                    "system",
+                    f"Job '{parts[1]}' had already finished ({state}): "
+                    "nothing was cancelled.",
+                )
+            elif rec.cancel_requested:
                 app.session.add_warning(
-                    f"Job '{parts[1]}' is still running: it cannot be interrupted now, "
+                    f"Job '{parts[1]}' is still {state}: it cannot be interrupted now, "
                     "and is recorded as cancelled when it ends."
                 )
+            elif not manager.has_backend(rec.backend):
+                app.session.add_warning(
+                    f"Job '{parts[1]}' was not cancelled: it is still {state}, and "
+                    f"runs on the '{rec.backend}' backend, which this app has not "
+                    "registered."
+                )
             else:
-                app.session.add_success(f"Job '{parts[1]}' → {rec.state.value}.")
+                app.session.add_warning(
+                    f"Job '{parts[1]}' was not cancelled: it is still {state}, and "
+                    "could not be stopped from here (another process of this app may "
+                    "be running it, or its record could not be updated just now)."
+                )
             return
 
         if parts and parts[0] == "clean":

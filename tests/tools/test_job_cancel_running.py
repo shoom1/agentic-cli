@@ -13,6 +13,8 @@ when it ends, as any cancelled job is; only then does the next one start.
 
 from __future__ import annotations
 
+import json
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -57,7 +59,7 @@ def jobs(tmp_path: Path):
 
 
 def _submit(jobs: JobManager, gate: _Gate, name: str):
-    def work():  # a function, not the bound method: the spec is deep-copied
+    def work():
         return gate.work(name)
 
     return jobs.submit(tool="t", backend="inprocess", spec={"target": work})
@@ -189,3 +191,152 @@ class TestACancelFromAnotherManager:
             assert restarted.get(stubborn.job_id).cancel_requested is True
         finally:
             restarted.close()
+
+
+class TestAJobThatHasAlreadyEnded:
+    """A cancel records a job that ended before it as the job ended.
+
+    ``cancel`` reloaded the record but never polled the job, so one that had
+    ended since anybody last looked was still RUNNING to it. Its own manager
+    recorded it CANCELLED, without its exit code; another manager waited out
+    the cancel on the owner's unreaped process and recorded a cancel request,
+    which the owner then turned into CANCELLED.
+    """
+
+    def test_its_own_manager_records_how_it_ended(self, jobs):
+        rec = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": "true"})
+        _until((jobs.base_dir / rec.job_id / "exit_code").exists)  # ended; nothing polled it
+
+        cancelled = jobs.cancel(rec.job_id)
+
+        assert (cancelled.state, cancelled.exit_code) == (JobState.SUCCEEDED, 0)
+        on_disk = json.loads((jobs.base_dir / rec.job_id / "meta.json").read_text())
+        assert (on_disk["state"], on_disk["exit_code"]) == ("succeeded", 0)
+
+    def test_another_manager_records_how_it_ended_without_waiting(self, jobs, tmp_path):
+        gate = tmp_path / "gate"
+        rec = jobs.submit(
+            tool="run_shell_job", backend="subprocess",
+            spec={"command": f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.02; done"},
+        )
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            assert other.get(rec.job_id).state is JobState.RUNNING
+            gate.write_text("go")
+            _until((jobs.base_dir / rec.job_id / "exit_code").exists)  # its owner never polled
+
+            started = time.monotonic()
+            cancelled = other.cancel(rec.job_id)
+            took = time.monotonic() - started
+        finally:
+            other.close()
+
+        assert (cancelled.state, cancelled.exit_code) == (JobState.SUCCEEDED, 0)
+        assert cancelled.cancel_requested is False
+        assert took < backends_mod._CANCEL_WAIT_S, "the cancel waited on a job that had ended"
+        on_disk = json.loads((jobs.base_dir / rec.job_id / "meta.json").read_text())
+        assert (on_disk["state"], on_disk["cancel_requested"]) == ("succeeded", False)
+        owner_view = jobs.get(rec.job_id)
+        assert (owner_view.state, owner_view.exit_code) == (JobState.SUCCEEDED, 0)
+
+
+def _cancel_with(manager: JobManager, job_id: str) -> dict:
+    """``job_cancel`` as the model calls it, against ``manager``."""
+    token = set_service_registry({"job_manager": manager})
+    try:
+        return job_cancel(job_id)
+    finally:
+        token.var.reset(token)
+
+
+class TestTheToolSaysWhatHappened:
+    """``job_cancel`` reported success for a job it had not cancelled.
+
+    A job running in another live manager whose backend cannot cancel it from
+    here, an unreadable record, the lock unavailable: ``cancel`` returns the
+    record as it is, still running, and the tool said ``success`` with
+    ``state: running``, so a model told the user the job was stopped. And a
+    job that had already ended was reported as if this call had acted on it.
+    """
+
+    def test_a_job_it_could_not_reach_was_not_cancelled(self, jobs, tmp_path):
+        gate = _Gate()
+        first = _submit(jobs, gate, "first")
+        _until(lambda: gate.running == ["first"])
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            result = _cancel_with(other, first.job_id)  # a thread elsewhere: out of reach
+        finally:
+            other.close()
+            gate.release.set()
+
+        assert result["success"] is False
+        assert result["state"] == "running"
+        assert "was not cancelled" in result["error"]
+        assert "still running" in result["error"]
+        assert "cancel_requested" not in result
+
+    def test_a_job_that_had_ended_was_not_cancelled(self, jobs):
+        rec = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": "true"})
+        _until(lambda: jobs.get(rec.job_id).state is JobState.SUCCEEDED)
+
+        result = _cancel_with(jobs, rec.job_id)
+
+        assert result["success"] is True
+        assert result["state"] == "succeeded"
+        assert "already finished" in result.get("message", "")
+        assert "nothing was cancelled" in result.get("message", "")
+
+    def test_a_queued_job_it_could_not_reach_is_still_queued(self, jobs, tmp_path):
+        gate = _Gate()
+        _submit(jobs, gate, "first")
+        second = _submit(jobs, gate, "second")  # queued, for its submitter only
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            result = _cancel_with(other, second.job_id)
+        finally:
+            other.close()
+            gate.release.set()
+
+        assert (result["success"], result["state"]) == (False, "queued")
+        assert "still queued" in result["error"]
+
+    def test_a_job_on_a_backend_this_app_has_not_registered(self, tmp_path):
+        class Remote(backends_mod.JobBackend):
+            name = "remote"
+            survives_restart = True
+            cancels_foreign_jobs = True
+
+            def start(self, record, job_dir):
+                record.backend_handle = "remote-1"
+
+            def poll(self, record, job_dir):
+                return JobState.RUNNING
+
+            def cancel(self, record, job_dir):
+                return True
+
+        owner = JobManager(base_dir=tmp_path / "jobs")
+        owner.register_backend(Remote())
+        rec = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+        other = JobManager(base_dir=tmp_path / "jobs")  # the app no longer registers it
+        try:
+            result = _cancel_with(other, rec.job_id)
+        finally:
+            other.close()
+
+        assert (result["success"], result["state"]) == (False, "running")
+        assert "runs on the 'remote' backend, which this app has not registered" in (
+            result["error"]
+        )
+
+    def test_a_cancelled_job_is_reported_cancelled(self, jobs):
+        gate = _Gate()
+        _submit(jobs, gate, "first")
+        second = _submit(jobs, gate, "second")  # queued: cancelled at once
+
+        result = _cancel_with(jobs, second.job_id)
+        gate.release.set()
+
+        assert result == {"success": True, "state": "cancelled"}

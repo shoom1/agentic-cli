@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import socket
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -243,9 +244,10 @@ class JobRecord:
     resume_error: str | None = None    # why delivery failed, when it did
     resume_owner: str | None = None    # "<host>:<pid>" holding a RESUMING claim
     # "<host>:<pid>" that launched the job and owns its execution. Set when the
-    # launch is claimed, so a second CLI sharing the jobs directory neither
-    # relaunches a queued job nor writes off a running one whose handle lives
-    # in the owner's memory.
+    # launch is claimed (at submit, for a job only its submitter can launch:
+    # ``JobBackend.survives_restart`` False), so a second CLI sharing the jobs
+    # directory neither relaunches a queued job nor writes off a running one
+    # whose handle lives in the owner's memory.
     exec_owner: str | None = None
     # Set when a cancel could not stop the job (a running in-process thread, a
     # process that outlived SIGTERM): it stays RUNNING, holding its slot, and
@@ -266,9 +268,17 @@ class JobRecord:
         return round(max(0.0, end - start), 1)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
+        """The record as ``meta.json`` holds it; it shares nothing with ``self``.
+
+        Built field by field: ``dataclasses.asdict`` deep-copied the whole
+        record first, ``spec`` included, so a live object JSON cannot hold
+        (a bound method of a service holding a lock) failed the copy before
+        ``_json_safe_spec`` could replace it.
+        """
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
         d["state"] = self.state.value
         d["spec"] = _json_safe_spec(self.spec)
+        d["tags"] = list(self.tags)
         return d
 
     @classmethod
@@ -281,10 +291,10 @@ class JobRecord:
             d["resume_state"] = (
                 ResumeState.DELIVERED.value if legacy_resumed else ResumeState.PENDING.value
             )
-        fields = cls.__dataclass_fields__  # type: ignore[attr-defined]
+        declared = cls.__dataclass_fields__  # type: ignore[attr-defined]
         # Only pass keys the record actually declares, so a missing optional
         # key falls back to its default instead of becoming None.
-        return cls(**{k: v for k, v in d.items() if k in fields})
+        return cls(**{k: v for k, v in d.items() if k in declared})
 
     def summary(self) -> dict:
         """Compact, JSON-safe view for tools / UI."""
@@ -308,16 +318,22 @@ class JobRecord:
 
 
 def _json_safe_spec(spec: dict) -> dict:
-    """Keep only JSON-serializable spec entries (drop live callables, etc.)."""
+    """Keep only JSON-serializable spec entries (drop live callables, etc.).
+
+    A kept entry is a copy, so the result shares nothing with ``spec``; one
+    JSON cannot hold becomes a placeholder and is never copied.
+    """
+    import copy
     import json
 
     safe: dict = {}
     for k, v in spec.items():
         try:
             json.dumps(v)
-            safe[k] = v
         except (TypeError, ValueError):
             safe[k] = f"<non-serializable: {type(v).__name__}>"
+        else:
+            safe[k] = copy.deepcopy(v)
     return safe
 
 
@@ -352,6 +368,9 @@ class JobManager:
         # and is now missing was *deleted* by another manager; one that was
         # never persisted is simply new. Writing must tell them apart.
         self._persisted: set[str] = set()
+        # Jobs whose unregistered backend has been logged at warning, which
+        # happens once per job, when a caller asks for it (``_backend_of``).
+        self._backendless_warned: set[str] = set()
         self._load_existing()
 
     # ------------------------------------------------------------------
@@ -359,7 +378,23 @@ class JobManager:
     # ------------------------------------------------------------------
 
     def register_backend(self, backend: JobBackend) -> None:
+        """Add a backend under its ``name``, replacing one of the same name.
+
+        An app registers its own after construction, when the constructor
+        has already reconciled the jobs on disk: until then, a job on that
+        backend was left as it is (``_backend_of``), and from now on this
+        manager polls, launches and cancels it.
+        """
         self._backends[backend.name] = backend
+
+    def has_backend(self, name: str) -> bool:
+        """Whether a backend of this ``name`` is registered with this manager.
+
+        A job on a backend that is not is left as it is here: not polled,
+        launched or cancelled. ``job_cancel`` and ``/jobs cancel`` ask, to
+        say so.
+        """
+        return name in self._backends
 
     def submit(
         self,
@@ -389,7 +424,11 @@ class JobManager:
 
         The backend pins the spec now (``JobBackend.pin``): a queued job may
         be launched by another CLI, so a subprocess job's working directory
-        is the one it was submitted in, whoever launches it.
+        is the one it was submitted in, whoever launches it. A job on a
+        backend that does not survive a restart (``survives_restart`` False,
+        the in-process one: its callable is not saved) is claimed for this
+        manager now instead, so no other manager launches it; ``close()``
+        records it FAILED if it has not started by then.
         """
         if backend not in self._backends:
             raise ValueError(
@@ -399,7 +438,8 @@ class JobManager:
             session_id, user_id = self._fill_turn_context(session_id, user_id)
         if resume_on_complete and call_id is None:
             call_id, call_name = self._fill_tool_call(call_name)
-        spec = self._backends[backend].pin(dict(spec))
+        runs_on = self._backends[backend]
+        spec = runs_on.pin(dict(spec))
         with self._lock:
             job_id = uuid.uuid4().hex[:12]
             rec = JobRecord(
@@ -415,10 +455,21 @@ class JobManager:
                 call_name=call_name or (tool if resume_on_complete else None),
                 session_id=session_id,
                 user_id=user_id,
+                exec_owner=(
+                    None if runs_on.survives_restart else self._exec_owner_token()
+                ),
             )
+            # Kept only once it is on disk: a record kept but never written
+            # was launched by the next submit, after the tool was told this
+            # one had failed.
+            job_dir = self._job_dir(job_id)
+            try:
+                job_dir.mkdir(parents=True, exist_ok=True)
+                self._persist(rec)
+            except BaseException:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                raise
             self._records[job_id] = rec
-            self._job_dir(job_id).mkdir(parents=True, exist_ok=True)
-            self._persist(rec)
             self._maybe_start_queued()
             return rec
 
@@ -501,7 +552,10 @@ class JobManager:
             rec = self._records.get(job_id)
             if rec is None:
                 return []
-            return self._backends[rec.backend].logs(rec, self._job_dir(job_id), n, stream)
+            backend = self._backend_of(rec, asked=True)
+            if backend is None:
+                return []
+            return backend.logs(rec, self._job_dir(job_id), n, stream)
 
     def result(self, job_id: str) -> Any:
         with self._lock:
@@ -511,20 +565,28 @@ class JobManager:
             self._refresh(rec)
             if rec.state not in TERMINAL_STATES:
                 return None
-            return self._backends[rec.backend].result(rec, self._job_dir(job_id))
+            backend = self._backend_of(rec, asked=True)
+            if backend is None:
+                return None
+            return backend.result(rec, self._job_dir(job_id))
 
     def cancel(self, job_id: str) -> JobRecord | None:
         """Cancel a job, if this manager can actually cancel it.
 
-        Reloads the durable record first: a job that has already finished stays
-        finished (terminal transitions are monotonic — a stale view must not
-        rewrite a recorded success as CANCELLED). A job another live manager is
-        executing is only cancelled when the backend can reach it from here
-        (``cancels_foreign_jobs``); otherwise the record is returned unchanged
-        rather than reported cancelled while it keeps running. A job the
-        backend could not stop (``JobBackend.cancel`` returned False) stays
-        RUNNING with ``cancel_requested``, holding its slot, and is recorded
-        CANCELLED when it ends; the next queued job starts then, not now.
+        Brings the record up to date first, as every read does (``_refresh``:
+        the durable record, then the backend's poll), and returns it as it is
+        when that shows the job has ended: a job that has already finished
+        stays finished, also when nobody had polled it since (terminal
+        transitions are monotonic — neither a stale view nor a cancel that
+        lands after the end may rewrite a success as CANCELLED). A job
+        another live manager is executing is only cancelled when the backend
+        can reach it from here (``cancels_foreign_jobs``); otherwise the
+        record is returned unchanged rather than reported cancelled while it
+        keeps running, as is a job whose backend this manager has not
+        registered (``_backend_of``). A job the backend could not stop
+        (``JobBackend.cancel`` returned False) stays RUNNING with
+        ``cancel_requested``, holding its slot, and is recorded CANCELLED when
+        it ends; the next queued job starts then, not now.
 
         Returns:
             The record — check ``state`` for what actually happened — or None
@@ -536,7 +598,7 @@ class JobManager:
                 return None
             try:
                 with self._claim_transaction():
-                    status = self._reload_durable(rec)
+                    status = self._refresh(rec)
                     if status is DurableRead.MISSING:
                         self._forget(job_id)
                         return None
@@ -544,6 +606,10 @@ class JobManager:
                         logger.warning("job_cancel_unreadable", job_id=job_id)
                         return rec
                     if rec.state in TERMINAL_STATES:
+                        self._maybe_start_queued()  # its end may free a slot
+                        return rec
+                    backend = self._backend_of(rec, asked=True)
+                    if backend is None:
                         return rec
                     if self._execution_is_foreign(rec) and not self._can_cancel_foreign(
                         rec
@@ -554,10 +620,7 @@ class JobManager:
                             owner=rec.exec_owner,
                         )
                         return rec
-                    stopped = (
-                        self._backends[rec.backend].cancel(rec, self._job_dir(job_id))
-                        is not False
-                    )
+                    stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
                     if not stopped:
                         rec.cancel_requested = True
                         self._persist(rec, owns_shared_state=True)
@@ -602,8 +665,6 @@ class JobManager:
         is irreversible, and a stale terminal snapshot would take a job another
         manager is still running with it.
         """
-        import shutil
-
         with self._lock:
             self.reconcile()
             try:
@@ -637,8 +698,18 @@ class JobManager:
                 return 0
 
     def running_count(self) -> int:
+        """Running jobs this manager knows, which count toward its cap.
+
+        A job whose backend this manager has not registered is left out: it
+        is never judged here, so it never ends here, and counted it would hold
+        a slot for good once the app no longer registers its backend.
+        """
         with self._lock:
-            return sum(1 for r in self._records.values() if r.state == JobState.RUNNING)
+            return sum(
+                1
+                for r in self._records.values()
+                if r.state == JobState.RUNNING and r.backend in self._backends
+            )
 
     def awaiting_resume(self) -> list[JobRecord]:
         """Terminal jobs flagged for resume whose result is still undelivered.
@@ -850,7 +921,14 @@ class JobManager:
         Idempotent. Jobs themselves are not cancelled: a detached subprocess is
         meant to outlive the CLI, and its state is recovered from disk on the
         next start. Only in-process resources (thread pools) are released.
+
+        A job this manager claimed at submit (its backend does not survive a
+        restart) and has not started yet never will: no other manager can
+        launch it. It is recorded FAILED, saying so, and one submitted with
+        ``resume_on_complete`` is then delivered as any failed job is. See
+        :meth:`_fail_unstarted_claims`.
         """
+        self._fail_unstarted_claims()
         for backend in self._backends.values():
             try:
                 backend.close()
@@ -858,6 +936,49 @@ class JobManager:
                 logger.warning(
                     "job_backend_close_failed", backend=backend.name, error=str(exc)
                 )
+
+    def _fail_unstarted_claims(self) -> None:
+        """Record FAILED the jobs this manager claimed but has not started.
+
+        Only a job claimed at submit is still QUEUED under this manager's
+        token: a launch claims and starts a job in one transaction. They are
+        found in memory first, and the cross-process lock is taken only if
+        there are any, so a close with nothing to fail neither waits behind
+        another CLI nor warns of a lock it did not need. Each is judged on
+        its record reloaded under the lock. Without the lock nothing is
+        written: the job stays QUEUED under a claim that no other manager
+        takes, and startup recovery fails it once this process is gone.
+        """
+        with self._lock:
+            mine = self._exec_owner_token()
+            claimed = [
+                rec
+                for rec in self._records.values()
+                if rec.state == JobState.QUEUED and rec.exec_owner == mine
+            ]
+            if not claimed:
+                return
+            try:
+                with self._claim_transaction():
+                    for rec in claimed:
+                        status = self._reload_durable(rec)
+                        if status is DurableRead.MISSING:
+                            self._forget(rec.job_id)
+                            continue
+                        if status is DurableRead.UNREADABLE:
+                            continue
+                        if rec.state != JobState.QUEUED or rec.exec_owner != mine:
+                            continue
+                        rec.state = JobState.FAILED
+                        rec.error = (
+                            "the app closed before the job started; a job on this "
+                            "backend runs only in the app that submitted it"
+                        )
+                        rec.finished_at = _now()
+                        self._persist(rec, owns_shared_state=True)
+                        logger.warning("job_closed_before_start", job_id=rec.job_id)
+            except ClaimLockUnavailable as exc:
+                logger.warning("job_close_skipped_unlocked", error=str(exc))
 
     # ------------------------------------------------------------------
     # Internals
@@ -1090,6 +1211,32 @@ class JobManager:
             logger.warning("job_recovery_skipped_unreadable", job_id=rec.job_id)
         return False
 
+    def _backend_of(
+        self, rec: JobRecord, *, asked: bool = False
+    ) -> JobBackend | None:
+        """The job's backend, or None when this manager has not registered it.
+
+        Such a job is left exactly as it is: neither polled, judged, launched
+        (a queued one is not claimed) nor cancelled here, and nothing is
+        written. Without the backend this manager cannot tell a running job
+        from an ended one, and an app registers its own backends after the
+        constructor has reconciled (``register_backend``): writing a verdict
+        then ended a live job, and handed it to a resume as finished.
+
+        Logged at debug on the passes every start and orchestrator switch
+        makes (refresh, scheduling), which meet such a job before the app has
+        registered its backend; at warning, once per job, when a caller
+        ``asked`` for it by name (cancel, tail, result).
+        """
+        backend = self._backends.get(rec.backend)
+        if backend is None:
+            warn = asked and rec.job_id not in self._backendless_warned
+            if warn:
+                self._backendless_warned.add(rec.job_id)
+            log = logger.warning if warn else logger.debug
+            log("job_backend_not_registered", job_id=rec.job_id, backend=rec.backend)
+        return backend
+
     def _can_cancel_foreign(self, rec: JobRecord) -> bool:
         """Whether this manager could actually cancel a job it did not start.
 
@@ -1126,7 +1273,8 @@ class JobManager:
         not do is believe ``UNKNOWN`` — that answer means "I hold no handle for
         this", which is true of every job another manager started, and taking
         it at face value would mark a healthy job terminal and hand its
-        "result" to a resume.
+        "result" to a resume. Nor does a manager without the job's backend
+        judge it: the job is left as it is (``_backend_of``).
 
         Returns:
             The durable read status, so callers can forget a deleted record.
@@ -1136,10 +1284,8 @@ class JobManager:
             return status
         if rec.state in TERMINAL_STATES or rec.state == JobState.QUEUED:
             return status
-        backend = self._backends.get(rec.backend)
+        backend = self._backend_of(rec)
         if backend is None:
-            rec.state = JobState.UNKNOWN
-            self._persist(rec)
             return status
         new_state = backend.poll(rec, self._job_dir(rec.job_id))
         if new_state == rec.state:
@@ -1179,13 +1325,18 @@ class JobManager:
         record. Execution is therefore claimed the same way delivery is: under
         the cross-process lock, against the record *on disk*, recording the
         owner durably **before** the backend is touched. If the lock is
-        unavailable the launch is skipped — a late job beats two of them.
+        unavailable the launch is skipped — a late job beats two of them, and
+        so is a job whose backend this manager has not registered: it is not
+        claimed, and stays queued for a manager that has it.
         """
+        backend = self._backend_of(rec)
+        if backend is None:
+            return
         try:
             with self._claim_transaction():
                 if not self._claim_execution(rec):
                     return
-                self._launch(rec)
+                self._launch(rec, backend)
         except ClaimLockUnavailable as exc:
             logger.warning(
                 "job_launch_skipped_unlocked", job_id=rec.job_id, error=str(exc)
@@ -1208,20 +1359,23 @@ class JobManager:
             rec.exec_owner = data.get("exec_owner")
         if rec.state != JobState.QUEUED:
             return False
+        mine = self._exec_owner_token()
+        if rec.exec_owner == mine:
+            return True  # claimed at submit: only this manager can run it
         if rec.exec_owner is not None:
-            # Already claimed: either it is running elsewhere, or its launcher
-            # died and startup recovery will fail it. Never launch it twice.
+            # Already claimed: either it is running elsewhere, it waits for
+            # the manager that submitted it, or its launcher died and startup
+            # recovery will fail it. Never launch it twice.
             logger.debug(
                 "job_launch_owned_elsewhere", job_id=rec.job_id, owner=rec.exec_owner
             )
             return False
-        rec.exec_owner = self._exec_owner_token()
+        rec.exec_owner = mine
         self._persist(rec, owns_shared_state=True)
         return True
 
-    def _launch(self, rec: JobRecord) -> None:
+    def _launch(self, rec: JobRecord, backend: JobBackend) -> None:
         """Start the backend for a claimed job. Caller holds the transaction."""
-        backend = self._backends[rec.backend]
         try:
             backend.start(rec, self._job_dir(rec.job_id))
             rec.state = JobState.RUNNING

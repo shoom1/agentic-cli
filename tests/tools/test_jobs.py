@@ -154,6 +154,93 @@ class TestInProcessBackend:
         assert rec.state is JobState.FAILED
 
 
+def _greet(name: str) -> str:
+    return f"hi {name}"
+
+
+class TestSavingARecord:
+    """Saving a record never copies its spec, and a failed submit leaves nothing.
+
+    ``to_dict`` deep-copied the whole record (``dataclasses.asdict``) before it
+    replaced what JSON cannot hold, so a job whose target was a bound method of
+    an object holding a lock could not be submitted. And ``submit`` kept the
+    record before writing it: the stray QUEUED record was launched, or raised
+    again, at the next submit, after that one had saved its own job.
+    """
+
+    def test_a_bound_method_of_an_object_holding_a_lock_runs(self, jm: JobManager):
+        import threading
+
+        class Service:
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+
+            def work(self) -> str:
+                with self._lock:
+                    return "done"
+
+        rec = jm.submit(tool="t", backend="inprocess", spec={"target": Service().work})
+
+        assert _wait(jm, rec.job_id).state is JobState.SUCCEEDED
+        assert jm.result(rec.job_id) == "done"
+
+    def test_a_submit_whose_write_fails_leaves_nothing_behind(
+        self, jm: JobManager, monkeypatch
+    ):
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        real_write = jobs_manager.atomic_write_json
+        failures = [OSError("No space left on device")]
+
+        def write_once_failing(path, data, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_write(path, data, **kwargs)
+
+        monkeypatch.setattr(jobs_manager, "atomic_write_json", write_once_failing)
+
+        with pytest.raises(OSError):
+            jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        assert [p.name for p in jm.base_dir.iterdir() if p.is_dir()] == []
+
+        good = jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        assert [r.job_id for r in jm.list()] == [good.job_id]
+        assert [p.name for p in jm.base_dir.iterdir() if p.is_dir()] == [good.job_id]
+
+    def test_the_saved_json_is_what_it_was(self):
+        """Field by field, the same keys and values ``asdict`` gave."""
+        import dataclasses
+
+        rec = JobRecord(
+            job_id="j1", tool="t", backend="inprocess", name="n",
+            state=JobState.SUCCEEDED,
+            spec={"target": _greet, "args": ("x",), "kwargs": {"k": [1, {"a": None}]},
+                  "cwd": "/tmp"},
+            backend_handle="thread", pid=42, exit_code=0, tags=["a", "b"],
+            submitted_at=1.0, started_at=2.0, finished_at=3.0, error="e",
+            session_id="s", user_id="u", resume_on_complete=True, call_id="c",
+            call_name="t", resume_state="resuming", resume_error="r",
+            resume_owner="h:1", exec_owner="h:1:abc", cancel_requested=True,
+        )
+        expected = dataclasses.asdict(rec)  # what to_dict wrote, for a spec it could copy
+        expected["state"] = "succeeded"
+        expected["spec"] = {**expected["spec"], "target": "<non-serializable: function>"}
+
+        assert json.dumps(rec.to_dict(), indent=2) == json.dumps(expected, indent=2)
+
+    def test_the_dict_does_not_share_the_record_s_lists(self):
+        rec = JobRecord(
+            job_id="j1", tool="t", backend="subprocess", name="n",
+            state=JobState.QUEUED, spec={"command": ["echo", "hi"]}, tags=["a"],
+        )
+        saved = rec.to_dict()
+        saved["tags"].append("b")
+        saved["spec"]["command"].append("there")
+
+        assert rec.tags == ["a"]
+        assert rec.spec == {"command": ["echo", "hi"]}
+
+
 class TestTheExitSentinel:
     """A poll that lands while the sentinel is being written waits for it.
 
@@ -1125,6 +1212,203 @@ class TestExecutionOwnership:
             jm.close()
 
 
+class _RemoteBackend(JobBackend):
+    """A durable remote job: any manager that has the backend can reach it."""
+
+    name = "remote"
+    survives_restart = True
+    cancels_foreign_jobs = True
+
+    def __init__(self, outcome: JobState = JobState.RUNNING) -> None:
+        self.outcome = outcome
+        self.polled: list[str] = []
+
+    def start(self, record, job_dir):
+        record.backend_handle = f"remote-{record.job_id}"
+
+    def poll(self, record, job_dir):
+        self.polled.append(record.job_id)
+        return self.outcome
+
+    def cancel(self, record, job_dir):
+        return True
+
+
+class TestAJobWhoseBackendIsNotRegistered:
+    """A manager that lacks a job's backend leaves the job as it is.
+
+    The framework builds every manager with the default backends, and an app
+    registers its own afterwards, once the constructor has reconciled. The
+    manager wrote UNKNOWN, a terminal state, over a job whose backend it did
+    not have, whoever was running it: a custom backend's running job ended
+    whenever another CLI started, or its own restarted, and was offered for
+    resume as finished. A queued one was claimed and its launch raised.
+    """
+
+    @staticmethod
+    def _owner(base: Path, **kwargs) -> tuple[JobManager, _RemoteBackend]:
+        manager = JobManager(base_dir=base, **kwargs)
+        backend = _RemoteBackend()
+        manager.register_backend(backend)
+        return manager, backend
+
+    def test_another_manager_leaves_a_running_job_alone(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        try:
+            rec = owner.submit(
+                tool="t", backend="remote", spec={}, resume_on_complete=True,
+                session_id="s", user_id="u",
+            )
+            assert owner.get(rec.job_id).state is JobState.RUNNING
+
+            other = JobManager(base_dir=base)  # the app registers "remote" later
+            try:
+                on_disk = json.loads((base / rec.job_id / "meta.json").read_text())
+                assert on_disk["state"] == JobState.RUNNING.value
+                assert other.awaiting_resume() == []
+                assert other.get(rec.job_id).state is JobState.RUNNING
+            finally:
+                other.close()
+            assert owner.get(rec.job_id).state is JobState.RUNNING
+            assert owner.awaiting_resume() == []
+        finally:
+            owner.close()
+
+    def test_a_restarted_manager_polls_it_once_the_backend_is_registered(
+        self, tmp_path: Path
+    ):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        rec = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+
+        restarted = JobManager(base_dir=base)
+        try:
+            assert restarted.get(rec.job_id).state is JobState.RUNNING
+            backend = _RemoteBackend(outcome=JobState.SUCCEEDED)
+            restarted.register_backend(backend)
+
+            assert restarted.get(rec.job_id).state is JobState.SUCCEEDED
+            assert backend.polled == [rec.job_id]
+        finally:
+            restarted.close()
+
+    def test_a_queued_job_is_neither_claimed_nor_launched(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base, max_concurrent=1)
+        try:
+            running = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
+            assert queued.state is JobState.QUEUED
+
+            other = JobManager(base_dir=base)
+            try:
+                other.reconcile()
+                on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+                assert (on_disk["state"], on_disk["exec_owner"]) == ("queued", None)
+            finally:
+                other.close()
+
+            owner.cancel(running.job_id)  # its slot frees: the owner launches it
+            assert owner.get(queued.job_id).state is JobState.RUNNING
+        finally:
+            owner.close()
+
+    def test_cancel_tail_and_result_leave_it_alone(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, backend = self._owner(base, max_concurrent=1)
+        other = None
+        try:
+            running = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
+            finished = owner.submit(tool="t", backend="remote", spec={})
+            owner.cancel(finished.job_id)  # queued: cancelled at once
+
+            other = JobManager(base_dir=base)
+            before = {
+                job_id: (base / job_id / "meta.json").read_bytes()
+                for job_id in (running.job_id, queued.job_id)
+            }
+            assert other.cancel(running.job_id).state is JobState.RUNNING
+            assert other.cancel(queued.job_id).state is JobState.QUEUED
+            for job_id, data in before.items():
+                assert (base / job_id / "meta.json").read_bytes() == data
+            assert other.tail(running.job_id) == []
+            assert other.result(finished.job_id) is None
+        finally:
+            if other is not None:
+                other.close()
+            owner.close()
+
+    def test_it_holds_no_slot_of_the_cap(self, tmp_path: Path):
+        """It is never judged here, so it never ends here: counted, it starved the cap."""
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        stale = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+
+        other = JobManager(base_dir=base, max_concurrent=1)  # no "remote" here
+        try:
+            job = other.submit(tool="t", backend="subprocess", spec={"command": "true"})
+
+            assert job.state is JobState.RUNNING, "the cap was full of a job it cannot judge"
+            assert other.get(stale.job_id).state is JobState.RUNNING
+        finally:
+            other.close()
+
+    def test_it_is_logged_at_warning_only_when_asked_for(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """An app registers its backends after the constructor has reconciled,
+        so every start and orchestrator switch passes such a job: those
+        passes log at debug. A cancel, tail or result asks for the job by
+        name, and the first of them warns."""
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        logged: list[tuple[str, str, dict]] = []
+
+        class _Recorder:
+            def __getattr__(self, level):
+                return lambda event, **fields: logged.append((level, event, fields))
+
+        def levels() -> list[str]:
+            return [
+                level
+                for level, event, fields in logged
+                if event == "job_backend_not_registered"
+                and fields == {"job_id": rec.job_id, "backend": "remote"}
+            ]
+
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base, max_concurrent=1)
+        try:
+            rec = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
+            monkeypatch.setattr(jobs_manager, "logger", _Recorder())
+            other = JobManager(base_dir=base)
+            try:
+                other.reconcile()
+                other.get(rec.job_id)
+                other.get(queued.job_id)
+                assert levels() and set(levels()) == {"debug"}
+                assert all(
+                    level == "debug"
+                    for level, event, _ in logged
+                    if event == "job_backend_not_registered"
+                ), "the queued job's scheduling warned"
+
+                passive = len(levels())
+                other.cancel(rec.job_id)
+                other.tail(rec.job_id)
+                assert levels()[passive:].count("warning") == 1
+                assert levels()[-1] == "debug"  # the tail: warned once already
+            finally:
+                other.close()
+        finally:
+            owner.close()
+
+
 class _GatedInProcessBackend(JobBackend):
     """In-process semantics: only the starter can poll, gated completion."""
 
@@ -1377,7 +1661,7 @@ class TestJobRecordLifecycleCoherence:
 
 
 def _wait_for_gate(path: str, timeout: float = 5.0) -> str:
-    """Block until ``path`` appears. Module level so the spec stays copyable."""
+    """Block until ``path`` appears."""
     import os
 
     deadline = time.time() + timeout
@@ -1983,3 +2267,172 @@ class TestInProcessShutdownDoesNotStrandQueuedJobs:
             assert observer.begin_resume(queued.job_id) is True
         finally:
             observer.close()
+
+
+class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
+    """A queued in-process job is launched by the manager that submitted it.
+
+    Its callable cannot be saved (``"<non-serializable: function>"`` on disk),
+    yet any manager that loaded the record claimed and launched it: another
+    CLI, or the manager an orchestrator switch builds while the old one is
+    still open. It failed, "launch failed: inprocess job requires a callable
+    spec['target']". Such a job is now claimed by its submitter at submit,
+    and one still queued when that manager closes is recorded FAILED.
+    """
+
+    @staticmethod
+    def _busy_then_queued(owner: JobManager, gate: Path, marker: Path, **resume):
+        busy = owner.submit(
+            tool="wait", backend="inprocess",
+            spec={"target": _wait_for_gate, "kwargs": {"path": str(gate), "timeout": 10.0}},
+        )
+        queued = owner.submit(
+            tool="mark", backend="inprocess",
+            spec={"target": _touch_marker, "args": (str(marker),)}, **resume,
+        )
+        assert (busy.state, queued.state) == (JobState.RUNNING, JobState.QUEUED)
+        return busy, queued
+
+    def test_another_manager_leaves_it_to_its_submitter(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        other = None
+        try:
+            _, queued = self._busy_then_queued(owner, gate, marker)
+
+            other = JobManager(base_dir=base)  # another CLI, or a switch's new manager
+            other.reconcile()
+            seen = other.get(queued.job_id)
+            assert seen.state is JobState.QUEUED, f"launched elsewhere: {seen.error}"
+
+            gate.write_text("go")
+            deadline = time.time() + 10
+            while owner.get(queued.job_id).state is not JobState.SUCCEEDED:
+                assert time.time() < deadline, owner.get(queued.job_id)
+                owner.reconcile()  # the busy job ends: its slot frees
+                time.sleep(0.05)
+            assert marker.read_text() == "ran"
+        finally:
+            gate.write_text("go")
+            if other is not None:
+                other.close()
+            owner.close()
+
+    def test_close_fails_one_still_queued(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        later = None
+        try:
+            _, queued = self._busy_then_queued(
+                owner, gate, marker,
+                resume_on_complete=True, call_id="c1", session_id="s", user_id="u",
+            )
+            owner.close()
+            owner.close()  # idempotent
+
+            on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+            assert on_disk["state"] == JobState.FAILED.value
+            assert "closed before the job started" in on_disk["error"]
+            assert on_disk["finished_at"] is not None
+
+            later = JobManager(base_dir=base)
+            rec = later.get(queued.job_id)
+            assert rec.state is JobState.FAILED
+            assert "closed before the job started" in rec.error
+            assert [r.job_id for r in later.awaiting_resume()] == [queued.job_id]
+            assert not marker.exists()
+        finally:
+            gate.write_text("go")
+            if later is not None:
+                later.close()
+            owner.close()
+
+    def test_close_without_the_lock_leaves_it_queued(self, tmp_path: Path, monkeypatch):
+        """Startup recovery fails it once this process is gone. The backends
+        are released all the same."""
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        class _Released(JobBackend):
+            name = "released"
+            closed = False
+
+            def start(self, record, job_dir):
+                return None
+
+            def poll(self, record, job_dir):
+                return JobState.RUNNING
+
+            def cancel(self, record, job_dir):
+                return True
+
+            def close(self):
+                self.closed = True
+
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        released = _Released()
+        owner.register_backend(released)
+        try:
+            _, queued = self._busy_then_queued(owner, gate, marker)
+
+            def _boom(fd):
+                raise OSError("flock unavailable")
+
+            monkeypatch.setattr(jobs_manager, "_acquire_lock", _boom)
+            owner.close()
+
+            on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+            assert on_disk["state"] == JobState.QUEUED.value
+            assert released.closed, "close() released no backend"
+        finally:
+            gate.write_text("go")
+            monkeypatch.undo()
+            owner.close()
+
+    def test_close_with_nothing_queued_does_not_wait_for_the_lock(
+        self, tmp_path: Path
+    ):
+        """Another CLI's transaction holds the lock; this one has nothing to fail."""
+        import fcntl
+        import threading
+
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base)
+        jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        fd = os.open(base / ".resume.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        closing = threading.Thread(target=jm.close, daemon=True)
+        try:
+            closing.start()
+            closing.join(2.0)
+            assert not closing.is_alive(), "close() waited for another CLI's lock"
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            closing.join(5.0)
+
+    def test_close_with_nothing_queued_does_not_warn_of_the_lock(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """The jobs directory is gone, so no lock can be taken: nothing to say."""
+        import shutil
+
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        logged: list[str] = []
+
+        class _Recorder:
+            def __getattr__(self, level):
+                return lambda event, **fields: logged.append(event)
+
+        base = tmp_path / "jobs"
+        jm = JobManager(base_dir=base)
+        shutil.rmtree(base)
+        monkeypatch.setattr(jobs_manager, "logger", _Recorder())
+
+        jm.close()
+
+        assert "job_close_skipped_unlocked" not in logged

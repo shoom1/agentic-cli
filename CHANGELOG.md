@@ -97,6 +97,11 @@ the start of the entry's title.
   `load_agents_from_yaml` raises `ValueError` for a file it cannot use.
   (Fixed: **arXiv requests are paced…**, **`load_agents_from_yaml` raises…**;
   Changed: **`web_fetch` answers an error…**)
+- A custom `JobBackend` whose queued jobs a later start can launch from the
+  saved spec (plain data: a command, a remote request) sets
+  `survives_restart = True`; with the default, False, a queued job runs only
+  in the app that submitted it, and is failed if that app closes before
+  starting it. (Fixed: **A queued in-process job runs…**)
 - Gone: `agentic_cli.tools.shell` (the OS sandbox is
   `agentic_cli.tools.os_sandbox`), `ExecutionTimeoutError`,
   `WorkflowEvent.tool_result(duration_ms=)`, `UsageTracker.record()`'s
@@ -2209,6 +2214,75 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
+  a job the cancel could not reach (another CLI of the app runs it and its
+  backend cannot stop it from there, or its record could not be read or
+  locked), `job_cancel` answered `{"success": true, "state": "running"}` and
+  `/jobs cancel` printed "Job 'x' → running." as a success, so a model told
+  the user the job was stopped. `job_cancel` now returns `success: false`
+  with an `error` saying the job was not cancelled, its state (running or
+  queued), and why: it runs on a backend this app has not registered (named),
+  or it could not be stopped from here, to try again later or tell the user.
+  `/jobs cancel` says the same as a warning. A job that had already finished
+  keeps `success: true` and its state, with a `message` that nothing was
+  cancelled, which `/jobs cancel` says too.
+
+- **A queued in-process job runs in the app that submitted it.** Its
+  callable cannot be saved, yet any job manager that read the jobs
+  directory while it was queued (another CLI of the app, or the manager an
+  orchestrator switch builds while the old one is still open) launched it,
+  and it failed: "launch failed: inprocess job requires a callable
+  spec['target']". `JobBackend.survives_restart`, which nothing read, now
+  says whether a manager other than the submitting one may launch a queued
+  job from its saved record. A job on a backend that does not (`inprocess`,
+  and a backend that keeps the default, False) is claimed at submit by the
+  manager that submitted it, which launches it when a slot frees; one still
+  queued when that manager closes is recorded FAILED ("the app closed before
+  the job started…"), and with `resume_on_complete` is delivered as any
+  failed job is. A custom backend whose queued jobs another process can
+  launch from the saved spec sets `survives_restart = True`.
+
+- **An in-process job whose target holds a lock can be submitted, and a
+  submit that fails leaves nothing behind.** `JobRecord.to_dict` deep-copied
+  the whole record before it replaced what JSON cannot hold, so
+  `JobManager.submit` raised `TypeError: cannot pickle '_thread.lock'
+  object` for an in-process job whose target was a bound method of an object
+  holding a lock (a service, a client). And `submit` kept the record before
+  writing it: the next `submit` launched that job, or raised again, after
+  saving its own, so a tool told the first had failed while it ran later,
+  and a model that retried ran it twice. `to_dict` now builds the dict field
+  by field (the same JSON as before, sharing nothing with the record), and
+  `submit` keeps a job only once it is on disk: one that fails to save
+  removes its folder and raises.
+
+- **A job manager leaves alone a job whose backend it has not registered.**
+  A `JobManager` without a job's backend recorded the job UNKNOWN, a
+  terminal state, whoever was running it, and an app registers its own
+  backends with `register_backend` only after the constructor has read the
+  jobs on disk: a custom backend's running job was ended whenever another
+  CLI of the app started, or its own restarted, and was then resumed as
+  finished. A queued one was claimed and its launch raised `KeyError`, out
+  of the constructor, and `cancel`, `tail` and `result` raised it too. Such
+  a job is now left as it is until a manager that has its backend looks at
+  it (`job_backend_not_registered`, at debug, and at warning the first time
+  a cancel, `tail` or `result` asks for the job): it is not polled,
+  claimed, launched or cancelled, `cancel` returns it unchanged, `tail`
+  returns no lines and `result` None, and a running one holds no slot of
+  the manager's concurrency cap. The new `JobManager.has_backend(name)`
+  says whether a backend is registered. So a job on a backend the app no
+  longer registers stays as it was, RUNNING or queued, until its folder under
+  `~/.<app>/jobs/` is removed: `/jobs clean` removes finished jobs only.
+
+- **Cancelling a job that has already ended records how it ended.**
+  `JobManager.cancel` (and so `job_cancel` and `/jobs cancel`) reloaded the
+  job's record but did not poll the job, so a job that had finished since it
+  was last polled was recorded CANCELLED, without its exit code, and with
+  `resume_on_complete` the agent was told it had been cancelled. A cancel now
+  brings the record up to date from the job's backend first, whether it comes
+  from the manager running the job or from another CLI sharing the jobs
+  directory, and returns a job that has ended as it ended; only a job still
+  running is stopped.
 
 - **`search_arxiv` returns each paper's whole abstract.** It returned the
   first 500 characters of every abstract, the preview its search source
