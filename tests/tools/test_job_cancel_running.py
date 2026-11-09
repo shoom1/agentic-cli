@@ -146,3 +146,46 @@ class TestSubprocess:
         cancelled = jobs.cancel(rec.job_id)
 
         assert cancelled.state is JobState.CANCELLED
+
+
+class TestACancelFromAnotherManager:
+    """A cancel another CLI requests reaches the manager that runs the job.
+
+    The second manager cannot stop a process that ignores SIGTERM, so it
+    records the request and leaves the job RUNNING. The owner read the state
+    and its own lifecycle fields back from disk but not the request: its next
+    poll found the shell around the command killed (exit -15), recorded the
+    job FAILED while the command still ran, started the next job in its slot,
+    and wrote ``cancel_requested`` false over the other manager's.
+    """
+
+    def test_the_owner_holds_the_slot_and_records_the_job_cancelled(
+        self, jobs, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(backends_mod, "_CANCEL_WAIT_S", 0.3)
+        stubborn = jobs.submit(
+            tool="run_shell_job", backend="subprocess",
+            spec={"command": "trap '' TERM; echo ready; sleep 2"},
+        )
+        after = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": "true"})
+        _until(lambda: jobs.tail(stubborn.job_id) == ["ready"])
+
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            cancelled = other.cancel(stubborn.job_id)
+        finally:
+            other.close()
+        assert cancelled.state is JobState.RUNNING
+        assert cancelled.cancel_requested is True
+
+        jobs.reconcile()
+        assert jobs.get(stubborn.job_id).state is JobState.RUNNING
+        assert jobs.get(after.job_id).state is JobState.QUEUED
+        _until(lambda: (jobs.reconcile(), jobs.get(stubborn.job_id).state)[1] is JobState.CANCELLED)
+        _until(lambda: (jobs.reconcile(), jobs.get(after.job_id).state)[1] is JobState.SUCCEEDED)
+
+        restarted = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            assert restarted.get(stubborn.job_id).cancel_requested is True
+        finally:
+            restarted.close()

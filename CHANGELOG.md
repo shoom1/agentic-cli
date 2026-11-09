@@ -2210,6 +2210,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A job cancelled from another CLI is recorded CANCELLED, and keeps its
+  slot until it stops.** When a second CLI sharing the jobs directory
+  cancelled a subprocess job that outlived SIGTERM, it recorded the request
+  (`cancel_requested`) for the manager running the job, which never read it
+  back: that manager's next poll found the shell around the command killed,
+  recorded the job FAILED (exit -15) while the command still ran, started the
+  next queued job in its slot, and wrote the request away. A resumed agent was
+  told the job failed. Every manager now reads the request from the record and
+  never drops it, so the job holds its slot until its processes exit and is
+  recorded CANCELLED.
+
 - **`search_arxiv` returns each paper's whole abstract.** It returned the
   first 500 characters of every abstract, the preview its search source
   gives (`SearchSourceResult.snippet`), so the model judged papers on a cut

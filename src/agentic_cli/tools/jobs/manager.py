@@ -1007,9 +1007,17 @@ class JobManager:
     )
 
     def _adopt_shared_fields(self, rec: JobRecord, data: dict) -> None:
-        """Adopt the ownership/delivery fields from a persisted snapshot."""
+        """Adopt the fields any manager may write from a persisted snapshot.
+
+        The ownership and delivery fields, and a cancel request: a second CLI
+        that cannot stop a job records one for the manager running it, which
+        holds the slot until the job ends and records it CANCELLED. Once
+        requested it stays requested, so no write drops it.
+        """
         if "exec_owner" in data:
             rec.exec_owner = data["exec_owner"]
+        if data.get("cancel_requested"):
+            rec.cancel_requested = True
         state = data.get("resume_state")
         if state is None:
             # A record written before the lifecycle existed.
