@@ -731,19 +731,20 @@ the start of the entry's title.
 - **`/models`** shows the list the model pickers offer: per model, the
   context window, max output, thinking mechanism and levels, tools, cache
   mechanism, where each value came from (`config`, `listing`, `table`,
-  `default`), and the roles that use it; then each `models` entry the list
-  leaves out, with why ("no key: set TOGETHER_API_KEY", "provider 'together'
+  `default`), and the roles that use it; then each model the settings name that
+  the list leaves out (a `models` entry, or the model of `default_model`, a role
+  or an agent), with why ("no key: set TOGETHER_API_KEY", "provider 'together'
   is not defined in model_providers", "not served by together"); then a row
   per provider in use: whether it has a key (or needs none), whether its
   listing is fresh, stale, failed or not tried, when it was fetched, how many
-  models it lists, and the last error. `/models <text>` searches the full
-  listing of every provider that can be called, ignoring case, by reference,
-  and marks the models already in the list: how to find an exact id to add
-  to `models` (a provider not in use is listed the first time it is
-  searched). `/models refresh` lists every provider in use or searched again
-  now and reports whose models changed and which listings failed. Before
-  the workflow is initialized it reads the model cache, and lists a provider
-  in use the cache holds nothing for. It never shows a key.
+  models it shows (its listing holds more), and the last error. `/models
+  <text>` searches the full listing of every provider that can be called,
+  ignoring case, by reference, and marks the models already in the list: how
+  to find an exact id to add to `models` (a provider not in use is listed the
+  first time it is searched). `/models refresh` lists every provider in use
+  or searched again now and reports whose models changed and which listings
+  failed. Before the workflow is initialized it reads the model cache, and
+  lists a provider in use the cache holds nothing for. It never shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
   installs beside `langgraph`, and its LangChain packages are the
@@ -1534,9 +1535,17 @@ the start of the entry's title.
   it.
   Startup waits only for one that can be called and has no cache entry, all
   of them at once and each for at most 10 seconds; an older entry is used
-  while it is listed again in the background. As in 0.6, an id unknown to a
+  while it is listed again in the background, and so is a listing that failed
+  at startup (once). Until one succeeds the provider's ids are not checked and
+  its models' limits and thinking come from the shipped table (an OpenRouter
+  or configured provider's models run without thinking and with the 128,000-token
+  window floor), which the warning says; the session's agents are resolved
+  once, at startup, and keep that, and the listing reaches `/models`, the
+  pickers, side calls and the next start. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it. After a key change to an
+  failed, untried or older listing accepts it, and a listing grows older in
+  a long session too: 24 hours after it was fetched it no longer rejects an
+  id, and `/models <text>` lists the provider again. After a key change to an
   account with other models, run `/models refresh` to list again at once.
   Every process of the app shares the file, two releases of it included
   (a dev checkout beside the installed app): a listing writes only its own
@@ -1715,7 +1724,8 @@ the start of the entry's title.
   Default Model (`default_model`), has two companions: Fast Model and Strong
   Model, which write `model_roles["fast"]` and `model_roles["strong"]`. Each
   offers the list, as `provider:model` references: the `models` entries
-  that can run, then each model the settings, the agents and the roles name;
+  that can run, then each model the settings, the agents and the roles name
+  that can run by the same rule (a model is never both offered and left out);
   when the list offers no entry, each built-in provider with a key's newest
   fast, default and strong model. A listing never adds to it, where 0.6's
   picker offered every model the providers listed. A role's picker shows
@@ -2273,6 +2283,35 @@ step; each entry says what to use instead.
   still reads the job's result on the event loop (the backends'
   `resume_with_job_result`).
 
+- **The documented lifecycle contract says what the code does.** The README's
+  "Turn and lifecycle contracts", `CLAUDE.md` and `BaseWorkflowManager`'s
+  docstring said `initialize_services()` takes the turn lock. It takes only the
+  lifecycle lock (a turn initializes before it takes the turn lock);
+  `reinitialize()` and `cleanup()` take both. The docstrings of the
+  constructor's `app_name` (it names the conversations; the services use
+  `settings.app_name`), `summarize` (`content` is not sent, the prompt holds
+  it) and `_release_resources` (it closes the catalog and the services, and
+  leaves a backend's own state to its override) are corrected too.
+
+- **The example in `BaseWorkflowManager`'s docstring is a backend that runs.**
+  It left out five abstract members (`backend_type`, `_get_state_tools`,
+  `_do_initialize`, `reinitialize`, `cleanup`), replaced `initialize_services`
+  with a no-op and called a `_process_internal` that does not exist, so the
+  class could not be instantiated, and a backend copied from it would have
+  dropped the constructor's `on_event` hook. It is now a complete minimal
+  backend (it validates the agent graph and passes its events through the
+  hook), and a test builds the class from the docstring and runs it through a
+  turn, `cleanup`, `reinitialize` and a hook that drops events.
+
+- **A backend of your own adopts the conversation's id.** `load_session`
+  adopted the id only when the subclass had set `session_id` itself (the three
+  shipped backends do). For a `BaseWorkflowManager` backend that had not, a
+  call that left out the session id stayed on `default_session` after
+  `/resume` (the CLI passes the id to every turn, so `/resume` itself worked),
+  and `/status` showed "Not available" in place of its Session ID, Services
+  and context rows. The base now declares `session_id` as a class default
+  (`"default_session"`), which a backend that sets or provides its own keeps.
+
 - **A turn closes its event stream before it returns.** When a turn
   stopped reading the workflow's events early (an event handler that
   raised, or Ctrl+C while one waited), the event generator was left to the
@@ -2663,10 +2702,22 @@ step; each entry says what to use instead.
   `generateContent`: not its embedding, Imagen or Veo models), each marked
   whether it is shown: every such id is accepted and found by
   `/models <text>`, while the list the pickers offer, `/models`, the roles'
-  tier picks and the "not available" message show what they showed. Without
-  a listing, a dated Claude id is described as its alias is
+  tier picks and the "not available" message show only the shown ones:
+  Google's text models, Anthropic's dated ids under their aliases (below)
+  and OpenAI's curated and reasoning models. Without a listing, a dated Claude id is described as its alias is
   (`claude-sonnet-5-5-20261001` cannot turn thinking off and takes no
-  sampling parameters, like `claude-sonnet-5-5`).
+  sampling parameters, like `claude-sonnet-5-5`). A dated Claude id is shown
+  as the undated alias the shipped table lists for it (`claude-sonnet-4-5`,
+  `claude-haiku-4-5`, `claude-opus-4-1`, `claude-opus-4-5`, and `claude-opus-4-0`
+  and `claude-sonnet-4-0` for the 20250514 models), and no other date-stripped
+  id is accepted: `claude-opus-4` and `claude-sonnet-4`, which 0.6 offered by
+  stripping the date, are not served (the `-4-0` aliases are), and a dated id
+  the table lists no alias for, such as `claude-3-5-haiku-20241022`, is shown
+  and accepted as itself (Claude Haiku 3 has no alias, and the `-latest`
+  aliases of 3.5 Haiku and 3.7 Sonnet are retired). Google's `-latest` aliases
+  (`gemini-flash-latest`, `-flash-lite-latest`, `-pro-latest`) are described
+  as the Gemini 3 family they point at (tier, thinking levels), so a pinned
+  one thinks.
 - **On ADK, an OpenRouter model's reasoning details go back to it with the
   tool results, as on Deep Agents.** Beside its reasoning text OpenRouter
   sends `reasoning_details` (Claude's signed thinking, Gemini's thought

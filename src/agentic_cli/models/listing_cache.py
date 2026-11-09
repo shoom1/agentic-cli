@@ -41,7 +41,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -175,6 +175,7 @@ class ListingCache:
         absent: Iterable[str] = (),
         *,
         after_failure: bool = False,
+        served: Collection[str] | None = None,
     ) -> None:
         """Write ``name``'s entry, keeping every other entry as the file holds
         it now; a failure is logged, never raised, and a file of a newer
@@ -196,6 +197,9 @@ class ListingCache:
                 a provider serves again is no longer absent).
             after_failure: ``listing`` follows a failed attempt: the failure
                 itself, or the listing kept through it.
+            served: Every id the catalog accepts from ``listing``; by default
+                the ids it lists and each model's alias. A catalog passes its
+                own, since it decides which of the aliases are served.
         """
         if self._path is None:
             return
@@ -207,7 +211,7 @@ class ListingCache:
         held_here = held if held is not None and held.ok and held.describes(provider) else None
         if held_here is not None and (after_failure or not listing.ok):
             return
-        entries[name] = self._written(provider, listing, absent, held_here)
+        entries[name] = self._written(provider, listing, absent, held_here, served)
         try:
             _atomic_write_json(self._path, {"version": CACHE_VERSION, "providers": entries})
         except OSError as exc:
@@ -256,13 +260,18 @@ class ListingCache:
 
     @staticmethod
     def _written(
-        provider: Provider, listing: Listing, absent: Iterable[str], held: CacheEntry | None
+        provider: Provider,
+        listing: Listing,
+        absent: Iterable[str],
+        held: CacheEntry | None,
+        served: Collection[str] | None,
     ) -> dict[str, Any]:
         """An entry as written."""
         if listing.ok:
-            served = {model.id for model in listing.models}
-            served.update(model.alias for model in listing.models if model.alias)
-            joined = {*absent, *(held.absent if held is not None else ())} - served
+            if served is None:
+                served = {model.id for model in listing.models}
+                served.update(model.alias for model in listing.models if model.alias)
+            joined = {*absent, *(held.absent if held is not None else ())} - set(served)
         else:
             joined = set()
         return {

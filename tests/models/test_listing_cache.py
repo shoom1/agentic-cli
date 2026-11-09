@@ -412,6 +412,22 @@ class TestAbsent:
 
         assert entry_of(path, "anthropic")["absent"] == ["claude-a", "claude-b"]
 
+    def test_what_the_catalog_serves_replaces_the_ids_and_aliases_the_listing_names(self, path):
+        """A dated id's alias in the listing is no served id when the catalog does not
+        accept it (the table names no such family): the file's record of it stays."""
+        cache = ListingCache(path)
+        listing = ok(
+            ANTHROPIC, ListedModel("claude-3-haiku-20240307", alias="claude-3-haiku", shown=False),
+        )
+        cache.put("anthropic", ANTHROPIC, ok(ANTHROPIC), absent={"claude-3-haiku", "claude-old"})
+
+        cache.put(
+            "anthropic", ANTHROPIC, listing, absent={"claude-x"},
+            served={"claude-3-haiku-20240307", "claude-old"},
+        )
+
+        assert entry_of(path, "anthropic")["absent"] == ["claude-3-haiku", "claude-x"]
+
     def test_the_files_record_of_another_address_is_not_joined(self, path):
         cache = ListingCache(path)
         cache.put("local-vllm", VLLM, ok(VLLM), absent={"other-box-model"})

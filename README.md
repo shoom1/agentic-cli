@@ -918,25 +918,29 @@ lacks fails with one error that names each agent concerned.
 
 A model can run when its provider can be called: a built-in provider with
 its key, or a configured provider whose `api_key_env` is set (or that names
-none). An entry is not offered when its provider is not defined, cannot be
-called, or does not serve it (its fresh listing lacks the model); the first
-and the last are warned of once at startup. Listings never add to the list.
-Each model appears once. Picking writes `default_model`, or the role's
-`model_roles` entry, to the project settings file and restarts the workflow
-on it, keeping the conversation. Before the workflow is ready, the pickers
-offer the list from the entries and the shipped table. An app adds a
-picker for a role of its own with the key `model_role:<role>` in
-`get_ui_setting_keys()`.
+none). A model a setting names (an entry, `default_model`, a role's model or
+an agent's) is not offered when its provider is not defined, cannot be
+called, or does not serve it (its fresh listing lacks the model, or the older
+listing in use recorded it as absent), and `/models` says why for each; an
+entry whose provider is not defined or does not serve it is also warned of
+once at startup. Listings never add to the list. Each model appears once. Picking writes
+`default_model`, or the role's `model_roles` entry, to the project settings
+file and restarts the workflow on it, keeping the conversation. Before the
+workflow is ready, the pickers offer the list from the entries and the
+shipped table. An app adds a picker for a role of its own with the key
+`model_role:<role>` in `get_ui_setting_keys()`.
 
-- **`/models`** shows the list, then each entry it leaves out with why ("no
-  key: set TOGETHER_API_KEY", "provider 'together' is not defined in
+- **`/models`** shows the list, then each model the settings name that it
+  leaves out (an entry, or `default_model`, a role or an agent's model) with
+  why ("no key: set TOGETHER_API_KEY", "provider 'together' is not defined in
   model_providers", "not served by together"). Per model: the context window,
   max output, thinking, tools, cache, where each value came from (`config`,
   `listing`, `table`, `default`) and the roles that use it. Below, each
   provider in use: whether it has a key (or needs none), whether its listing
   is fresh, stale, failed or not listed, when it was fetched, how many models
-  it lists, and the last error. Before the workflow is initialized it reads
-  the model cache, and lists a provider in use the cache holds nothing for.
+  it shows (its listing holds more, which `/models <text>` finds), and the
+  last error. Before the workflow is initialized it reads the model cache,
+  and lists a provider in use the cache holds nothing for.
 - **`/models <text>`** searches the full listing of each provider that can be
   called (and is listed), ignoring case, by reference, and marks the models
   already in the list: how to find an exact id to copy into `models`
@@ -948,7 +952,8 @@ picker for a role of its own with the key `model_role:<role>` in
   account with other models.
 - In code, an initialized manager's `manager.catalog` gives
   `catalog.offered()` (the entries and the models the settings and the
-  agents name), `catalog.not_offered()`, `catalog.records("google")`,
+  agents name), `catalog.not_offered()` (those it leaves out, with why),
+  `catalog.records("google")`,
   `catalog.status()`, `await catalog.search(text)` and
   `await catalog.refresh()`, and `manager.model` is the default model's
   reference. The pickers' list adds the roles' models:
@@ -973,22 +978,31 @@ as 128,000 tokens.
   address and kind: a change to either lists it again. Startup waits only to
   list a provider in use that can be called and has no cache entry yet: all
   of them at once, each for at most 10 seconds. An older entry is used while
-  it is listed again in the background. Every process of the app shares the
-  file, and a listing writes only its own provider's entry and keeps the
+  it is listed again in the background, and a listing counts as older once
+  it is 24 hours old in a long session too. A listing that fails at startup
+  is listed once more in the background: until one succeeds the provider's
+  ids are not checked and its models' limits and thinking come from the
+  shipped table (an OpenRouter or configured provider's models, which the
+  table does not know, run without thinking and with the 128,000-token
+  window floor unless a `models` entry says otherwise). The agents are
+  resolved once, at startup, and keep that for the session: the listing
+  reaches the next start, `/models`, the pickers and side calls. Every
+  process of the app shares
+  the file, and a listing writes only its own provider's entry and keeps the
   others as the file holds them (an entry this release cannot read too; a file
   of a newer release is neither read nor written: this process keeps its
   listings in memory and logs once that every start lists); a failed listing
   never replaces one of the provider's address and kind.
 - **Checking ids**: a model a provider does not list is rejected only when
-  that provider's listing is fresh; a failed, untried or older listing
-  accepts any id. A rejection read from the cache is confirmed by one new
-  listing first, since the cache can predate a model. A model a setting, a
-  role or an agent names that the provider does not serve fails at startup,
-  listing the provider's models. An entry only in `models` is left out of
-  the list instead, with one warning: an app's list does not stop it starting
-  because a host retired one model, and the cache records the absence (of every
-  project's list that shares the file), so it costs one listing, not one at
-  every start.
+  that provider's listing is fresh (under 24 hours old, however long the
+  session has run); a failed, untried or older listing accepts any id. A
+  rejection read from the cache is confirmed by one new listing first, since
+  the cache can predate a model. A model a setting, a role or an agent names
+  that the provider does not serve fails at startup, listing the provider's
+  models. An entry only in `models` is left out of the list instead, with one
+  warning: an app's list does not stop it starting because a host retired one
+  model, and the cache records the absence (of every project's list that
+  shares the file), so it costs one listing, not one at every start.
 - **An OpenAI-compatible host's listing** may be `{"data": [...]}` or a bare
   array, and a model's window is read from its `context_length`,
   `context_window` or `max_model_len`, the first present. Its thinking comes
@@ -1341,12 +1355,14 @@ word counting to a researcher whose tool is named in its YAML.
 ### Turn and lifecycle contracts
 
 A workflow manager runs **one turn at a time**: `process()` and
-`resume_with_job_result()` serialize on a turn lock, and
-`initialize_services()`/`reinitialize()`/`cleanup()` take it too, so the backend
-is never torn down mid-stream. Admission also re-verifies the backend is live
-after acquiring the lock, so a turn queued behind a cleanup reinitializes (or
-fails cleanly) instead of running against released resources. Run separate
-managers for genuine parallelism.
+`resume_with_job_result()` serialize on a turn lock, and `reinitialize()` and
+`cleanup()` take it too (after the lifecycle lock they share with
+`initialize_services()`), so the backend is never torn down mid-stream.
+`initialize_services()` takes only the lifecycle lock: a turn initializes
+before it takes the turn lock, which keeps the two from deadlocking. Admission
+also re-verifies the backend is live after acquiring the turn lock, so a turn
+queued behind a cleanup reinitializes (or fails cleanly) instead of running
+against released resources. Run separate managers for genuine parallelism.
 
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
 `FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a

@@ -8,11 +8,14 @@ entry) and swaps in the result.
 
 Two maps come out. The provider's listing holds every model it **serves**, and
 the catalog accepts each of their ids; the provider **shows** fewer, the
-models its list offers (``ModelCatalog.records``). Where "shown" is decided
+models it shows (``ModelCatalog.records``). Where "shown" is decided
 depends on the provider: Google's lister marks the text models; Anthropic's
-marks a dated id as its alias, which this module adds as a record (it takes
-the first dated id listed's facts); OpenAI's curated list and its reasoning
-models are picked here. Every value in a record keeps its source
+marks a dated id with its date-stripped id, for which this module serves and
+shows the alias the table lists (``ShippedTable.served_alias``: ``claude-opus-4-0``
+for ``claude-opus-4-20250514``; it takes the first dated id listed's facts)
+and, with none listed (``claude-3-5-haiku-20241022``: Anthropic serves no
+``claude-3-5-haiku``), shows the dated id itself; OpenAI's curated list and
+its reasoning models are picked here. Every value in a record keeps its source
 (``ModelRecord.sources``), highest precedence first: the ``models`` entry
 (``config``, ``with_entry``), the listing (``listing``), the shipped table
 (``table``).
@@ -67,8 +70,8 @@ def records_for(
 
     Returns:
         The records of every model the provider serves, by id (the ids
-        ``ModelCatalog.record`` accepts), and those it shows, in the order its
-        list offers them. A shown record is the served one.
+        ``ModelCatalog.record`` accepts), and those it shows, in the order it shows
+        them. A shown record is the served one.
     """
     served, shown = _records_for(provider, listing, table)
     given = entries or {}
@@ -122,35 +125,38 @@ def _records_for(
     if listing is None:
         fallback = [table.record_for(name, kind, model) for model in table.fallback_models(kind)]
         return {record.model: record for record in fallback}, fallback
-    # Every id the provider serves is accepted; only the shown ones are offered.
+    # Every id the provider serves is accepted; only the shown ones are shown.
     accepted: dict[str, ModelRecord] = {}
     shown: dict[str, ModelRecord] = {}
     for listed in listing.models:
         if listed.id not in accepted:
             accepted[listed.id] = _listed_record(name, kind, listed, table)
-        if listed.alias is None:
-            if listed.shown:
+        served = table.served_alias(listed.alias) if listed.alias is not None else None
+        if served is None:
+            # A dated id the table lists no alias for (the 3.x line's) is shown
+            # as it is, and its date-stripped id is no id at all.
+            if listed.shown or listed.alias is not None:
                 shown.setdefault(listed.id, accepted[listed.id])
             continue
         # Anthropic: a dated id is shown as its alias, which takes the
         # first one listed's facts, as in 0.6.
-        if listed.alias not in accepted:
-            alias = dataclasses.replace(listed, id=listed.alias)
-            accepted[listed.alias] = _listed_record(name, kind, alias, table)
-        shown.setdefault(listed.alias, accepted[listed.alias])
+        if served not in accepted:
+            alias = dataclasses.replace(listed, id=served)
+            accepted[served] = _listed_record(name, kind, alias, table)
+        shown.setdefault(served, accepted[served])
     if kind is not ProviderKind.OPENAI:
         return accepted, list(shown.values())
     # R15: the curated ids the account has, then any other reasoning
     # model it lists. Other ids (embeddings, TTS, gpt-4.1) are accepted by
-    # record() but never offered.
+    # record() but never shown.
     curated = table.curated_openai()
-    offered = [accepted[model] for model in curated if model in accepted]
-    offered += [
+    chosen = [accepted[model] for model in curated if model in accepted]
+    chosen += [
         record
         for model, record in accepted.items()
         if model not in curated and record.thinking.mechanism is ThinkingMechanism.EFFORT
     ]
-    return accepted, offered
+    return accepted, chosen
 
 
 def _listed_record(

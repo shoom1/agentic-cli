@@ -13,6 +13,7 @@ import dataclasses
 import logging
 import time
 
+import httpx
 import pytest
 
 from agentic_cli.models import (
@@ -143,6 +144,44 @@ class TestGoogle:
         assert record.display_name == "Gemini 2.0 Flash"
 
 
+class TestGoogleLatestAliases:
+    """A pinned ``-latest`` alias is served (the list does not show it) and described as
+    the family it points at: its listing says it thinks, and thinking is not silently off."""
+
+    async def test_a_pinned_alias_thinks_as_its_family(self):
+        catalog = await loaded(google=KEYS["google"])
+
+        record = catalog.record(ModelRef("google", "gemini-flash-latest"))
+
+        assert record.thinking.mechanism is ThinkingMechanism.GEMINI_LEVEL
+        assert (record.tier, record.sources["thinking"]) == ("default", "table")
+        assert record.context_window == 1048576 and record.sources["context_window"] == "listing"
+
+    async def test_an_alias_the_listing_says_does_not_think_has_no_knob(self):
+        payload = recorded("google")
+        for model in payload["models"]:
+            if model["name"] == "models/gemini-flash-latest":
+                model["thinking"] = False
+        catalog = await loaded(ProviderAPI(google=payload), google=KEYS["google"])
+
+        record = catalog.record(ModelRef("google", "gemini-flash-latest"))
+
+        assert record.thinking == ThinkingRule()
+        assert record.sources["thinking"] == "listing"
+
+    async def test_a_default_model_pinned_to_an_alias_resolves_with_its_thinking_level(self):
+        catalog = await loaded(google=KEYS["google"])
+
+        resolved = resolve_model(
+            agent=None, spec="google:gemini-flash-latest", generation=None,
+            thinking_effort="high", roles=RoleMap(default_model=None, model_roles={}),
+            catalog=catalog, providers=providers(google=KEYS["google"]),
+        )
+
+        assert resolved.thinking is not None
+        assert resolved.thinking.mechanism is ThinkingMechanism.GEMINI_LEVEL
+
+
 class TestAnthropic:
     async def test_the_thinking_types_decide_the_mechanism(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
@@ -160,7 +199,7 @@ class TestAnthropic:
         assert sonnet.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET
         assert (sonnet.budgets, sonnet.budget_range) == ((4096, 10000, 32000), (1024, 128000))
         # The listing says it does not think.
-        assert thinking("claude-3-5-haiku") == ThinkingRule()
+        assert thinking("claude-3-5-haiku-20241022") == ThinkingRule()
         record = catalog.record(ModelRef("anthropic", "claude-opus-4-7"))
         assert record.sources["thinking"] == "listing"
         assert (record.context_window, record.max_output) == (1000000, 128000)
@@ -260,7 +299,7 @@ class TestAnthropic:
     async def test_without_capabilities_the_version_decides(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
 
-        record = catalog.record(ModelRef("anthropic", "claude-3-haiku"))
+        record = catalog.record(ModelRef("anthropic", "claude-3-haiku-20240307"))
 
         assert record.thinking.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET
         assert record.sources["thinking"] == "table"
@@ -582,10 +621,10 @@ async def test_google_serves_for_chat_only_the_models_that_generate_content():
         catalog.record(ModelRef("google", "text-embedding-004"))
 
 
-async def test_what_is_shown_does_not_change():
-    """Each provider's records, the tiers a list with no entry offers, the
-    status counts and the "not available" message: the same as when the
-    listers dropped what they do not show."""
+async def test_what_each_provider_shows():
+    """Each provider's shown records, the tiers a list with no entry offers, the
+    status counts and the "not available" message, for the recorded listings: a
+    dated 3.x Claude id is shown as itself, since Anthropic serves no alias for it."""
     catalog = await loaded(references=ON_OPENROUTER, openrouter="r-test-key", **KEYS)
 
     assert {name: ids(catalog.records(name)) for name in (*KEYS, "openrouter")} == {
@@ -595,7 +634,7 @@ async def test_what_is_shown_does_not_change():
         ],
         "anthropic": [
             "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
-            "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+            "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
         ],
         "openai": [
             "gpt-5.5", "gpt-5.5-2026-03-05", "gpt-5.5-pro", "gpt-5.4-mini", "gpt-5-codex", "o3",
@@ -624,7 +663,7 @@ async def test_what_is_shown_does_not_change():
         catalog.record(ModelRef("anthropic", "claude-sonnet-9-9"))
     assert str(caught.value).endswith(
         "Available anthropic models: claude-sonnet-5-5, claude-opus-4-7, claude-sonnet-4-6, "
-        "claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-haiku, claude-3-haiku"
+        "claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-haiku-20241022, claude-3-haiku-20240307"
     )
 
 
@@ -636,6 +675,108 @@ async def test_search_finds_an_id_its_provider_serves_but_does_not_show():
 
     assert [str(record.ref) for record in dated] == ["anthropic:claude-sonnet-4-5-20250929"]
     assert [str(record.ref) for record in alias] == ["google:gemini-flash-latest"]
+
+
+#: The date-stripped ids of the recorded listing's 3.x models: Anthropic's alias for 3.5
+#: Haiku is ``claude-3-5-haiku-latest`` and 3 Haiku has none, so a request for these fails.
+NOT_SERVED = (
+    ModelRef("anthropic", "claude-3-5-haiku"),
+    ModelRef("anthropic", "claude-3-haiku"),
+)
+
+
+async def test_an_id_the_provider_does_not_serve_is_not_accepted_shown_or_found():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for ref in NOT_SERVED:
+        with pytest.raises(ModelResolutionError, match=f"{ref} is not available"):
+            catalog.record(ref)
+    assert not {ref.model for ref in NOT_SERVED} & set(ids(catalog.records("anthropic")))
+    found = await catalog.search("haiku")
+    assert [str(record.ref) for record in found] == [
+        "anthropic:claude-3-5-haiku-20241022",
+        "anthropic:claude-3-haiku-20240307",
+        "anthropic:claude-haiku-4-5",
+        "anthropic:claude-haiku-4-5-20251001",
+    ]
+
+
+async def test_a_dated_id_of_a_family_with_no_alias_is_accepted_and_shown_as_it_is():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for model in ("claude-3-5-haiku-20241022", "claude-3-haiku-20240307"):
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in ids(catalog.records("anthropic"))
+
+
+async def test_the_aliases_the_table_lists_are_accepted_and_shown():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for model in ("claude-sonnet-4-5", "claude-haiku-4-5"):
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in ids(catalog.records("anthropic"))
+
+
+def anthropic_shaped(*model_ids: str) -> dict:
+    """An Anthropic listing of ``model_ids``, each with the recorded Sonnet 4.5's capabilities."""
+    shape = next(m for m in recorded("anthropic")["data"] if m["id"] == "claude-sonnet-4-5-20250929")
+    data = [dict(shape, id=model_id, display_name=model_id) for model_id in model_ids]
+    return {"data": data, "has_more": False, "first_id": model_ids[0], "last_id": model_ids[-1]}
+
+
+#: What Anthropic serves, of the ids a listing of its dated 4.x models and two 3.x ones
+#: suggests: its documented aliases (``claude-opus-4-0`` and ``claude-sonnet-4-0`` for the
+#: 20250514 models, the rest the date-stripped id), and not the date-stripped ids
+#: ``claude-opus-4`` and ``claude-sonnet-4``, nor any 3.x one.
+ALIASES_SERVED = (
+    "claude-opus-4-0", "claude-sonnet-4-0", "claude-opus-4-1", "claude-opus-4-5",
+    "claude-sonnet-4-5", "claude-haiku-4-5",
+)
+ALIASES_NOT_SERVED = (
+    "claude-opus-4", "claude-sonnet-4", "claude-3-7-sonnet", "claude-3-7-sonnet-latest",
+    "claude-3-5-haiku", "claude-3-5-haiku-latest", "claude-3-haiku",
+)
+DATED_4X = (
+    "claude-opus-4-5-20251101", "claude-haiku-4-5-20251001", "claude-sonnet-4-5-20250929",
+    "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-sonnet-4-20250514",
+    "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
+)
+
+
+async def test_the_aliases_are_those_the_table_lists_not_every_date_stripped_id():
+    """Anthropic's aliases for Opus 4 and Sonnet 4 end in -4-0: the date-stripped ids are
+    not served, and the aliases that are must not be rejected as "not available"."""
+    payload = anthropic_shaped("claude-opus-4-7", "claude-sonnet-4-6", *DATED_4X)
+    catalog = await loaded(ProviderAPI(anthropic=payload), anthropic=KEYS["anthropic"])
+    shown = ids(catalog.records("anthropic"))
+
+    for model in ALIASES_SERVED:
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in shown
+    for model in ALIASES_NOT_SERVED:
+        with pytest.raises(ModelResolutionError, match=f"anthropic:{model} is not available"):
+            catalog.record(ModelRef("anthropic", model))
+        assert model not in shown
+    for model in DATED_4X:
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+    # A dated id whose alias is shown is not; the 3.x ones, with none, are shown as they are.
+    assert shown == [
+        "claude-opus-4-7", "claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-4-5",
+        "claude-sonnet-4-5", "claude-opus-4-1", "claude-opus-4-0", "claude-sonnet-4-0",
+        "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
+    ]
+
+
+async def test_an_alias_that_is_not_its_date_stripped_id_is_described_by_its_family():
+    payload = anthropic_shaped("claude-opus-4-20250514", "claude-sonnet-4-20250514")
+    catalog = await loaded(ProviderAPI(anthropic=payload), anthropic=KEYS["anthropic"])
+
+    opus = catalog.record(ModelRef("anthropic", "claude-opus-4-0"))
+    sonnet = catalog.record(ModelRef("anthropic", "claude-sonnet-4-0"))
+
+    assert (opus.tier, sonnet.tier) == ("strong", "default")
+    assert (opus.thinking.mechanism, sonnet.thinking.mechanism) == (BUDGET, BUDGET)
+    assert opus.context_window == 200_000 and opus.sources["context_window"] == "listing"
 
 
 async def test_a_listed_dated_claude_id_is_described_as_its_alias_is():
@@ -1057,6 +1198,49 @@ class TestNotOffered:
         }
         assert catalog.offered() == ["google:gemini-2.5-flash"]
 
+    async def test_why_a_model_a_setting_names_is_not_offered(self):
+        """The references (``default_model``, a role, an agent, the manager's model) are
+        left out of the list by the entries' rule, so ``not_offered`` says why for them
+        too; one that is also an entry is one row."""
+        unserved = ModelRef("google", "gemini-9-ultra")
+        catalog = await loaded(
+            entries={
+                ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(),
+                unserved: ModelEntry(),
+                GEMINI: ModelEntry(),
+            },
+            references=[
+                ModelRef("together", "deepseek-ai/DeepSeek-V3.1"), QWEN, unserved, GEMINI,
+                ModelRef("anthropic", "claude-sonnet-4-6"),
+            ],
+            google=KEYS["google"], openrouter=None,
+        )
+
+        assert catalog.not_offered() == {
+            "anthropic:claude-sonnet-4-6": "no key: set ANTHROPIC_API_KEY",
+            "google:gemini-9-ultra": "not served by google",
+            "together:deepseek-ai/DeepSeek-V3.1": (
+                "provider 'together' is not defined in model_providers"
+            ),
+            "openrouter:qwen/qwen3-235b-a22b": "no key: set OPENROUTER_API_KEY",
+        }
+        assert catalog.offered() == ["google:gemini-2.5-flash"]
+
+    async def test_a_model_a_setting_names_is_left_out_without_a_warning(self, caplog):
+        """A reference that a fresh listing lacks fails startup, and any other is
+        accepted and shown by /models with its reason: only an entry, which would
+        otherwise vanish from the list, is warned of."""
+        catalog = catalog_for(
+            references=[ModelRef("google", "gemini-9-ultra"), ModelRef("together", "x")],
+            google=KEYS["google"],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        assert catalog.not_offered() != {}
+        assert [r for r in caplog.records if r.name == "agentic_cli.models.catalog"] == []
+
     async def test_the_offered_entries_records_in_list_order(self):
         catalog = await loaded(
             entries={
@@ -1300,3 +1484,100 @@ class TestRefresh:
 
         assert task.done()
         assert catalog.start_background_refresh() is None
+
+
+# --- a listing that failed at startup is tried once more --------------------------
+
+
+def fails_first(payload):
+    """An answer that fails the first request (a network blip) and serves ``payload`` after."""
+    asked: list[httpx.Request] = []
+
+    def answer(request):
+        asked.append(request)
+        return refuse(request) if len(asked) == 1 else payload
+
+    return answer
+
+
+class TestAFailedStartupListing:
+    """Without a listing an OpenRouter model has no thinking knob and no window
+    (the shipped table's conservative record): the background refresh lists the
+    provider once more, so a blip at startup does not last the session."""
+
+    async def test_the_background_refresh_lists_it_again_and_the_record_gets_the_listing_s_facts(
+        self,
+    ):
+        api = ProviderAPI(openrouter=fails_first(recorded("openrouter")))
+        catalog = await loaded(api, references=ON_OPENROUTER, openrouter="r-test-key")
+        assert catalog.status()[0].state is ProviderState.DEGRADED
+        before = catalog.record(QWEN)
+        assert (before.thinking.mechanism, before.context_window) == (ThinkingMechanism.NONE, None)
+
+        task = catalog.start_background_refresh()
+        assert task is not None
+        await task
+
+        assert api.calls == ["openrouter", "openrouter"]
+        assert catalog.status()[0].state is ProviderState.FRESH
+        after = catalog.record(QWEN)
+        assert (after.thinking.mechanism, after.context_window) == (
+            ThinkingMechanism.EFFORT, 131072,
+        )
+
+    async def test_it_is_tried_once_more_and_no_more(self, tmp_path):
+        cache = tmp_path / "model_cache.json"
+        api = ProviderAPI(openrouter=500)
+        keyed = providers(openrouter="r-test-key")
+        catalog = ModelCatalog(providers=keyed, references=ON_OPENROUTER, cache_path=cache,
+                               transport=api.transport, clock=Clock())
+        await catalog.load()
+
+        task = catalog.start_background_refresh()
+        assert task is not None
+        await task
+
+        assert api.calls == ["openrouter", "openrouter"]
+        assert catalog.status()[0].state is ProviderState.DEGRADED
+        assert catalog.start_background_refresh() is None  # no loop
+        # The failure is cached, so the next start tries again, as before.
+        again = ModelCatalog(providers=keyed, references=ON_OPENROUTER, cache_path=cache,
+                             transport=ProviderAPI(openrouter=500).transport, clock=Clock())
+        await again.load()
+        assert again.start_background_refresh() is not None
+        await again.aclose()
+
+    async def test_a_refresh_or_search_that_fails_is_not_tried_again_by_itself(self):
+        api = ProviderAPI()
+        catalog = await loaded(api, google=KEYS["google"])
+        api.answers["google"] = 500
+        await catalog.refresh()
+
+        assert catalog.start_background_refresh() is None
+
+    async def test_the_warning_says_what_it_means_for_a_built_in_provider_s_models(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await loaded(ProviderAPI(google=refuse), google=KEYS["google"])
+
+        (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning.startswith("Could not list google models (")
+        assert "ids are not checked" in warning
+        assert "limits and thinking come from the shipped table" in warning
+        # The agents are resolved once, at startup; a later listing reaches the rest.
+        assert "this session's agents" in warning and "next start" in warning
+
+    async def test_the_warning_says_what_it_means_for_an_openrouter_provider_s_models(self, caplog):
+        """The table knows no OpenRouter model: without its listing a model has no thinking
+        and the unknown-window floor, for this session's agents."""
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await loaded(
+                ProviderAPI(openrouter=fails_first(recorded("openrouter"))),
+                references=ON_OPENROUTER, openrouter="r-test-key",
+            )
+
+        (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning.startswith("Could not list openrouter models (")
+        assert "ids are not checked" in warning
+        assert "without thinking" in warning and "128,000-token window" in warning
+        assert "shipped table" not in warning
+        assert "this session's agents" in warning and "next start" in warning

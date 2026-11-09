@@ -114,7 +114,9 @@ def create_workflow_manager_from_settings(
     Args:
         agent_configs: List of agent configurations.
         settings: Application settings (determines orchestrator type).
-        app_name: Application name for services.
+        app_name: The name conversations are kept under, and what an
+            OpenRouter provider is told (``settings.app_name`` if not given);
+            see ``BaseWorkflowManager``.
         model: The manager's own default model, a ``provider:model``
             reference or a model id; it takes the ``default`` role.
         adk_config_path: A native ADK YAML agent config. In ``native`` mode it

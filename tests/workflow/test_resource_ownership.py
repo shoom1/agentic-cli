@@ -209,7 +209,6 @@ def _real_manager(monkeypatch=None):
     mgr = GoogleADKWorkflowManager(
         agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
     )
-    mgr._ensure_managers_initialized = lambda: None
 
     created: list[_AsyncClosable] = []
 
