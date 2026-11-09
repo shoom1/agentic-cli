@@ -966,7 +966,10 @@ as 128,000 tokens.
   list a provider in use that can be called and has no cache entry yet: all
   of them at once, each for at most 10 seconds. An older entry is used while
   it is listed again in the background. Every process of the app shares the
-  file, and a listing writes only its own provider's entry; a failed listing
+  file, and a listing writes only its own provider's entry and keeps the
+  others as the file holds them (an entry this release cannot read too; a file
+  of a newer release is neither read nor written: this process keeps its
+  listings in memory and logs once that every start lists); a failed listing
   never replaces one of the provider's address and kind.
 - **Checking ids**: a model a provider does not list is rejected only when
   that provider's listing is fresh; a failed, untried or older listing
@@ -975,8 +978,9 @@ as 128,000 tokens.
   role or an agent names that the provider does not serve fails at startup,
   listing the provider's models. An entry only in `models` is left out of
   the list instead, with one warning: an app's list does not stop it starting
-  because a host retired one model, and the cache records the absence, so it
-  costs one listing, not one at every start.
+  because a host retired one model, and the cache records the absence (of every
+  project's list that shares the file), so it costs one listing, not one at
+  every start.
 - **An OpenAI-compatible host's listing** may be `{"data": [...]}` or a bare
   array, and a model's window is read from its `context_length`,
   `context_window` or `max_model_len`, the first present. Its thinking comes
