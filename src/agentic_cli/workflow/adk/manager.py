@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
@@ -27,7 +28,7 @@ from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
 
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.base_manager import BaseWorkflowManager
+from agentic_cli.workflow.base_manager import BaseWorkflowManager, Closer
 from agentic_cli.workflow.context import CompactResult, context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
@@ -141,11 +142,6 @@ def _author_of_call(session: Any, call_id: str) -> str | None:
     return None
 
 
-#: Releases still closing after a cancel stopped their wait: held so none is
-#: garbage collected halfway (``_release_resources``).
-_CLOSING: set[asyncio.Future] = set()
-
-
 def _as_written(prompt: str) -> Callable[[Any], str]:
     """``prompt`` as an instruction ADK sends as written.
 
@@ -226,10 +222,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
-        # True while reinitialize(preserve_sessions=True) is in flight: the
-        # live session service is being carried across and must survive both a
-        # successful rebuild and a rollback.
-        self._session_service_pinned = False
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
@@ -283,134 +275,34 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return text
 
-    async def cleanup(self) -> None:
-        """Clean up workflow manager resources.
+    def _detach_backend(self) -> list[Closer]:
+        """The runner and the agent tree, and the LLM logging plugin.
 
-        Releases resources and resets state. Call this before shutting down or
-        when reinitializing with new settings. Idempotent: references are
-        detached before being closed, so a repeat call is a no-op. Takes the
-        lifecycle and turn locks, so it cannot tear the runner down while a
-        turn is streaming.
+        The runner closes the agents' toolsets (an MCP server stops with its
+        toolset) and plugins; the session service it only flushes, so one a
+        model switch keeps stays open. It closes before the session service
+        (the base runs the backend's closers before the store's).
         """
-        async with self._lifecycle_lock:
-            async with self._turn_lock:
-                await self._release_resources()
-
-    async def _release_resources(self, keep_session_service: bool = False) -> None:
-        """Release owned resources; never raises.
-
-        The session service is *closed*, not merely dropped — the durable
-        ``DatabaseSessionService`` holds a SQLAlchemy engine whose connection
-        pool leaks otherwise. ``reinitialize(preserve_sessions=True)`` keeps it
-        instead, and then reuses that same instance rather than building a
-        replacement that would be discarded unclosed.
-
-        Args:
-            keep_session_service: Retain (do not close) the session service.
-        """
-        logger.debug("cleaning_up_workflow_manager")
-
-        # Detach first so a concurrent/repeat cleanup can't double-close. A
-        # pinned service is being carried across a reinitialize, so a rollback
-        # inside that window must not close it either.
-        session_service = None
-        if not (keep_session_service or self._session_service_pinned):
-            session_service, self._session_service = self._session_service, None
         runner, self._runner = self._runner, None
         self._root_agent = None
-        self._budgets = {}
-        self._index_snapshots.clear()
-        self._initialized = False
-
-        # Clear LLM logging plugin
         if self._llm_logging_plugin:
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
+        return [("runner", functools.partial(self._aclose_owned, runner, "runner"))]
 
-        catalog, self._catalog = self._catalog, None
+    def _detach_store(self) -> list[Closer]:
+        """The session service.
 
-        # Clean up managers (sandbox, jobs, etc.)
-        self._cleanup_managers()
-
-        # The rest closes in a task of its own, awaited under a shield: a
-        # cancel (Ctrl+C can stop a /settings model switch) stops only the
-        # wait. Cancelled halfway, ADK's runner would leave the toolsets it
-        # had not reached open, and the service and catalog with them.
-        closing = asyncio.ensure_future(self._close_detached(runner, session_service, catalog))
-        _CLOSING.add(closing)
-        closing.add_done_callback(_CLOSING.discard)
-        await asyncio.shield(closing)
-
-        logger.info("workflow_manager_cleaned_up")
-
-    async def _close_detached(self, runner: Any, session_service: Any, catalog: Any) -> None:
-        """Close what ``_release_resources`` detached, in this order."""
-        # The runner closes the agents' toolsets (an MCP server stops with
-        # its toolset) and plugins; the session service it only flushes, so
-        # one a model switch keeps stays open. Before the service closes.
-        await self._aclose_owned(runner, "runner")
-        await self._aclose_owned(session_service, "session_service")
-        await self._aclose_owned(catalog, "model_catalog")
-
-    async def reinitialize(
-        self,
-        model: str | None = None,
-        preserve_sessions: bool = True,
-    ) -> None:
-        """Reinitialize the workflow manager with new configuration.
-
-        Use this method when settings change (e.g. a model switch) to recreate
-        agents and runners with the new configuration.
-
-        Transactional: on failure the manager ends up *uninitialized* (
-        ``is_initialized`` False) with nothing left allocated, rather than
-        holding a half-built runner that would answer as if it were ready. The
-        caller (``WorkflowController``) turns that into a FAILED state. A
-        preserved session service survives both outcomes, so a retry can still
-        continue the same conversations; so do the services scoped to them
-        (session grants, sandbox kernels, jobs — see ``_carrying_services``).
-
-        Args:
-            model: Optional new model to use. If None, re-resolves from settings.
-            preserve_sessions: If True, keeps the existing session service
-                (default) and the services (permission engine, sandbox, jobs,
-                knowledge bases) and reuses them for the new runner. If False,
-                they are released and fresh ones created.
-
-        Raises:
-            Exception: Whatever initialization raised, after rollback.
+        It is *closed*, not merely dropped: the durable
+        ``DatabaseSessionService`` holds a SQLAlchemy engine whose connection
+        pool leaks otherwise. A model switch keeps it instead
+        (``reinitialize(preserve_sessions=True)``), and ``_do_initialize``
+        then reuses that same instance rather than building a replacement
+        that would be discarded unclosed.
         """
-        logger.info(
-            "reinitializing_workflow_manager",
-            new_model=model,
-            preserve_sessions=preserve_sessions,
-        )
-
-        async with self._lifecycle_lock:
-            async with self._turn_lock:
-                preserved = self._session_service if preserve_sessions else None
-                with self._carrying_services(preserve_sessions):
-                    await self._release_resources(keep_session_service=preserve_sessions)
-                    self._reset_model(model)
-                    self._session_service_pinned = preserve_sessions
-                    try:
-                        # _do_initialize reuses self._session_service when set, so
-                        # no replacement service is built for a preserved one.
-                        await self._initialize_locked()
-                    except BaseException:
-                        # _initialize_locked already rolled back what it created;
-                        # restore the preserved service so a retry can use it.
-                        if preserved is not None:
-                            self._session_service = preserved
-                        raise
-                    finally:
-                        self._session_service_pinned = False
-
-        logger.info(
-            "workflow_manager_reinitialized",
-            model=self.model,
-            sessions_preserved=preserve_sessions,
-        )
+        service, self._session_service = self._session_service, None
+        close = functools.partial(self._aclose_owned, service, "session_service")
+        return [("session_service", close)]
 
     def _get_state_tools(self) -> list:
         """Return ADK-native state tools using ToolContext.state."""

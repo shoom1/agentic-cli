@@ -61,7 +61,6 @@ def _manager(session_service) -> GoogleADKWorkflowManager:
     mgr._initialized = True
     mgr._llm_logging_plugin = None
     mgr._catalog = None
-    mgr._session_service_pinned = False
     mgr._carried_service_keys = frozenset()
     mgr._index_snapshots = {}
     mgr._lifecycle_lock = asyncio.Lock()
@@ -148,9 +147,22 @@ class TestRunnerClose:
         mgr = _manager(service)
         runner = mgr._runner = _Runner()
 
-        await mgr._release_resources(keep_session_service=True)
+        with mgr._keeping(True):  # a model switch
+            await mgr._release_resources()
 
         assert (runner.closes, service.closes) == (1, 0)
+        assert mgr._session_service is service
+
+    async def test_the_deprecated_keyword_still_keeps_the_session_service(self):
+        """``keep_session_service=True`` (0.6) keeps the store until 0.8.0."""
+        service = _AsyncClosable()
+        mgr = _manager(service)
+
+        with pytest.warns(DeprecationWarning, match="_keeping"):
+            await mgr._release_resources(keep_session_service=True)
+
+        assert service.closes == 0
+        assert mgr._session_service is service
 
     async def test_a_cancel_during_the_close_lets_everything_close(self):
         """Ctrl+C can stop a ``/settings`` model switch while the runner

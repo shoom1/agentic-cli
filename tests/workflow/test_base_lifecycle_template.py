@@ -114,11 +114,6 @@ async def _reply(manager: BaseWorkflowManager) -> list[str]:
     return [event.content async for event in manager.process("hi", "u", "s")]
 
 
-#: Until the base owns the lifecycle (the next commits remove these marks).
-_NOT_YET = pytest.mark.xfail(strict=True, reason="the base does not own the lifecycle yet")
-
-
-@_NOT_YET
 class TestABackendOfHooksOnly:
     async def test_cleanup_leaves_it_uninitialized_and_released(self, ctx):
         manager = _hooks_only(ctx)
@@ -211,7 +206,6 @@ class TestABackendOfHooksOnly:
         await manager.cleanup()
 
 
-@_NOT_YET
 class TestTheBaseReleaseResetsTheBaseState:
     """A backend that keeps a ``cleanup`` of its own and calls the base
     release (as the docstring once showed) is left uninitialized by it."""
