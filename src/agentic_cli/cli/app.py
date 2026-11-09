@@ -61,7 +61,7 @@ from agentic_cli.settings_persistence import (
     RESTART_KEYS,
     USER_PREFERENCE_KEYS,
 )
-from agentic_cli.workflow.factory import orchestrator_of
+from agentic_cli.workflow.factory import check_backend, orchestrator_of
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -1742,7 +1742,7 @@ class BaseCLIApp:
                 session_id=self._session_id,
             )
 
-    async def start_new_session(self) -> str:
+    async def start_new_session(self, backend: str | None = None) -> str:
         """Start a new conversation in this process (``/new``), and return its id.
 
         Waits for a running turn or job resume (the turn lock), then switches
@@ -1769,30 +1769,83 @@ class BaseCLIApp:
         conversation that started it (a finished job waits until that
         conversation is opened).
 
+        A conversation runs on one backend for its whole life (each keeps
+        its history in its own store), so the new one runs on ``backend``,
+        by default the settings' ``orchestrator``, the backend of new
+        conversations. On another backend than the one running, the
+        memories of the conversation left are proposed first (its backend
+        holds it), then a manager of ``backend`` is started
+        (``WorkflowController.switch_backend``: a failure there changes
+        nothing), and the line names it: ``"New conversation <new> on
+        deepagents."``, with ``" Previous: <old>, kept by adk."`` when the
+        conversation left is stored; one on LangGraph is told it is
+        deprecated. A Ctrl+C once the new backend runs (the old one is being
+        released) is too late to undo: the new conversation is opened there
+        first, then the cancel goes on. The backend chosen is not saved to
+        any settings file.
+
+        Args:
+            backend: The backend the new conversation runs on: ``adk``,
+                ``deepagents`` or ``langgraph``.
+
         Returns:
             The new session id (12 hex characters).
-        """
-        import uuid
 
+        Raises:
+            ValueError: ``backend`` is no orchestrator.
+            ImportError: Its extra is not installed (the message says how to
+                install it); nothing changed.
+        """
+        target = check_backend(backend).value if backend is not None else None
         async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
-                old = self._session_id
-                parts = self._switch_parts()
-                stored = parts.workflow is not None and await self._is_stored(
-                    parts.workflow, old
-                )
-                new = uuid.uuid4().hex[:12]
-                switched = await self._conversation.switch(new, parts)
-                if not switched.made:  # a new id: never open elsewhere in practice
-                    raise RuntimeError(
-                        f"'{new}' is open in another process ({switched.holder})"
-                    )
-                logger.info("new_session_started", session_id=new, previous=old)
-                line = f"New conversation {new}."
-                if stored:
-                    line += f" Previous: {old}, listed in /sessions."
-                self.session.add_message("system", line)
-                return new
+                return await self._new_conversation(target)
+
+    async def _new_conversation(self, backend: str | None) -> str:
+        """``start_new_session``'s switch, under the turn lock: on ``backend``
+        (the settings' orchestrator when None)."""
+        import uuid
+
+        controller = self._workflow_controller
+        old, old_backend = self._session_id, controller.backend
+        target = backend or orchestrator_of(self._settings).value
+        moving = target != old_backend
+        if moving and backend is None:
+            check_backend(target)  # before anything changes
+        parts = self._switch_parts()
+        stored = parts.workflow is not None and await self._is_stored(parts.workflow, old)
+        place, interrupted = None, None
+        if moving:
+            if self._turned:  # proposed while the backend that holds them runs
+                await self._saving_facts(old)
+                self._turned = False
+            try:
+                await controller.switch_backend(target)
+            except asyncio.CancelledError as cancel:
+                if controller.backend != target:
+                    raise  # it never ran: nothing changed
+                interrupted = cancel  # it runs: its conversation is opened, then the cancel
+            parts = self._switch_parts()
+            place = Place.of(self._settings, backend=target)
+        new = uuid.uuid4().hex[:12]
+        switched = await self._conversation.switch(new, parts, place=place, propose=not moving)
+        if not switched.made:  # a new id: never open elsewhere in practice
+            raise RuntimeError(f"'{new}' is open in another process ({switched.holder})")
+        logger.info("new_session_started", session_id=new, previous=old, backend=target)
+        if moving:
+            line = f"New conversation {new} on {target}."
+            if stored:
+                line += f" Previous: {old}, kept by {old_backend}."
+        else:
+            line = f"New conversation {new}."
+            if stored:
+                line += f" Previous: {old}, listed in /sessions."
+        self.session.add_message("system", line)
+        if moving and target == OrchestratorType.LANGGRAPH.value:
+            self.session.add_warning(_LANGGRAPH_DEPRECATION)
+        if interrupted is not None:
+            raise interrupted
+        return new
 
     async def resume_session(self, session_id: str) -> bool:
         """Switch to the stored conversation ``session_id`` (``/resume``), and show where it left off.

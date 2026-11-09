@@ -787,7 +787,10 @@ class TestOnRealBackends:
         pytest.importorskip("deepagents")
         monkeypatch.setattr(deepagents_manager, "build_chat_model",
                             ScriptedModels(solo=[ai("A1."), ai("A2."), ai("B1."), ai("A3.")]))
-        with MockContext(google_api_key="test-key", session_store="memory") as context:
+        # The settings name the backend it runs: /new starts on the settings'.
+        with MockContext(
+            google_api_key="test-key", session_store="memory", orchestrator="deepagents"
+        ) as context:
             manager = DeepAgentsWorkflowManager(
                 agent_configs=[AgentConfig(name="solo", prompt="You help.")],
                 settings=context.settings, model="gemini-2.5-flash",

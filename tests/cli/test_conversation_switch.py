@@ -523,3 +523,172 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
 
         assert built == [] and kept.turns == [app.session_id]
         assert not free(app, self.key_where(app, "adk", "sqlite"))
+
+
+class TestANewConversationOnAnotherBackend:
+    """``/new [backend]``: a conversation belongs to one backend for its whole
+    life, so another backend is a new conversation's. ``/new deepagents``
+    starts one there (the setting stays; nothing is saved); plain ``/new``
+    starts one on the settings' orchestrator, the backend of new
+    conversations. An unknown backend, or one whose extra is not installed,
+    is refused, and nothing changes."""
+
+    Manager = TestAPlaceChangeWhileTheWorkflowIsDown.Manager
+
+    @classmethod
+    def on_adk(cls, monkeypatch, app_settings=None):
+        """An app running ADK; the controller builds any other backend's fake."""
+        built = TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: False)
+        adk = cls.Manager("adk", fails=False)
+        adk.is_initialized = True
+        app = app_on(adk, app_settings or BaseSettings(session_store="sqlite"))
+        assert app._hold(app.session_id) is None  # as the start does
+        return app, adk, built
+
+    @staticmethod
+    def running(app) -> str:
+        return app._workflow_controller.workflow.backend_type
+
+    async def test_it_starts_one_there_and_lets_the_old_one_go(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        old, old_key = app.session_id, app._conversation_key(app.session_id)
+        app._message_processor._last_task_progress = "- [ ] an adk task"
+        app.usage_tracker.record({"prompt_tokens": 100, "completion_tokens": 5})
+
+        await app.process_input("/new deepagents")
+
+        new = app.session_id
+        assert new != old and self.running(app) == "deepagents"
+        assert [m.backend_type for m in built] == ["deepagents"]
+        assert built[0].calls == [f"load_session {new}"]
+        assert app._conversation_key(new)[0] == "deepagents"
+        assert not free(app, app._conversation_key(new)) and free(app, old_key)
+        adk.cleanup  # released by the controller
+        assert app._message_processor._last_task_progress is None
+        assert app.usage_tracker.invocation_count == 0
+        assert said(app.session, "add_message")[-1] == f"New conversation {new} on deepagents."
+        assert app.settings.orchestrator.value == "adk"  # the setting stays
+
+    async def test_a_model_switch_then_keeps_that_backend(self, home, monkeypatch):
+        app, _, built = self.on_adk(monkeypatch)
+        await app.process_input("/new deepagents")
+        conversation = app.session_id
+
+        assert await app.apply_settings({"model": "google:gemini-2.5-pro"})
+
+        assert self.running(app) == "deepagents" and app._workflow_controller.backend == "deepagents"
+        assert built[0].reinitialize.await_count == 1 and len(built) == 1
+        assert app.session_id == conversation
+
+    async def test_plain_new_runs_on_the_settings_orchestrator(self, home, monkeypatch):
+        app, _, built = self.on_adk(monkeypatch)
+        await app.process_input("/new deepagents")
+
+        await app.process_input("/new")
+
+        assert self.running(app) == "adk"
+        assert [m.backend_type for m in built] == ["deepagents", "adk"]
+        assert said(app.session, "add_message")[-1] == f"New conversation {app.session_id} on adk."
+
+    async def test_an_unknown_backend_is_refused(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+
+        await app.process_input("/new nope")
+
+        assert app.session_id == old and built == [] and self.running(app) == "adk"
+        assert said(app.session, "add_error") == [
+            "Unknown backend 'nope': adk, deepagents or langgraph."
+        ]
+
+    async def test_one_whose_extra_is_missing_is_refused(self, home, monkeypatch):
+        import sys
+
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
+
+        await app.process_input("/new deepagents")
+
+        assert app.session_id == old and built == [] and self.running(app) == "adk"
+        assert said(app.session, "add_error") == [
+            "The deepagents orchestrator needs the 'deepagents' extra. "
+            "Install with: pip install 'agentic-cli[deepagents]'"
+        ]
+
+    async def test_langgraph_says_it_is_deprecated(self, home, monkeypatch):
+        from agentic_cli.cli.app import _LANGGRAPH_DEPRECATION
+
+        app, _, _ = self.on_adk(monkeypatch)
+
+        await app.process_input("/new langgraph")
+
+        assert self.running(app) == "langgraph"
+        assert said(app.session, "add_warning") == [_LANGGRAPH_DEPRECATION]
+
+    async def test_an_app_overriding_start_new_session_keeps_its_new(self, home, monkeypatch):
+        """``start_new_session()`` overridden without the ``backend`` keyword:
+        plain ``/new`` calls it as before."""
+        from agentic_cli.cli.app import BaseCLIApp
+
+        calls: list[str] = []
+
+        class App(BaseCLIApp):
+            async def start_new_session(self) -> str:
+                calls.append("theirs")
+                return await super().start_new_session()
+
+        app, _, _ = self.on_adk(monkeypatch)
+        app.__class__ = App
+        old = app.session_id
+
+        await app.process_input("/new")
+
+        assert calls == ["theirs"] and app.session_id != old
+
+    async def test_ctrl_c_before_the_new_backend_runs_changes_nothing(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+        starting = asyncio.Event()
+
+        async def initialize_services():
+            starting.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(self.Manager, "initialize_services", lambda self: initialize_services())
+        new = asyncio.create_task(app.process_input("/new deepagents"))
+        await asyncio.wait_for(starting.wait(), 5)
+        new.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await new
+
+        assert app.session_id == old and self.running(app) == "adk"
+        assert not free(app, app._conversation_key(old))
+
+    async def test_ctrl_c_once_the_new_backend_runs_opens_its_conversation(
+        self, home, monkeypatch
+    ):
+        """Too late to undo once the new backend is published (the old one is
+        being released): the new conversation is opened there, then the
+        cancel goes on. The app never runs one backend in another's
+        conversation."""
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+        releasing, released = asyncio.Event(), asyncio.Event()
+
+        async def cleanup():
+            releasing.set()
+            await released.wait()
+
+        adk.cleanup = cleanup
+        new = asyncio.create_task(app.process_input("/new deepagents"))
+        await asyncio.wait_for(releasing.wait(), 5)
+        new.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await new
+        released.set()
+
+        assert app.session_id != old and self.running(app) == "deepagents"
+        assert app._conversation_key(app.session_id)[0] == "deepagents"
+        assert not free(app, app._conversation_key(app.session_id))
+        await app._workflow_controller.close()

@@ -229,22 +229,24 @@ class ConversationCore:
         Ctrl+C or a failure leaves the app in the conversation it was in,
         holding it alone, and a workflow that took ``to`` is given that
         conversation back (shielded, so a second Ctrl+C cannot stop it
-        half way). A switch to the conversation the app is already in (the
-        one a run starts in, or the same id in another backend after an
-        orchestrator switch) has no other to stay in: it is made before the
-        load, whatever the load says.
+        half way). A switch with no other conversation to stay in is made
+        before the load, whatever the load says: to the conversation the app
+        is already in (the one a run starts in), or to another place (a new
+        conversation on another backend, which runs already: the one left
+        is not there).
 
         Args:
             to: The conversation's id.
             parts: The app's parts it acts on.
             place: Where ``to`` is kept: the current place by default; another
-                one after an orchestrator switch, whose usage counters keep
-                the session's totals and forget only the context.
+                one for a conversation on another backend or store. The same
+                conversation in another place keeps the session's usage
+                totals and forgets only the context.
             stored: ``to`` must be in the store (``/resume``); a new
                 conversation's load finds nothing, as it should.
-            propose: Propose the memories of the conversation left (never
-                after an orchestrator switch: the backend that holds them is
-                gone).
+            propose: Propose the memories of the conversation left (not when
+                the caller proposed them already, while the backend that
+                holds them ran).
             hold: ``to``'s lock, already taken (``acquire``); the switch keeps
                 it or lets it go.
 
@@ -261,12 +263,13 @@ class ConversationCore:
             if isinstance(taken, int):
                 return Switch(made=False, holder=taken)
             hold = taken
-        swapped = hold.place != self.place
+        elsewhere = hold.place != self.place
+        swapped = elsewhere and to == left  # the same conversation, in another place
         workflow = parts.workflow
         made = told = False
         loaded: bool | None = None
         try:
-            if to == left:  # nothing else to stay in: held whatever the load says
+            if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
                 self._make(hold, parts, swapped=swapped)
                 made = True
             elif propose and self.turned:
