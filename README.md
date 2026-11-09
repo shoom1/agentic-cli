@@ -1364,6 +1364,22 @@ also re-verifies the backend is live after acquiring the turn lock, so a turn
 queued behind a cleanup reinitializes (or fails cleanly) instead of running
 against released resources. Run separate managers for genuine parallelism.
 
+The lifecycle is `BaseWorkflowManager`'s: `initialize_services()` (a failed
+attempt is rolled back), `cleanup()`, `reinitialize()` and the one release
+they all run (`_release_resources`). The release marks the manager
+uninitialized, takes what the backend holds, closes the services, then closes
+the rest in one task of its own, in a fixed order, awaited under a shield:
+Ctrl+C during a model switch stops only the wait, and nothing is left open. A
+model switch (`reinitialize(preserve_sessions=True)`) keeps the conversation's
+session store and services, also when it fails. A backend of your own
+implements `backend_type`, `_get_state_tools`, `_do_initialize` (its build)
+and `process`, and two hooks for what it holds: `_detach_backend()` (what each
+initialization builds: agents, a runner, MCP sessions) and `_detach_store()`
+(the store its conversations live in, which a model switch keeps). Each is
+synchronous (`def`), sets its handles to `None` and returns `(name, close)`
+pairs; both default to nothing. `BaseWorkflowManager`'s docstring ends with
+such a backend.
+
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
 `FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a
 surfaced rate limit fails it explicitly. An `EventType.ERROR` event is

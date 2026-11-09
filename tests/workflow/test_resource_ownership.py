@@ -61,7 +61,6 @@ def _manager(session_service) -> GoogleADKWorkflowManager:
     mgr._initialized = True
     mgr._llm_logging_plugin = None
     mgr._catalog = None
-    mgr._session_service_pinned = False
     mgr._carried_service_keys = frozenset()
     mgr._index_snapshots = {}
     mgr._lifecycle_lock = asyncio.Lock()
@@ -148,9 +147,22 @@ class TestRunnerClose:
         mgr = _manager(service)
         runner = mgr._runner = _Runner()
 
-        await mgr._release_resources(keep_session_service=True)
+        with mgr._keeping(True):  # a model switch
+            await mgr._release_resources()
 
         assert (runner.closes, service.closes) == (1, 0)
+        assert mgr._session_service is service
+
+    async def test_the_deprecated_keyword_still_keeps_the_session_service(self):
+        """``keep_session_service=True`` (0.6) keeps the store until 0.8.0."""
+        service = _AsyncClosable()
+        mgr = _manager(service)
+
+        with pytest.warns(DeprecationWarning, match="_keeping"):
+            await mgr._release_resources(keep_session_service=True)
+
+        assert service.closes == 0
+        assert mgr._session_service is service
 
     async def test_a_cancel_during_the_close_lets_everything_close(self):
         """Ctrl+C can stop a ``/settings`` model switch while the runner
@@ -578,7 +590,6 @@ def _deepagents_manager(connection, mcp=None):
     mgr._services = {}
     mgr._checkpointer = object()
     mgr._checkpointer_cm = connection
-    mgr._checkpointer_pinned = False
     mgr._sessions = object()
     mgr._root = object()
     mgr._root_agent_name = "a"
@@ -641,12 +652,23 @@ class TestDeepAgentsMCPClose:
     async def test_a_release_that_keeps_the_checkpointer_still_closes_them(self):
         connection, mcp = _CountedConnection(), _CountedMCP()
         mgr = _deepagents_manager(connection, mcp)
-        mgr._checkpointer_pinned = True  # the rollback inside a model switch
 
-        await mgr._release_resources()
-        await mgr._release_resources(keep_checkpointer=True)
+        with mgr._keeping(True):  # a model switch, and the rollback inside it
+            await mgr._release_resources()
 
-        assert (mcp.closes, connection.closes) == (2, 0)
+        assert (mcp.closes, connection.closes) == (1, 0)
+        assert mgr._checkpointer_cm is connection
+        assert mgr._mcp is not mcp, "the next initialization reuses closed sessions"
+
+    async def test_the_deprecated_keyword_still_keeps_the_checkpointer(self):
+        connection = _CountedConnection()
+        mgr = _deepagents_manager(connection)
+
+        with pytest.warns(DeprecationWarning, match="_keeping"):
+            await mgr._release_resources(keep_checkpointer=True)
+
+        assert connection.closes == 0
+        assert mgr._checkpointer_cm is connection
 
     async def test_their_notices_go_with_them(self):
         mgr = _deepagents_manager(None)

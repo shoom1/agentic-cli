@@ -80,7 +80,8 @@ class MCPSessions:
     ``start`` opens an agent's servers, ``aclose`` closes every session (from
     any task, bounded, never raising), and ``identify`` says which tool
     objects are the open sessions' tools. After ``aclose`` the same instance
-    can ``start`` again (a model switch reopens the sessions).
+    can ``start`` again; the manager's release hands an instance over to be
+    closed and starts the next initialization's sessions on a fresh one.
     """
 
     def __init__(self) -> None:

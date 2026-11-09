@@ -188,8 +188,10 @@ the start of the entry's title.
 
 - The LangGraph backend (`orchestrator="langgraph"`) is removed in 0.8.0:
   install `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`.
-  Its sessions do not carry over. Nothing else is deprecated. (Deprecated:
-  **The LangGraph backend**)
+  Its sessions do not carry over. (Deprecated: **The LangGraph backend**)
+- A backend's `_release_resources(keep_session_service=True)` keeps working
+  until 0.8.0, with a warning: release inside `_keeping(True)`. Nothing else
+  is deprecated. (Deprecated: **`_release_resources(keep_session_service=True)`**)
 
 ### Security
 
@@ -797,11 +799,15 @@ the start of the entry's title.
     (`SessionInfo`, below) from its newest checkpoint, `delete_session` also
     removes the sub-agents' checkpoints and returns False for an unknown id,
     and `recent_messages` is the user's and the assistant's text.
-  - **Lifecycle, as on ADK.** A cleanup or a model switch waits for the
-    running turn. A failed initialization closes the checkpointer it
-    opened. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
-    same checkpointer and connection, also when it fails, so a retry
-    continues the conversation.
+  - **Lifecycle, as on ADK** (the base's: see Changed). A cleanup or a model
+    switch waits for the running turn. A failed initialization closes the
+    checkpointer it opened. A model switch
+    (`reinitialize(preserve_sessions=True)`) keeps the same checkpointer and
+    connection, also when it fails, so a retry continues the conversation. A
+    release closes the services, then the agents' MCP sessions, the
+    checkpointer's connection and the model catalog, under a shield: a
+    Ctrl+C during a model switch stops only the wait, and everything still
+    closes once.
   - **Context.** Deep Agents' summarization runs in every agent, on its own
     model, at the point both backends share (see Changed): the smaller of
     85% of the model's input budget (0.95 of its context window, less its
@@ -1246,6 +1252,31 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **`cleanup()` and `reinitialize()` are `BaseWorkflowManager`'s; a backend
+  implements the release's hooks.** Both were abstract, so every backend wrote
+  its own, and the base's `_release_resources` closed only the services: a
+  backend that relied on it was still initialized after a cleanup, did not
+  initialize again, and admitted the next turn against what it had released.
+  The base now implements both, on one release (`_release_resources`, which a
+  failed initialization's rollback runs too): it marks the manager
+  uninitialized and drops its context budgets, memory index snapshots and
+  model catalog, takes what the backend holds through two hooks,
+  `_detach_backend()` (what each initialization builds: agents, a runner, MCP
+  sessions) and `_detach_store()` (the store the conversations live in),
+  closes the services, then closes the rest in one task of its own, in that
+  order, each close isolated, awaited under a shield: a Ctrl+C during a model
+  switch stops only the wait, and nothing is left open. Each hook is
+  synchronous, detaches its handles and returns `(name, close)` pairs; both
+  default to nothing, and one that returns an awaitable (`async def` by
+  mistake) fails the release with a `TypeError` once the rest is released. A
+  model switch (`reinitialize(preserve_sessions=True)`) keeps the store and
+  the services with one mechanism, `_keeping(preserve)` (`_carrying_services`
+  is its other name), also through a switch that fails. A backend now
+  implements `backend_type`, `_get_state_tools`, `_do_initialize`, `process`
+  and the hooks for what it holds, as the class docstring's example does; one
+  that overrides `cleanup` or `reinitialize` keeps its own (the LangGraph
+  backend does).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -1954,6 +1985,15 @@ the start of the entry's title.
 
 ### Deprecated
 
+- **`_release_resources(keep_session_service=True)`**, which kept ADK's
+  session service through a release, is deprecated and will be removed in
+  0.8.0. It still keeps the session store for that release, with a
+  `DeprecationWarning`; release inside `with manager._keeping(True):`
+  instead, as `reinitialize(preserve_sessions=True)` does. An override of
+  `_release_resources` is called without the keyword during a model switch
+  (the base keeps the store through `_keeping`): it reads
+  `self._keeping_store` to know whether the store is being kept.
+
 - **The LangGraph backend** (`orchestrator="langgraph"`,
   `LangGraphWorkflowManager` and its alias `LangGraphManager`, and the
   `langgraph` extra) is deprecated and will be removed in 0.8.0, with
@@ -2289,9 +2329,8 @@ step; each entry says what to use instead.
   lifecycle lock (a turn initializes before it takes the turn lock);
   `reinitialize()` and `cleanup()` take both. The docstrings of the
   constructor's `app_name` (it names the conversations; the services use
-  `settings.app_name`), `summarize` (`content` is not sent, the prompt holds
-  it) and `_release_resources` (it closes the catalog and the services, and
-  leaves a backend's own state to its override) are corrected too.
+  `settings.app_name`) and `summarize` (`content` is not sent, the prompt
+  holds it) are corrected too.
 
 - **The example in `BaseWorkflowManager`'s docstring is a backend that runs.**
   It left out five abstract members (`backend_type`, `_get_state_tools`,

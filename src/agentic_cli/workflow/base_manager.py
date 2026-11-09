@@ -7,6 +7,8 @@ The base class provides auto-detection of required managers (memory, planning,
 HITL) based on tool requirements, creating them lazily when needed.
 
 It also provides shared implementations for:
+- The lifecycle: initialization, ``cleanup``, ``reinitialize`` and the one
+  release they run, which the backends join through two hooks
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
 - Context: each agent's context numbers (``context_budget``), for a UI
@@ -18,6 +20,7 @@ import asyncio
 import contextlib
 import functools
 import inspect
+import warnings
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
 from types import MappingProxyType
@@ -82,6 +85,15 @@ MEMORY_INDEX_MIN_BYTES = 1_000
 
 #: Where the backends' tool classes live.
 _TOOL_CLASS_MODULES = ("google.adk.tools", "langchain_core.tools")
+
+#: One thing a release closes: a name for the log, and the call that closes it
+#: (a coroutine function, or a plain function). The detach hooks return them
+#: (see ``BaseWorkflowManager._release_resources``).
+Closer = tuple[str, Callable[[], Any]]
+
+#: Releases still closing after a cancel stopped their wait: held so none is
+#: garbage collected halfway (``BaseWorkflowManager._release_resources``).
+_CLOSING: set[asyncio.Future] = set()
 
 
 def _module_of(klass: type) -> str:
@@ -178,22 +190,45 @@ class BaseWorkflowManager(ABC):
         on cancellation. The active session/user identity remains a
         ContextVar, so it stays correct for nested and task-spawned work.
 
+    Lifecycle contract:
+        The base owns the lifecycle: ``initialize_services`` (transactional:
+        a failed attempt is rolled back), ``cleanup``, ``reinitialize`` (a
+        model switch, which keeps the session store and the services with
+        ``_keeping``) and the one release they all run,
+        ``_release_resources``. A backend builds in ``_do_initialize`` and
+        takes part in the release through two hooks, ``_detach_backend``
+        (what it built for this initialization) and ``_detach_store`` (the
+        store its conversations live in), each synchronous, detaching its
+        handles and returning their closers; the base closes them under a
+        shield, so cancelling the caller never leaves one open (only an event
+        loop shutting down, which cancels the closing task itself, skips the
+        closers after the one running). A backend that overrides ``cleanup``
+        or ``reinitialize`` keeps its own (the deprecated LangGraph backend
+        does).
+
     Example:
-        A minimal backend. ``initialize_services`` is the base's: it calls the
+        A minimal backend: it builds its engine in ``_do_initialize`` and
+        hands it to the release in ``_detach_backend``; everything else of
+        the lifecycle is the base's. ``initialize_services`` calls the
         backend's ``_validate_agent_graph`` (the base's validates nothing and
         leaves ``root_agent_name`` None), resolves the models, builds the
         services the tools declare and then calls ``_do_initialize``. A turn
-        passes each event through ``_apply_event_hook``, which is the
-        constructor's ``on_event``. The backend takes both locks to tear down,
-        and resets what it set up in ``_release_resources`` (the base closes
-        the catalog and the services only)::
+        enters through ``_turn_admission``, which initializes the manager
+        when it is not and re-checks ``_backend_ready`` under the turn lock,
+        and passes each event through ``_apply_event_hook``, which is the
+        constructor's ``on_event``. A backend with a session store also
+        returns its closers from ``_detach_store``, which a model switch
+        skips, and builds on the store it still holds::
 
+            from functools import partial
             from typing import Callable
 
             from agentic_cli import BaseWorkflowManager, WorkflowEvent
             from agentic_cli.workflow.config import AgentGraph, validate_agent_graph
 
             class CustomWorkflowManager(BaseWorkflowManager):
+                _engine = None  # what a turn runs on
+
                 @property
                 def backend_type(self) -> str:
                     return "custom"
@@ -205,7 +240,14 @@ class BaseWorkflowManager(ABC):
                     return validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
                 async def _do_initialize(self) -> None:
-                    ...  # build the backend's agents or graph
+                    self._engine = object()  # build the backend's agents or graph
+
+                def _backend_ready(self) -> bool:
+                    return self._initialized and self._engine is not None
+
+                def _detach_backend(self):
+                    engine, self._engine = self._engine, None
+                    return [("engine", partial(self._aclose_owned, engine, "engine"))]
 
                 async def process(self, message, user_id, session_id=None):
                     async with self._turn_admission():
@@ -214,25 +256,6 @@ class BaseWorkflowManager(ABC):
                             event = self._apply_event_hook(event)  # None: dropped
                             if event is not None:
                                 yield event
-
-                async def reinitialize(self, model=None, preserve_sessions=True):
-                    async with self._lifecycle_lock:
-                        async with self._turn_lock:
-                            with self._carrying_services(preserve_sessions):
-                                await self._release_resources()
-                                self._reset_model(model)
-                                await self._initialize_locked()
-
-                async def cleanup(self) -> None:
-                    async with self._lifecycle_lock:
-                        async with self._turn_lock:
-                            await self._release_resources()
-
-                async def _release_resources(self) -> None:
-                    self._initialized = False
-                    self._budgets = {}
-                    self._index_snapshots.clear()
-                    await super()._release_resources()
     """
 
     #: The conversation a call without a session id belongs to
@@ -241,6 +264,11 @@ class BaseWorkflowManager(ABC):
     #: backend that provides its own (set before or after the base constructor,
     #: a class default or a property) is never overwritten by the base.
     session_id: str = "default_session"
+
+    #: True while a model switch keeps the session store (``_keeping``): a
+    #: release then leaves it attached and open (``_detach_store`` is not
+    #: called). A class default, so it holds for a manager whatever built it.
+    _keeping_store: bool = False
 
     def __init__(
         self,
@@ -323,8 +351,7 @@ class BaseWorkflowManager(ABC):
         # Plan/task state lives in native backend state (ToolContext.state
         # for ADK, graph state for LangGraph), not here.
         self._services: dict[str, Any] = {}
-        # Keys of services a reinitialize is carrying over; see
-        # _carrying_services().
+        # Keys of services a reinitialize is carrying over; see _keeping().
         self._carried_service_keys: frozenset[str] = frozenset()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
@@ -1146,8 +1173,8 @@ class BaseWorkflowManager(ABC):
         ``_build_services``). Idempotent: the registry is emptied, so a second
         call finds nothing. The registry is cleared regardless of failures.
 
-        Services a reinitialize is carrying over (:meth:`_carrying_services`)
-        stay published and open.
+        Services a reinitialize is carrying over (:meth:`_keeping`) stay
+        published and open.
         """
         carried = {
             key: service
@@ -1164,24 +1191,34 @@ class BaseWorkflowManager(ABC):
             self._services = carried
 
     @contextlib.contextmanager
-    def _carrying_services(self, carry: bool) -> Iterator[None]:
-        """Keep the live services through a reinitialize when ``carry`` is set.
+    def _keeping(self, preserve: bool) -> Iterator[None]:
+        """Keep the conversation's resources through a reinitialize when ``preserve`` is set.
 
-        Session grants (the permission engine), sandbox kernels, the job
-        manager and loaded embedding models belong to the conversation, not to
-        the model, so a model switch that preserves sessions must not release
-        them. Inside this block a release, including the rollback of a failed
-        attempt, leaves them published, and initialization reuses them: it
-        builds only the services that are missing. After a failed attempt they
-        stay with the manager, for a retry to reuse or ``cleanup()`` to release.
+        The session store (the backend's ``_detach_store``), session grants
+        (the permission engine), sandbox kernels, the job manager and loaded
+        embedding models belong to the conversation, not to the model, so a
+        model switch that preserves sessions must not release them. Inside
+        this block a release, including the rollback of a failed attempt,
+        leaves the store attached and the live services published, and
+        initialization reuses them: the backend builds on the store it holds,
+        and only the services that are missing are built. After a failed
+        attempt they stay with the manager, for a retry to reuse or
+        ``cleanup()`` to release. The one mechanism :meth:`reinitialize` keeps
+        them by: nothing has to put them back afterwards.
         """
         self._carried_service_keys = (
-            frozenset(self._services) if carry else frozenset()
+            frozenset(self._services) if preserve else frozenset()
         )
+        self._keeping_store = preserve
         try:
             yield
         finally:
             self._carried_service_keys = frozenset()
+            self._keeping_store = False
+
+    def _carrying_services(self, carry: bool) -> contextlib.AbstractContextManager[None]:
+        """:meth:`_keeping` under its earlier name (LangGraph's ``reinitialize`` uses it)."""
+        return self._keeping(carry)
 
     @property
     @abstractmethod
@@ -1565,20 +1602,163 @@ class BaseWorkflowManager(ABC):
             "admission and could not be reinitialized. Retry the request."
         )
 
-    async def _release_resources(self) -> None:
-        """Close the model catalog and the services. Idempotent, never raises.
+    async def _release_resources(
+        self, keep_session_service: bool = False, keep_checkpointer: bool = False
+    ) -> None:
+        """Release everything this manager owns. Idempotent.
 
-        The base body releases only what the base built: the catalog (its
-        background refresh) and the services, except those a reinitialize is
-        carrying (:meth:`_carrying_services`). It leaves ``_initialized``,
-        ``_budgets`` and ``_index_snapshots`` as they are, and a backend's own
-        resources are its own: an override resets them (ADK's and Deep Agents'
-        do, and neither calls this body; the class docstring's example calls
-        it). ``_initialize_locked`` also calls it to roll back a failed
-        attempt.
+        The one release protocol: ``cleanup()``, ``reinitialize()`` and the
+        rollback of a failed initialization (``_initialize_locked``) all run
+        it, and a backend takes part through two hooks rather than an
+        override. In order:
+
+        1. The base's state, at once: ``is_initialized`` False, the context
+           budgets and the memory index snapshots dropped, the catalog
+           detached.
+        2. What the backend holds: :meth:`_detach_backend` (the agents, the
+           runner, the MCP sessions), then :meth:`_detach_store` (the session
+           store), which is not called while a model switch keeps the store
+           (:meth:`_keeping`). Each detaches its handles and returns their
+           closers.
+        3. The services, closed now (synchronously), except those a model
+           switch carries.
+        4. The closers, in one task of its own, in a fixed order: the
+           backend's, the store's, then the catalog's. Each is isolated (one
+           that raises is logged, and the rest still run), and the task is
+           awaited under a shield: a cancel of the caller (Ctrl+C during a
+           ``/settings`` model switch, a cancelled ``async with manager``)
+           stops only the wait, and everything still closes, once. Only an
+           event loop shutting down, which cancels the closing task itself,
+           skips the closers after the one running.
+
+        It raises nothing a close raises. It raises ``TypeError`` for a hook
+        that is not synchronous (returns an awaitable), after releasing
+        everything else: that hook detached nothing, so its handles are still
+        open.
+
+        A subclass that overrides this method (as 0.6's ADK backend did, with
+        ``keep_session_service``) and calls it is called without the keyword
+        during a model switch, since :meth:`reinitialize` keeps the store
+        through :meth:`_keeping`: the override reads ``self._keeping_store``
+        to know whether the store is being kept.
+
+        Args:
+            keep_session_service: Deprecated, removed in 0.8.0: keeps the
+                session store for this release, as :meth:`_keeping` does.
+            keep_checkpointer: Deprecated: the same, accepted for code written
+                against the 0.7 development line (Deep Agents' own release
+                took it).
+
+        Raises:
+            TypeError: A detach hook returned an awaitable.
         """
-        await self._close_catalog()
+        logger.debug("cleaning_up_workflow_manager")
+        if keep_session_service or keep_checkpointer:
+            warnings.warn(
+                "_release_resources(keep_session_service=..., keep_checkpointer=...) "
+                "is deprecated and will be removed in 0.8.0; release inside "
+                "`with self._keeping(True):`, which keeps the session store.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        keep_store = self._keeping_store or keep_session_service or keep_checkpointer
+
+        self._initialized = False
+        self._budgets = {}
+        self._index_snapshots.clear()
+        catalog, self._catalog = self._catalog, None
+
+        not_synchronous: list[TypeError] = []
+        closers = self._detached(self._detach_backend, not_synchronous)
+        if not keep_store:
+            closers += self._detached(self._detach_store, not_synchronous)
+        closers.append((
+            "model_catalog",
+            functools.partial(self._aclose_owned, catalog, "model_catalog"),
+        ))
+
         self._cleanup_managers()
+
+        closing = asyncio.ensure_future(self._close_in_order(closers))
+        _CLOSING.add(closing)
+        closing.add_done_callback(_CLOSING.discard)
+        await asyncio.shield(closing)
+        logger.info("workflow_manager_cleaned_up")
+        if not_synchronous:
+            raise not_synchronous[0]
+
+    def _detach_backend(self) -> list[Closer]:
+        """Detach what the backend built for this initialization, and say how to close it.
+
+        A backend hook of the release (:meth:`_release_resources`): set every
+        handle a turn runs on to None (so ``_backend_ready`` is False and a
+        repeat release finds nothing) and return the closers of what they
+        held, in the order they must run. Called on every release, a model
+        switch's included. It must be synchronous (``def``, never
+        ``async def``) and must not raise. The services are already closed
+        when its closers run (the base closes them first, synchronously, so a
+        cancel cannot skip them); that is safe because no turn is in flight
+        (a release holds the turn lock, or rolls back an attempt no turn ran
+        on) and the services never reach the backend's MCP servers or its
+        store. The base holds nothing here.
+        """
+        return []
+
+    def _detach_store(self) -> list[Closer]:
+        """Detach the session store, and say how to close it.
+
+        A backend hook of the release (:meth:`_release_resources`), as
+        :meth:`_detach_backend` is, for the store the conversations live in
+        (a session service, a checkpointer and its connections): synchronous,
+        never raising, and its closers run after the services closed, which
+        is safe for the same reasons (no turn in flight; no service reaches
+        the store). Not called while a model switch keeps the store
+        (:meth:`_keeping`): the backend then finds its store still attached
+        when it builds again, and must reuse it rather than open another. The
+        base holds nothing here.
+        """
+        return []
+
+    @staticmethod
+    def _detached(
+        detach: Callable[[], list[Closer]], not_synchronous: list[TypeError]
+    ) -> list[Closer]:
+        """What a detach hook returns; nothing, logged, when it raises.
+
+        A hook that returns an awaitable (written ``async def`` by mistake)
+        detached nothing, since its body never ran: the awaitable is closed,
+        so no "never awaited" warning follows, and a ``TypeError`` naming the
+        hook is added to ``not_synchronous`` for the release to raise once
+        everything else is released.
+        """
+        name = getattr(detach, "__qualname__", repr(detach))
+        try:
+            closers = detach()
+            if inspect.isawaitable(closers):
+                if inspect.iscoroutine(closers):
+                    closers.close()
+                not_synchronous.append(TypeError(
+                    f"{name} must be synchronous (def, not async def): it "
+                    "returned an awaitable, so it detached nothing and what it "
+                    "holds is still open. Set its handles to None and return "
+                    "their closers; the closers may be coroutine functions."
+                ))
+                return []
+            return list(closers)
+        except Exception as exc:  # noqa: BLE001 - shutdown must not fail
+            logger.warning("resource_detach_failed", hook=name, error=str(exc))
+            return []
+
+    @staticmethod
+    async def _close_in_order(closers: list[Closer]) -> None:
+        """Run each closer in turn; one that raises is logged and the rest still run."""
+        for label, close in closers:
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - shutdown must not fail
+                logger.warning("resource_close_failed", resource=label, error=str(exc))
 
     async def _close_catalog(self) -> None:
         """Release the model catalog (its background refresh). Idempotent."""
@@ -1631,31 +1811,63 @@ class BaseWorkflowManager(ABC):
         if False:  # pragma: no cover
             yield  # type: ignore[misc]
 
-    @abstractmethod
     async def reinitialize(
         self,
         model: str | None = None,
         preserve_sessions: bool = True,
     ) -> None:
-        """Reinitialize the workflow manager with new configuration.
+        """Rebuild the backend with a new configuration (a model switch).
 
-        Use this method when settings change (e.g., model switch) to
-        properly recreate agents and runners.
+        Takes the lifecycle lock and then the turn lock, so it waits for a
+        running turn; releases (:meth:`_release_resources`), sets the model
+        (:meth:`_reset_model`) and initializes again.
+
+        Transactional: on failure the manager is left *uninitialized*
+        (``is_initialized`` False) with nothing half-built, rather than
+        holding a backend that would answer as if it were ready; the caller
+        (``WorkflowController``) turns that into a FAILED state and keeps the
+        manager for a retry. What a preserving switch keeps survives both
+        outcomes (:meth:`_keeping`), so a retry continues the same
+        conversations.
 
         Args:
-            model: Optional new model to use.
-            preserve_sessions: If True, keeps existing session data.
-        """
-        pass
+            model: The new default model; None re-resolves it from settings.
+            preserve_sessions: Keep the session store and the services
+                (permission engine, sandbox, jobs, knowledge bases) and
+                rebuild only the backend. False releases them and builds
+                fresh ones.
 
-    @abstractmethod
+        Raises:
+            Exception: Whatever initialization raised, after the rollback.
+        """
+        logger.info(
+            "reinitializing_workflow_manager",
+            new_model=model,
+            preserve_sessions=preserve_sessions,
+        )
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                with self._keeping(preserve_sessions):
+                    await self._release_resources()
+                    self._reset_model(model)
+                    await self._initialize_locked()
+        logger.info(
+            "workflow_manager_reinitialized",
+            model=self.model,
+            sessions_preserved=preserve_sessions,
+        )
+
     async def cleanup(self) -> None:
-        """Clean up workflow manager resources.
+        """Release everything this manager owns (:meth:`_release_resources`).
 
-        Release resources and reset state. Should be called before
-        shutting down or when reinitializing with new settings.
+        Call it before shutting down. Idempotent: references are detached
+        before they are closed, so a repeat call finds nothing. Takes the
+        lifecycle lock and then the turn lock, so it waits for a running
+        turn. A turn after it initializes the manager again.
         """
-        pass
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                await self._release_resources()
 
     # User input handling — callback-only
 
