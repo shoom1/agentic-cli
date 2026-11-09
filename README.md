@@ -388,11 +388,13 @@ How it differs from ADK:
   `FILE_DATA` come from Gemini's code execution on ADK.
 - **A sub-agent's failure ends the turn** with one error; on ADK the
   coordinator carries on, and the user gets a warning.
-- **Its own sessions**: neither backend reads the other's, so switching the
-  orchestrator in `/settings` continues the conversation's id from empty on
-  the new one, and says that its history stays with the previous backend
-  (switching back continues it). The task list starts over there, and the
-  conversation stays held on the new backend, so no other run opens it.
+- **Its own sessions**: neither backend reads the other's, so a
+  conversation stays on the backend it began on. `orchestrator` is the
+  backend of new conversations: changed in `/settings`, it starts a new
+  conversation on the new backend at once when the open one holds nothing
+  yet (no turn ran in it), and otherwise applies to the next `/new` ("(applies
+  to the next /new)"); `/new deepagents` (or `adk`, `langgraph`) starts one
+  on the backend named. A model switch never changes the backend.
 
 Requires: `pip install 'agentic-cli[deepagents]'`
 
@@ -545,7 +547,7 @@ configured is reported (`settings_secrets_dir_ignored`).
 | `model_providers` | `AGENTIC_MODEL_PROVIDERS` | The app's | OpenRouter and OpenAI-compatible hosts by name (never from a project file) |
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
-| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | Orchestrator: `adk`, `deepagents`, or `langgraph` (deprecated) |
+| `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | The backend new conversations run on: `adk`, `deepagents`, or `langgraph` (deprecated); a conversation keeps its own |
 | `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
 | `context_summarize_at` | `AGENTIC_CONTEXT_SUMMARIZE_AT` | 0.85 | Summarize the earlier conversation at this fraction of the model's input budget (0.5 to 0.95) |
 | `context_max_tokens` | `AGENTIC_CONTEXT_MAX_TOKENS` | 200000 | Or once a prompt reaches this many tokens, if that comes first (0: no ceiling; otherwise at least 16000) |
@@ -1433,8 +1435,12 @@ manager cannot capture each other's prompts.
 `WorkflowController` exposes a derived `WorkflowState`
 (`uninitialized`/`initializing`/`ready`/`failed`/`closed`) that never reports
 `ready` over an uninitialized manager, and `controller.workflow` raises unless
-the state is `ready`. Lifecycle transitions (init, reinitialize, orchestrator
-swap, close) are serialized, so nothing is published after `close()`. A failed
+the state is `ready`. Lifecycle transitions (init, reinitialize, a switch of
+backend, close) are serialized, so nothing is published after `close()`. The
+controller runs the open conversation's backend (`controller.backend`): the
+settings' `orchestrator` at its first start, then the one
+`switch_backend(backend)` chose for a new conversation; `reinitialize` (a
+model switch) is always in place. A failed
 in-place reinitialization keeps the manager — it still owns the session service
 it preserved — and the next initialization revives it rather than discarding
 the conversation.
@@ -1834,7 +1840,7 @@ other `job_*` tools do), and `workflow.job_manager` is `None` before then.
 A backend implements `start`, `poll` and `cancel`, and may override `logs`,
 `result`, `pin` and `close`. Its `survives_restart` says whether a manager
 other than the one that submitted a job may launch it from its saved record
-(another CLI, or the app after a restart or an orchestrator switch):
+(another CLI, or the app after a restart or in a new conversation on another backend):
 `subprocess` sets it, since its command and working directory are saved;
 `inprocess` does not, since its callable cannot be, and nor does a backend
 that keeps the default, False. A job on such a backend is claimed at submit
@@ -1947,8 +1953,8 @@ model and its `max_tokens`.
   alone, `ctx 45k`, as on LangGraph and in a native ADK YAML app, which
   manage no context. A `/settings` change that rebuilds the agents (a
   model, `context_summarize_at`, `context_max_tokens`) shows the new
-  trigger at once; an orchestrator swap starts another conversation, and
-  the segment waits for its first call, as a resumed session's does.
+  trigger at once; a new conversation (on any backend) starts without it,
+  and the segment waits for its first call, as a resumed session's does.
 - **`/status`** adds the main agent's rows after Services: Main Agent (its
   name and model), Context Window (or "unknown, 128k floor in use"), Input
   Budget, Summarize At and Last Prompt. A manager's
@@ -1986,7 +1992,16 @@ model and its `max_tokens`.
   (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
   jobs carry on, and a job reports to the conversation that started it,
-  which its line names. `/clear` only clears the screen.
+  which its line names. `/clear` only clears the screen. The new
+  conversation runs on the settings' `orchestrator`, the backend of new
+  conversations; `/new deepagents` (or `adk`, `langgraph`;
+  `start_new_session(backend=...)`) starts it on another, without saving
+  it: the line names the backend ("New conversation <id> on deepagents."),
+  the memories of the conversation left are proposed first, and an unknown
+  backend, or one whose extra is not installed, is refused. A new backend
+  starts a new manager, whose services are new too: an in-process job
+  ends, sandbox kernels start over and "Allow for this session" grants are
+  forgotten.
 
 ## CLI Commands
 
@@ -2005,7 +2020,7 @@ Built-in slash commands available in all apps:
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
-| `/new` | | Start a new conversation; the current one stays in `/sessions` |
+| `/new [backend]` | | Start a new conversation, on the backend named (`adk`, `deepagents`, `langgraph`) or the settings' `orchestrator`; the current one stays in `/sessions` |
 | `/resume` | | Reopen a saved conversation: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
 | `/memory` | | Review saved memories: the list of both scopes, one memory (Delete, History), `/memory <id>`, `/memory history` (restore a version), `/memory inbox` (Accept, Discard or Skip the proposals the extractor filed), `/memory stale` (not updated for 90 days) |
 
