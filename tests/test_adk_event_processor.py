@@ -281,11 +281,21 @@ class TestToolResults:
 
         assert event.metadata["error"] == "No such city.\nTry Paris."
 
-    def test_one_without_text_still_fails(self):
+    def test_one_without_content_says_so_as_deep_agents_does(self):
+        """langchain-mcp-adapters' words, which Deep Agents reports."""
         event = ADKEventProcessor(model="m").process_part(_result(_mcp_error()), "s1")
 
         assert event.metadata["success"] is False
-        assert event.metadata["error"] == "The MCP tool returned an error without text."
+        assert event.metadata["error"] == "MCP tool returned an error with empty content."
+
+    def test_one_without_text_counts_its_other_blocks_as_deep_agents_does(self):
+        response = _mcp_error({"type": "image", "data": "aGk=", "mimeType": "image/png"})
+
+        event = ADKEventProcessor(model="m").process_part(_result(response), "s1")
+
+        assert event.metadata["error"] == (
+            "MCP tool returned an error with no text content (1 non-text content block(s))."
+        )
 
     def test_an_mcp_result_that_is_no_error_is_a_success(self):
         response = {"content": [{"type": "text", "text": "5"}], "isError": False}

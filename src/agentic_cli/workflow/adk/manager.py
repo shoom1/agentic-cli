@@ -505,10 +505,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         progress and logging plugins are kept, since the manager drains
         their buffers. ``_do_initialize`` adds the rest: for an app built
         from agent configs, ``MainAgentPlugin`` before them, and after them
-        the foreign reasoning filter, the interrupted calls, the result cap,
-        the memory index, the overflow handler, the fit guard and the raw
-        log as sent; for any app that caches, ``ContextCachePlugin``. The
-        whole order is pinned by ``tests/workflow/adk/test_plugin_chain.py``.
+        the foreign reasoning filter, ``ContextCachePlugin`` when the app
+        caches, the interrupted calls, the result cap, the memory index, the
+        overflow handler, the fit guard and the raw log as sent. A native ADK
+        YAML app gets ``ContextCachePlugin`` alone after them, when it
+        caches. The whole order is pinned by
+        ``tests/workflow/adk/test_plugin_chain.py``.
 
         Returns:
             Those plugins, in chain order.

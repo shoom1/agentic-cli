@@ -29,9 +29,6 @@ NO_ANSWER_CODES = (
     | {"MODEL_RETURNED_NO_CONTENT"}
 )
 
-#: The error of an MCP error result whose content holds no text.
-_MCP_ERROR_WITHOUT_TEXT = "The MCP tool returned an error without text."
-
 #: Finish reasons that are no reason: the reply ended as it should.
 _NORMAL_FINISH = frozenset(
     {types.FinishReason.STOP.value, types.FinishReason.FINISH_REASON_UNSPECIFIED.value}
@@ -289,20 +286,32 @@ def _is_mcp_error(response: Any) -> bool:
     return isinstance(response, dict) and response.get("isError") is True
 
 
+def _mcp_error_text(content: list[Any]) -> str:
+    """An MCP error result's error, as ``langchain-mcp-adapters`` words it on
+    Deep Agents: its text blocks, a line each, else what it holds instead."""
+    texts = [
+        str(block.get("text", "")) for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    if texts:
+        return "\n".join(texts)
+    if content:
+        return (
+            "MCP tool returned an error with no text content "
+            f"({len(content)} non-text content block(s))."
+        )
+    return "MCP tool returned an error with empty content."
+
+
 def _outcome(response: Any) -> tuple[bool, str | None]:
     """Whether a tool's result is a success, and its error when it is not.
 
     The framework's shape fails with an ``error`` value or ``success``
     false, and its error is that value. An MCP error result fails too, its
-    error the text of its text blocks, as Deep Agents reports it
-    (``langchain-mcp-adapters`` joins them by line).
+    error in the words Deep Agents reports (``_mcp_error_text``).
     """
     if _is_mcp_error(response):
-        texts = [
-            block.get("text") for block in response.get("content") or ()
-            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
-        ]
-        return False, "\n".join(texts) or _MCP_ERROR_WITHOUT_TEXT
+        return False, _mcp_error_text(response.get("content") or [])
     if not isinstance(response, dict):
         return True, None
     # An error value, not just the key; an explicit "success" decides.

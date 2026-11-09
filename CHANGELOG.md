@@ -2394,10 +2394,10 @@ step; each entry says what to use instead.
 - **On ADK, an MCP tool's error result is a failed tool call.** A result
   the server marks `isError` was a `TOOL_RESULT` with `success=True`, shown
   as "Result: 2 items". It is now `success=False` with the result's text in
-  `metadata["error"]` (its text blocks, a line each), shown "Failed:
-  <text>", as Deep Agents reports it; the model reads the result as
-  before. A framework tool's failed result names its error in
-  `metadata["error"]` too, as on Deep Agents.
+  `metadata["error"]` (its text blocks, a line each, or Deep Agents' words
+  for one without text), shown "Failed: <text>", as Deep Agents reports
+  it; the model reads the result as before. A framework tool's failed
+  result names its error in `metadata["error"]` too, as on Deep Agents.
 
 - **A finished job's result is no longer given up when its delivery stops
   before reaching the agent.** The CLI claimed a job's delivery before it
