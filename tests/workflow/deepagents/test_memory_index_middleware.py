@@ -50,17 +50,23 @@ async def test_the_index_is_the_first_block_of_the_first_human_message():
     assert history[0].content == "Hello."  # the state keeps its message
 
 
-def test_the_sync_path_and_no_index():
+async def test_no_index_leaves_the_request_as_it_is():
     history = [HumanMessage("Hello.")]
-    assert MemoryIndexMiddleware(lambda: "").wrap_model_call(_request(history), lambda r: r.messages) == history
-    sent = MemoryIndexMiddleware(lambda: INDEX).wrap_model_call(_request(history), lambda r: r.messages)
-    assert sent[0].content[0]["text"] == INDEX
+
+    async def handler(request):
+        return request.messages
+
+    assert await MemoryIndexMiddleware(lambda: "").awrap_model_call(_request(history), handler) == history
 
 
-def test_a_summary_message_gets_it_first():
+async def test_a_summary_message_gets_it_first():
     summary = HumanMessage([{"type": "text", "text": "Here is a summary of the conversation to date: ..."}])
-    sent = MemoryIndexMiddleware(lambda: INDEX).wrap_model_call(
-        _request([summary, AIMessage("ok")]), lambda r: r.messages
+
+    async def handler(request):
+        return request.messages
+
+    sent = await MemoryIndexMiddleware(lambda: INDEX).awrap_model_call(
+        _request([summary, AIMessage("ok")]), handler
     )
     assert [block["text"][:12] for block in sent[0].content] == [INDEX[:12], "Here is a su"]
 
@@ -125,7 +131,7 @@ async def test_a_sub_agent_gets_no_index(hermetic, monkeypatch):
 # -- the summarization counts it; a summary takes a new one ----------------------------------
 
 
-def test_the_summarization_counts_the_index():
+async def test_the_summarization_counts_the_index():
     """The index is added after the summarization, which must count it: a
     conversation just under the trigger goes over it with a 3,000-token index."""
     chat = ScriptedChat(script=[ai("A summary.")])
@@ -143,9 +149,13 @@ def test_the_summarization_counts_the_index():
     assert empty._count_tokens(history, None, None) == base < 16_150
     assert counted._count_tokens(history, None, None) == base + plain.token_counter([HumanMessage(big)])
     request = ModelRequest(model=chat, messages=history, state={"messages": history})
-    assert plain.wrap_model_call(request, lambda r: "the answer") == "the answer"
+
+    async def handler(request):
+        return "the answer"
+
+    assert await plain.awrap_model_call(request, handler) == "the answer"
     assert chat.requests == []  # under the trigger: no summary call
-    counted.wrap_model_call(request, lambda r: "the answer")
+    await counted.awrap_model_call(request, handler)
     assert len(chat.requests) == 1  # over it with the index: summarized
 
 

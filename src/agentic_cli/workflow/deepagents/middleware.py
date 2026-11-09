@@ -21,6 +21,11 @@ gets these; sub-agents are gated as strictly as the root.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
+
+Turns run through ``astream``, so each middleware defines its async hook
+only; the gate also defines the sync tool hook, to deny it. A graph run
+synchronously fails at the first middleware without a sync hook (LangChain's
+``NotImplementedError``), before a model call or a tool runs.
 """
 
 from __future__ import annotations
@@ -310,13 +315,6 @@ class ToolResultCapMiddleware(AgentMiddleware):
     ) -> _ToolResult:
         return self._capped(request, await handler(request))
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], _ToolResult],
-    ) -> _ToolResult:
-        return self._capped(request, handler(request))
-
     def _capped(self, request: ToolCallRequest, result: _ToolResult) -> _ToolResult:
         name = request.tool_call["name"]
         try:
@@ -467,20 +465,6 @@ class ToolCallErrorMiddleware(AgentMiddleware):
                 raise
             return _error_message(request.tool_call, error)
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], _ToolResult],
-    ) -> _ToolResult:
-        try:
-            return handler(request)
-        except GraphBubbleUp:
-            raise
-        except Exception as error:
-            if _is_delegation(request.tool):
-                raise
-            return _error_message(request.tool_call, error)
-
 
 class InterruptedCallsMiddleware(AgentMiddleware):
     """Every call gets one result, the ones a stopped turn left open too.
@@ -565,15 +549,6 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         self._record(request.tool_call, result)
         return result
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], _ToolResult],
-    ) -> _ToolResult:
-        result = handler(request)
-        self._record(request.tool_call, result)
-        return result
-
     def _record(self, call: ToolCall, result: _ToolResult) -> None:
         updates: dict[str, Any] = {}
         if isinstance(result, Command):
@@ -623,17 +598,6 @@ class ActiveToolCallMiddleware(AgentMiddleware):
         finally:
             reset_active_tool_call(token)
 
-    def wrap_tool_call(
-        self,
-        request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], _ToolResult],
-    ) -> _ToolResult:
-        token = set_active_tool_call(_call_ref(request.tool_call))
-        try:
-            return handler(request)
-        finally:
-            reset_active_tool_call(token)
-
 
 def _call_ref(call: ToolCall) -> ToolCallRef:
     return ToolCallRef(call_id=call["id"], name=call["name"])
@@ -661,20 +625,6 @@ class ContextOverflowMiddleware(AgentMiddleware):
     ) -> Any:
         try:
             return await handler(request)
-        except ContextOverflowError:
-            raise
-        except Exception as error:
-            if is_context_overflow(error):
-                raise ContextOverflowError(str(error)) from error
-            raise
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> Any:
-        try:
-            return handler(request)
         except ContextOverflowError:
             raise
         except Exception as error:
@@ -725,13 +675,6 @@ class MemoryIndexMiddleware(AgentMiddleware):
     ) -> Any:
         return await handler(self._with_index(request, await asyncio.to_thread(self._index_for)))
 
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> Any:
-        return handler(self._with_index(request, self._index_for()))
-
 
 class ForeignReasoningMiddleware(AgentMiddleware):
     """No model is sent another provider's, or another agent's, reasoning.
@@ -768,10 +711,3 @@ class ForeignReasoningMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> Any:
         return await handler(self._own(request))
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> Any:
-        return handler(self._own(request))

@@ -347,11 +347,6 @@ class TestTheMiddleware:
         assert CUT.search(sent.content)
         assert result.update["messages"][0].content == LOG  # the original is left alone
 
-    async def test_the_sync_path(self, here):
-        capped = cap().wrap_tool_call(request(), lambda _: message(LOG))
-
-        assert CUT.search(capped.content)
-
     async def test_a_read_file_of_a_saved_output_is_not_saved_again(self, here):
         middleware = cap()
         first = await run(middleware, request(), message(LOG))

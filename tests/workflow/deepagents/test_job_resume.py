@@ -282,19 +282,6 @@ class TestTheActiveToolCall:
 
         assert get_active_tool_call() is None
 
-    def test_the_sync_path_too(self):
-        seen = []
-
-        def handler(request):
-            seen.append(get_active_tool_call())
-            raise ValueError("bad")
-
-        with pytest.raises(ValueError):
-            ActiveToolCallMiddleware().wrap_tool_call(_request("call-3"), handler)
-
-        assert seen == [ToolCallRef("call-3", "jr_where")]
-        assert get_active_tool_call() is None
-
     async def test_two_parallel_long_running_calls_get_their_own_ids(
         self, ctx, monkeypatch, cleanup
     ):

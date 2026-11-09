@@ -351,7 +351,7 @@ class TestReasoning:
 
 
 class TestTheMiddleware:
-    def test_another_agents_reasoning_is_left_out(self):
+    async def test_another_agents_reasoning_is_left_out(self):
         own = AIMessage(
             content=[{"type": "thinking", "thinking": "Mine.", "signature": "s1"},
                      {"type": "text", "text": "A."}],
@@ -370,22 +370,28 @@ class TestTheMiddleware:
         history = [HumanMessage("hi"), parents, unnamed, own]
         request = ModelRequest(model=ScriptedChat(), messages=history, state={"messages": history})
 
+        async def handler(request):
+            return request.messages
+
         middleware = ForeignReasoningMiddleware(ProviderKind.ANTHROPIC, agent="researcher")
-        messages = middleware.wrap_model_call(request, lambda r: r.messages)
+        messages = await middleware.awrap_model_call(request, handler)
 
         assert thoughts(messages) == ["Nobody's.", "Mine."]
         assert messages[1].content == [{"type": "text", "text": "B."}]
         assert thoughts(history) == ["The parent's.", "Nobody's.", "Mine."]  # untouched
 
-    def test_without_an_agent_only_other_providers_reasoning_goes(self):
+    async def test_without_an_agent_only_other_providers_reasoning_goes(self):
         parents = AIMessage(
             content=[{"type": "thinking", "thinking": "The parent's.", "signature": "s2"}],
             name="coordinator", response_metadata={"model_provider": "anthropic"},
         )
         request = ModelRequest(model=ScriptedChat(), messages=[parents], state={"messages": [parents]})
 
-        messages = ForeignReasoningMiddleware(ProviderKind.ANTHROPIC).wrap_model_call(
-            request, lambda r: r.messages
+        async def handler(request):
+            return request.messages
+
+        messages = await ForeignReasoningMiddleware(ProviderKind.ANTHROPIC).awrap_model_call(
+            request, handler
         )
 
         assert thoughts(messages) == ["The parent's."]
