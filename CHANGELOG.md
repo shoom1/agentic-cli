@@ -2210,6 +2210,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **Cancelling a job that has already ended records how it ended.**
+  `JobManager.cancel` (and so `job_cancel` and `/jobs cancel`) reloaded the
+  job's record but did not poll the job, so a job that had finished since it
+  was last polled was recorded CANCELLED, without its exit code, and with
+  `resume_on_complete` the agent was told it had been cancelled. A cancel now
+  brings the record up to date from the job's backend first, whether it comes
+  from the manager running the job or from another CLI sharing the jobs
+  directory, and returns a job that has ended as it ended; only a job still
+  running is stopped.
+
 - **`search_arxiv` returns each paper's whole abstract.** It returned the
   first 500 characters of every abstract, the preview its search source
   gives (`SearchSourceResult.snippet`), so the model judged papers on a cut

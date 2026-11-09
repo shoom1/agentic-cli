@@ -516,15 +516,19 @@ class JobManager:
     def cancel(self, job_id: str) -> JobRecord | None:
         """Cancel a job, if this manager can actually cancel it.
 
-        Reloads the durable record first: a job that has already finished stays
-        finished (terminal transitions are monotonic — a stale view must not
-        rewrite a recorded success as CANCELLED). A job another live manager is
-        executing is only cancelled when the backend can reach it from here
-        (``cancels_foreign_jobs``); otherwise the record is returned unchanged
-        rather than reported cancelled while it keeps running. A job the
-        backend could not stop (``JobBackend.cancel`` returned False) stays
-        RUNNING with ``cancel_requested``, holding its slot, and is recorded
-        CANCELLED when it ends; the next queued job starts then, not now.
+        Brings the record up to date first, as every read does (``_refresh``:
+        the durable record, then the backend's poll), and returns it as it is
+        when that shows the job has ended: a job that has already finished
+        stays finished, also when nobody had polled it since (terminal
+        transitions are monotonic — neither a stale view nor a cancel that
+        lands after the end may rewrite a success as CANCELLED). A job
+        another live manager is executing is only cancelled when the backend
+        can reach it from here (``cancels_foreign_jobs``); otherwise the
+        record is returned unchanged rather than reported cancelled while it
+        keeps running. A job the backend could not stop
+        (``JobBackend.cancel`` returned False) stays RUNNING with
+        ``cancel_requested``, holding its slot, and is recorded CANCELLED when
+        it ends; the next queued job starts then, not now.
 
         Returns:
             The record — check ``state`` for what actually happened — or None
@@ -536,7 +540,7 @@ class JobManager:
                 return None
             try:
                 with self._claim_transaction():
-                    status = self._reload_durable(rec)
+                    status = self._refresh(rec)
                     if status is DurableRead.MISSING:
                         self._forget(job_id)
                         return None
@@ -544,6 +548,7 @@ class JobManager:
                         logger.warning("job_cancel_unreadable", job_id=job_id)
                         return rec
                     if rec.state in TERMINAL_STATES:
+                        self._maybe_start_queued()  # its end may free a slot
                         return rec
                     if self._execution_is_foreign(rec) and not self._can_cancel_foreign(
                         rec

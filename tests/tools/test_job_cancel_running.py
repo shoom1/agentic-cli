@@ -13,6 +13,8 @@ when it ends, as any cancelled job is; only then does the next one start.
 
 from __future__ import annotations
 
+import json
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -189,3 +191,50 @@ class TestACancelFromAnotherManager:
             assert restarted.get(stubborn.job_id).cancel_requested is True
         finally:
             restarted.close()
+
+
+class TestAJobThatHasAlreadyEnded:
+    """A cancel records a job that ended before it as the job ended.
+
+    ``cancel`` reloaded the record but never polled the job, so one that had
+    ended since anybody last looked was still RUNNING to it. Its own manager
+    recorded it CANCELLED, without its exit code; another manager waited out
+    the cancel on the owner's unreaped process and recorded a cancel request,
+    which the owner then turned into CANCELLED.
+    """
+
+    def test_its_own_manager_records_how_it_ended(self, jobs):
+        rec = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": "true"})
+        _until((jobs.base_dir / rec.job_id / "exit_code").exists)  # ended; nothing polled it
+
+        cancelled = jobs.cancel(rec.job_id)
+
+        assert (cancelled.state, cancelled.exit_code) == (JobState.SUCCEEDED, 0)
+        on_disk = json.loads((jobs.base_dir / rec.job_id / "meta.json").read_text())
+        assert (on_disk["state"], on_disk["exit_code"]) == ("succeeded", 0)
+
+    def test_another_manager_records_how_it_ended_without_waiting(self, jobs, tmp_path):
+        gate = tmp_path / "gate"
+        rec = jobs.submit(
+            tool="run_shell_job", backend="subprocess",
+            spec={"command": f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.02; done"},
+        )
+        other = JobManager(base_dir=tmp_path / "jobs", max_concurrent=1)
+        try:
+            assert other.get(rec.job_id).state is JobState.RUNNING
+            gate.write_text("go")
+            _until((jobs.base_dir / rec.job_id / "exit_code").exists)  # its owner never polled
+
+            started = time.monotonic()
+            cancelled = other.cancel(rec.job_id)
+            took = time.monotonic() - started
+        finally:
+            other.close()
+
+        assert (cancelled.state, cancelled.exit_code) == (JobState.SUCCEEDED, 0)
+        assert cancelled.cancel_requested is False
+        assert took < backends_mod._CANCEL_WAIT_S, "the cancel waited on a job that had ended"
+        on_disk = json.loads((jobs.base_dir / rec.job_id / "meta.json").read_text())
+        assert (on_disk["state"], on_disk["cancel_requested"]) == ("succeeded", False)
+        owner_view = jobs.get(rec.job_id)
+        assert (owner_view.state, owner_view.exit_code) == (JobState.SUCCEEDED, 0)
