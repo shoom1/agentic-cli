@@ -22,10 +22,13 @@ gets these; sub-agents are gated as strictly as the root.
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
 
-Turns run through ``astream``, so each middleware defines its async hook
-only; the gate also defines the sync tool hook, to deny it. A graph run
-synchronously fails at the first middleware without a sync hook (LangChain's
-``NotImplementedError``), before a model call or a tool runs.
+Turns run through ``astream``, so each middleware wraps its calls with the
+async hook only; the gate also defines the sync tool wrapper, to deny it.
+(``InterruptedCallsMiddleware.before_agent`` is a node hook, not a wrapper,
+and is synchronous: LangGraph runs it on async turns too.) A graph run
+synchronously fails at the first middleware without a sync model or tool
+wrapper (LangChain's ``NotImplementedError``), before a model call or a tool
+runs.
 """
 
 from __future__ import annotations
