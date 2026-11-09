@@ -71,11 +71,14 @@ and waits on the network only for a provider in use that has credentials and
 no entry for its address and kind; a fresh entry needs no listing, and an
 older one (or a cached failure) is used while ``start_background_refresh``
 lists it again. A listing that fails at startup is listed once more there (a
-blip should not last the session: until a listing succeeds, the provider's ids
-are not checked and its models' limits and thinking come from the table); if
-that fails too, the next start tries again. A broken file, one from an older version, an entry this
-version cannot read, or an entry for another address or kind is ignored and
-listed again; a file of a newer version is not used, and never written (the
+blip should not last the session): until a listing succeeds, the provider's ids
+are not checked and its models' limits and thinking come from the table (an
+OpenRouter or configured provider's, which the table does not know: no thinking
+and the 128,000-token window floor); the session's agents are resolved once, at
+startup, and keep that, and a later listing reaches ``/models``, the pickers,
+side calls and the next start. If it fails too, the next start tries again. A
+broken file, one from an older version, an entry this version cannot read, or
+an entry for another address or kind is ignored and listed again; a file of a newer version is not used, and never written (the
 listings stay in memory). A listing writes its own provider's entry and
 leaves every other entry as the file then holds it, one this version cannot
 read included: several catalogs share the file (two terminals, two projects
@@ -107,7 +110,7 @@ from agentic_cli.models.listing_cache import (  # noqa: F401 - CACHE_VERSION sta
     ListingCache,
 )
 from agentic_cli.models.listing_records import records_for, with_entry
-from agentic_cli.models.providers import Provider
+from agentic_cli.models.providers import Provider, ProviderKind
 from agentic_cli.models.records import ModelRecord
 from agentic_cli.models.refs import BUILTIN_PROVIDERS, ModelRef, ModelSpecError, parse_ref
 from agentic_cli.models.resolve import ModelResolutionError
@@ -121,6 +124,24 @@ DEFAULT_TTL = 86400.0
 _TIERS = ("fast", "default", "strong")
 # How many models an "is not available" message names.
 _MESSAGE_MODELS = 20
+# What a provider's models are without its listing, for the warning that a listing
+# failed. The agents are resolved once at startup and keep this for the session; a
+# later listing reaches /models, the pickers, side calls and the next start. (The
+# window is the workflow's floor for an unknown one, ``workflow.context.UNKNOWN_WINDOW``.)
+_WITHOUT_LISTING = {
+    kind: (
+        "and its models' limits and thinking come from the shipped table for this "
+        "session's agents (a later listing reaches /models and the next start)"
+    )
+    for kind in (ProviderKind.GOOGLE, ProviderKind.ANTHROPIC, ProviderKind.OPENAI)
+} | {
+    kind: (
+        "and its models run without thinking and with a 128,000-token window (the "
+        "floor for an unknown one) for this session's agents, unless a models entry "
+        "says otherwise (a later listing reaches /models and the next start)"
+    )
+    for kind in (ProviderKind.OPENROUTER, ProviderKind.OPENAI_COMPATIBLE)
+}
 #: The (reference, reason) pairs already warned of as not offered. Once per
 #: process: a manager builds a new catalog at every reinitialize, and /models
 #: one while the workflow starts, and the user was told already.
@@ -649,11 +670,10 @@ class ModelCatalog:
             # later it only means a refresh will retry.
             logger.log(
                 logging.WARNING if startup else logging.INFO,
-                "Could not list %s models (%s); its model ids are not checked, "
-                "and its models' limits and thinking come from the shipped table, "
-                "until a listing succeeds",
+                "Could not list %s models (%s); its model ids are not checked, %s",
                 name,
                 listing.error,
+                _WITHOUT_LISTING[state.provider.kind],
             )
         # A failure at startup is listed once more by the background refresh
         # (a blip should not last the session); any other attempt is not

@@ -1555,7 +1555,20 @@ class TestAFailedStartupListing:
 
         assert catalog.start_background_refresh() is None
 
-    async def test_the_warning_says_what_it_means_for_the_models(self, caplog):
+    async def test_the_warning_says_what_it_means_for_a_built_in_provider_s_models(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await loaded(ProviderAPI(google=refuse), google=KEYS["google"])
+
+        (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning.startswith("Could not list google models (")
+        assert "ids are not checked" in warning
+        assert "limits and thinking come from the shipped table" in warning
+        # The agents are resolved once, at startup; a later listing reaches the rest.
+        assert "this session's agents" in warning and "next start" in warning
+
+    async def test_the_warning_says_what_it_means_for_an_openrouter_provider_s_models(self, caplog):
+        """The table knows no OpenRouter model: without its listing a model has no thinking
+        and the unknown-window floor, for this session's agents."""
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
             await loaded(
                 ProviderAPI(openrouter=fails_first(recorded("openrouter"))),
@@ -1565,4 +1578,6 @@ class TestAFailedStartupListing:
         (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert warning.startswith("Could not list openrouter models (")
         assert "ids are not checked" in warning
-        assert "limits and thinking" in warning and "shipped table" in warning
+        assert "without thinking" in warning and "128,000-token window" in warning
+        assert "shipped table" not in warning
+        assert "this session's agents" in warning and "next start" in warning

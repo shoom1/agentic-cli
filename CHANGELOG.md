@@ -1523,9 +1523,12 @@ the start of the entry's title.
   Startup waits only for one that can be called and has no cache entry, all
   of them at once and each for at most 10 seconds; an older entry is used
   while it is listed again in the background, and so is a listing that failed
-  at startup (once: until one succeeds, the provider's ids are not checked and
-  its models' limits and thinking come from the shipped table, which the
-  warning says). As in 0.6, an id unknown to a
+  at startup (once). Until one succeeds the provider's ids are not checked and
+  its models' limits and thinking come from the shipped table (an OpenRouter
+  or configured provider's models run without thinking and with the 128,000-token
+  window floor), which the warning says; the session's agents are resolved
+  once, at startup, and keep that, and the listing reaches `/models`, the
+  pickers, side calls and the next start. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
   failed, untried or older listing accepts it, and a listing grows older in
   a long session too: 24 hours after it was fetched it no longer rejects an

@@ -974,9 +974,12 @@ as 128,000 tokens.
   it is 24 hours old in a long session too. A listing that fails at startup
   is listed once more in the background: until one succeeds the provider's
   ids are not checked and its models' limits and thinking come from the
-  shipped table (the agents are resolved once, at startup, so they keep
-  what they started with; the listing reaches the next start, `/models` and
-  the pickers). Every process of the app shares
+  shipped table (an OpenRouter or configured provider's models, which the
+  table does not know, run without thinking and with the 128,000-token
+  window floor unless a `models` entry says otherwise). The agents are
+  resolved once, at startup, and keep that for the session: the listing
+  reaches the next start, `/models`, the pickers and side calls. Every
+  process of the app shares
   the file, and a listing writes only its own provider's entry and keeps the
   others as the file holds them (an entry this release cannot read too; a file
   of a newer release is neither read nor written: this process keeps its
