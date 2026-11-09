@@ -34,7 +34,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
-from agentic_cli.cli.conversation import ConversationCore, Hold, Place
+from agentic_cli.cli.conversation import ConversationCore, Hold, Place, SwitchParts
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
     SessionStart,
@@ -1620,14 +1620,16 @@ class BaseCLIApp:
     async def start_new_session(self) -> str:
         """Start a new conversation in this process (``/new``), and return its id.
 
-        Waits for a running turn or job resume (the turn lock), then:
+        Waits for a running turn or job resume (the turn lock), then switches
+        as every change of conversation does (``ConversationCore.switch``):
 
         - with ``auto_extract_session_facts`` on, proposes memories from the
           conversation being left when a turn ran in it since it was opened,
           as at exit, under a status line ("Looking for memories to
           propose…"; a failure never stops it);
         - adopts a new session id once the workflow has taken it
-          (``workflow.load_session``), and every later turn targets it;
+          (``workflow.load_session``), and every later turn targets it; this
+          process holds it, and lets the one left go;
         - ends the task box and forgets its tasks, zeroes the usage counters,
           and draws the status bar again: ``ctx`` waits for the new
           conversation's first call.
@@ -1650,22 +1652,16 @@ class BaseCLIApp:
         async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
                 old = self._session_id
-                controller = self._workflow_controller
-                ready = controller.is_ready
-                if self._turned:  # memories proposed once per conversation used
-                    await self._saving_facts(old)
-                    self._turned = False
-                stored = ready and await self._is_stored(controller.workflow, old)
+                parts = self._switch_parts()
+                stored = parts.workflow is not None and await self._is_stored(
+                    parts.workflow, old
+                )
                 new = uuid.uuid4().hex[:12]
-                if ready:
-                    await controller.workflow.load_session(new)
-                self._hold(new)  # a new id: nobody else has it open
-                self._session_id = new
-                self._turned = False
-                self._message_processor.reset()
-                self._usage_tracker.reset()
-                # The trigger as a /settings rebuild shows it; no prompt yet.
-                _show_new_context(controller, self.session, swapped=False)
+                switched = await self._conversation.switch(new, parts)
+                if not switched.made:  # a new id: never open elsewhere in practice
+                    raise RuntimeError(
+                        f"'{new}' is open in another process ({switched.holder})"
+                    )
                 logger.info("new_session_started", session_id=new, previous=old)
                 line = f"New conversation {new}."
                 if stored:
@@ -1751,18 +1747,30 @@ class BaseCLIApp:
             await self._resume_on_its_own()
 
     async def _open_conversation(self, session_id: str) -> bool:
-        """The switch itself, under the turn lock (``resume_session``)."""
+        """The switch to a stored conversation, under the turn lock (``resume_session``)."""
         async with self._turn_lock:
+            return await self._open(session_id)
+
+    async def _open(self, session_id: str, hold: Hold | None = None) -> bool:
+        """Open the stored conversation ``session_id``: its row and messages
+        are read first, then the switch (``ConversationCore.switch``).
+
+        The caller holds the turn lock. ``hold`` is ``session_id``'s lock,
+        taken already (at startup, before the prompt): it is kept once the
+        switch is made, and let go on every other way out.
+        """
+        switching = False
+        try:
             if session_id == self._session_id:
                 self.session.add_message("system", "Already in this conversation.")
                 return False
-            controller = self._workflow_controller
-            if not controller.is_ready:
+            parts = self._switch_parts()
+            workflow = parts.workflow
+            if workflow is None:
                 self.session.add_error(
                     f"Could not open '{session_id}': the workflow is not ready."
                 )
                 return False
-            workflow = controller.workflow
             try:
                 info = await workflow.session_info(session_id)
                 messages = (
@@ -1780,59 +1788,49 @@ class BaseCLIApp:
             line = resumed_line(info, datetime.now(timezone.utc))
             replay = replay_lines(messages)
             old = self._session_id
-            # Held beside the one it is in until the switch is done: a Ctrl+C
-            # or a failure below keeps the one it stays in, and lets this go.
-            taken = self._acquire(session_id)
-            if isinstance(taken, int):
-                self.session.add_error(
-                    f"Could not open '{session_id}': it is open in another process ({taken})."
-                )
-                return False
-            adopted = False
+            switching = True  # the switch keeps the hold or lets it go
             try:
-                if self._turned:  # memories proposed once per conversation used
-                    await self._saving_facts(old)
-                    self._turned = False  # proposed: a switch that fails now proposes none again
-                try:
-                    stored = await workflow.load_session(session_id)
-                    # Not stored now: deleted since it was read (another
-                    # process's /sessions --delete), unless it is still
-                    # listed, holding no message yet.
-                    gone = not stored and await workflow.session_info(session_id) is None
-                except Exception as error:  # noqa: BLE001 - the id is not adopted
-                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                    reason = str(error) or type(error).__name__
-                    self.session.add_error(f"Could not open '{session_id}': {reason}")
-                    return False
-                if gone:
-                    await self._readopt(workflow, old)
-                    self.session.add_error(f"No conversation '{session_id}' found.")
-                    return False
-                adopted = True
-            finally:
-                if adopted:
-                    self._commit(taken)
-                else:
-                    self._abandon(taken)
-            self._session_id = session_id
-            self._turned = False
-            self._message_processor.reset()
-            self._usage_tracker.reset()
-            _show_new_context(controller, self.session, swapped=False)
-            logger.info("session_resumed", session_id=session_id, previous=old)
-            self.session.add_message("system", line)
-            show_replay(self.session, replay)
-            return True
+                switched = await self._conversation.switch(
+                    session_id, parts, stored=True, hold=hold
+                )
+            except Exception as error:  # noqa: BLE001 - the id is not adopted
+                if self._session_id == session_id:
+                    raise  # opened: what failed after it is the caller's to say
+                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                reason = str(error) or type(error).__name__
+                self.session.add_error(f"Could not open '{session_id}': {reason}")
+                return False
+        finally:
+            if hold is not None and not switching:
+                self._conversation.abandon(hold)
+        if switched.holder is not None:
+            self.session.add_error(
+                f"Could not open '{session_id}': it is open in another process "
+                f"({switched.holder})."
+            )
+            return False
+        if switched.gone:  # deleted since it was read (another process's /sessions --delete)
+            self.session.add_error(f"No conversation '{session_id}' found.")
+            return False
+        logger.info("session_resumed", session_id=session_id, previous=old)
+        self.session.add_message("system", line)
+        show_replay(self.session, replay)
+        return True
 
-    @staticmethod
-    async def _readopt(workflow: Any, session_id: str) -> None:
-        """Give ``session_id`` back to the workflow, after a load that adopted
-        another conversation and found it gone. Never raises: the turns name
-        their conversation anyway."""
-        try:
-            await workflow.load_session(session_id)
-        except Exception:  # noqa: BLE001 - a lookup, the next turn goes on
-            logger.debug("session_readopt_failed", session_id=session_id, exc_info=True)
+    def _switch_parts(self) -> SwitchParts:
+        """What a switch acts on besides the conversation, as the app has it now."""
+        controller = self._workflow_controller
+        self._place()  # known before anything is held (an app built with __new__)
+        return SwitchParts(
+            workflow=controller.workflow if controller.is_ready else None,
+            processor=self._message_processor,
+            tracker=self._usage_tracker,
+            propose=self._saving_facts,
+            # The trigger as a /settings rebuild shows it; no prompt yet.
+            status=lambda swapped: _show_new_context(
+                controller, self.session, swapped=swapped
+            ),
+        )
 
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
@@ -2119,15 +2117,6 @@ class BaseCLIApp:
         another backend or store is another conversation."""
         return self._place().key(session_id)
 
-    def _acquire(self, session_id: str) -> Hold | int:
-        """``_hold``'s first half: ``session_id`` held beside the one held now.
-
-        Returns:
-            The hold to ``_commit`` or ``_abandon`` (one that locks nothing on
-            the memory store); the process id holding it elsewhere.
-        """
-        return self._conversation.acquire(session_id, self._place())
-
     @contextmanager
     def conversation_held(self, session_id: str) -> Iterator[int | None]:
         """Hold ``session_id``'s conversation for the block, beside the one
@@ -2141,22 +2130,16 @@ class BaseCLIApp:
             needed); else the process id that has it open (0 when unknown),
             and nothing is held.
         """
-        taken = self._acquire(session_id)
+        taken = self._conversation.acquire(session_id, self._place())
         if isinstance(taken, int):
             yield taken
             return
         try:
             yield None
         finally:
-            self._abandon(taken)
+            self._conversation.abandon(taken)
             if self._job_monitor is not None:
                 self._job_monitor.forget_conversations()
-
-    def _commit(self, taken: Hold) -> None:
-        self._conversation.commit(taken)
-
-    def _abandon(self, taken: Hold) -> None:
-        self._conversation.abandon(taken)
 
     def _hold(self, session_id: str) -> int | None:
         """Hold ``session_id``'s conversation for this process, letting go of the one before.

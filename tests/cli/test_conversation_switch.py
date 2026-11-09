@@ -22,6 +22,7 @@ controller holds a fake workflow (``tests/cli/test_resume_session.py``).
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
@@ -32,6 +33,7 @@ from agentic_cli.cli.conversation_lock import ConversationLock  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from tests.cli.test_compact_and_new import (  # noqa: E402,F401
     app_on,
+    fake_settings,
     project,
     quiet_app,
     said,
@@ -89,4 +91,44 @@ class TestASessionStoreChange:
         assert resumed is False and app.session_id == before
         assert said(app.session, "add_error") == [
             f"Could not open 'abc': it is open in another process ({os.getpid()})."
+        ]
+
+
+class TestACtrlCWhileTheTargetIsLookedUpAgain:
+    """The workflow took the target and found it empty, and the switch asks
+    whether it is still listed (deleted by another process as it opened, or
+    a first turn killed before its input was stored): a Ctrl+C there left the
+    workflow on the target while the app stayed where it was, so ``/status``
+    named the wrong conversation."""
+
+    async def test_the_workflow_is_given_back_the_conversation_the_app_stays_in(
+        self, project
+    ):
+        workflow = Workflow(conversation("abc", "Plan the trip", 2))
+        app = app_on(workflow, fake_settings())
+        old = app.session_id
+        load, info = workflow.load_session, workflow.session_info
+        looking, lookups = asyncio.Event(), []
+
+        async def deleted_first(session_id, user_id=None):
+            workflow.stored.pop("abc", None)
+            return await load(session_id, user_id)
+
+        async def session_info(session_id, *, user_id=None):
+            lookups.append(session_id)
+            if len(lookups) == 2:  # asked again, after the load
+                looking.set()
+                await asyncio.Event().wait()
+            return await info(session_id, user_id=user_id)
+
+        workflow.load_session, workflow.session_info = deleted_first, session_info
+        resuming = asyncio.create_task(app.resume_session("abc"))
+        await asyncio.wait_for(looking.wait(), 5)
+        resuming.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(resuming, 5)
+
+        assert app.session_id == old
+        assert [c for c in workflow.calls if c.startswith("load_session")] == [
+            "load_session abc", f"load_session {old}",
         ]
