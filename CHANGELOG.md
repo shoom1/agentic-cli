@@ -60,8 +60,9 @@ the start of the entry's title.
   another model a knowledge base re-embeds all its text) and `summarizer=`.
   `list_documents` returns no text or chunks. (Removed:
   **`agentic_cli.knowledge_base`**; Changed: **The knowledge base keeps…**)
-- A tool declares `requires="knowledge_base"`; the workflow's services are
-  `workflow.knowledge_base` and `workflow.memory_store`, built by
+- A tool declares `requires="knowledge_base"`; `workflow.kb_manager` and
+  `user_kb_manager` are `workflow.knowledge_base`, and
+  `workflow.memory_manager` is `workflow.memory_store`, built by
   `memory_services.open_knowledge_base` and `open_memory_store`; the factories
   take a `KnowledgeBase`. (Removed: **`requires="kb_manager"`** and the four
   entries after it, to **`memory_services.build_memory_store`**)
@@ -80,9 +81,10 @@ the start of the entry's title.
   refuses one that does not start with a letter, holds other than letters,
   digits, `_` and `-`, or is `user`. Code calling ADK follows ADK 2's notes.
   (Changed: **`app_name` comes only…**, **agentic-cli runs on ADK 2**)
-- A settings class built from the mixins lists them before pydantic-settings'
-  `BaseSettings`; a skill path or `skills_dirs` entry is absolute. (Security:
-  **A settings class composed…**, **A skill name is looked up…**)
+- A settings class built from the mixins must list them before
+  pydantic-settings' `BaseSettings`, and a skill path or `skills_dirs` entry
+  must be absolute. (Security: **A settings class composed…**, **A skill name
+  is looked up…**)
 - `ModelRegistry`, `manager.model_registry`, the settings' model helpers and
   the backends' private model code give way to `manager.catalog`,
   `agentic_cli.models` and the model factories; `manager.model` is a
