@@ -9,6 +9,7 @@ cannot rot again.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import textwrap
 from typing import Any
@@ -19,6 +20,7 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
+from agentic_cli.workflow.sessions import SessionRef, get_active_turn
 from tests.conftest import MockContext
 
 
@@ -61,6 +63,37 @@ async def test_a_turn_initializes_it_and_replies(example):
         assert manager.is_initialized
 
         await manager.cleanup()
+
+
+async def test_its_turn_enters_through_the_bases_turn(example):
+    """The example starts its turn as every turn starts (``_turn``)."""
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+        entered: list[SessionRef] = []
+        turn = manager._turn
+
+        @contextlib.asynccontextmanager
+        async def recorded(session_id=None, user_id=None):
+            async with turn(session_id, user_id) as ref:
+                entered.append(ref)
+                assert get_active_turn() == ref
+                yield ref
+
+        manager._turn = recorded
+
+        assert await _reply(manager, "hello") == ["echo: hello"]
+        assert entered == [SessionRef(manager.app_name, "user", "session")]
+
+        await manager.cleanup()
+
+
+def test_it_has_no_job_resume_and_no_compact(example):
+    """What the example leaves out, its flags say: they are derived from the hooks."""
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+
+    assert manager.supports_job_resume is False
+    assert manager.supports_compact is False
 
 
 def test_the_lifecycle_is_the_bases(example):

@@ -977,11 +977,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
-        Shared by ``process()`` (user message) and ``resume_with_job_result()``
-        (the job's notice, or a native app's function response). The caller
+        Shared by ``process()`` (user message) and ``_deliver_job_notice()``
+        (a job's notice, or a native app's function response). The caller
         must already be inside the turn (the base's ``_turn``) with the
-        session prepared. ``state_delta`` is saved with ``new_message`` (a user
-        turn's row).
+        session prepared. ``state_delta`` is saved with ``new_message`` (a
+        user turn's row).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens

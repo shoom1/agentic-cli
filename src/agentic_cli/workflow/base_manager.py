@@ -9,6 +9,8 @@ HITL) based on tool requirements, creating them lazily when needed.
 It also provides shared implementations for:
 - The lifecycle: initialization, ``cleanup``, ``reinitialize`` and the one
   release they run, which the backends join through two hooks
+- The turn: one entry (``_turn``) for every turn, and the templates of a
+  job's resume, ``can_resume`` and ``compact`` over the backends' hooks
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
 - Context: each agent's context numbers (``context_budget``), for a UI
@@ -174,13 +176,14 @@ class BaseWorkflowManager(ABC):
     - User input request/response flow
 
     Concurrency contract:
-        A manager runs **one turn at a time**. ``process()`` and
-        ``resume_with_job_result()`` serialize on an internal turn lock, so
-        overlapping callers queue rather than interleave — the backend's
-        per-invocation event buffers are manager-scoped, and interleaving would
-        let one invocation drain another's events. Run separate managers for
-        genuine parallelism. (The HITL input callback is context-local, so it
-        does not depend on that serialization; see ``set_input_callback``.)
+        A manager runs **one turn at a time**. ``process()``,
+        ``resume_with_job_result()`` and ``compact()`` enter through
+        ``_turn`` and serialize on an internal turn lock, so overlapping
+        callers queue rather than interleave — the backend's per-invocation
+        event buffers are manager-scoped, and interleaving would let one
+        invocation drain another's events. Run separate managers for genuine
+        parallelism. (The HITL input callback is context-local, so it does
+        not depend on that serialization; see ``set_input_callback``.)
 
         ``reinitialize`` and ``cleanup`` take the lifecycle lock and then the
         turn lock, so the backend is never torn down under a running
@@ -206,6 +209,23 @@ class BaseWorkflowManager(ABC):
         or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
 
+    Turn contract:
+        Every turn starts with ``async with self._turn(session_id, user_id)
+        as ref:``: the conversation is resolved (``session_ref``) and named in
+        the log context, the manager initialized when it is not, the turn
+        lock taken with a live backend behind it (``_turn_admission``), and
+        the settings, the services and the active turn set for the block
+        (``_workflow_context``). A backend's ``process`` runs its agents
+        inside it. The rest of the turn protocol is the base's, over hooks:
+        ``resume_with_job_result`` (the record's checks, the turn, the job's
+        result read on a worker thread, the notice) runs the backend's
+        ``_deliver_job_notice`` in the conversation ``_conversation_exists``
+        finds, and ``can_resume`` makes the same checks without the turn;
+        ``compact`` runs the backend's ``_compact_turn`` as a turn. A backend
+        implements the hooks it can, and ``supports_job_resume`` and
+        ``supports_compact`` are derived from them; one that overrides a
+        template keeps its own.
+
     Example:
         A minimal backend: it builds its engine in ``_do_initialize`` and
         hands it to the release in ``_detach_backend``; everything else of
@@ -213,12 +233,14 @@ class BaseWorkflowManager(ABC):
         backend's ``_validate_agent_graph`` (the base's validates nothing and
         leaves ``root_agent_name`` None), resolves the models, builds the
         services the tools declare and then calls ``_do_initialize``. A turn
-        enters through ``_turn_admission``, which initializes the manager
-        when it is not and re-checks ``_backend_ready`` under the turn lock,
-        and passes each event through ``_apply_event_hook``, which is the
-        constructor's ``on_event``. A backend with a session store also
-        returns its closers from ``_detach_store``, which a model switch
-        skips, and builds on the store it still holds::
+        enters through ``_turn``, which initializes the manager when it is
+        not and re-checks ``_backend_ready`` under the turn lock, and passes
+        each event through ``_apply_event_hook``, which is the constructor's
+        ``on_event``. A backend with a session store also returns its
+        closers from ``_detach_store``, which a model switch skips, and
+        builds on the store it still holds. This one has no job resume and
+        no ``compact``: a backend that does implements their hooks (the turn
+        contract above)::
 
             from functools import partial
             from typing import Callable
@@ -250,12 +272,11 @@ class BaseWorkflowManager(ABC):
                     return [("engine", partial(self._aclose_owned, engine, "engine"))]
 
                 async def process(self, message, user_id, session_id=None):
-                    async with self._turn_admission():
-                        with self._workflow_context(session_id=session_id, user_id=user_id):
-                            event = WorkflowEvent.text(f"echo: {message}", session_id)
-                            event = self._apply_event_hook(event)  # None: dropped
-                            if event is not None:
-                                yield event
+                    async with self._turn(session_id, user_id) as ref:
+                        event = WorkflowEvent.text(f"echo: {message}", ref.session_id)
+                        event = self._apply_event_hook(event)  # None: dropped
+                        if event is not None:
+                            yield event
     """
 
     #: The conversation a call without a session id belongs to
@@ -1245,7 +1266,7 @@ class BaseWorkflowManager(ABC):
             f"{type(self).__name__} cannot tell a conversation that its job finished."
         )
         if False:  # pragma: no cover - an async generator
-            yield  # type: ignore[unreachable]
+            yield  # type: ignore[misc]
 
     @contextlib.contextmanager
     def _workflow_context(
