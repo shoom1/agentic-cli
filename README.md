@@ -1968,10 +1968,16 @@ class MyCommand(Command):
         app.session.add_response(f"Executed with args: {args}")
 
 class MyApp(BaseCLIApp):
-    def _register_builtin_commands(self) -> None:
-        super()._register_builtin_commands()
+    def register_commands(self) -> None:
         self.command_registry.register(MyCommand())
 ```
+
+`register_commands()` runs last in the constructor, after the built-ins
+(`_register_builtin_commands()`), so a command of the same name or alias
+replaces a built-in one. An app that overrides `_register_builtin_commands()`
+instead, calling `super()._register_builtin_commands()` first and then
+registering its own, keeps working: its commands are registered just before
+`register_commands()` runs.
 
 ## Events
 

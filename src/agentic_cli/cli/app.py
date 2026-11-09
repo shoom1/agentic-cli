@@ -3,7 +3,8 @@
 This module provides the base CLI application that:
 1. Uses ThinkingPromptSession for all UI (thinking boxes, messages, etc.)
 2. Connects to domain-specific workflow managers
-3. Tracks message history for persistence
+3. Opens, switches and resumes the conversation its turns run in (the
+   workflow's session store keeps each one)
 """
 
 from __future__ import annotations
@@ -541,7 +542,15 @@ class BaseCLIApp:
     - register_commands(): Register domain-specific commands
     - get_theme(name): Customize a theme's colors
     - get_ui_setting_keys(): Customize settings dialog fields
-    - apply_settings(): Handle additional custom settings
+    - apply_settings(changes): Handle additional custom settings
+    - save_settings(keys): Persist the settings ``/settings`` changed
+    - add_arguments(parser), from_args(args): The app's own command-line
+      flags, and how ``main()`` builds the app from them (classmethods)
+
+    ``register_commands()`` and ``get_theme()`` run during construction:
+    ``register_commands()`` last, ``get_theme()`` as the session is built
+    in its theme, everything else in place. An attribute of the app's own
+    that one reads is set before ``super().__init__()``.
     """
 
     #: A turn ran in the current conversation since it was opened (its memories
@@ -608,8 +617,11 @@ class BaseCLIApp:
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
 
-        # Serializes turns: a user turn and a background-job resume turn must
-        # never overlap (shared session + thinking boxes).
+        # Serializes what writes to the conversation: a turn, a job's resume,
+        # /compact, /new and /resume (not /settings, nor the /resume picker,
+        # which waits on a dialog). thinking-prompt runs one input handler at
+        # a time, so it orders them against the startup resume
+        # (_open_on_startup, a task of its own) and an app's own tasks.
         self._turn_lock = asyncio.Lock()
         # Whether a turn ran in the current conversation since it was adopted:
         # its memories are proposed on leaving it, or at exit, only then.
@@ -2077,7 +2089,8 @@ class BaseCLIApp:
                 # What --continue / --resume open, once the prompt is up.
                 opening = asyncio.create_task(self._open_on_startup())
                 try:
-                    # Run the session - user sees prompt immediately!
+                    # Run the session: the prompt shows now, after the
+                    # start above (which waited for the workflow).
                     with _log_lines_above_prompt(self.session):
                         await self.session.run_async()
                 finally:
