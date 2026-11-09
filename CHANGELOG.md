@@ -2371,6 +2371,12 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`write_file` and `edit_file` of an existing file work on Windows with
+  Python 3.12.** Keeping the file's permission bits called `os.fchmod`,
+  which Python on Windows has only from 3.13, so every such call failed
+  with `AttributeError`. Where the platform has no `fchmod` (there the
+  bits mean nothing but read-only) the bits are no longer copied.
+
 - **The ADK conversation store is owner-only.** `sessions.db` (the default
   `session_store`, sqlite) was created with the process's umask: 0644 in a
   0755 folder under the usual 022, so another account on the machine could

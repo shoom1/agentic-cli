@@ -77,3 +77,19 @@ def test_concurrent_writes_produce_valid_file(tmp_path):
     # No temp files left behind.
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "shared.json"]
     assert leftovers == [], f"unexpected leftover files: {leftovers}"
+
+
+def test_preserve_mode_writes_without_fchmod(tmp_path, monkeypatch):
+    """Python 3.12 on Windows has no ``os.fchmod`` (3.13 added it), and there
+    the permission bits mean nothing: ``write_file`` and ``edit_file`` of an
+    existing file still write it."""
+    import os
+
+    path = tmp_path / "notes.txt"
+    path.write_text("old", encoding="utf-8")
+    monkeypatch.delattr(os, "fchmod")
+
+    atomic_write_text(path, "new", preserve_mode=True)
+
+    assert path.read_text(encoding="utf-8") == "new"
+    assert [p.name for p in tmp_path.iterdir()] == ["notes.txt"]
