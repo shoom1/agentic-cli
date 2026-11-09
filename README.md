@@ -1964,9 +1964,10 @@ model and its `max_tokens`.
   conversation `/new` left; an inheriting sub-agent's prompt
   holds the conversation, but it is not the main agent's context. On a
   model whose window is unknown (the 128k floor in use) it shows the prompt
-  alone, `ctx 45k`, as on LangGraph, which manages no context. A `/settings` change that rebuilds the agents (a
-  model, `context_summarize_at`, `context_max_tokens`) shows the new
-  trigger at once; an orchestrator swap starts another conversation, and
+  alone, `ctx 45k`, as on LangGraph, which manages no context. A
+  `/settings` change that rebuilds the agents (a model,
+  `context_summarize_at`, `context_max_tokens`) shows the new trigger at
+  once; an orchestrator swap starts another conversation, and
   the segment waits for its first call, as a resumed session's does.
 - **`/status`** adds the main agent's rows after Services: Main Agent (its
   name and model), Context Window (or "unknown, 128k floor in use"), Input
