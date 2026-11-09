@@ -116,7 +116,6 @@ class _DeepAgentsAdmissionHarness:
             self.manager._sessions = SimpleNamespace(
                 exists=self._exists, outside_content=self._outside_content
             )
-            self.manager._root_name = "a"
             self.manager._root = SimpleNamespace(name=f"backend-{self.inits}")
 
         async def _run_turn(ref, graph_input):

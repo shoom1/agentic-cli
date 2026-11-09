@@ -163,7 +163,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._sessions: CheckpointSessions | None = None
 
         self._root: CompiledStateGraph | None = None
-        self._root_name: str | None = None
         # The root agent's summarization middleware, which compact() uses.
         self._root_summarization: ReportingSummarizationMiddleware | None = None
 
@@ -226,7 +225,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         if self._checkpointer is None:
             await self._open_session_store()
 
-        graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
         # Each agent's context numbers, as its summarization uses them; a
         # budget too small to work in fails here (ContextBudgetError).
         self._budgets = {
@@ -257,7 +255,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
-        index_wanted = self._memory_index_wanted(graph.root_name)
+        root = self._root_agent_name  # from the graph the base validated
+        index_wanted = self._memory_index_wanted(root)
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -281,13 +280,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             memory_index_cached=self._memory_index_cached if index_wanted else None,
             memory_index_forget=self._forget_memory_index if index_wanted else None,
         )
-        self._root_name = graph.root_name
-        self._root_summarization = summarizers.get(graph.root_name)
+        self._root_summarization = summarizers.get(root)
 
         logger.info(
             "services_initialized",
             model=self.model,
-            root=self._root_name,
+            root=root,
             session_store=self._settings.session_store,
             required_managers=list(self._required_managers),
         )
@@ -413,7 +411,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self._checkpointer = None
             self._sessions = None
         self._root = None
-        self._root_name = None
         self._root_summarization = None
         self._budgets = {}
         self._index_snapshots.clear()
@@ -689,7 +686,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 previous = values.get(SUMMARIZATION_EVENT_KEY)
                 messages = values.get("messages") or []
                 sent = middleware._apply_event_to_messages(messages, previous)
-                root = self._root_name
+                root = self._root_agent_name
                 model = self._resolved_models[root]
                 cut = compact_cutoff(
                     sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
@@ -767,14 +764,14 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         left (``_recording``).
         """
         processor = DeepAgentsEventProcessor(
-            root=self._root_name,
+            root=self._root_agent_name,
             agent_models=self._resolved_models,
             session_id=ref.session_id,
             budgets=self._budgets,
         )
         live = LiveEvents()
         callback = RunCallback(
-            root=self._root_name,
+            root=self._root_agent_name,
             agent_models=self._resolved_models,
             llm_log=self._raw_llm_log(),
             live=live,
