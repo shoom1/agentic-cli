@@ -1056,7 +1056,9 @@ class BaseCLIApp:
         one before, and starts the task list and the usage counters over,
         with a ``DeprecationWarning``. The workflow is not told until the next
         turn names the id, and the memories of the conversation left are not
-        proposed. Set it between turns.
+        proposed. Set it between turns. None names no conversation: the turns
+        run in the one the workflow loaded last, and the conversation held
+        stays held.
 
         Raises:
             RuntimeError: On setting an id another process has open; nothing

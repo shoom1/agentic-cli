@@ -388,13 +388,16 @@ class TestTheSwitchAtOnce:
         assert core.switch_now("b", around.parts()) == os.getpid()
         assert core.session_id == "a" and around.done == []
 
-    def test_none_holds_nothing(self, tmp_path):
+    def test_none_keeps_the_conversation_held(self, tmp_path):
+        """No conversation named: the workflow's own, the one it loaded last."""
         core, around = TestTheSwitch.core_in(tmp_path), Around()
+        core.turned = True
 
         assert core.switch_now(None, around.parts()) is None
 
-        assert core.session_id is None
-        assert held_elsewhere(place(tmp_path), "a") is None
+        assert (core.session_id, core.turned) == (None, True)
+        assert held_elsewhere(place(tmp_path), "a") == os.getpid()
+        assert around.done == []
 
 
 def _row():

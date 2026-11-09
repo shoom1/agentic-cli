@@ -295,8 +295,13 @@ class ConversationCore:
         conversation, unused, its task list and usage counters start over,
         and the status line is drawn. The workflow does not load it (the next
         turn names it), and the memories of the conversation left are not
-        proposed. None holds nothing: the turns run in the workflow's own
-        default session.
+        proposed.
+
+        None names no conversation: the turns then run in the one the
+        workflow loaded last (``session_ref`` falls back to its own id), which
+        is the conversation held whenever the workflow ran at its switch.
+        So nothing else changes: the lock, ``turned``, the task list and the
+        usage counters stay.
 
         Returns:
             None once ``to`` is the conversation (or was); else the process
@@ -304,15 +309,13 @@ class ConversationCore:
         """
         if to == self.session_id:
             return None
-        if to is None:
-            self.release()
-            self.session_id, self.turned = None, False
-            _start_over(parts, swapped=False)
-        else:
-            taken = self.acquire(to)
-            if isinstance(taken, int):
-                return taken
-            self._make(taken, parts, swapped=False)
+        if to is None:  # the workflow's own: the conversation held, as it was
+            self.session_id = None
+            return None
+        taken = self.acquire(to)
+        if isinstance(taken, int):
+            return taken
+        self._make(taken, parts, swapped=False)
         parts.status(False)
         return None
 

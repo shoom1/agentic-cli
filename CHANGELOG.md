@@ -2020,7 +2020,8 @@ the start of the entry's title.
   and nothing changes), the one before let go, and the task list and the
   usage counters start over; the workflow is not told until the next turn
   names the id, and the memories of the conversation left are not
-  proposed.
+  proposed. None names no conversation, as before: the turns run in the one
+  the workflow loaded last, which stays held.
 
 - **`_release_resources(keep_session_service=True)`**, which kept ADK's
   session service through a release, is deprecated and will be removed in
