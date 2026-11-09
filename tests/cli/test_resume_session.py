@@ -101,7 +101,8 @@ class Workflow(CompactWorkflow):
         if self.load_error is not None:
             self.calls.append(f"load_session {session_id}")
             raise self.load_error
-        return await super().load_session(session_id, user_id)
+        await super().load_session(session_id, user_id)
+        return session_id in self.stored  # as a store answers: whether it holds it
 
     async def session_info(self, session_id, *, user_id=None):
         self.calls.append(f"session_info {session_id}")
@@ -334,6 +335,46 @@ class TestResumeSession:
         assert resumed is False and app.session_id == old
         assert said(app.session, "add_error") == ["Could not open 'abc': database is locked"]
         assert not any(m.startswith("Resumed:") for m in said(app.session, "add_message"))
+
+    async def test_a_conversation_deleted_as_it_opens_is_said_gone(self, project):
+        """Deleted between its lookup and the load (another process's
+        ``/sessions --delete``): not resumed, and the workflow goes back to
+        the conversation the app stays in."""
+        workflow = Workflow(conversation("abc", "Plan the trip", 2))
+        app = app_on(workflow, fake_settings())
+        old = app.session_id
+        load = workflow.load_session
+
+        async def deleted_first(session_id, user_id=None):
+            workflow.stored.pop("abc", None)
+            return await load(session_id, user_id)
+
+        workflow.load_session = deleted_first
+
+        resumed = await app.resume_session("abc")
+
+        assert resumed is False and app.session_id == old
+        assert said(app.session, "add_error") == ["No conversation 'abc' found."]
+        assert not any(m.startswith("Resumed:") for m in said(app.session, "add_message"))
+        assert workflow.calls == [
+            "session_info abc", "load_session abc", "session_info abc", f"load_session {old}",
+        ]
+
+    async def test_a_stored_conversation_the_load_finds_empty_is_still_resumed(self, project):
+        """Listed, yet holding no message (a first turn killed before its
+        input was stored): it is there to resume, as before."""
+        workflow = Workflow(conversation("abc", "Plan the trip", 0))
+        app = app_on(workflow, fake_settings())
+        load = workflow.load_session
+
+        async def empty(session_id, user_id=None):
+            await load(session_id, user_id)
+            return False
+
+        workflow.load_session = empty
+
+        assert await app.resume_session("abc") is True
+        assert app.session_id == "abc"
 
     async def test_a_workflow_that_did_not_start_changes_nothing(self, project):
         app = app_on(Workflow(), fake_settings())
@@ -614,6 +655,18 @@ class TestPickSession:
             "1d ago   · 2 turns   · Plan the trip · old",
         ]
         assert picked == "old"
+
+    async def test_it_is_drawn_where_the_user_chose_since_the_start(self, project):
+        """A ``/settings`` change of dialog_placement: the session keeps the
+        placement it started with, so the picker passes the live one."""
+        app = app_on(Workflow(conversation("abc", "Plan the trip", 2)), fake_settings())
+        app.settings.update_setting("dialog_placement", "inline")
+        app.session.show_dialog.return_value = None
+
+        await app.pick_session()
+
+        (dialog,) = app.session.show_dialog.call_args.args
+        assert dialog.placement == "inline"
 
     async def test_escape_picks_nothing(self, project):
         app = app_on(Workflow(conversation("abc", "Plan the trip", 2)), fake_settings())

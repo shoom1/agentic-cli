@@ -919,10 +919,11 @@ the start of the entry's title.
     the new colors, while Rich panels and tables keep the colors they were
     printed in.
   - A new placement applies from the next dialog agentic-cli opens:
-    `/settings` and the tools' questions (permission prompts included) pass
-    `placement=` from the settings each time, since thinking-prompt's session
-    placement is fixed when it starts. An app's own dialogs keep that startup
-    placement unless they pass `placement=` themselves.
+    `/settings`, the `/resume` picker, `/memory`'s dialogs and the tools'
+    questions (permission prompts included) pass `placement=` from the
+    settings each time, since thinking-prompt's session placement is fixed
+    when it starts. An app's own dialogs keep that startup placement unless
+    they pass `placement=` themselves.
 - **ADK summarizes the main agent's conversation before it outgrows the
   model, as Deep Agents does.** ADK sent the whole session with every model
   call, so a conversation that outgrew the window failed every later turn
@@ -1182,7 +1183,8 @@ the start of the entry's title.
   keeps the current one ("No other conversations to resume." when there are
   none). `/resume <id>` opens that one. Under the turn lock it reads the
   conversation first, so one that is not stored ("No conversation '<id>'
-  found."), already open ("Already in this conversation.") or unreadable
+  found.", also when another process deletes it while it opens), already
+  open ("Already in this conversation.") or unreadable
   ("Could not open '<id>': <error>") changes nothing; then, as `/new` does,
   memories are proposed from the conversation left (when that is on), the
   id is adopted once the workflow has taken it, and the task box and the
@@ -2252,6 +2254,92 @@ step; each entry says what to use instead.
   and `/status` showed "Not available" in place of its Session ID, Services
   and context rows. The base now declares `session_id` as a class default
   (`"default_session"`), which a backend that sets or provides its own keeps.
+
+- **A turn closes its event stream before it returns.** When a turn
+  stopped reading the workflow's events early (an event handler that
+  raised, or Ctrl+C while one waited), the event generator was left to the
+  event loop's finalizer, which closed it from another context: resetting
+  the turn's context variables failed, and the loop logged "ValueError:
+  <Token …> was created in a different Context". `MessageProcessor` now
+  closes the stream in the turn's own task (`contextlib.aclosing`), for
+  every turn: a message, a job's resume and `/compact`. A stream whose own
+  cleanup raises as Ctrl+C closes it still ends the turn cancelled
+  ("Operation cancelled...", once), not as a "Workflow error"; the cleanup's
+  error is logged at debug (`turn_stream_close_failed`).
+
+- **A run whose workflow did not start says how to go on.** Starting a new
+  conversation, it warned "Cannot adopt session — workflow not
+  initialized."; it now says "The workflow did not start. Fix it with
+  /settings; your next message starts it again.", as `--continue` and
+  `--resume` already said how to resume once it is fixed.
+
+- **A slash command that fails is logged.** The user saw "Error executing
+  command: <error>" (for a `KeyError`, only the key) and nothing reached
+  the log. The failure is now logged as `command_failed` at info, with the
+  command and the error's type, and its traceback at debug.
+
+- **`/status` says why the workflow did not start.** It looked for the
+  start's error on the app under two names the app never had, so a workflow
+  that failed to start showed only "Not available (initializing...)". The
+  new `BaseCLIApp.workflow_error` property is the error the workflow's
+  start, or its last rebuild, failed with (the controller's `init_error`;
+  None while it runs or is starting), and `/status` shows "Not available
+  (failed to start)" and an Error row with it.
+
+- **An app's hooks run on a built app, and a command registered later
+  completes.** `register_commands()` ran before the usage tracker, the
+  workflow controller and the session existed, so a hook that read
+  `self.usage_tracker` (or anything built after it) failed with an
+  `AttributeError`; and the slash-command completer copied the command names
+  once, so a command registered after construction never completed.
+  `register_commands()`, after `_register_builtin_commands()`, now runs last
+  in the constructor, `get_theme()` as the session is built with everything
+  else in place, and the completer reads the registry each time it
+  completes (`SlashCommandCompleter` takes a `CommandRegistry`, or a list of
+  names as before). The hooks still run during construction: an attribute
+  of an app's own that one reads is set before `super().__init__()`.
+
+- **`/settings` says when a change takes effect, and rebuilds the workflow
+  for each setting its models are built with.** The retries
+  (`retry_max_attempts`, `retry_initial_delay`, `retry_backoff_factor`) and
+  `anthropic_request_timeout` are read when each model's client is built,
+  yet a change of them was reported as applied and ran only after some
+  later rebuild; `session_store`, `log_level` and `log_format`, read only as
+  the app starts, were reported as applied too. `settings_persistence` now
+  declares, beside `PROJECT_SETTABLE_KEYS`, when each key `/settings` may
+  show takes effect, and `apply_settings` follows it: `REBUILD_KEYS` rebuild
+  the workflow (the retry and timeout keys now among them), `RESTART_KEYS`
+  are saved and their line says "(takes effect at the next start)", and
+  `LIVE_KEYS` apply at once. A change of `session_store` made while the
+  workflow is starting waits for that start, which reads it, as a rebuild
+  does.
+
+- **`/settings` while the workflow is still starting runs the change it
+  saves.** A start resolves its models from the settings before it builds
+  the rest, so a change of model (or of anything else the agents are built
+  from) made while it ran was reported and saved but not run: the workflow
+  went on with the model it had resolved, and an orchestrator change was
+  left for some later rebuild to make. `apply_settings` now waits for the
+  start in progress, as a turn does ("Waiting for initialization...";
+  Ctrl+C stops the wait and changes nothing), then rebuilds as usual. When
+  that start fails, the change is applied as for any workflow that is not
+  running: nothing is rebuilt, and the next start uses it.
+
+- **`JobManager.complete_resume` without the cross-process lock changes
+  nothing.** It could not record the delivery, yet marked the job delivered
+  (or failed) in the manager's memory, until a refresh read the claim back
+  from disk. The record now stays as the disk has it: resuming, under this
+  process's claim, which startup recovery records failed once the process
+  is gone (the result stays readable with `/jobs <id>`).
+
+- **A job's record keeps what a later version of the app wrote in it.**
+  Every write of a job's `meta.json` (a poll that found the job ended, a
+  cancel, a launch, a delivery, startup recovery) wrote the whole record as
+  the writing version knows it, so a field a later version had added,
+  running as another CLI over the same jobs directory, was erased. A job
+  manager now writes onto the record it read and keeps every key it does
+  not know (not the legacy `resumed`, which `resume_state` replaced). A
+  0.6.4 CLI still erases the fields 0.7.0 added, such as `cancel_requested`.
 
 - **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
   a job the cancel could not reach (another CLI of the app runs it and its

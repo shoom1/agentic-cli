@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import Field, SecretStr
 
+from agentic_cli.cli.workflow_controller import WorkflowState
 from agentic_cli.config import BaseSettings
 from agentic_cli.settings_persistence import (
     SECRET_FIELDS,
@@ -272,7 +273,9 @@ class TestSettingsCommandSavesTheChanges:
         ]
         app.session = autospec_session()
         app.session.show_dialog.return_value = True  # Save
-        app._workflow_controller = SimpleNamespace(is_ready=False)
+        app._workflow_controller = SimpleNamespace(
+            is_ready=False, state=WorkflowState.UNINITIALIZED
+        )
         app.apply_settings = lambda changes: BaseCLIApp.apply_settings(app, changes)
         app.save_settings = AsyncMock(return_value=SimpleNamespace(
             project_path=Path("p"), user_path=None, user_scoped_keys=()))
