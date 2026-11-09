@@ -205,6 +205,66 @@ def copy_regular_file_no_follow(
         os.close(fd)
 
 
+def _fchmod(fd: int, mode: int) -> None:
+    """``os.fchmod(fd, mode)`` where the platform has it.
+
+    Python on Windows has none before 3.13, and there the permission bits
+    mean nothing but read-only: the mode is then left as it is.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is not None:
+        fchmod(fd, mode)
+
+
+def make_private_file(path: Path, *, tighten: bool = True) -> None:
+    """Make ``path`` an owner-only file (0600) before a library opens it.
+
+    For a file that holds what the user said, such as a session database,
+    which its library would create with the process's umask (0644 under
+    022). A missing file is created empty: SQLite takes an empty file for an
+    empty database. A missing directory is created owner-only (0700); one
+    that exists is left as it is, since it may be the user's own. An
+    existing file is tightened, dropping its group and other bits (one an
+    older version created 0644), unless ``tighten`` is False: a file at a
+    location the user names may be shared on purpose. A symlink, and what
+    it points at, are left alone, as is a file this process may not change
+    (and every file where the platform has no ``fchmod``: Windows' Python
+    before 3.13).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+    except FileExistsError:
+        if tighten:
+            tighten_file(path)
+    else:
+        os.close(fd)
+
+
+def tighten_file(path: Path) -> None:
+    """Drop the group and other permission bits of the regular file ``path``.
+
+    A missing file, a symlink (and what it points at), a file this process
+    may not change, and every file where the platform has no ``fchmod``
+    (Windows' Python before 3.13) are left as they are; nothing is raised.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
+    except OSError:  # missing, a symlink (ELOOP), or nothing this process may open
+        return
+    try:
+        status = os.fstat(fd)
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode) and mode & 0o077:
+            _fchmod(fd, mode & 0o700)
+    except OSError:  # not this process's file
+        pass
+    finally:
+        os.close(fd)
+
+
 def _open_temp_beside(
     path: Path, *, mode: int = 0o666, dir_fd: int | None = None
 ) -> tuple[int, Path]:
@@ -240,6 +300,8 @@ def _atomic_write(path: Path, content: str | bytes, *, preserve_mode: bool = Fal
       owns: an existing file keeps its permission bits and a new one gets the
       process default, as with a plain write. Setuid/setgid are not carried
       over (the kernel clears them when a non-root process writes a file).
+      Where the platform has no ``fchmod`` (Windows' Python before 3.13,
+      whose bits mean nothing), the bits are not copied.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = None
@@ -258,7 +320,7 @@ def _atomic_write(path: Path, content: str | bytes, *, preserve_mode: bool = Fal
     try:
         with os.fdopen(fd, "wb") as f:
             if existing is not None:
-                os.fchmod(f.fileno(), existing)
+                _fchmod(f.fileno(), existing)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())

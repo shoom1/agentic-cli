@@ -1,8 +1,8 @@
 """The listing cache: ``~/.<app>/model_cache.json`` in the workflow.
 
 One entry per provider: fetch time, outcome, address, kind, the models (each
-with whether it is shown) and the entries' models the listing lacked
-(``absent``), never a key. ``ListingCache`` reads the file and writes one
+with whether it is shown) and the models a catalog's settings named that the
+listing lacked (``absent``), never a key. ``ListingCache`` reads the file and writes one
 provider's entry at a time; what a cached listing means (fresh, stale, listed
 again) is the catalog's.
 
@@ -102,7 +102,8 @@ class CacheEntry(BaseModel):
     #: The provider's kind (``ProviderKind``'s value): another kind lists again.
     kind: str | None = None
     models: tuple[CachedModel, ...] = ()
-    #: The entries' models the listing lacked (``ModelCatalog``'s ``absent``).
+    #: The models a catalog's settings named that the listing lacked
+    #: (``ModelCatalog``'s ``absent``).
     absent: tuple[str, ...] = ()
 
     def describes(self, provider: Provider) -> bool:
@@ -191,8 +192,8 @@ class ListingCache:
             name: The provider's name in the file.
             provider: The provider, for the address and kind written.
             listing: The listing to write: the new one, or the failure.
-            absent: The entries' models this catalog's listing lacked. The
-                entry holds them with the file's own record of the same
+            absent: The models this catalog's settings name that its listing
+                lacked. The entry holds them with the file's own record of the same
                 address and kind, less every id the listing serves (a model
                 a provider serves again is no longer absent).
             after_failure: ``listing`` follows a failed attempt: the failure

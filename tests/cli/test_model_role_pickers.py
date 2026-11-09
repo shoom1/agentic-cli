@@ -565,17 +565,22 @@ async def test_a_role_change_reaches_the_agents_and_keeps_the_conversation(liste
         await manager.cleanup()
 
 
-async def test_a_role_the_listing_lacks_is_rolled_back_on_a_real_manager(listed, monkeypatch):
+async def test_a_role_the_listing_lacks_runs_as_the_settings_say_on_a_real_manager(
+    listed, monkeypatch
+):
+    """The settings decide what runs: a role whose model Google's listing lacks is
+    not refused (a turn on it fails at the provider), and the list, which the
+    pickers offer, leaves it out with its reason."""
     settings, configs, manager = await _adk_with_a_session(monkeypatch)
     try:
         app = _dialog_app(settings, manager, configs)
 
-        assert not await app.apply_settings({"model_role:fast": "google:gemini-0-missing"})
+        assert await app.apply_settings({"model_role:fast": "google:gemini-0-missing"})
 
-        assert settings.model_roles == {}
-        assert app._workflow_controller.is_ready
-        assert manager._resolved_models["writer"].ref == ModelRef("google", "gemini-2.5-flash-lite")
+        assert settings.model_roles == {"fast": "google:gemini-0-missing"}
+        assert manager._resolved_models["writer"].ref == ModelRef("google", "gemini-0-missing")
+        assert manager.catalog.not_offered() == {"google:gemini-0-missing": "not served by google"}
         assert await manager.session_exists("kept", user_id="u")
-        assert any("gemini-0-missing" in error for error in app.errors)
+        assert app.errors == []
     finally:
         await manager.cleanup()

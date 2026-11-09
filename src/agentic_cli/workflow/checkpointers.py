@@ -34,6 +34,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+from agentic_cli.file_utils import make_private_file, tighten_file
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -50,6 +51,10 @@ CheckpointerKind = Literal["memory", "sqlite", "postgres"]
 # ``sqlite_file`` too). What follows the prefix is the file, as SQLAlchemy reads it:
 # ``sqlite:///rel.db`` is relative, ``sqlite:////abs/x.db`` absolute.
 _SQLITE_URI_PREFIXES = ("sqlite:///", "sqlite+aiosqlite:///")
+
+# The files SQLite keeps beside a database: its rollback journal, and in WAL
+# mode the write-ahead log and its shared-memory index.
+_SQLITE_COMPANIONS = ("-journal", "-wal", "-shm")
 
 # How many times a setup that lost a race is run again, and the pause before
 # each run, in seconds: the other process's migrations take milliseconds, but
@@ -275,14 +280,45 @@ def sqlite_file(value: str) -> str:
     return os.path.expanduser(value)
 
 
+def private_sqlite_file(path: str | Path, *, tighten_existing: bool = True) -> None:
+    """Make the sqlite database file ``path`` names owner-only before it is opened.
+
+    The conversation store holds every word of every conversation, as the
+    raw LLM log does, so it is 0600 in a directory created 0700
+    (``file_utils.make_private_file``): its library would create it with the
+    process's umask. ADK's ``sessions.db`` and Deep Agents' ``checkpoints.db``
+    both come through here. ``:memory:`` names no file.
+
+    Args:
+        path: The database file.
+        tighten_existing: Tighten a file that exists (one an older version
+            made 0644): the backends' own location, ``sqlite_uri`` unset. A
+            file at a location the user names (``sqlite_uri``) may be shared
+            on purpose (0660 in a team folder), so there a missing file is
+            created 0600 and an existing one is left as it is. The
+            journal and WAL files SQLite keeps beside the database are
+            tightened with it when they exist.
+    """
+    if str(path) in ("", ":memory:"):
+        return
+    make_private_file(Path(path), tighten=tighten_existing)
+    if tighten_existing:
+        # What a crash of an earlier build left beside it: SQLite writes the
+        # new pages into them until a clean close.
+        for suffix in _SQLITE_COMPANIONS:
+            tighten_file(Path(f"{path}{suffix}"))
+
+
 def deepagents_sqlite_path(settings: Any) -> Path:
     """The Deep Agents backend's sqlite checkpoint file.
 
     ``sqlite_uri``'s file when it is set (the file ADK uses too), else
     ``{workspace}/sessions/checkpoints.db``, next to ADK's ``sessions.db``.
-    The file's directory is created.
+    The file is made owner-only (``private_sqlite_file``; one ``sqlite_uri``
+    names, and that exists, is left as it is), its directory created if
+    missing.
     """
     uri = getattr(settings, "sqlite_uri", None)
     path = Path(sqlite_file(uri)) if uri else settings.sessions_dir / "checkpoints.db"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_sqlite_file(path, tighten_existing=not uri)
     return path

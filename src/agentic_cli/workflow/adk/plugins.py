@@ -18,9 +18,6 @@ from google.adk.plugins.base_plugin import BasePlugin
 
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.llm_log import LLMLogWriter
-
-# The redaction moved to ``workflow.llm_log``; its old private name still imports.
-from agentic_cli.workflow.llm_log import redact_secrets as _redact_secrets  # noqa: F401
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:

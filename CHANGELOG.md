@@ -141,6 +141,11 @@ the start of the entry's title.
 - With a Google key, no `models` list and no listing yet, an agent without a
   model runs on `gemini-3.8-flash`, where 0.6 ran on `gemini-2.5-flash`.
   (Changed: **Models are named…**)
+- A model its provider's listing lacks no longer stops the start, where 0.6
+  refused it: the workflow runs on it as the settings name it, one warning
+  names the setting and what to do, and a turn on it fails at the provider. A
+  start waits on a listing only to fill a gap the settings leave. (Changed:
+  **A model the settings name is used…**, **Startup no longer lists…**)
 - `/settings` (Save or Cancel, no Ctrl+S) writes a pick equal to the default
   too, and no save removes a key (delete it from `~/.{app_name}/settings.json`
   to follow the app again); its pickers offer the `models` list. (Fixed: **A
@@ -746,7 +751,7 @@ the start of the entry's title.
   first time it is searched). `/models refresh` lists every provider in use
   or searched again now and reports whose models changed and which listings
   failed. Before the workflow is initialized it reads the model cache, and
-  lists a provider in use the cache holds nothing for. It never shows a key.
+  lists what a start would wait on. It never shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
   installs beside `langgraph`, and its LangChain packages are the
@@ -792,13 +797,14 @@ the start of the entry's title.
     `(app_name, user_id, session_id)`, so two users, or two apps sharing a
     database, never share a conversation through one session id.
     `session_store` picks the checkpointer: sqlite (the default) in
-    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
-    (`sqlite_uri` may point ADK and Deep Agents at one file: their tables do
-    not collide), Postgres at `postgres_uri`, or memory. Every session hook
-    takes `user_id`. `list_sessions` gives each conversation's row
-    (`SessionInfo`, below) from its newest checkpoint, `delete_session` also
-    removes the sub-agents' checkpoints and returns False for an unknown id,
-    and `recent_messages` is the user's and the assistant's text.
+    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db` and,
+    as it is, owner-only (`sqlite_uri` may point ADK and Deep Agents at one
+    file: their tables do not collide), Postgres at `postgres_uri`, or
+    memory. Every session hook takes `user_id`. `list_sessions` gives each
+    conversation's row (`SessionInfo`, below) from its newest checkpoint,
+    `delete_session` also removes the sub-agents' checkpoints and returns
+    False for an unknown id, and `recent_messages` is the user's and the
+    assistant's text.
   - **Lifecycle, as on ADK** (the base's: see Changed). A cleanup or a model
     switch waits for the running turn. A failed initialization closes the
     checkpointer it opened. A model switch
@@ -975,10 +981,11 @@ the start of the entry's title.
   trigger leaves the shared session alone. ADK's own pass after each turn is
   switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
   for a summary after the answer. A summary that fails is one warning a
-  turn, "Could not summarize the earlier conversation; older turns are left
-  out instead.", and the next turn tries again (a later call of the same
-  turn only once the range has grown); Ctrl+C during one writes
-  nothing. A request still over its agent's input budget (the summary
+  turn, "Could not summarize the earlier conversation; the agent goes on
+  without a new summary." (the text Deep Agents gives; the fit guard below
+  says itself what it leaves out), and the next turn tries again (a later
+  call of the same turn only once the range has grown); Ctrl+C during one
+  writes nothing. A request still over its agent's input budget (the summary
   lags a call, a sub-agent may run on a smaller model, an unknown window
   counts as 128,000 tokens) has its oldest whole turns left out of that
   request only, by the fit guard (`workflow/adk/fit_guard_plugin.py`), which
@@ -1066,10 +1073,11 @@ the start of the entry's title.
   and trims by them, the root agent's by default. A frozen `ContextBudget`
   (`workflow/context.py`): the model's `window` (128,000 with `window_known`
   False when the model's is unknown), the input `budget`, the summary
-  `trigger` and the `keep` tail, computed when the agents are built. It
-  raises `RuntimeError` before the manager initializes and `KeyError` for an
-  agent whose context the manager does not manage: LangGraph and a native
-  ADK YAML app manage none, and their `root_agent_name` is None. On ADK and
+  `trigger` and the `keep` tail, computed when the models are resolved,
+  before any service is built. It raises `RuntimeError` before the manager
+  initializes and `KeyError` for an agent whose context the manager does not
+  manage: LangGraph and a native ADK YAML app manage none, and their
+  `root_agent_name` is None. On ADK and
   Deep Agents every `LLM_USAGE` an agent's call reports now carries `agent`,
   that agent's `context_trigger` and `window_known`; a summary's carries
   those of the agent it summarized. A sub-agent's call stays
@@ -1153,8 +1161,9 @@ the start of the entry's title.
   context. It says "Nothing to summarize yet." with nothing before the kept
   tail (or no conversation yet), "Could not summarize: <error>" once when
   the summary fails (the error's type when it has no words), and "/compact
-  is not supported on this backend" on LangGraph and in a native ADK YAML
-  app, with no events box. `/new` starts a new conversation without a
+  is not supported on this backend" on LangGraph, with no events box (a
+  native ADK YAML app, which no `BaseCLIApp` starts, has no `compact`
+  either). `/new` starts a new conversation without a
   restart, under the turn lock: memories are proposed from the conversation
   being left first when `auto_extract_session_facts` is on, as at exit,
   under the status line "Looking for memories to propose…" (a failure
@@ -1283,6 +1292,29 @@ the start of the entry's title.
   settings name (`orchestrator_of`) and checks one can run
   (`check_backend`).
 
+- **Importing the ADK backend changes no logger, and a manager no longer
+  re-registers Claude with ADK.** Importing `agentic_cli.workflow.adk.manager`
+  set the `google_genai.types` logger to ERROR for the whole process;
+  `configure_logging()`, which `BaseCLIApp` calls, does it now, beside the
+  other third-party loggers it quiets (an app that configures its own
+  logging may now see google-genai's "non-text parts in the response"
+  warning). Each `GoogleADKWorkflowManager` construction pointed ADK's
+  process-wide model registry at `DirectAnthropicLlm` for `claude-*` names
+  again and cleared its cache; the first one does it, once per process
+  (`anthropic_llm.ensure_direct_anthropic`; `register_direct_anthropic`
+  still registers when called).
+
+- **A call to a tool name the agent does not have reads the same on ADK and
+  Deep Agents, and is no warning.** The model reads ADK's own first two
+  lines, "<name> failed: ValueError: Tool '<name>' not found." and the
+  agent's tools by name, without ADK's advice to a developer ("Possible
+  causes: …"); the log says `tool_not_found` at info, where ADK's
+  `ToolErrorPlugin` logged `tool_raised` as a warning, with a traceback,
+  over the prompt. It is the model's mistake, which it reads and corrects.
+  On ADK the permission gate lets ADK's stand-in for the name through
+  (`tool_error_plugin.is_unknown_tool`: a bare `BaseTool`, which runs
+  nothing) to `ToolErrorPlugin`.
+
 - **Every turn starts in `BaseWorkflowManager._turn`, and a job's resume and
   `can_resume` are the base's, over two backend hooks.**
   `resume_with_job_result` was not declared on the base: a backend wrote it
@@ -1328,7 +1360,11 @@ the start of the entry's title.
   implements `backend_type`, `_get_state_tools`, `_do_initialize`, `process`
   and the hooks for what it holds, as the class docstring's example does; one
   that overrides `cleanup` or `reinitialize` keeps its own (the LangGraph
-  backend does).
+  backend does). The base also computes each agent's context numbers, once
+  the models are resolved and before any service is built; a backend that
+  summarizes by them says so in `_manages_context()` and reads `_budgets` in
+  `_do_initialize` (ADK for an app built from agent configs, and Deep Agents,
+  do; LangGraph and a native ADK YAML app have none).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -1577,10 +1613,11 @@ the start of the entry's title.
   `initialize_services()` resolves the default model and every agent before
   it builds anything, and raises one `SettingsValidationError` that lists
   every agent that cannot run (a provider neither built in nor defined in
-  `model_providers`, a provider that cannot be called, a model the
-  provider's fresh listing lacks, a thinking mode the model does not take),
-  each naming the agent, the model and the allowed values; a role nothing
-  can fill is said once, whatever the number of agents on it.
+  `model_providers`, a provider that cannot be called, a thinking mode the
+  model does not take), each naming the agent, the model and the allowed
+  values; a role nothing can fill is said once, whatever the number of
+  agents on it. A model its provider does not serve is not among them: it is
+  warned of (see **A model the settings name is used…**).
   `validate=False` skips only the static checks of `validate_settings`. A
   bare agent `model` that is not a model id (such as `"mystery-model"`) is
   now an app role: it runs on the default model, with a warning once per
@@ -1616,17 +1653,29 @@ the start of the entry's title.
   settings and the agents name, and the built-in providers with a key when
   the list offers no entry or a computed role has no model of its tier in
   it.
-  Startup waits only for one that can be called and has no cache entry, all
-  of them at once and each for at most 10 seconds; an older entry is used
-  while it is listed again in the background, and so is a listing that failed
-  at startup (once). Until one succeeds the provider's ids are not checked and
-  its models' limits and thinking come from the shipped table (an OpenRouter
-  or configured provider's models run without thinking and with the 128,000-token
-  window floor), which the warning says; the session's agents are resolved
-  once, at startup, and keep that, and the listing reaches `/models`, the
-  pickers, side calls and the next start. As in 0.6, an id unknown to a
-  provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it, and a listing grows older in
+  Startup uses the models the settings name at once, and waits on a listing
+  only to fill a gap they leave: no `models` entry can run (the list's tier
+  models come from the built-in providers' listings), a role is computed (it
+  has no model of its own: the start lists the provider of the entry of its
+  tier it would take, unless a cached listing serves that entry, and with no
+  such entry the built-in providers), or nothing describes a model they name
+  (no cached listing has it, no family rule of the shipped table matches it,
+  and its `models` entry, if any, does not give its `context_window` and
+  `thinking`). Those listings run at once, each for at most 10 seconds, and a
+  second round lists the built-in providers the first one's results put in
+  use; a provider the cache holds a listing or a failure for is not waited on
+  for the built-ins. Every other provider
+  in use is listed in the background: one the cache holds nothing for, an
+  older entry, an entry that lacks a model the settings name, and a listing
+  that failed at startup (once). Until one succeeds the provider's ids are
+  not checked and its models' limits and thinking come from the shipped table
+  (an OpenRouter or configured provider's models run without thinking and
+  with the 128,000-token window floor), which the warning says; the session's
+  agents are resolved once, at startup, and keep that, and the listing
+  reaches `/models`, the pickers, side calls and the next start. As in 0.6,
+  an id the settings do not name (one `/models` looks up) that a provider
+  does not list is rejected only when that provider's own listing succeeded;
+  a failed, untried or older listing accepts it, and a listing grows older in
   a long session too: 24 hours after it was fetched it no longer rejects an
   id, and `/models <text>` lists the provider again. After a key change to an
   account with other models, run `/models refresh` to list again at once.
@@ -1637,8 +1686,8 @@ the start of the entry's title.
   provider's listing of its address and kind. A file of a newer version is
   not read or written: this process lists for itself, keeps its listings in
   memory and says once why every start lists. A listing also records which of
-  the `models` entries' models it lacked, so a model a provider retired costs
-  one listing, not one at every start, whichever project's list names it.
+  the models the settings name it lacked, so a model a provider retired costs
+  one listing, not one at every start, whichever project's settings name it.
 - **`budget` thinking on a model without budget thinking fails at startup.**
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive
@@ -1787,17 +1836,31 @@ the start of the entry's title.
   provider's model has no tier, so without a Google, Anthropic or OpenAI key
   the default role needs `default_model`; said once, not once per agent at
   startup), and that some provider can be called; each message names the
-  variable to set and where it is read. Whether a model exists is checked
-  at startup, against the catalog. It no longer rewrites `default_model` or
+  variable to set and where it is read. Whether a provider serves a model is
+  checked against its listing, which warns of one it does not (see below).
+  It no longer rewrites `default_model` or
   an agent's `model`: the deprecated-model upgrade is gone (see Removed).
-- **A model a cached listing lacks is listed again before startup refuses
-  it.** A listing under 24 hours old can predate a model the provider now
-  serves (one released since, or newly open to the account), so that provider
-  is listed again, once, and the new listing decides. A `models` entry the
-  provider does not serve is left out of the list instead, with one warning
-  ("Model … in models is not offered: not served by …"), so an app's list
-  does not stop it starting when a host retires one model; the cache
-  records the absence, so it costs one listing, not one at every start.
+- **A model the settings name is used as they name it, and checked.** The
+  settings decide what runs: a provider that does not serve a model they name
+  (a `models` entry, `default_model`, a role's model, an agent's or the
+  manager's) no longer stops the start. Once a listing shows it, at startup
+  or in the background, the list leaves the model out (`/models` says why),
+  and one warning names it, the setting that names it and what to do ("Model
+  google:gemini-9-ultra (agent 'writer') is not served by google: its listing
+  lacks it, so a turn on it will fail at the provider. Choose a model google
+  serves for agent 'writer' (`/models google:` lists what it serves)."; for an
+  entry a computed role took at the start, that the role runs on it and to
+  set the role or restart; for any other entry, "… in models is not offered:
+  not served by google. Remove it from models, or name a model google serves
+  …"). A computed role never takes an entry no listing has served: the start
+  lists its provider first. A model nothing describes either runs on the
+  conservative record (no thinking, the 128,000-token window floor, or the
+  one of the two its entry does not give), which the warning says. A listing
+  under 24 hours old read from the cache can predate a model the provider
+  now serves (one released since, or newly open to the account), so its
+  absence counts only once a new listing confirms it (in the background,
+  once); the cache records the absence, so a retired model costs one
+  listing, not one at every start.
 - **`settings.set_model()` checks only the reference** (a role, or a
   malformed one, raises `ValueError`); `/settings` reinitializes the workflow
   and rolls the change back if the model cannot run. `default_model` must be
@@ -1983,15 +2046,17 @@ the start of the entry's title.
   as 128,000 tokens instead of getting Deep Agents' fixed 170,000 tokens or 6
   messages, which never fired on a 32k model. A model whose budget is under
   16,000 tokens fails to start with a `ContextBudgetError`, an
-  `AgentGraphError` naming the agent, its model and its `max_tokens`. That is
-  a `max_tokens` close to the window, or **a window of 16,842 tokens or
-  less, whatever its `max_tokens` (breaking): an 8k or 16k local model
-  that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
+  `AgentGraphError` naming the agent, its model and its `max_tokens`, before
+  any service is built or session store opened (the base computes the
+  budgets once the models are resolved, so no embedding model loads first).
+  That is a `max_tokens` close to the window, or **a window of 16,842
+  tokens or less, whatever its `max_tokens` (breaking): an 8k or 16k local
+  model that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
   window that works. A summary the model writes no text for (Claude can
   refuse one) is not stored: the request goes on in full, the user is told
-  "Could not summarize the earlier conversation; it is sent in full
-  instead." once a turn, and the next turn tries again (a later call of the
-  same turn only once the range has grown). Both settings are
+  "Could not summarize the earlier conversation; the agent goes on without
+  a new summary." once a turn, as on ADK, and the next turn tries again (a
+  later call of the same turn only once the range has grown). Both settings are
   project-settable, and a `/settings` change of either rebuilds the agents,
   keeping the conversation.
 - **google-adk 2.13 is supported, as is 2.12.** The OpenAI-compatible model
@@ -2248,7 +2313,8 @@ step; each entry says what to use instead.
   `get_family(model)` is `parse_ref(model).provider`;
   `get_default(family)` is `manager.model`;
   `resolve_model(model)` is `catalog.record(parse_ref(model))`, which raises
-  `ModelResolutionError` when the provider's fresh listing lacks the model;
+  `ModelResolutionError` when the provider's fresh listing lacks a model the
+  settings do not name (one they name is accepted, and warned of);
   `is_authoritative_for(model)` is
   `catalog.is_authoritative(parse_ref(model).provider)`;
   `supports_thinking(model)` is
@@ -2269,8 +2335,8 @@ step; each entry says what to use instead.
   The others are covered in the `ModelRegistry` entry above.
 - **The deprecated-model upgrade.** 0.6 replaced a model its registry
   marked deprecated with the newest of its family and tier; no listing ever
-  set the mark. A model a provider no longer lists fails at startup when the
-  provider's listing is fresh: name a current one.
+  set the mark. A model a provider no longer lists is warned of, naming the
+  setting, and a turn on it fails at the provider: name a current one.
 - **`agentic_cli.workflow.adk.transfer_tool_description`**, the plugin that
   rewrote the description ADK 1.x gave its `transfer_to_agent` tool (it told
   the model to call `TransferToAgentTool`). ADK 2's description is correct,
@@ -2349,6 +2415,34 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **`write_file` and `edit_file` of an existing file work on Windows with
+  Python 3.12.** Keeping the file's permission bits called `os.fchmod`,
+  which Python on Windows has only from 3.13, so every such call failed
+  with `AttributeError`. Where the platform has no `fchmod` (there the
+  bits mean nothing but read-only) the bits are no longer copied.
+
+- **The ADK conversation store is owner-only.** `sessions.db` (the default
+  `session_store`, sqlite) was created with the process's umask: 0644 in a
+  0755 folder under the usual 022, so another account on the machine could
+  read every conversation, though the raw LLM log of the same words is
+  0600. The file is now created 0600 before the database opens it, in a
+  folder created 0700 (a folder that exists is left as it is), and at the
+  default location a file from an earlier version is tightened to 0600 when
+  it is opened, with the `-journal`, `-wal` or `-shm` file a crash left
+  beside it (`workflow.checkpointers.private_sqlite_file`, over
+  `file_utils.make_private_file`; a symlink is left alone). A file that
+  `sqlite_uri` names and that exists keeps its permissions: it may be
+  shared on purpose (0660 in a team folder). Deep Agents' `checkpoints.db`
+  is made the same way.
+
+- **On ADK, an MCP tool's error result is a failed tool call.** A result
+  the server marks `isError` was a `TOOL_RESULT` with `success=True`, shown
+  as "Result: 2 items". It is now `success=False` with the result's text in
+  `metadata["error"]` (its text blocks, a line each, or Deep Agents' words
+  for one without text), shown "Failed: <text>", as Deep Agents reports
+  it; the model reads the result as before. A framework tool's failed
+  result names its error in `metadata["error"]` too, as on Deep Agents.
 
 - **A finished job's result is no longer given up when its delivery stops
   before reaching the agent.** The CLI claimed a job's delivery before it
@@ -3046,9 +3140,10 @@ step; each entry says what to use instead.
   OpenAI refuse, so every later turn of that conversation failed. Deep
   Agents reported a call that had finished beside the cancelled one as "did
   not complete", so a side effect could be repeated. Now a call that
-  finished keeps its result and the state it changed (`save_tasks`' tasks),
-  a running one is answered "Interrupted by the user before it finished; it
-  may have partly run. Check before running it again.", one waiting at its
+  finished keeps its result (as the tool result cap cut it, its full output
+  saved once) and the state it changed (`save_tasks`' tasks), a running one
+  is answered "Interrupted by the user before it finished; it may have
+  partly run. Check before running it again.", one waiting at its
   permission prompt or at a question "Not run: the user cancelled it.", a
   delegation to a sub-agent as interrupted, and a call whose job was already
   submitted with the job's state (found among the jobs the manager holds,

@@ -765,7 +765,8 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             "SQLite file for session_store=sqlite, as a sqlite:/// URI or a path "
             "(default: ADK's and Deep Agents' own files under {workspace}/sessions/). "
             "ADK and Deep Agents may share one file: their tables do not collide, "
-            "and sessions do not move between backends"
+            "and sessions do not move between backends. A missing file is created "
+            "owner-only (0600); one that exists keeps its permissions"
         ),
         json_schema_extra={"ui_order": 147},
     )

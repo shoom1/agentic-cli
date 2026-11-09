@@ -23,8 +23,9 @@ both); each backend's adapter turns what it resolves into SDK objects.
 - ``catalog``: ``ModelCatalog``, the records merged from ``models`` entries,
   listings and the table; which ids each provider rejects; the providers in
   use, the list the model pickers offer, and search over full listings; the
-  background refresh. It builds records with ``listing_records`` and keeps
-  listings in the file ``listing_cache`` reads and writes (neither is
+  background refresh. It builds records with ``listing_records``, keeps
+  listings in the file ``listing_cache`` reads and writes, and asks
+  ``startup`` which listings a start waits on (none of the three is
   exported).
 """
 

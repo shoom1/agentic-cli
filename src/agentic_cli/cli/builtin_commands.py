@@ -752,8 +752,9 @@ class ModelsCommand(Command):
         catalog = getattr(workflow, "catalog", None)
         owned = catalog is None
         if owned:
-            # The catalog the workflow would load: the model cache, and a
-            # listing of each provider in use with a key and no cache entry.
+            # The catalog the workflow would load: the model cache, and the
+            # listings a start would wait on (ModelCatalog.load); any other
+            # provider in use shows as not listed.
             if workflow is None:
                 app.session.add_message(
                     "system", "The workflow is not initialized yet: showing the model cache."

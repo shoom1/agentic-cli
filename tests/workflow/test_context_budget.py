@@ -706,3 +706,18 @@ def test_the_overflow_message():
         "This conversation no longer fits anthropic:claude-sonnet-4-5's context window. "
         "Use /compact or /new."
     )
+
+
+
+def test_a_failed_summary_is_told_in_one_text_on_both_backends():
+    """True whatever happens next: Deep Agents sends the conversation whole;
+    ADK sends it whole too, unless it is over its budget, when the fit guard
+    or the overflow handler leaves its oldest turns out and says so itself.
+    Each backend's tests check the warning it gives."""
+    from agentic_cli.workflow.adk import compaction
+
+    assert context.SUMMARY_FAILED == (
+        "Could not summarize the earlier conversation; the agent goes on without a new summary."
+    )
+    assert context.SUMMARY_FAILED_CODE == "summary_failed"
+    assert compaction.SUMMARY_FAILED is context.SUMMARY_FAILED  # the CLI tests read it there

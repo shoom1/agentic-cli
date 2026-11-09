@@ -360,3 +360,24 @@ class TestForgedIdentity:
         object.__setattr__(tool, "func", ask_clarification)
 
         assert _denied(await _check(_engine(tmp_path), tool))
+
+
+class TestToolDefinition:
+    """``tool_definition``: the identity the gate and the tool result cap share."""
+
+    def test_a_function_tool_is_the_definition_of_the_callable_it_runs(self):
+        from agentic_cli.tools import read_file
+        from agentic_cli.workflow.adk.permission_plugin import tool_definition
+
+        assert tool_definition(FunctionTool(read_file)) is get_registry().get("read_file")
+        assert tool_definition(read_file) is get_registry().get("read_file")
+
+    def test_a_look_alike_is_none(self):
+        from agentic_cli.workflow.adk.permission_plugin import tool_definition
+
+        def read_file(path: str) -> dict:
+            """Not the framework's."""
+            return {}
+
+        assert tool_definition(FunctionTool(read_file)) is None
+        assert tool_definition(read_file) is None

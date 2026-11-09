@@ -63,6 +63,7 @@ from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
     OVERFLOW_ERROR_CODE,
+    ContextBudget,
     ContextBudgetError,
     context_budget,
     overflow_message,
@@ -241,6 +242,15 @@ class TestThresholds:
         with pytest.raises(ContextBudgetError, match="'a'"):
             summarization_thresholds(small_window, context())
 
+    def test_a_budget_the_caller_computed_is_the_numbers(self):
+        # The manager's own (``_compute_budgets``): not computed a second time.
+        own = ContextBudget(window=50_000, window_known=True, budget=40_000,
+                            trigger=5_000, keep=600)
+
+        assert summarization_thresholds(resolved(SONNET_THINKING), context(), own) == (
+            ("tokens", 5_000), ("tokens", 600)
+        )
+
 
 class TestNoArchive:
     async def test_it_stores_nothing(self):
@@ -320,6 +330,48 @@ TEAM = [
     AgentConfig(name="lead", prompt="p", sub_agents=["helper"]),
     AgentConfig(name="helper", prompt="p", description="Helps."),
 ]
+
+
+class TestTheBudgetsGiven:
+    def test_each_agents_budget_sets_its_summarization(self):
+        budgets = {
+            "lead": ContextBudget(window=50_000, window_known=True, budget=40_000,
+                                  trigger=5_000, keep=600),
+            "helper": ContextBudget(window=60_000, window_known=True, budget=50_000,
+                                    trigger=7_000, keep=800),
+        }
+        models = {"lead": resolved(SONNET_THINKING, "lead"),
+                  "helper": resolved("google:gemini-2.5-flash", "helper")}
+        summarizers = {}
+
+        build_agent_tree(
+            TEAM,
+            chat_models={config.name: ScriptedChat(label=config.name) for config in TEAM},
+            resolved=models, tools={}, prompts={config.name: "p" for config in TEAM},
+            settings=context(), checkpointer=None,
+            budgets=budgets, summarizers=summarizers,
+        )
+
+        assert {name: (m._lc_helper.trigger, m._lc_helper.keep)
+                for name, m in summarizers.items()} == {
+            "lead": (("tokens", 5_000), ("tokens", 600)),
+            "helper": (("tokens", 7_000), ("tokens", 800)),
+        }
+
+    def test_an_agent_without_one_is_computed_from_its_model(self):
+        models = {"lead": resolved(SONNET_THINKING, "lead"),
+                  "helper": resolved("google:gemini-2.5-flash", "helper")}
+        summarizers = {}
+
+        build_agent_tree(
+            TEAM,
+            chat_models={config.name: ScriptedChat(label=config.name) for config in TEAM},
+            resolved=models, tools={}, prompts={config.name: "p" for config in TEAM},
+            settings=context(), checkpointer=None, summarizers=summarizers,
+        )
+
+        for name, model in models.items():
+            assert summarizers[name]._lc_helper.trigger == thresholds_of(model, context())[0]
 
 
 class TestTheStack:
@@ -983,6 +1035,36 @@ class TestSettingsChange:
         assert [m.text for m in models.chats["solo"].conversation(1)] == [
             "First.", "Answer 1.", "Second."
         ]
+
+
+class TestTheManagersBudgetsDecideWhenToSummarize:
+    """``_compute_budgets`` is the one source of an agent's numbers: what /status
+    shows, what /compact keeps and when the automatic summary runs."""
+
+    async def test_a_subclass_that_computes_its_own_summarizes_by_them(
+        self, hermetic, monkeypatch
+    ):
+        class OwnBudgets(DeepAgentsWorkflowManager):
+            def _compute_budgets(self):
+                return {
+                    name: dataclasses.replace(budget, trigger=5_000, keep=700)
+                    for name, budget in super()._compute_budgets().items()
+                }
+
+        monkeypatch.setattr(manager_module, "build_chat_model", ScriptedModels(solo=[]))
+        settings = _settings(
+            model_providers=SMALL, models=SMALL_MODELS, default_model="local:small",
+            orchestrator="deepagents",
+        )
+        manager = OwnBudgets(agent_configs=[_agent("solo", "Answer.")], settings=settings)
+        try:
+            await manager.initialize_services()
+            helper = manager._root_summarization._lc_helper
+
+            assert manager.context_budget().trigger == 5_000
+            assert (helper.trigger, helper.keep) == (("tokens", 5_000), ("tokens", 700))
+        finally:
+            await manager.cleanup()
 
 
 class TestHistoryFilters:

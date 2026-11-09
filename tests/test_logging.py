@@ -2,6 +2,8 @@
 log lines go (stderr, or a sink while a CLI's prompt runs)."""
 
 import logging
+import subprocess
+import sys
 import threading
 
 import structlog
@@ -20,6 +22,26 @@ def test_trafilatura_dependency_loggers_are_silenced(logging_configured):
     """
     for name in ("trafilatura", "htmldate", "courlan", "justext"):
         assert logging.getLogger(name).level == logging.CRITICAL
+
+
+def test_the_genai_sdks_non_text_parts_warning_is_silenced(logging_configured):
+    """google-genai warns when a response holding a function call is read as
+    text; the ADK event processor reads every part on its own."""
+    assert logging.getLogger("google_genai.types").level == logging.ERROR
+
+
+def test_importing_the_adk_backend_sets_no_logger_level():
+    """A library import changes no process-wide logging: ``configure_logging``
+    does, which the CLI calls. Run in a fresh interpreter, since this one has
+    imported everything already."""
+    probe = (
+        "import logging, agentic_cli.workflow.adk.manager; "
+        "print(logging.getLogger('google_genai.types').level)"
+    )
+    run = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+
+    assert run.stdout.strip() == str(logging.NOTSET)
 
 
 def test_while_a_sink_is_set_each_log_line_reaches_it_whole(logging_configured):

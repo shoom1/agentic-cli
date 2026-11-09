@@ -1,9 +1,10 @@
 """A workflow manager's models: the catalog it loads, and every agent resolved at startup.
 
 The manager builds a ``ModelCatalog`` from settings (``workflow.model_services``)
-when it initializes, loads it (listing only what the cache cannot answer),
-resolves the default model and every agent in one all-or-nothing pass, and
-owns the catalog until cleanup. Each backend then builds every agent's model
+when it initializes, loads it (listing only what fills a gap the settings
+leave; the background refresh lists the other providers in use), resolves the
+default model and every agent in one all-or-nothing pass, and owns the catalog
+until cleanup. Each backend then builds every agent's model
 from its resolved model: ADK through its model factory, LangGraph through the
 LangChain adapter. Listings come from ``ProviderAPI``, a fake of every
 provider's model list, and model requests from the fakes in
@@ -202,6 +203,8 @@ class TestProvidersInUse:
         await manager.initialize_services()
         try:
             assert manager.catalog.in_use == ("google", "openrouter")
+            assert providers.calls == ["openrouter"]  # the one model nothing describes
+            await asyncio.gather(*refreshing())  # the rest are checked in the background
             assert sorted(providers.calls) == ["google", "openrouter"]  # not Anthropic
             assert manager.catalog.offered() == [
                 "google:gemini-2.5-flash", "openrouter:qwen/qwen3-235b-a22b",
@@ -255,7 +258,8 @@ class TestResolution:
         keys(monkeypatch, "google")
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b"],
-                        model="gemini-9-ultra"),
+                        model="gemini-2.5-flash",
+                        model_settings=ModelSettings(thinking=ThinkingSettings(mode="xhigh"))),
             AgentConfig(name="a", prompt="p", model="anthropic:claude-sonnet-4-5"),
             AgentConfig(name="b", prompt="p", model="google:gemini-2.5-pro"),
         ]
@@ -265,13 +269,35 @@ class TestResolution:
             await manager.initialize_services(validate=False)
 
         message = str(caught.value)
-        assert "Agent 'coordinator': Model google:gemini-9-ultra is not available." in message
+        assert "Agent 'coordinator': thinking mode 'xhigh' is not available" in message
         assert "Agent 'a': model 'anthropic:claude-sonnet-4-5' needs the anthropic" in message
         assert "Agent 'b'" not in message
         assert manager._resolved_models == {}
         assert not manager.is_initialized
         assert manager.services == {}
         assert manager.catalog is None
+
+    async def test_the_manager_loads_then_resolves_with_no_second_try(
+        self, providers, monkeypatch
+    ):
+        """Loading is the catalog's alone: the manager knows no confirmation
+        protocol, so a start that fails to resolve (a thinking level the model
+        lacks) fails at once, without asking the catalog to list again."""
+        keys(monkeypatch, "google")
+        confirmed: list[ModelCatalog] = []
+
+        async def confirm(catalog: ModelCatalog) -> bool:
+            confirmed.append(catalog)
+            return True
+
+        monkeypatch.setattr(ModelCatalog, "confirm_rejections", confirm)
+        writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))  # Gemini 2.5 has none
+        manager = adk(team("gemini-2.5-flash", model_settings=writer), settings())
+
+        with pytest.raises(SettingsValidationError, match="'xhigh' is not available"):
+            await manager.initialize_services(validate=False)
+
+        assert confirmed == []
 
     async def test_a_static_problem_costs_no_listing(self, providers, monkeypatch):
         keys(monkeypatch, "google")
@@ -282,17 +308,34 @@ class TestResolution:
 
         assert providers.calls == []
 
-    async def test_an_unknown_id_is_rejected_only_by_its_own_fresh_listing(
-        self, providers, monkeypatch
+    async def test_a_model_its_provider_does_not_serve_still_starts(
+        self, providers, monkeypatch, caplog
     ):
-        """An Anthropic outage neither stops Google rejecting an unknown Gemini
-        id nor makes Anthropic's fallback list reject a real model."""
+        """The settings decide what runs: Google's fresh listing lacks the writer's
+        model, and the manager starts on it (a turn on it fails at the provider),
+        while the list leaves it out with its reason. An Anthropic outage accepts
+        any id."""
         keys(monkeypatch, "google", "anthropic")
         providers.answers["anthropic"] = 500
 
-        rejected = adk(team("gemini-9-ultra"), settings())
-        with pytest.raises(SettingsValidationError, match="Available google models"):
-            await rejected.initialize_services()
+        unserved = adk(team("gemini-9-ultra"), settings())
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await unserved.initialize_services()
+        try:
+            warned = [
+                r.getMessage() for r in caplog.records
+                if r.name == "agentic_cli.models.catalog" and r.getMessage().startswith("Model ")
+            ]
+            assert warned == [
+                "Model google:gemini-9-ultra (agent 'writer') is not served by google: its listing "
+                "lacks it, so a turn on it will fail at the provider. Choose a model google serves "
+                "for agent 'writer' (`/models google:` lists what it serves)."
+            ]
+            assert str(unserved._resolved_models["writer"].ref) == "google:gemini-9-ultra"
+            assert unserved.catalog.is_authoritative("google")
+            assert unserved.catalog.not_offered() == {"google:gemini-9-ultra": "not served by google"}
+        finally:
+            await unserved.cleanup()
 
         accepted = adk(team("claude-unknown-9"), settings())
         await accepted.initialize_services()
@@ -366,7 +409,9 @@ class TestManagerModel:
     async def test_without_a_default_model_the_list_s_newest_default_tier_model(
         self, providers, monkeypatch
     ):
-        """Before and after the start, and only the list's provider is listed."""
+        """Before and after the start, and only the list's provider is listed: the role
+        has no model of its own, so the start lists the provider of the entries it
+        takes from, to know the provider serves them."""
         keys(monkeypatch, "google", "anthropic")
         s = settings(models={"anthropic:claude-sonnet-4-5": {}, "anthropic:claude-sonnet-4-6": {}})
         manager = adk(team(), s)
@@ -376,6 +421,28 @@ class TestManagerModel:
         try:
             assert manager.model == "anthropic:claude-sonnet-4-6"
             assert providers.calls == ["anthropic"]
+            await asyncio.gather(*refreshing())
+            assert providers.calls == ["anthropic"]
+        finally:
+            await manager.cleanup()
+
+    async def test_a_computed_default_never_starts_on_an_entry_its_provider_does_not_serve(
+        self, providers, monkeypatch
+    ):
+        """The review's start: the list's one default-tier model is one Anthropic does
+        not serve. The start lists Anthropic, finds it absent, and every agent runs on
+        the newest model Google serves."""
+        keys(monkeypatch, "google", "anthropic")
+        manager = adk(team(), settings(models={"anthropic:claude-sonnet-4-7": {}}))
+
+        await manager.initialize_services()
+        try:
+            assert manager.model == "google:gemini-3-flash-preview"
+            assert {name: str(m.ref) for name, m in manager.agent_models.items()} == {
+                "coordinator": "google:gemini-3-flash-preview",
+                "writer": "google:gemini-3-flash-preview",
+            }
+            assert providers.calls == ["anthropic", "google"]
         finally:
             await manager.cleanup()
 
@@ -407,7 +474,11 @@ class TestManagerModel:
 
     async def test_an_override_is_checked_with_the_agents(self, providers, monkeypatch):
         keys(monkeypatch, "google")
-        manager = adk(team("gemini-9-ultra"), settings(), model="anthropic:claude-sonnet-4-5")
+        writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))  # Gemini 2.5 has no xhigh
+        manager = adk(
+            team("gemini-2.5-flash", model_settings=writer), settings(),
+            model="anthropic:claude-sonnet-4-5",
+        )
 
         with pytest.raises(SettingsValidationError) as caught:
             await manager.initialize_services(validate=False)
@@ -1040,10 +1111,10 @@ class TestCatalogLifecycle:
             return built[-1]
 
         monkeypatch.setattr(model_services, "build_catalog", recording)
-        manager = adk(team("gemini-9-ultra"), settings())
+        manager = adk(team("anthropic:claude-sonnet-4-5"), settings())  # no Anthropic key
 
         with pytest.raises(SettingsValidationError):
-            await manager.initialize_services()
+            await manager.initialize_services(validate=False)  # past the static check
 
         assert manager.catalog is None
         assert built[0].start_background_refresh() is None  # closed
