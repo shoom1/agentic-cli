@@ -1741,6 +1741,16 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **`WorkflowEvent.tool_result(duration_ms=)` and `ExecutionTimeoutError`.** No
+  backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
+  showed: the parameter, the `duration_ms` metadata key it set and the suffix
+  are gone (an app that sets `metadata["duration_ms"]` on its own events no
+  longer gets the suffix). `ExecutionTimeoutError`, exported from
+  `agentic_cli.tools` and aliased as `TimeoutError` in
+  `agentic_cli.tools.executor`, was never raised: `execute_python` reports a
+  timeout in its result (`success` false, `error` "Execution timed out after N
+  seconds"), so there is nothing to catch.
+
 - **research_demo's own `/memory`.** The built-in replaces it.
 
 - **The 0.6 memory store API.** `MemoryItem` (now `Memory`),
