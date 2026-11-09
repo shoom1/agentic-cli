@@ -141,6 +141,11 @@ the start of the entry's title.
 - With a Google key, no `models` list and no listing yet, an agent without a
   model runs on `gemini-3.8-flash`, where 0.6 ran on `gemini-2.5-flash`.
   (Changed: **Models are named…**)
+- A model its provider's listing lacks no longer stops the start, where 0.6
+  refused it: the workflow runs on it as the settings name it, one warning
+  names the setting and what to do, and a turn on it fails at the provider. A
+  start waits on a listing only to fill a gap the settings leave. (Changed:
+  **A model the settings name is used…**, **Startup no longer lists…**)
 - `/settings` (Save or Cancel, no Ctrl+S) writes a pick equal to the default
   too, and no save removes a key (delete it from `~/.{app_name}/settings.json`
   to follow the app again); its pickers offer the `models` list. (Fixed: **A
@@ -746,7 +751,7 @@ the start of the entry's title.
   first time it is searched). `/models refresh` lists every provider in use
   or searched again now and reports whose models changed and which listings
   failed. Before the workflow is initialized it reads the model cache, and
-  lists a provider in use the cache holds nothing for. It never shows a key.
+  lists what a start would wait on. It never shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
   installs beside `langgraph`, and its LangChain packages are the
@@ -1564,17 +1569,26 @@ the start of the entry's title.
   settings and the agents name, and the built-in providers with a key when
   the list offers no entry or a computed role has no model of its tier in
   it.
-  Startup waits only for one that can be called and has no cache entry, all
-  of them at once and each for at most 10 seconds; an older entry is used
-  while it is listed again in the background, and so is a listing that failed
-  at startup (once). Until one succeeds the provider's ids are not checked and
-  its models' limits and thinking come from the shipped table (an OpenRouter
-  or configured provider's models run without thinking and with the 128,000-token
-  window floor), which the warning says; the session's agents are resolved
-  once, at startup, and keep that, and the listing reaches `/models`, the
-  pickers, side calls and the next start. As in 0.6, an id unknown to a
-  provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it, and a listing grows older in
+  Startup uses the models the settings name at once, and waits on a listing
+  only to fill a gap they leave: no `models` entry can run (the list's tier
+  models come from the built-in providers' listings), a computed role has no
+  model of its tier in the list, or nothing describes a model they name (no
+  `models` entry sets a fact of it, no family rule of the shipped table
+  matches it, no cached listing has it). Those listings run at once, each for
+  at most 10 seconds, and a second round lists the built-in providers the
+  first one's results put in use; a provider the cache holds a listing or a
+  failure for is not waited on for the first two gaps. Every other provider
+  in use is listed in the background: one the cache holds nothing for, an
+  older entry, an entry that lacks a model the settings name, and a listing
+  that failed at startup (once). Until one succeeds the provider's ids are
+  not checked and its models' limits and thinking come from the shipped table
+  (an OpenRouter or configured provider's models run without thinking and
+  with the 128,000-token window floor), which the warning says; the session's
+  agents are resolved once, at startup, and keep that, and the listing
+  reaches `/models`, the pickers, side calls and the next start. As in 0.6,
+  an id the settings do not name (one `/models` looks up) that a provider
+  does not list is rejected only when that provider's own listing succeeded;
+  a failed, untried or older listing accepts it, and a listing grows older in
   a long session too: 24 hours after it was fetched it no longer rejects an
   id, and `/models <text>` lists the provider again. After a key change to an
   account with other models, run `/models refresh` to list again at once.
@@ -1585,8 +1599,8 @@ the start of the entry's title.
   provider's listing of its address and kind. A file of a newer version is
   not read or written: this process lists for itself, keeps its listings in
   memory and says once why every start lists. A listing also records which of
-  the `models` entries' models it lacked, so a model a provider retired costs
-  one listing, not one at every start, whichever project's list names it.
+  the models the settings name it lacked, so a model a provider retired costs
+  one listing, not one at every start, whichever project's settings name it.
 - **`budget` thinking on a model without budget thinking fails at startup.**
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive
@@ -1735,17 +1749,28 @@ the start of the entry's title.
   provider's model has no tier, so without a Google, Anthropic or OpenAI key
   the default role needs `default_model`; said once, not once per agent at
   startup), and that some provider can be called; each message names the
-  variable to set and where it is read. Whether a model exists is checked
-  at startup, against the catalog. It no longer rewrites `default_model` or
+  variable to set and where it is read. Whether a provider serves a model is
+  checked against its listing, which warns of one it does not (see below).
+  It no longer rewrites `default_model` or
   an agent's `model`: the deprecated-model upgrade is gone (see Removed).
-- **A model a cached listing lacks is listed again before startup refuses
-  it.** A listing under 24 hours old can predate a model the provider now
-  serves (one released since, or newly open to the account), so that provider
-  is listed again, once, and the new listing decides. A `models` entry the
-  provider does not serve is left out of the list instead, with one warning
-  ("Model … in models is not offered: not served by …"), so an app's list
-  does not stop it starting when a host retires one model; the cache
-  records the absence, so it costs one listing, not one at every start.
+- **A model the settings name is used as they name it, and checked.** The
+  settings decide what runs: a provider that does not serve a model they name
+  (a `models` entry, `default_model`, a role's model, an agent's or the
+  manager's) no longer stops the start. Once a listing shows it, at startup
+  or in the background, the list leaves the model out (`/models` says why),
+  and one warning names it, the setting that names it and what to do ("Model
+  google:gemini-9-ultra (agent 'writer') is not served by google: its listing
+  lacks it, so a turn on it will fail at the provider. Choose a model google
+  serves for agent 'writer' (/models google: lists what it serves)."; for an
+  entry only, "… in models is not offered: not served by google. Remove it
+  from models, or name a model google serves …"). A model nothing describes
+  either (no `models` entry setting a fact, no family rule of the shipped
+  table) runs on the conservative record, no thinking and the 128,000-token
+  window floor, which the warning says. A listing under 24 hours old read
+  from the cache can predate a model the provider now serves (one released
+  since, or newly open to the account), so its absence counts only once a
+  new listing confirms it (in the background, once); the cache records the
+  absence, so a retired model costs one listing, not one at every start.
 - **`settings.set_model()` checks only the reference** (a role, or a
   malformed one, raises `ValueError`); `/settings` reinitializes the workflow
   and rolls the change back if the model cannot run. `default_model` must be
@@ -2206,8 +2231,8 @@ step; each entry says what to use instead.
   The others are covered in the `ModelRegistry` entry above.
 - **The deprecated-model upgrade.** 0.6 replaced a model its registry
   marked deprecated with the newest of its family and tier; no listing ever
-  set the mark. A model a provider no longer lists fails at startup when the
-  provider's listing is fresh: name a current one.
+  set the mark. A model a provider no longer lists is warned of, naming the
+  setting, and a turn on it fails at the provider: name a current one.
 - **`agentic_cli.workflow.adk.transfer_tool_description`**, the plugin that
   rewrote the description ADK 1.x gave its `transfer_to_agent` tool (it told
   the model to call `TransferToAgentTool`). ADK 2's description is correct,

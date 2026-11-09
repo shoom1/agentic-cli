@@ -18,23 +18,36 @@ providers of the ``models`` entries that can run (defined, with
 credentials); the providers of the models a setting, an agent or the manager
 names (``references``); and every built-in provider with a key when no entry
 can run, or when a role is computed (``computed_roles``) that no entry can
-fill (a built-in model's tier comes from the table's family rules). ``load``
-asks the last two rules again once the listings have rejected what they
-lack, and lists the built-ins they then need. Only these are listed at
-startup and refreshed in the background; one whose ``list_models`` is False
-is in use but never listed. ``search`` lists any other provider with
-credentials the first time it is searched, and any whose listing is not
-fresh.
+fill (a built-in model's tier comes from the table's family rules).
+``startup.plan`` applies these rules, and ``load`` asks it again once the
+listings have shown what their providers lack. Only these are listed, at
+startup or in the background; one whose ``list_models`` is False is in use
+but never listed. ``search`` lists any other provider with credentials the
+first time it is searched, and any whose listing is not fresh.
+
+**Startup: the settings first.** The settings name the models, and ``load``
+uses them at once. It waits on a listing only to fill a gap they leave
+(``startup``): no entry can run (the list's tier models come from the
+built-in providers' listings), a computed role has no entry of its tier, or
+nothing describes a model they name (no ``models`` entry sets a fact of it, no
+table rule or entry matches it, and no listing in hand serves it). Those
+listings run concurrently, each within the timeout, and a second round lists
+the built-in providers the first one's results put in use; there is no
+third. ``start_background_refresh`` lists every other provider in use: one
+nothing is known of, one whose cached listing is not fresh or failed, and one
+whose cached listing lacks a model the settings name (it may predate the
+model). That is how the models the settings name are checked.
 
 **The list** (``offered``) is what the model pickers offer: the entries that
 can run, then the models the references and the caller name that can run (one
 rule for all of them), each once; when no entry can run, each built-in
 provider's newest fast, default and strong models, of those it shows.
 Listings never add to it. ``not_offered`` says why a model the settings name
-(an entry or a reference) is left out, and ``load`` warns, once per process,
-of an entry (not a reference: startup fails on one a fresh listing lacks, and
-``/models`` shows the others with their reason) whose provider is not defined
-or whose listing lacks its model.
+(an entry or a reference) is left out. Once a listing shows that a provider
+does not serve a model the settings name (at startup, or in the background),
+the catalog warns, once per process, naming the model, the setting that names
+it (``named_by``) and what to do; and of an entry whose provider is not
+defined (a reference to one fails to resolve, and says so).
 
 **Served and shown.** A listing holds every model the provider serves, and
 the catalog accepts each id it lists (``record()``, ``search``), and for
@@ -50,36 +63,43 @@ dated id as its alias where the table lists one, which takes the first one
 listed's facts, else as itself; OpenAI its curated and reasoning models.
 ``listing_records.records_for`` makes both maps, each record with its entry.
 
-**Validation.** An unknown id is rejected only when its provider's listing is
-fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
-prove a model does not exist, so the id is accepted with the table's record.
-A provider's state is derived each time it is asked, from its listing's age,
-its last failure and the clock: a listing that outlives the TTL in a long
-session is stale, whether the cache or this process made it.
-A fresh listing read from the cache can predate a model, so before it
-rejects one the provider is listed again, once: while loading for an entry's
-model, through ``confirm_rejections`` for a referenced one. A listing records
-the entries' models it lacked (``absent``, in the cache too), and a later
-start trusts that record: a model a provider retired costs one listing, not
-one at every start, whichever project's list names it.
+**Validation.** A model the settings name is never refused (``record()``):
+the settings decide what runs, a turn on a model its provider does not serve
+fails at the provider, and the list and the warnings say so beforehand; one
+nothing describes runs on the conservative record. Any other id is rejected
+only when its provider's listing is fresh (``ProviderState.FRESH``); a stale,
+failed or untried listing cannot prove a model does not exist, so the id is
+accepted with the table's record. A provider's state is derived each time it
+is asked, from its listing's age, its last failure and the clock: a listing
+that outlives the TTL in a long session is stale, whether the cache or this
+process made it. A fresh listing read from the cache can predate a model:
+before it rejects an id no setting names (a ``/models`` lookup), the provider
+is listed again, once, through ``confirm_rejections``, and it leaves a model
+the settings name out of the list only once a listing this process made, or
+its own record of the model as absent, says so. A listing records the models
+the settings name that it lacks (``absent``, in the cache too), and a later
+start trusts that record at any age: a model a provider retired costs one
+listing, not one at every start, whichever project's settings name it.
 
 **Cache.** Listings are kept in a JSON file (``~/.<app>/model_cache.json`` in
 the workflow; ``listing_cache.ListingCache`` reads and writes it), one entry
 per provider: fetch time, outcome, address, kind, models (each with whether
-it is shown) and the entries' models it lacked, never a key. Startup reads it
-and waits on the network only for a provider in use that has credentials and
-no entry for its address and kind; a fresh entry needs no listing, and an
-older one (or a cached failure) is used while ``start_background_refresh``
-lists it again. A listing that fails at startup is listed once more there (a
-blip should not last the session): until a listing succeeds, the provider's ids
-are not checked and its models' limits and thinking come from the table (an
-OpenRouter or configured provider's, which the table does not know: no thinking
-and the 128,000-token window floor); the session's agents are resolved once, at
-startup, and keep that, and a later listing reaches ``/models``, the pickers,
-side calls and the next start. If it fails too, the next start tries again. A
-broken file, one from an older version, an entry this version cannot read, or
-an entry for another address or kind is ignored and listed again; a file of a newer version is not used, and never written (the
-listings stay in memory). A listing writes its own provider's entry and
+it is shown) and the models the settings named that it lacked, never a key.
+Startup reads it first, and waits on a provider with an entry for its address
+and kind only when the entry is a listing that lacks a model nothing else
+describes, without having recorded it as absent; a fresh entry needs no
+listing, and an older one (or a cached failure) is used while
+``start_background_refresh`` lists it again. A listing that fails at startup
+is listed once more there (a blip should not last the session): until a
+listing succeeds, the provider's ids are not checked and its models' limits
+and thinking come from the table (an OpenRouter or configured provider's,
+which the table does not know: no thinking and the 128,000-token window
+floor); the session's agents are resolved once, at startup, and keep that,
+and a later listing reaches ``/models``, the pickers, side calls and the next
+start. If it fails too, the next start tries again. A broken file, one from
+an older version, an entry this version cannot read, or an entry for another
+address or kind is ignored and listed again; a file of a newer version is not
+used, and never written (the listings stay in memory). A listing writes its own provider's entry and
 leaves every other entry as the file then holds it, one this version cannot
 read included: several catalogs share the file (two terminals, two projects
 of one app, two releases of it), and a catalog's own copy of an entry may be
