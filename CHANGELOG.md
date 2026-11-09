@@ -3101,13 +3101,17 @@ step; each entry says what to use instead.
   write to, however it changes (`cli/conversation.py`: `ConversationCore`,
   one switch for `/new`, `/resume`, the start and an orchestrator switch):
   a run holds its conversation from the start, also when the workflow fails
-  to start (the user fixes it with `/settings` and goes on in it); a line
-  typed before `--continue` or `--resume` has opened its conversation waits
-  for it and runs there; an orchestrator switch moves the lock to the new
-  backend's key. It is keyed by the backend and the store the workflow
-  runs, recorded as it starts and at an orchestrator switch, so a
-  `/settings` change of `session_store`, which takes effect at the next
-  start, does not stop the locking before. ADK's stale
+  to start; a line typed before `--continue` or `--resume` has opened its
+  conversation waits for it and runs there; an orchestrator switch moves the
+  lock to the new backend's key. It is keyed by the backend and the store
+  the workflow runs: recorded as the app starts, at an orchestrator switch,
+  and when `/settings` changes the orchestrator or `session_store` while the
+  workflow is down (a failed start, which the user fixes there and goes on:
+  the next start builds on the new values, so the lock moves to them at
+  once, and the change is refused, "Settings were not changed.", when
+  another process has the conversation open there). A change of
+  `session_store` while the workflow runs takes effect at the next start
+  and leaves the lock on the store it runs. ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message

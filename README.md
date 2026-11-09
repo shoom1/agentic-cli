@@ -177,8 +177,9 @@ open in one process at a time: two would lose a turn, so a conversation
 another run has open is refused ("Conversation '<id>' is open in another
 process (1234)."; `--continue` passes over it to the newest one free among
 the 50 newest, and says so). A run holds its conversation from the start,
-also when the workflow fails to start (fix it with `/settings` and go on),
-and a line typed before `--continue` or `--resume` has opened its
+also when the workflow fails to start; fixed with `/settings` (another
+orchestrator or `session_store`), it is held where the next start runs it.
+A line typed before `--continue` or `--resume` has opened its
 conversation waits for it, then runs there. An app switches with
 `await app.resume_session(id)` or `await app.start_new_session()`; setting
 `app.session_id` is deprecated.

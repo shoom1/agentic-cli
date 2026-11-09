@@ -351,3 +351,134 @@ class TestTheSessionIdSetter:
         await app.process_input("Hello.")
 
         assert workflow.turns == ["theirs"]
+
+
+class TestAPlaceChangeWhileTheWorkflowIsDown:
+    """The first start fails (``orchestrator=deepagents`` without its extra,
+    say), and ``/settings`` changes the orchestrator or the session store,
+    as the warning invites. The workflow is not running, so nothing is
+    rebuilt: the next message's start builds a manager from the settings as
+    they are then. The lock stayed on the place recorded as the app started,
+    so a second terminal could open the conversation where the turns now
+    write. It now moves there with the change, through the same switch an
+    orchestrator swap makes."""
+
+    class Manager(Workflow):
+        """A manager of one backend; ``fails`` makes its start fail."""
+
+        def __init__(self, backend: str, fails: bool) -> None:
+            super().__init__()
+            self.backend_type = backend
+            self.fails = fails
+            self.is_initialized = False
+
+        async def initialize_services(self) -> None:
+            if self.fails:
+                raise RuntimeError(f"{self.backend_type} cannot start (its extra is missing)")
+            self.is_initialized = True
+
+        async def cleanup(self) -> None:
+            pass
+
+    @classmethod
+    def builds(cls, monkeypatch, fails) -> list:
+        """The managers the controller builds, each failing when ``fails(n,
+        backend)`` says so (n: how many were built before)."""
+        built: list = []
+
+        def create(agent_configs, settings, app_name=None, model=None):
+            backend = getattr(settings.orchestrator, "value", settings.orchestrator)
+            manager = cls.Manager(backend, fails(len(built), backend))
+            built.append(manager)
+            return manager
+
+        monkeypatch.setattr(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings", create
+        )
+        return built
+
+    @staticmethod
+    async def started(app_settings):
+        """An app whose start ran, as ``run()`` runs it, and failed."""
+        from agentic_cli.cli import AppInfo
+        from agentic_cli.cli.app import BaseCLIApp
+        from agentic_cli.cli.conversation import Place
+        from agentic_cli.workflow.config import AgentConfig
+        from tests.cli.dialog_fakes import autospec_session, opening_boxes
+
+        app = BaseCLIApp(
+            app_info=AppInfo(name="Place test", version="0"),
+            agent_configs=[AgentConfig(name="solo", prompt="Help.")],
+            settings=app_settings,
+        )
+        app.session = opening_boxes(autospec_session())
+        app._conversation.place = Place.of(app_settings)  # as run() records it
+        await app._workflow_controller.start_background_init()
+        assert await app._adopt_session_on_startup()
+        assert not app._workflow_controller.is_ready
+        return app
+
+    @staticmethod
+    def key_where(app, backend: str, store: str) -> tuple:
+        return (backend, store, *app._conversation_key(app.session_id)[2:])
+
+    async def test_an_orchestrator_change_moves_the_lock_where_the_turns_run(
+        self, home, monkeypatch
+    ):
+        built = self.builds(monkeypatch, lambda n, backend: backend == "deepagents")
+        app = await self.started(BaseSettings(session_store="sqlite", orchestrator="deepagents"))
+
+        assert await app.apply_settings({"orchestrator": "adk"})
+        await app.process_input("hello")
+        await app._workflow_controller.close()
+
+        assert [m.backend_type for m in built] == ["deepagents", "adk"]
+        assert built[-1].turns == [app.session_id]
+        assert not free(app, self.key_where(app, "adk", "sqlite"))
+        assert free(app, self.key_where(app, "deepagents", "sqlite"))
+
+    async def test_a_store_change_moves_the_lock_where_the_turns_run(self, home, monkeypatch):
+        built = self.builds(monkeypatch, lambda n, backend: n == 0)
+        app = await self.started(BaseSettings(session_store="memory", orchestrator="adk"))
+
+        assert await app.apply_settings({"session_store": "sqlite"})
+        await app.process_input("hello")
+        await app._workflow_controller.close()
+
+        assert built[-1].turns == [app.session_id]
+        assert not free(app, self.key_where(app, "adk", "sqlite"))
+
+    async def test_one_open_there_elsewhere_refuses_the_change(self, home, monkeypatch):
+        self.builds(monkeypatch, lambda n, backend: backend == "deepagents")
+        app = await self.started(BaseSettings(session_store="sqlite", orchestrator="deepagents"))
+        other = open_elsewhere(app, self.key_where(app, "adk", "sqlite"))
+
+        applied = await app.apply_settings({"orchestrator": "adk"})
+        other.release()
+        await app._workflow_controller.close()
+
+        assert applied is False
+        assert app.settings.orchestrator.value == "deepagents"
+        assert said(app.session, "add_error")[-1] == (  # after the start's own failure
+            f"Could not set Orchestrator: conversation '{app.session_id}' is open in "
+            f"another process ({os.getpid()}) on adk (sqlite). Settings were not changed."
+        )
+        assert not free(app, self.key_where(app, "deepagents", "sqlite"))
+
+    async def test_a_manager_kept_to_revive_keeps_the_lock_on_its_backend(
+        self, home, monkeypatch
+    ):
+        """A failed reinitialization keeps its manager, and the next start
+        revives it on the backend and the store it had: the turns go on
+        there, and so does the lock (the next rebuild swaps)."""
+        built = self.builds(monkeypatch, lambda n, backend: False)
+        app = app_on(self.Manager("adk", fails=False), BaseSettings(session_store="sqlite"))
+        kept = app._workflow_controller._workflow
+        assert app._hold(app.session_id) is None
+        kept.is_initialized = False  # a failed reinitialization left it down
+
+        assert await app.apply_settings({"orchestrator": "deepagents"})
+        await app.process_input("hello")
+
+        assert built == [] and kept.turns == [app.session_id]
+        assert not free(app, self.key_where(app, "adk", "sqlite"))

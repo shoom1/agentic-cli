@@ -232,6 +232,15 @@ class WorkflowController:
         return self.state is WorkflowState.READY
 
     @property
+    def next_start_builds(self) -> bool:
+        """Whether the next start builds a new manager, from the settings as
+        they are then: none is kept (none was built yet, or the one that
+        failed to start was released). A manager a failed reinitialization
+        left is kept instead, and the next start revives it, on the backend
+        and the session store it had. False while one runs."""
+        return self._workflow is None
+
+    @property
     def init_error(self) -> Exception | None:
         """Get initialization error, if any."""
         return self._init_error

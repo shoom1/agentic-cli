@@ -395,6 +395,10 @@ _AT_NEXT_START = "(takes effect at the next start)"
 #: does not wait.
 _READ_BY_THE_START = frozenset({"session_store"})
 
+#: The settings that say where conversations are kept: the backend and the
+#: session store (``Place``), which key a conversation's lock.
+_PLACE_KEYS = frozenset({"orchestrator", "session_store"})
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -1179,7 +1183,11 @@ class BaseCLIApp:
         does a change of ``session_store``, which that start reads; Ctrl+C
         stops the wait, re-raised, and changes nothing. When that start
         fails, the change is applied as for any workflow that is not
-        running: nothing is rebuilt, and the next start uses it. A
+        running: nothing is rebuilt, and the next start uses it. A change of
+        the orchestrator or ``session_store`` made while the workflow is down
+        (whose next start builds on the new values) holds the conversation
+        where that start will run it (``_hold_it_at``), and is refused, every
+        field restored, when another process has it open there. A
         switch to the deprecated LangGraph orchestrator ends with its
         deprecation warning. A change of ``ui_theme`` switches the session to
         ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
@@ -1290,6 +1298,24 @@ class BaseCLIApp:
                 controller, self.session, swapped=controller.workflow is not previous
             )
 
+        # Where conversations are kept changed while the workflow is down, and
+        # its next start builds a manager from the settings as they are now
+        # (no manager is kept to revive): the conversation is held there from
+        # now on, as an orchestrator swap holds it, before a turn writes there.
+        moved = [key for key in changes if _ui_key_target_field(key) in _PLACE_KEYS]
+        if moved and not controller.is_ready and controller.next_start_builds:
+            place = Place.of(self._settings)
+            holder = await self._hold_it_at(place)
+            if holder is not None:  # open there in another process: nothing changes
+                _restore_settings(self._settings, snapshot)
+                labels = ", ".join(_setting_label(key, self._settings) for key in moved)
+                self.session.add_error(
+                    f"Could not set {labels}: conversation '{self._session_id}' is open "
+                    f"in another process ({holder}) on {place.backend} ({place.store}). "
+                    "Settings were not changed."
+                )
+                return False
+
         # Report changes
         for key, value in changes.items():
             line = f"{_setting_label(key, self._settings)}: {value}"
@@ -1358,6 +1384,24 @@ class BaseCLIApp:
                 f"{held}: a new one starts here, {new}. Its history stays with the "
                 "previous backend: switch back to continue it."
             )
+
+    async def _hold_it_at(self, place: Place) -> int | None:
+        """Hold the conversation at ``place`` (another backend or session
+        store), letting go of where it was held, before the workflow runs
+        there: the switch an orchestrator swap makes (``_open_here``), with
+        no workflow to load it (the next start's builds from the settings).
+
+        Returns:
+            None once it is held there (or was); else the process id of
+            another process that has it open there, and nothing changed.
+        """
+        if place == self._place():
+            return None
+        async with self._turn_lock:
+            switched = await self._conversation.switch(
+                self._session_id, self._switch_parts(), place=place, propose=False
+            )
+        return switched.holder
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
@@ -2207,11 +2251,14 @@ class BaseCLIApp:
         """Where the conversation is kept: its backend and store, as the
         workflow runs them.
 
-        Recorded when the workflow starts (``run()``) and when an orchestrator
-        switch starts another one, never read from the settings in between: a
-        ``/settings`` change of ``session_store`` takes effect at the next
-        start, and until then the lock keys the store the workflow keeps.
-        An app built with ``__new__`` reads its settings on first use.
+        Recorded when the workflow starts (``run()``), when an orchestrator
+        switch starts another one, and when ``/settings`` changes the
+        orchestrator or ``session_store`` while the workflow is down and its
+        next start builds on the new values (``_hold_it_at``); never read from
+        the settings in between: a change of ``session_store`` while the
+        workflow runs takes effect at the next start, and until then the lock
+        keys the store the workflow keeps. An app built with ``__new__`` reads
+        its settings on first use.
         """
         core = self._conversation
         if core.place is None:
