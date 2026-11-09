@@ -17,6 +17,7 @@ both backends that implement the contract (ADK and Deep Agents).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,9 @@ from agentic_cli.workflow.events import (  # noqa: E402
     UserInputRequest,
     WorkflowEvent,
 )
+from agentic_cli.config import get_context_settings  # noqa: E402
+from agentic_cli.workflow.service_registry import get_service_registry  # noqa: E402
+from agentic_cli.workflow.sessions import get_active_turn  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 
 
@@ -313,7 +317,6 @@ class TestTurnSerialization:
         finally:
             ctx.__exit__(None, None, None)
 
-
     async def test_compact_shares_the_lock(self, backend):
         h, ctx = turn_harness(backend)
         try:
@@ -350,6 +353,38 @@ class TestCancellationReleasesTheLock:
             h.release.set()
             second = asyncio.create_task(h.drain("sess-b"))
             assert await asyncio.wait_for(second, timeout=2) == ["sess-b"]
+        finally:
+            ctx.__exit__(None, None, None)
+
+
+class TestAnEarlyStopFreesTheManager:
+    """A consumer that closes the stream after its first event (the CLI's
+    ``aclosing``) ends the turn there, in its own task and context."""
+
+    @pytest.mark.parametrize("entry", ["process", "resume_with_job_result"])
+    async def test_closing_after_the_first_event(self, backend, entry):
+        h, ctx = turn_harness(backend)
+        try:
+            h.release.set()
+            registry, settings = get_service_registry(), get_context_settings()
+            if entry == "process":
+                source, session = h.manager.process("hi", "u", session_id="sess-a"), "sess-a"
+            else:
+                source, session = h.manager.resume_with_job_result(_job_record(), "ok"), "sess-r"
+
+            async with contextlib.aclosing(source) as events:
+                async for event in events:
+                    inside = (get_active_turn(), get_service_registry())
+                    break
+
+            assert event.content == session
+            assert inside == (h.manager.session_ref(session, "u"), h.manager._services)
+            assert h.events == [f"start:{session}"], "the run went on after the close"
+            assert not h.manager._turn_lock.locked()
+            assert get_active_turn() is None
+            assert get_service_registry() is registry
+            assert get_context_settings() is settings
+            assert await asyncio.wait_for(h.drain("sess-b"), timeout=2) == ["sess-b"]
         finally:
             ctx.__exit__(None, None, None)
 
