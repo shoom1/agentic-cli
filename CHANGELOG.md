@@ -2247,7 +2247,8 @@ step; each entry says what to use instead.
   (`MessageProcessor.process_resume(claim=)`, called once the result can
   reach the agent), and a job whose delivery stopped before is told by a
   later one; an error there is said ("Background job 'build' could not be
-  resumed now: …"). A claim taken by a request Ctrl+C stopped while it
+  resumed now: …"), each time `/jobs resume` asks and once per job and
+  conversation at turn ends. A claim taken by a request Ctrl+C stopped while it
   waited for the claim is handed back (`JobManager.release_resume`). Ctrl+C
   during the resume turn still records the delivery failed: the job's
   notice may already be in the conversation.

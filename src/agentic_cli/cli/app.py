@@ -21,6 +21,7 @@ import threading
 import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NoReturn, Self
@@ -456,6 +457,10 @@ def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -
 
 # === A finished job's delivery ===
 
+#: Set while the CLI tells finished jobs on its own (a turn's end, a
+#: conversation opened), not because the user asked (``/jobs resume``).
+_TELLING_ON_ITS_OWN: ContextVar[bool] = ContextVar("telling_on_its_own", default=False)
+
 
 async def _claim_delivery(jm: Any, job_id: str) -> bool:
     """Claim the job's delivery (``jm.begin_resume``) on a worker thread.
@@ -605,6 +610,11 @@ class BaseCLIApp:
     #: are proposed on leaving it). A class default: an app built with
     #: ``__new__`` (tests, an application's own construction) reads it too.
     _turned: bool = False
+
+    #: (job, conversation) pairs whose "could not be resumed now" was said:
+    #: the deliveries the CLI makes on its own say it once per conversation.
+    #: An immutable class default, replaced on each write, for the same reason.
+    _said_not_told: frozenset[tuple[str, str]] = frozenset()
 
     def __init__(
         self,
@@ -1366,7 +1376,15 @@ class BaseCLIApp:
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).
         if getattr(self._settings, "job_auto_resume", False):
+            await self._resume_on_its_own()
+
+    async def _resume_on_its_own(self) -> None:
+        """``resume_finished_jobs``, as the CLI runs it unasked (``_TELLING_ON_ITS_OWN``)."""
+        token = _TELLING_ON_ITS_OWN.set(True)
+        try:
             await self.resume_finished_jobs()
+        finally:
+            _TELLING_ON_ITS_OWN.reset(token)
 
     async def resume_finished_jobs(self) -> int:
         """Resume the agent for each finished, resume-flagged background job.
@@ -1393,10 +1411,11 @@ class BaseCLIApp:
         may have changed while the delivery waited for it.
 
         Returns:
-            The number of jobs a resume turn was run for (unchanged meaning:
-            "how many were picked up"). Whether each one was delivered is
-            recorded on the job and reported by ``/jobs``; a failed delivery is
-            surfaced to the user by the turn itself.
+            The number of jobs picked up: a resume turn run for it, or, for
+            one that could not be told now (its conversation's lookup failed,
+            before any claim), the failure said. Whether each one was
+            delivered is recorded on the job and reported by ``/jobs``; a
+            failed delivery is surfaced to the user by the turn itself.
         """
         if not self._workflow_controller.is_ready:
             return 0
@@ -1448,7 +1467,10 @@ class BaseCLIApp:
         and looked the conversation up, before it says anything. A delivery
         stopped before then (the workflow not started, Ctrl+C or a failure
         during the lookup) claims nothing, and the job stays pending for a
-        later one; a failure is said.
+        later one. A failure is said: each time the user asks (``/jobs
+        resume``), and once per job and conversation when the CLI tells
+        jobs on its own (``_TELLING_ON_ITS_OWN``: a turn's end, a
+        conversation opened), not at every turn.
 
         Every exit path closes a claim, so no record can be left ``RESUMING``
         in this process: a normal outcome records delivered/failed, an
@@ -1466,10 +1488,11 @@ class BaseCLIApp:
             record: The job record.
 
         Returns:
-            True if the result was delivered to the agent, False if the job
-            was claimed and not delivered, None if it was not claimed (it
-            waits for its conversation, its delivery stopped before it could
-            reach the agent, or another coordinator has it).
+            True if the result was delivered to the agent; False if it was
+            not (claimed and not delivered, or a failure before the claim,
+            said); None if it was not claimed and nothing was said (it
+            waits for its conversation, the workflow was not ready, or
+            another coordinator has it).
         """
         claimed = False
 
@@ -1507,10 +1530,13 @@ class BaseCLIApp:
                 logger.warning(
                     "job_resume_unclaimed_failure", job_id=record.job_id, error=str(exc)
                 )
-                self.session.add_error(
-                    f"Background job '{record.name}' could not be resumed now: {exc}"
-                )
-                return None
+                said = (record.job_id, self._session_id)
+                if not (_TELLING_ON_ITS_OWN.get() and said in self._said_not_told):
+                    self.session.add_error(
+                        f"Background job '{record.name}' could not be resumed now: {exc}"
+                    )
+                    self._said_not_told = self._said_not_told | {said}
+                return False
             await asyncio.to_thread(
                 jm.complete_resume, record.job_id, delivered=False, error=str(exc)
             )
@@ -1692,7 +1718,7 @@ class BaseCLIApp:
         After the switch, outside the turn lock: each resume is a turn of its own.
         """
         if getattr(self._settings, "job_auto_resume", False):
-            await self.resume_finished_jobs()
+            await self._resume_on_its_own()
 
     async def _open_conversation(self, session_id: str) -> bool:
         """The switch itself, under the turn lock (``resume_session``)."""

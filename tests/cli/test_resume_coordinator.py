@@ -326,7 +326,7 @@ class TestClaimIsAlwaysClosed:
         app, jm = _strict_app([SimpleNamespace(job_id="a", name="build")], _Raising())
         app.session = SimpleNamespace(add_error=errors.append)
 
-        assert await app.resume_finished_jobs() == 0
+        assert await app.resume_finished_jobs() == 1  # picked up: its failure said
         assert jm.claimed == [] and jm.completed == []
         assert errors == [
             "Background job 'build' could not be resumed now: session store unreachable"
