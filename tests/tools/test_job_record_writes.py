@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
-import os
 import socket
 import subprocess
 import sys
@@ -435,13 +434,12 @@ class TestResultDecidesUnderTheLock:
     class _Gated(_Scripted):
         def __init__(self) -> None:
             super().__init__(stoppable=False)
-            self.on_poll: Callable[[], None] | None = None
+            self.ends = False
             self.on_cancel: Callable[[], None] | None = None
 
         def poll(self, record, job_dir):
-            if self.on_poll is None:
+            if not self.ends:
                 return super().poll(record, job_dir)
-            self.on_poll()
             record.exit_code = 1
             return JobState.FAILED  # it ended (the cancel's signal, say)
 
@@ -450,20 +448,33 @@ class TestResultDecidesUnderTheLock:
                 self.on_cancel()
             return False  # cannot stop it now
 
-    def test_a_cancel_requested_meanwhile_ends_it_cancelled(self, tmp_path: Path):
+    def test_a_cancel_requested_meanwhile_ends_it_cancelled(
+        self, tmp_path: Path, monkeypatch
+    ):
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
         base = tmp_path / "jobs"
         mine, theirs = self._Gated(), self._Gated()
         owner = _manager(base, mine)
         job = _submit(owner)
         other = _manager(base, theirs)  # another CLI, started after the submit
-        in_cancel, polled = threading.Event(), threading.Event()
+        in_cancel, owner_asks = threading.Event(), threading.Event()
+        here = threading.current_thread()
+        acquire = jobs_manager._acquire_lock
+
+        def acquire_noting_the_owner(fd):
+            if threading.current_thread() is here:
+                owner_asks.set()
+            acquire(fd)
+
+        monkeypatch.setattr(jobs_manager, "_acquire_lock", acquire_noting_the_owner)
         told: dict[str, JobRecord] = {}
         try:
-            # The other manager's cancel is under way when result() starts,
-            # and waits (a little) for the owner's poll before it records
-            # the request.
-            theirs.on_cancel = lambda: (in_cancel.set(), polled.wait(0.5))
-            mine.on_poll = polled.set
+            # The other manager's cancel holds the lock when result() starts,
+            # and records the request once the owner asks for the lock: by
+            # then a result() that decides outside it has polled and decided.
+            theirs.on_cancel = lambda: (in_cancel.set(), owner_asks.wait(5))
+            mine.ends = True
             canceller = threading.Thread(
                 target=lambda: told.update(record=other.cancel(job.job_id)), daemon=True
             )
@@ -477,6 +488,7 @@ class TestResultDecidesUnderTheLock:
             assert _read(base, job.job_id)["state"] == JobState.CANCELLED.value
             assert owner.get(job.job_id).state is JobState.CANCELLED
         finally:
+            monkeypatch.undo()
             other.close()
             owner.close()
 
@@ -512,20 +524,29 @@ class TestCompleteResumeWithoutTheLock:
 
 class TestAReadThatChangesNothingWritesNothing:
     """The job monitor lists every job every two seconds: a refresh that
-    finds nothing new leaves each record's file as it is."""
+    finds nothing new writes no record."""
 
-    def test_the_file_is_not_rewritten(self, tmp_path: Path):
-        base = tmp_path / "jobs"
-        owner = _manager(base, _Scripted())
+    def test_no_record_is_written(self, tmp_path: Path, monkeypatch):
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        written: list[Path] = []
+        write = jobs_manager.atomic_write_json
+
+        def counted(path, *args, **kwargs):
+            written.append(Path(path))
+            return write(path, *args, **kwargs)
+
+        owner = _manager(tmp_path / "jobs", _Scripted())
         try:
             job = _submit(owner)
-            before = os.stat(_meta(base, job.job_id)).st_ino
+            monkeypatch.setattr(jobs_manager, "atomic_write_json", counted)
 
             owner.get(job.job_id)
             owner.list()
             owner.result(job.job_id)
             owner.awaiting_resume()
 
-            assert os.stat(_meta(base, job.job_id)).st_ino == before
+            assert written == []
         finally:
+            monkeypatch.undo()
             owner.close()
