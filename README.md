@@ -1320,7 +1320,7 @@ def search_database(query: str, limit: int = 10) -> dict:
     return {"success": True, "results": results, "count": len(results)}
 ```
 
-**Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on every backend. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Registration also gives the tool registry metadata and tool-summary formatting.
+**Registration is required for a tool to run.** The permission engine is on by default, and any tool without a capability declaration is denied at call time (fail-closed) on every backend. You can still pass raw callables into `AgentConfig.tools`, but unless they are registered with `@register_tool` they will be blocked — register every tool with `capabilities=` (or `EXEMPT` for pure, side-effect-free functions). Building the agents logs a `tool_not_registered` warning for each such tool (a plain callable, or a `FunctionTool` or LangChain `@tool` wrapping an unregistered function), naming the agent and the tool. Registration also gives the tool registry metadata and tool-summary formatting.
 
 Identity is the *object the registry issued*, not the name: a callable the
 registry never issued is denied however it is named, and is left untouched by

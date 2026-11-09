@@ -94,7 +94,13 @@ _CONSTANTS = {"pi": math.pi, "e": math.e}
 
 
 def _sized(value: float) -> float:
-    """``value``, unless it is an int too large to work with."""
+    """``value``, unless it is an int too large to work with, or not a finite
+    real number: ``(-8) ** 0.5`` is complex, which no model provider takes back
+    as a tool result, and ``1e999`` is inf."""
+    if isinstance(value, complex):
+        raise ValueError("not a real number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("number too large")
     if isinstance(value, int) and value.bit_length() > _MAX_BITS:
         raise ValueError("number too large")
     return value
@@ -108,7 +114,7 @@ def _evaluate(node: ast.AST) -> float:
     it is computed.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
+        return _sized(node.value)
     if isinstance(node, ast.BinOp) and type(node.op) in _OPERATORS:
         left, right = _evaluate(node.left), _evaluate(node.right)
         if isinstance(node.op, ast.Pow):

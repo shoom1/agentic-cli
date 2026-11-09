@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 from abc import ABC, abstractmethod
 from contextvars import ContextVar, Token
@@ -77,6 +78,74 @@ logger = Loggers.workflow()
 MEMORY_INDEX_BUDGET_SHARE = 0.1
 #: The least the memory index is given, whatever the budget.
 MEMORY_INDEX_MIN_BYTES = 1_000
+
+#: Where the backends' tool classes live.
+_TOOL_CLASS_MODULES = ("google.adk.tools", "langchain_core.tools")
+
+
+def _module_of(klass: type) -> str:
+    module = getattr(klass, "__module__", None)
+    return module if isinstance(module, str) else ""
+
+
+def _wrapped_callable(tool: Any) -> Callable | None:
+    """The function a backend's function-tool object runs, unwrapped as the
+    permission gates unwrap it (exact ADK ``FunctionTool`` and
+    ``LongRunningFunctionTool``, exact LangChain ``StructuredTool``), or None."""
+    kind = type(tool)
+    try:
+        from google.adk.tools import FunctionTool, LongRunningFunctionTool
+    except ImportError:
+        pass
+    else:
+        if kind is FunctionTool or kind is LongRunningFunctionTool:
+            return tool.func
+    try:
+        from langchain_core.tools import StructuredTool
+    except ImportError:
+        pass
+    else:
+        if kind is StructuredTool:
+            return tool.coroutine or tool.func
+    return None
+
+
+def _tool_name(tool: Any) -> str:
+    """The name a model would see for ``tool``."""
+    try:
+        inner = tool.func if isinstance(tool, functools.partial) else tool
+        for attribute in ("name", "__name__"):
+            value = getattr(inner, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+    except Exception:  # a __getattr__ that raises
+        pass
+    return type(tool).__name__
+
+
+def _unregistered_name(tool: Any) -> str | None:
+    """The name of ``tool``, which the registry did not issue, when the gate
+    will deny every call to it; None when the gate never sees it.
+
+    A function-tool object is judged by the function it runs. ADK's own tool
+    objects are left to ADK: a built-in such as ``GoogleSearchTool`` runs
+    inside the model and never reaches the gate. Anything else callable, and an
+    app's own tool class (either backend's), is denied.
+    """
+    from agentic_cli.tools.registry import identify_tool
+
+    if isinstance(tool, (str, type)):
+        return None
+    inner = _wrapped_callable(tool)
+    if inner is not None:
+        return None if identify_tool(inner) is not None else _tool_name(tool)
+    kind = type(tool)
+    if _module_of(kind).startswith("google.adk."):
+        return None
+    is_tool_object = any(
+        _module_of(klass).startswith(_TOOL_CLASS_MODULES) for klass in kind.__mro__
+    )
+    return _tool_name(tool) if callable(tool) or is_tool_object else None
 
 
 class BaseWorkflowManager(ABC):
@@ -199,6 +268,8 @@ class BaseWorkflowManager(ABC):
         # The memory index each conversation's main agent gets (spec §11.1):
         # taken once, so the prompt prefix stays cached.
         self._index_snapshots: dict[SessionRef, str] = {}
+        # The (agent, tool) pairs already named as unregistered: once each.
+        self._unregistered_named: set[tuple[str, str]] = set()
 
     def set_input_callback(
         self, callback: Callable[[UserInputRequest], Awaitable[str]]
@@ -317,7 +388,8 @@ class BaseWorkflowManager(ABC):
         substituting the service-bound variant for it would silently run
         different code. It is therefore passed through untouched, as is a tool
         registered into some other ``ToolRegistry``. A callable passed through
-        is denied at permission time; an ADK built-in tool (such as
+        is denied at permission time, and named once in a
+        ``tool_not_registered`` warning; an ADK built-in tool (such as
         ``GoogleSearchTool``) runs inside the model and never reaches the
         permission check at all.
 
@@ -337,6 +409,7 @@ class BaseWorkflowManager(ABC):
         for tool in config.tools or []:
             definition = identify_tool(tool)
             if definition is None:
+                self._name_unregistered(config.name, tool)
                 result.append(tool)
                 continue
             variant = service_map.get(definition.name)
@@ -356,6 +429,28 @@ class BaseWorkflowManager(ABC):
             result.extend(self._injectable_state_tools(result))
 
         return result
+
+    def _name_unregistered(self, agent: str, tool: Any) -> None:
+        """Warn that the gate will deny every call to ``tool``, which the
+        registry did not issue (``_unregistered_name``). Once per agent and
+        tool, however often the agent is built (a model switch builds it
+        again); an object no check can read is let through unnamed."""
+        try:
+            name = _unregistered_name(tool)
+        except Exception as e:
+            logger.debug(
+                "tool_registration_unchecked", agent=agent, error=f"{type(e).__name__}: {e}"
+            )
+            return
+        if name is None or (agent, name) in self._unregistered_named:
+            return
+        self._unregistered_named.add((agent, name))
+        logger.warning(
+            "tool_not_registered",
+            agent=agent,
+            tool=name,
+            hint="register it with @register_tool; every call to it is denied",
+        )
 
     def _injectable_state_tools(self, assembled: list) -> list[Callable]:
         """State tools worth auto-injecting, given what the agent already has.
