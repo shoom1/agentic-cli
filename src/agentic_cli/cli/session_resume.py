@@ -3,10 +3,10 @@
 ``BaseCLIApp.pick_session`` asks which conversation to open and
 ``BaseCLIApp.resume_session`` opens it; this module holds what they show:
 
-- ``picker(rows, now, placement=)``: the dialog listing the conversations, newest first,
-  one option each: how long ago, its turns, its title and its id. The parts
-  that tell rows apart come first, since a terminal narrower than a row
-  clips its end; the id last keeps every option unique;
+- ``picker(rows, now, placement=)``: the dialog listing the conversations,
+  newest first, one option each: how long ago, its turns, its title and its
+  id. The parts that tell rows apart come first, since a terminal narrower
+  than a row clips its end; the id last keeps every option unique;
 - ``resumed_line(info, now)``: "Resumed: <title> (<id>, 12 turns, last active
   2h ago).";
 - ``replay_lines(messages)`` and ``show_replay(session, lines)``: the last
