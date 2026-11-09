@@ -10,36 +10,27 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from typing import Any
 
+# ---- Well-known registry keys (defined with the table of services) ----
 
-# ---- Well-known registry keys ----
-
-ARXIV_SOURCE = "arxiv_source"
-JOB_MANAGER = "job_manager"
-KNOWLEDGE_BASE = "knowledge_base"
-LLM_SUMMARIZER = "llm_summarizer"
-MEMORY_STORE = "memory_store"
-PERMISSION_ENGINE = "permission_engine"
-SANDBOX_MANAGER = "sandbox_manager"
-WORKFLOW = "workflow"
-
-# The embedding service both knowledge bases and the memory store share.
-# Built with them, never on its own: it is not in KNOWN_SERVICE_KEYS, so no
-# tool can declare it.
-EMBEDDING_SERVICE = "_embedding_service"
-
-# Service keys a tool may declare via ``register_tool(requires=...)``.
-#
-# Every entry must be something a manager can actually construct on demand
-# (see ``BaseWorkflowManager._build_services_into``). Keys that are
-# always present (PERMISSION_ENGINE, WORKFLOW) say nothing when declared.
-KNOWN_SERVICE_KEYS = frozenset({
+from agentic_cli.workflow.services import (
     ARXIV_SOURCE,
+    EMBEDDING_SERVICE,
     JOB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
+    PERMISSION_ENGINE,
     SANDBOX_MANAGER,
-})
+    SERVICES,
+    WORKFLOW,
+)
+
+# Service keys a tool may declare via ``register_tool(requires=...)``: the
+# table's declarable services (``workflow/services.py``), each one a manager
+# builds on demand. Keys that are always present (PERMISSION_ENGINE,
+# WORKFLOW) say nothing when declared; the embedding service is built with
+# the knowledge base, never on its own, so no tool can declare it.
+KNOWN_SERVICE_KEYS = frozenset(spec.key for spec in SERVICES if spec.declarable)
 
 # Extra guidance for keys that look declarable but are not.
 SERVICE_KEY_HINTS = {

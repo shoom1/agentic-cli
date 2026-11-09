@@ -1394,14 +1394,9 @@ class TestRequiresAreConstructible:
                 return {"success": True}
 
     def test_every_declarable_key_is_constructible(self):
-        """The declarable set must not drift from what the manager can build."""
-        import inspect
-
-        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        """The declarable set is the table's: every key a tool may declare is
+        one the manager builds (``workflow/services.py``)."""
         from agentic_cli.workflow.service_registry import KNOWN_SERVICE_KEYS
+        from agentic_cli.workflow.services import SERVICES
 
-        source = inspect.getsource(BaseWorkflowManager._build_services_into)
-        for key in KNOWN_SERVICE_KEYS:
-            assert f'"{key}" in self._required_managers' in source, (
-                f"{key} is declarable but _build_services_into never constructs it"
-            )
+        assert KNOWN_SERVICE_KEYS == {spec.key for spec in SERVICES if spec.declarable}

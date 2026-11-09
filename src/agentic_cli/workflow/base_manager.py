@@ -58,16 +58,13 @@ from agentic_cli.workflow.sessions import (
 )
 from agentic_cli.workflow.service_registry import (
     set_service_registry,
-    ARXIV_SOURCE,
-    EMBEDDING_SERVICE,
     JOB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
-    PERMISSION_ENGINE,
     SANDBOX_MANAGER,
-    WORKFLOW,
 )
+from agentic_cli.workflow.services import SERVICE_CLOSERS, ServiceSet, close_services
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
@@ -377,12 +374,12 @@ class BaseWorkflowManager(ABC):
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
-        # Service registry — complex services (KB, sandbox, etc.)
-        # Plan/task state lives in native backend state (ToolContext.state
-        # for ADK, graph state for LangGraph), not here.
-        self._services: dict[str, Any] = {}
-        # Keys of services a reinitialize is carrying over; see _keeping().
-        self._carried_service_keys: frozenset[str] = frozenset()
+        # The services the tools declared (workflow/services.py): published
+        # for them as ``_services``; which of them a reinitialize carries over
+        # is ``_carried_service_keys`` (see _keeping()). Plan/task state lives
+        # in native backend state (ToolContext.state for ADK, graph state for
+        # LangGraph), not here.
+        self._services_held = ServiceSet()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
         # What became of the turns' tool calls: a cancelled turn answers the
@@ -471,6 +468,36 @@ class BaseWorkflowManager(ABC):
     def services(self) -> dict[str, Any]:
         """Get the service registry dict."""
         return self._services
+
+    @property
+    def _service_set(self) -> ServiceSet:
+        """The services this manager holds (``workflow/services.py``).
+
+        Made on first use too, so a manager built without the constructor
+        (a test harness's ``__new__``) has one.
+        """
+        held = vars(self).get("_services_held")
+        if held is None:
+            held = self._services_held = ServiceSet()
+        return held
+
+    @property
+    def _services(self) -> dict[str, Any]:
+        """The published services: the registry a turn's tools read (``get_service``)."""
+        return self._service_set.services
+
+    @_services.setter
+    def _services(self, services: dict[str, Any]) -> None:
+        self._service_set.services = services
+
+    @property
+    def _carried_service_keys(self) -> frozenset[str]:
+        """The keys of the services a reinitialize is carrying over (:meth:`_keeping`)."""
+        return self._service_set.carried
+
+    @_carried_service_keys.setter
+    def _carried_service_keys(self, keys: frozenset[str]) -> None:
+        self._service_set.carried = frozenset(keys)
 
     @property
     def knowledge_base(self) -> "KnowledgeBase | None":
@@ -609,47 +636,12 @@ class BaseWorkflowManager(ABC):
     def _get_service_tool_map(self) -> dict[str, Callable]:
         """Create service tools via factories, returning name→function map.
 
-        Only creates tools for services that have been initialized.
+        Only creates tools for services that have been initialized, from
+        the table (``ServiceSet.tool_map``); the interaction tools always.
+        A backend that adds a tool of its own overrides this, and the
+        backends build their agents from what it returns.
         """
-        from agentic_cli.tools.factories import (
-            make_memory_tools,
-            make_kb_tools,
-            make_webfetch_tool,
-            make_sandbox_tool,
-            make_interaction_tools,
-            make_arxiv_tools,
-            make_ingest_arxiv_tool,
-        )
-
-        tool_map: dict[str, Callable] = {}
-        s = self._services
-
-        if s.get(MEMORY_STORE):
-            for t in make_memory_tools(s[MEMORY_STORE]):
-                tool_map[t.__name__] = t
-        knowledge_base = s.get(KNOWLEDGE_BASE)
-        if knowledge_base is not None:
-            for t in make_kb_tools(knowledge_base):
-                tool_map[t.__name__] = t
-        if s.get(LLM_SUMMARIZER):
-            tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
-        if s.get(SANDBOX_MANAGER):
-            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER], self)
-        if s.get(ARXIV_SOURCE):
-            for t in make_arxiv_tools(s[ARXIV_SOURCE]):
-                tool_map[t.__name__] = t
-        # ingest_arxiv_paper composes both services
-        if s.get(ARXIV_SOURCE) and knowledge_base is not None:
-            tool_map["ingest_arxiv_paper"] = make_ingest_arxiv_tool(s[ARXIV_SOURCE], knowledge_base)
-        # Workflow manager is always available for interaction tools
-        for t in make_interaction_tools(self):
-            tool_map[t.__name__] = t
-
-        # The factories bind each closure to the definition of the exact
-        # module-level tool it re-binds (see ``factories._issued``), so a
-        # variant carries identity only while the framework still owns that
-        # tool — never merely because the names match.
-        return tool_map
+        return self._service_set.tool_map(self)
 
     @abstractmethod
     def _get_state_tools(self) -> list[Callable]:
@@ -715,8 +707,7 @@ class BaseWorkflowManager(ABC):
 
     def _publish_services(self, built: dict[str, Any]) -> None:
         """Adopt constructed services without displacing anything already live."""
-        for key, service in built.items():
-            self._services.setdefault(key, service)
+        self._service_set.publish(built)
 
     def _build_services(
         self, existing: frozenset[str] = frozenset()
@@ -758,83 +749,14 @@ class BaseWorkflowManager(ABC):
     def _build_services_into(
         self, s: dict[str, Any], existing: frozenset[str]
     ) -> None:
-        """Construct the required services into ``s``. See :meth:`_build_services`."""
-        # Spelled `"<key>" in self._required_managers` for every declarable
-        # key: test_every_declarable_key_is_constructible reads this source.
-        needs_memory = "memory_store" in self._required_managers and MEMORY_STORE not in existing
-        needs_kb = "knowledge_base" in self._required_managers and KNOWLEDGE_BASE not in existing
-        embedding_service = None
-        if needs_kb:
-            # One service for both knowledge base scopes, so the model loads
-            # once. Reading the live registry here is safe: nothing publishes
-            # into it while services are being built, and a service carried
-            # over a model switch is reused rather than built again.
-            embedding_service = self._services.get(EMBEDDING_SERVICE)
-            if embedding_service is None:
-                from agentic_cli.workflow.memory_services import build_embedding_service
+        """Construct the required services into ``s``. See :meth:`_build_services`.
 
-                embedding_service = build_embedding_service(self._settings)
-                if embedding_service is not None:
-                    s[EMBEDDING_SERVICE] = embedding_service
-
-        if needs_memory:
-            from agentic_cli.workflow.memory_services import open_memory_store
-
-            store = open_memory_store(self._settings)
-            if store is not None:  # None: it cannot open, and the memory tools say so
-                s[MEMORY_STORE] = store
-
-        if needs_kb:
-            from agentic_cli.workflow.memory_services import open_knowledge_base
-
-            s[KNOWLEDGE_BASE] = open_knowledge_base(
-                self._settings, summarizer=self, embedding_service=embedding_service
-            )
-
-        if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
-            s[LLM_SUMMARIZER] = self
-
-        if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in existing:
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            s[SANDBOX_MANAGER] = SandboxManager(self._settings)
-
-        if "job_manager" in self._required_managers and JOB_MANAGER not in existing:
-            from pathlib import Path
-            from agentic_cli.tools.jobs import JobManager
-
-            # User-scoped so long jobs persist across projects and CLI restarts.
-            jobs_dir = Path.home() / f".{self._settings.app_name}" / "jobs"
-            s[JOB_MANAGER] = JobManager(
-                self._settings,
-                base_dir=jobs_dir,
-                max_concurrent=getattr(self._settings, "max_concurrent_jobs", 4),
-            )
-
-        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in existing:
-            from agentic_cli.tools.arxiv_source import ArxivSearchSource
-            s[ARXIV_SOURCE] = ArxivSearchSource()
-
-        # Always construct the PermissionEngine (all agents may need it)
-        if PERMISSION_ENGINE not in existing:
-            from pathlib import Path
-            from agentic_cli.tools.exec_policy import uncontained_exec_capabilities
-            from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
-            ctx = PermissionContext(
-                workdir=Path.cwd(),
-                home=Path.home(),
-                app_name=self._settings.app_name,
-            )
-            # Code that would run on the host without a sandbox is approved
-            # per call, and so is a memory write once the conversation has
-            # read outside content; the engine asks which at each check.
-            s[PERMISSION_ENGINE] = PermissionEngine(
-                settings=self._settings, workflow=self, ctx=ctx,
-                uncontained=uncontained_exec_capabilities,
-                per_call=self._per_call_capabilities,
-            )
-
-        # Always ensure workflow reference is available
-        s[WORKFLOW] = self
+        The table's services (``ServiceSet.build_into``): those the tools
+        declared, and those every manager has. A backend that builds a
+        service of its own overrides this, calls it, and adds its own to
+        ``s`` (and its closer to ``_SYNC_SERVICE_CLOSERS``).
+        """
+        self._service_set.build_into(self, s, existing)
 
     async def _construct_services(self) -> None:
         """Build services off the event loop and publish them transactionally.
@@ -1329,12 +1251,10 @@ class BaseWorkflowManager(ABC):
         except Exception as exc:  # noqa: BLE001 - shutdown must not fail
             logger.warning("resource_close_failed", resource=label, error=str(exc))
 
-    # Services that own OS resources, and the sync method that releases them.
-    _SYNC_SERVICE_CLOSERS = (
-        (SANDBOX_MANAGER, "cleanup"),
-        (JOB_MANAGER, "close"),
-        (KNOWLEDGE_BASE, "close"),  # a database connection per scope
-    )
+    # Services that own OS resources, and the sync method that releases
+    # them: the table's (workflow/services.py). A backend that builds a
+    # service of its own adds its closer here.
+    _SYNC_SERVICE_CLOSERS: tuple[tuple[str, str], ...] = SERVICE_CLOSERS
 
     @classmethod
     def _close_services(cls, services: dict[str, Any]) -> None:
@@ -1344,14 +1264,7 @@ class BaseWorkflowManager(ABC):
         Used both for the live registry and for services a rolled-back
         initialization constructed but never published.
         """
-        for key, method in cls._SYNC_SERVICE_CLOSERS:
-            service = services.get(key)
-            if service is None:
-                continue
-            try:
-                getattr(service, method)()
-            except Exception as exc:  # noqa: BLE001 - shutdown must not fail
-                logger.warning("resource_close_failed", resource=key, error=str(exc))
+        close_services(services, cls._SYNC_SERVICE_CLOSERS)
 
     def _cleanup_managers(self) -> None:
         """Release the synchronous resources this manager owns.
@@ -1363,19 +1276,7 @@ class BaseWorkflowManager(ABC):
         Services a reinitialize is carrying over (:meth:`_keeping`) stay
         published and open.
         """
-        carried = {
-            key: service
-            for key, service in self._services.items()
-            if key in self._carried_service_keys
-        }
-        try:
-            self._close_services({
-                key: service
-                for key, service in self._services.items()
-                if key not in carried
-            })
-        finally:
-            self._services = carried
+        self._close_services(self._service_set.release())
 
     @contextlib.contextmanager
     def _keeping(self, preserve: bool) -> Iterator[None]:
