@@ -2234,8 +2234,8 @@ step; each entry says what to use instead.
 
 - **A slash command that fails is logged.** The user saw "Error executing
   command: <error>" (for a `KeyError`, only the key) and nothing reached
-  the log. The failure is now logged as `command_failed` at warning, with
-  the command and the error's type, and its traceback at debug.
+  the log. The failure is now logged as `command_failed` at info, with the
+  command and the error's type, and its traceback at debug.
 
 - **`/status` says why the workflow did not start.** It looked for the
   start's error on the app under two names the app never had, so a workflow

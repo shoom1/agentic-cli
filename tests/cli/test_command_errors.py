@@ -1,8 +1,9 @@
 """A slash command that raises: the user is told, and the failure is logged.
 
-The line is "Error executing command: <error>", as before; the log has a
-warning naming the command and the error's type (``command_failed``), and
-the traceback at debug.
+The line is "Error executing command: <error>", as before; the log has an
+info record naming the command and the error's type (``command_failed``),
+and the traceback at debug. Not a warning: at the default log level a
+warning prints above the prompt, beside the line the user already sees.
 """
 
 from __future__ import annotations
@@ -72,11 +73,12 @@ async def test_it_is_shown_as_before(app, logged):
 async def test_it_is_logged_with_its_traceback_at_debug(app, logged):
     await app.process_input("/broken")
 
-    (warning,) = [e for e in logged if e["log_level"] == "warning"]
-    assert warning == {
-        "event": "command_failed", "log_level": "warning",
+    (record,) = [e for e in logged if e["event"] == "command_failed" and "exc_info" not in e]
+    assert record == {
+        "event": "command_failed", "log_level": "info",
         "command": "broken", "error_type": "KeyError", "error": "'missing'",
     }
+    assert not [e for e in logged if e["log_level"] in ("warning", "error")]
     (traceback,) = [e for e in logged if e["event"] == "command_failed" and "exc_info" in e]
     assert traceback["log_level"] == "debug"
     assert isinstance(traceback["exc_info"], KeyError)

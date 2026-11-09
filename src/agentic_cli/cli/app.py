@@ -1273,8 +1273,10 @@ class BaseCLIApp:
                 logger.debug("command_completed", command=command.name)
             except Exception as e:
                 # A command that raises is a bug: the line says what, the log
-                # which command and its type, and its traceback at debug.
-                logger.warning(
+                # which command and its type, and its traceback at debug. At
+                # info: a warning would print above the prompt (the default
+                # level), beside the line the user already sees.
+                logger.info(
                     "command_failed", command=command.name,
                     error_type=type(e).__name__, error=str(e),
                 )
