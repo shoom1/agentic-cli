@@ -180,3 +180,146 @@ def test_the_builtin_commands_include_memory():
     app = SimpleNamespace(command_registry=CommandRegistry())
     BaseCLIApp._register_builtin_commands(app)
     assert isinstance(app.command_registry.get("memory"), MemoryCommand)
+
+
+async def test_history_restores_a_version(store, clock):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    clock.now = T0 + timedelta(minutes=1)
+    store.update(memory.id, content="Tabs, width 4.")
+    clock.now = T0 + timedelta(minutes=2)
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], "restore")
+    await MemoryCommand().execute("history", app)
+    listing, version = shown(app)
+    assert listing.fields[0].options == [f"2026-11-08 14:04 · updated · Prefers tabs · {memory.id}"]
+    assert "Saved 2026-11-08 14:04 UTC:" in str(version.body) and "Now:" in str(version.body)
+    assert [b.text for b in version.buttons] == ["Restore", "Close"]
+    assert store.read(memory.id).content == "Tabs."
+    app.session.add_success.assert_called_once_with(f"Restored memory {memory.id}: Prefers tabs.")
+
+
+async def test_history_of_a_deleted_memory(store):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    store.delete(memory.id)
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], None)
+    await MemoryCommand().execute("history", app)
+    listing, version = shown(app)
+    assert " · deleted · " in listing.fields[0].options[0]
+    assert str(version.body).endswith("Now:\ndeleted")
+
+
+async def test_history_of_a_memory_whose_file_a_person_broke_does_not_call_it_deleted(store, clock):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    clock.now = T0 + timedelta(minutes=1)
+    store.update(memory.id, content="Tabs, width 4.")
+    path = store.read(memory.id).path
+    path.write_text(path.read_text().replace("type: feedback", "type: preference"))
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], None)
+    await MemoryCommand().execute("history", app)
+    listing, version = shown(app)
+    assert " · updated · " in listing.fields[0].options[0]
+    now = str(version.body).split("Now:\n")[1]
+    assert str(path) in now and "deleted" not in now
+
+
+async def test_a_restore_onto_a_file_in_the_way_names_the_file(store, clock):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    store.delete(memory.id)
+    memory.path.write_text("nonsense, my notes\n")
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], "restore")
+    await MemoryCommand().execute("history", app)
+    [error] = [call.args[0] for call in app.session.add_error.call_args_list]
+    assert error.startswith(f"Could not restore memory {memory.id}:")
+    assert str(memory.path) in error and "move or remove it" in error
+    app.session.add_success.assert_not_called()
+    assert memory.path.read_text() == "nonsense, my notes\n"
+
+
+async def test_no_history(store):
+    app = _App(store)
+    await MemoryCommand().execute("history", app)
+    app.session.add_message.assert_called_once_with("system", "No changes in the last 30 days.")
+
+
+async def test_the_inbox_accepts_discards_and_skips(store, clock):
+    target = store.save("Prefers spaces", "Spaces.", "feedback", scope="user")
+    store.propose(Candidate("new", None, "Uses metric", "km.", "user", "user"),
+                  conversation="c-1", outside_content="web_fetch")
+    clock.now = T0 + timedelta(minutes=1)
+    store.propose(Candidate("update", target.id, "Prefers tabs", "Tabs.", "feedback", "user"))
+    clock.now = T0 + timedelta(minutes=2)
+    third = store.propose(Candidate("new", None, "Likes otters", "Otters.", "user", "user"))
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking("accept", "discard", "skip")
+    await MemoryCommand().execute("inbox", app)
+    one, two, three = shown(app)
+    assert one.title == "Memory proposal 1 of 3"
+    assert "From a conversation that read outside content (web_fetch)." in str(one.body)
+    assert "Now:\nPrefers spaces" in str(two.body) and "Proposed:\nPrefers tabs" in str(two.body)
+    assert [b.text for b in one.buttons] == ["Accept", "Discard", "Skip"]
+    assert {m.description for m in store.memories()} == {"Prefers spaces", "Uses metric"}
+    assert [p.id for p in store.proposals()] == [third.id]
+    app.session.add_message.assert_called_with("system", "Accepted 1, discarded 1, 1 waiting.")
+
+
+async def test_escape_stops_the_inbox(store, clock):
+    store.propose(Candidate("new", None, "Uses metric", "km.", "user", "user"))
+    clock.now = T0 + timedelta(minutes=1)
+    store.propose(Candidate("new", None, "Likes otters", "Otters.", "user", "user"))
+    app = _App(store)
+    app.session.show_dialog.return_value = None
+    await MemoryCommand().execute("inbox", app)
+    assert len(shown(app)) == 1
+    app.session.add_message.assert_called_with("system", "Accepted 0, discarded 0, 2 waiting.")
+
+
+async def test_an_accept_the_store_refuses_says_why(store):
+    proposal = store.propose(Candidate("new", None, "Prefers tabs", "Tabs.", "feedback", "user"))
+    store.save("Prefers tabs", "By hand.", "feedback")
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking("accept")
+    await MemoryCommand().execute("inbox", app)
+    [error] = [call.args[0] for call in app.session.add_error.call_args_list]
+    assert error.startswith("Could not accept 'Prefers tabs':")
+    assert [p.id for p in store.proposals()] == [proposal.id]
+
+
+async def test_an_accept_onto_a_file_in_the_way_names_the_file(store, tmp_path):
+    alpha = store.save("alpha", "a", "user", scope="user")
+    mine = tmp_path / "user" / f"beta-{alpha.id}.md"
+    mine.write_text("not frontmatter, my notes\n")
+    proposal = store.propose(Candidate("update", alpha.id, "beta", "b", "user", "user"))
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking("accept")
+    await MemoryCommand().execute("inbox", app)
+    [error] = [call.args[0] for call in app.session.add_error.call_args_list]
+    assert error.startswith("Could not accept 'beta':")
+    assert str(mine) in error and "move or remove it" in error
+    assert mine.read_text() == "not frontmatter, my notes\n"
+    assert [p.id for p in store.proposals()] == [proposal.id]
+
+
+async def test_an_empty_inbox(store):
+    app = _App(store)
+    await MemoryCommand().execute("inbox", app)
+    app.session.add_message.assert_called_once_with("system", "No memory proposals waiting.")
+
+
+async def test_a_discard_the_store_cannot_do_says_discard(store, monkeypatch):
+    from agentic_cli.memory import MemoryBusy
+
+    proposal = store.propose(Candidate("new", None, "Uses metric", "km.", "user", "user"))
+
+    def busy(proposal_id):
+        raise MemoryBusy("another process holds the lock")
+
+    monkeypatch.setattr(store, "discard", busy)
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking("discard")
+    await MemoryCommand().execute("inbox", app)
+    [error] = [call.args[0] for call in app.session.add_error.call_args_list]
+    assert error == "Could not discard 'Uses metric': another process holds the lock"
+    assert [p.id for p in store.proposals()] == [proposal.id]

@@ -21,7 +21,7 @@ from thinking_prompt import ButtonConfig, ChoiceField, Dialog
 from agentic_cli.cli.commands import Command, CommandCategory
 
 if TYPE_CHECKING:
-    from agentic_cli.memory import Memory, MemoryStore, Problem
+    from agentic_cli.memory import Memory, MemoryStore, Problem, Proposal, Version
 
 STALE_DAYS = 90
 NOT_READY = (
@@ -111,6 +111,42 @@ def memory_view(memory: "Memory", has_history: bool) -> Dialog:
     return Dialog(f"Memory {memory.id}", body=body, buttons=buttons)
 
 
+def _claiming(store: "MemoryStore", memory_id: str) -> "Problem | None":
+    """The file the store cannot use that still holds ``memory_id``, if any."""
+    wanted = memory_id.casefold()
+    return next(
+        (p for p in store.problems() if p.memory_id and p.memory_id.casefold() == wanted), None
+    )
+
+
+def version_body(version: "Version", current: "Memory | None", unusable: "Problem | None" = None) -> str:
+    """A saved version beside the memory as it is now: ``deleted``, or the
+    file a person broke (``unusable``) when that holds its id."""
+    lines = [f"Saved {_when(version.saved)}:", version.memory.description, "", version.memory.content, "", "Now:"]
+    if current is not None:
+        lines += [current.description, "", current.content]
+    elif unusable is not None:
+        lines += [f"its file cannot be used (see Problems in /memory): {unusable.path}"]
+    else:
+        lines += ["deleted"]
+    return "\n".join(lines)
+
+
+def proposal_body(proposal: "Proposal", current: "Memory | None") -> str:
+    """What a proposal would do: a new memory, or a change beside the memory now."""
+    lines: list[str] = []
+    if proposal.outside_content:
+        lines += [f"From a conversation that read outside content ({proposal.outside_content}).", ""]
+    if proposal.action == "update":
+        lines += ["A change to a memory.", "", "Now:"]
+        lines += ["(deleted: discard this proposal)"] if current is None else [current.description, "", current.content]
+        lines += ["", "Proposed:"]
+    else:
+        lines += [f"A new {proposal.scope} memory ({proposal.type}).", ""]
+    lines += [proposal.description, "", proposal.content, "", f"Conversation: {proposal.conversation or '-'}"]
+    return "\n".join(lines)
+
+
 class MemoryCommand(Command):
     """Review saved memories: the list, one memory, history, the inbox, stale ones.
 
@@ -195,7 +231,74 @@ class MemoryCommand(Command):
             await self._history(app, store, memory.id)
 
     async def _history(self, app: Any, store: "MemoryStore", memory_id: str | None) -> None:
-        raise NotImplementedError  # Task 20
+        from agentic_cli.memory import MemoryStoreError
+
+        versions = await asyncio.to_thread(store.history, memory_id)
+        if not versions:
+            app.session.add_message("system", "No changes in the last 30 days.")
+            return
+        rows: dict[str, Any] = {}
+        for version in versions:
+            label = (
+                f"{version.saved:%Y-%m-%d %H:%M} · {'deleted' if version.deleted else 'updated'} · "
+                f"{version.memory.description} · {version.memory_id}"
+            )
+            while label in rows:
+                label += " ·"
+            rows[label] = version
+        title = "Memory history" + (f" of {memory_id}" if memory_id else "")
+        picked = await app.session.show_dialog(
+            Dialog(title, fields=[ChoiceField("version", "", options=list(rows))])
+        )
+        version = rows.get(picked) if picked is not None else None
+        if version is None:
+            return
+        current = await asyncio.to_thread(store.read, version.memory_id)
+        unusable = None if current is not None else await asyncio.to_thread(_claiming, store, version.memory_id)
+        choice = await app.session.show_dialog(Dialog(
+            f"Version of {version.memory_id}",
+            body=version_body(version, current, unusable),
+            buttons=[ButtonConfig("Restore", result="restore"), ButtonConfig("Close", result=None)],
+        ))
+        if choice != "restore":
+            return
+        try:
+            restored = await asyncio.to_thread(store.restore, version.memory_id, version.saved)
+        except (MemoryStoreError, OSError) as e:
+            app.session.add_error(f"Could not restore memory {version.memory_id}: {e}")
+            return
+        app.session.add_success(f"Restored memory {restored.id}: {restored.description}.")
 
     async def _inbox(self, app: Any, store: "MemoryStore") -> None:
-        raise NotImplementedError  # Task 20
+        from agentic_cli.memory import MemoryStoreError
+
+        proposals = await asyncio.to_thread(store.proposals)
+        if not proposals:
+            app.session.add_message("system", "No memory proposals waiting.")
+            return
+        accepted = discarded = 0
+        for number, proposal in enumerate(proposals, start=1):
+            current = (
+                await asyncio.to_thread(store.read, proposal.target) if proposal.action == "update" else None
+            )
+            choice = await app.session.show_dialog(Dialog(
+                f"Memory proposal {number} of {len(proposals)}",
+                body=proposal_body(proposal, current),
+                buttons=[
+                    ButtonConfig("Accept", result="accept"),
+                    ButtonConfig("Discard", result="discard"),
+                    ButtonConfig("Skip", result="skip"),
+                ],
+            ))
+            if choice is None:  # Esc stops; what is left waits
+                break
+            try:
+                if choice == "accept":
+                    await asyncio.to_thread(store.accept, proposal.id)
+                    accepted += 1
+                elif choice == "discard" and await asyncio.to_thread(store.discard, proposal.id):
+                    discarded += 1
+            except (MemoryStoreError, OSError) as e:
+                app.session.add_error(f"Could not {choice} {proposal.description!r}: {e}")
+        waiting = len(await asyncio.to_thread(store.proposals))
+        app.session.add_message("system", f"Accepted {accepted}, discarded {discarded}, {waiting} waiting.")
