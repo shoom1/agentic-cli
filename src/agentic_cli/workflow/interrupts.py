@@ -75,13 +75,19 @@ def job_for_call(call_id: str | None) -> Any | None:
     none outside a turn: the job store holds all the user's jobs, from every
     run, and a provider that numbers its call ids (``call_0``, ...) repeats
     them in every conversation.
+
+    Looked up among the jobs the manager holds (``JobManager.snapshot``), with
+    no lock: it is asked on the event loop (ADK answers a stopped turn's
+    calls in an async callback), where waiting for the jobs directory's lock
+    froze the app. A job a call submitted is the manager's own, or was loaded
+    when it started (a crash's), and what is matched never changes.
     """
     jobs = get_service(JOB_MANAGER)
     turn = get_active_turn()
     if jobs is None or turn is None or not call_id:
         return None
     return next((
-        record for record in jobs.list()
+        record for record in jobs.snapshot()
         if record.call_id == call_id
         and record.session_id == turn.session_id
         and record.user_id == turn.user_id

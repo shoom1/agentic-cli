@@ -7,7 +7,7 @@ never a provider SDK (only the backend adapters touch those):
   generate content; it shows the text models 0.6 kept;
 - ``anthropic``: ``GET /v1/models`` (``x-api-key``), with each model's
   thinking types and effort levels, and whether thinking can be turned off;
-  it shows a dated id as its alias (``ListedModel.alias``);
+  it marks a dated id with its date-stripped id (``ListedModel.alias``);
 - ``openai``: ``GET /v1/models`` (bearer key), ids only;
 - ``openrouter``: OpenRouter's public ``GET {base_url}/models`` (the key
   is sent when there is one), with tool and reasoning support;
@@ -70,10 +70,14 @@ class ListedModel:
     #: Whether to show the model under its own id. One not shown is still
     #: served: its id is accepted and found by search. Google does not show
     #: its other modalities, aliases, snapshots and variants, nor Anthropic
-    #: its dated ids.
+    #: its dated ids (``listing_records`` shows one as itself when its alias is
+    #: not served).
     shown: bool = True
-    #: Anthropic: the alias a dated id is shown as (``claude-sonnet-4-5`` for
-    #: ``claude-sonnet-4-5-20250929``); None for any other id.
+    #: Anthropic: a dated id without its date (``claude-sonnet-4-5`` for
+    #: ``claude-sonnet-4-5-20250929``); None for any other id. It is not the
+    #: alias Anthropic serves: ``listing_records`` takes that from the shipped
+    #: table's alias map (``claude-opus-4-0`` for ``claude-opus-4``), and the
+    #: 3.x line has none.
     alias: str | None = None
 
 

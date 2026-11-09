@@ -60,6 +60,11 @@ def jm(tmp_path: Path) -> JobManager:
     return JobManager(base_dir=tmp_path / "jobs", max_concurrent=2)
 
 
+def _holding(*records):
+    """A job manager whose ``list()`` returns ``records``."""
+    return SimpleNamespace(list=lambda **_: list(records))
+
+
 async def _await_until(predicate, timeout: float = 5.0, interval: float = 0.02) -> bool:
     """Async poll that yields to the loop so background tasks can run."""
     end = time.time() + timeout
@@ -120,96 +125,96 @@ class TestSegmentLogic:
         assert JobMonitor._short("x" * 40, limit=10) == "x" * 9 + "…"
         assert JobMonitor._short("", ) == "job"
 
-    def test_pending_resume_cue_when_enabled(self, jm: JobManager):
+    async def test_pending_resume_cue_when_enabled(self):
         from agentic_cli.tools.jobs import JobRecord
 
-        ui = FakeUI()
-        mon = JobMonitor(
-            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True)
-        )
         rec = JobRecord(
             job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
             state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
         )
-        seg = mon._build_segment([rec])
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, _holding(rec)), settings=SimpleNamespace(job_auto_resume=True)
+        )
+        seg = await mon.poll_once()
         assert seg is not None and "↻1 to resume" in seg
 
-    def test_with_auto_resume_off_the_cue_names_the_command(self, jm: JobManager):
+    async def test_with_auto_resume_off_the_cue_names_the_command(self):
         """Nothing resumes it on its own, so the cue says how to."""
         from agentic_cli.tools.jobs import JobRecord
 
-        ui = FakeUI()
-        mon = JobMonitor(
-            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=False)
-        )
         rec = JobRecord(
             job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
             state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
         )
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, _holding(rec)), settings=SimpleNamespace(job_auto_resume=False)
+        )
         # First-sight terminal job → no ✓ note; the cue alone.
-        assert mon._build_segment([rec]) == "↻1: /jobs resume"
+        assert await mon.poll_once() == "↻1: /jobs resume"
 
-    def test_the_cue_counts_only_this_conversations_jobs(self, jm: JobManager):
+    async def test_the_cue_counts_only_this_conversations_jobs(self):
         """Another conversation's job is told when that one is opened."""
         from agentic_cli.tools.jobs import JobRecord
 
-        ui = FakeUI()
-        mon = JobMonitor(
-            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True),
-            conversation=lambda: ("me", "s"),
-        )
         recs = [
             JobRecord(job_id=f"j{n}", tool="run_shell_job", backend="subprocess", name="build",
                       state=JobState.SUCCEEDED, resume_on_complete=True, call_id=f"c{n}",
                       session_id=session, user_id="me")
             for n, session in enumerate(["s", "s", "other"])
         ]
-        assert mon._build_segment(recs) == "↻2 to resume"
-
-    def test_no_resume_cue_for_already_resumed(self, jm: JobManager):
-        from agentic_cli.tools.jobs import JobRecord
-
         ui = FakeUI()
         mon = JobMonitor(
-            ui, FakeController(ui, jm), settings=SimpleNamespace(job_auto_resume=True)
+            ui, FakeController(ui, _holding(*recs)),
+            settings=SimpleNamespace(job_auto_resume=True), conversation=lambda: ("me", "s"),
         )
+        assert await mon.poll_once() == "↻2 to resume"
+
+    async def test_no_resume_cue_for_already_resumed(self):
+        from agentic_cli.tools.jobs import JobRecord
+
         rec = JobRecord(
             job_id="j1", tool="run_shell_job", backend="subprocess", name="build",
             state=JobState.SUCCEEDED, resume_on_complete=True, call_id="c1",
             resume_state="delivered",
         )
-        assert mon._build_segment([rec]) is None
+        ui = FakeUI()
+        mon = JobMonitor(
+            ui, FakeController(ui, _holding(rec)), settings=SimpleNamespace(job_auto_resume=True)
+        )
+        assert await mon.poll_once() is None
 
 
 # --- poll_once publishes + refreshes -------------------------------------------
 
 
 class TestPollOnce:
-    def test_publishes_segment_and_refreshes_on_change(self, jm: JobManager):
+    async def test_publishes_segment_and_refreshes_on_change(self, jm: JobManager):
         ui = FakeUI()
         ctrl = FakeController(ui, jm)
         mon = JobMonitor(ui, ctrl)
 
         jm.submit(tool="run_shell_job", backend="subprocess", spec={"command": "sleep 2"})
-        seg = mon.poll_once()
+        seg = await mon.poll_once()
         assert seg is not None and "running" in seg
         assert ctrl.jobs_status_segment == seg
         assert ui.statuses and "running" in ui.statuses[-1]
 
-    def test_no_redraw_when_segment_unchanged(self, jm: JobManager):
+    async def test_no_redraw_when_segment_unchanged(self, jm: JobManager):
         ui = FakeUI()
         ctrl = FakeController(ui, jm)
         mon = JobMonitor(ui, ctrl)
         # No jobs → segment None on every tick → no status updates at all.
-        mon.poll_once()
-        mon.poll_once()
+        await mon.poll_once()
+        await mon.poll_once()
         assert ctrl.status_updates == 0
 
-    def test_no_manager_is_safe(self, tmp_path: Path):
+    async def test_no_manager_is_safe(self, tmp_path: Path):
         ui = FakeUI()
         ctrl = FakeController(ui, None)  # workflow has no job_manager
         mon = JobMonitor(ui, ctrl)
-        assert mon.poll_once() is None
+        assert await mon.poll_once() is None
         assert ctrl.status_updates == 0
 
 

@@ -533,6 +533,17 @@ the start of the entry's title.
 
 ### Added
 
+- **`JobManager.snapshot()`, `JobManager.release_resume(job_id)` and
+  `JobRecord.awaiting_resume`.** `snapshot()` returns the jobs a manager
+  holds as it last read them, taking no lock, so a caller on the event loop
+  never waits for another CLI; a job's state there may be a tick old.
+  `release_resume()`, the counterpart of `begin_resume()`, hands back a
+  delivery claim nothing was delivered under (`RESUMING` → `PENDING`): only
+  the process holding the claim may, and anything else raises
+  `ResumeStateError`, as `complete_resume()` does. `awaiting_resume` says
+  of one record what `JobManager.awaiting_resume()` returns: finished,
+  flagged `resume_on_complete`, its delivery still `PENDING`.
+
 - **An example of agents defined in YAML, and a README section on the format.**
   `examples/yaml_agents/` is a runnable app whose coordinator and researcher
   are declared in `agents.yaml`: their prompts are read from `prompts/` through
@@ -722,19 +733,20 @@ the start of the entry's title.
 - **`/models`** shows the list the model pickers offer: per model, the
   context window, max output, thinking mechanism and levels, tools, cache
   mechanism, where each value came from (`config`, `listing`, `table`,
-  `default`), and the roles that use it; then each `models` entry the list
-  leaves out, with why ("no key: set TOGETHER_API_KEY", "provider 'together'
+  `default`), and the roles that use it; then each model the settings name that
+  the list leaves out (a `models` entry, or the model of `default_model`, a role
+  or an agent), with why ("no key: set TOGETHER_API_KEY", "provider 'together'
   is not defined in model_providers", "not served by together"); then a row
   per provider in use: whether it has a key (or needs none), whether its
   listing is fresh, stale, failed or not tried, when it was fetched, how many
-  models it lists, and the last error. `/models <text>` searches the full
-  listing of every provider that can be called, ignoring case, by reference,
-  and marks the models already in the list: how to find an exact id to add
-  to `models` (a provider not in use is listed the first time it is
-  searched). `/models refresh` lists every provider in use or searched again
-  now and reports whose models changed and which listings failed. Before
-  the workflow is initialized it reads the model cache, and lists a provider
-  in use the cache holds nothing for. It never shows a key.
+  models it shows (its listing holds more), and the last error. `/models
+  <text>` searches the full listing of every provider that can be called,
+  ignoring case, by reference, and marks the models already in the list: how
+  to find an exact id to add to `models` (a provider not in use is listed the
+  first time it is searched). `/models refresh` lists every provider in use
+  or searched again now and reports whose models changed and which listings
+  failed. Before the workflow is initialized it reads the model cache, and
+  lists a provider in use the cache holds nothing for. It never shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
   installs beside `langgraph`, and its LangChain packages are the
@@ -1554,9 +1566,17 @@ the start of the entry's title.
   it.
   Startup waits only for one that can be called and has no cache entry, all
   of them at once and each for at most 10 seconds; an older entry is used
-  while it is listed again in the background. As in 0.6, an id unknown to a
+  while it is listed again in the background, and so is a listing that failed
+  at startup (once). Until one succeeds the provider's ids are not checked and
+  its models' limits and thinking come from the shipped table (an OpenRouter
+  or configured provider's models run without thinking and with the 128,000-token
+  window floor), which the warning says; the session's agents are resolved
+  once, at startup, and keep that, and the listing reaches `/models`, the
+  pickers, side calls and the next start. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it. After a key change to an
+  failed, untried or older listing accepts it, and a listing grows older in
+  a long session too: 24 hours after it was fetched it no longer rejects an
+  id, and `/models <text>` lists the provider again. After a key change to an
   account with other models, run `/models refresh` to list again at once.
   Every process of the app shares the file, two releases of it included
   (a dev checkout beside the installed app): a listing writes only its own
@@ -1735,7 +1755,8 @@ the start of the entry's title.
   Default Model (`default_model`), has two companions: Fast Model and Strong
   Model, which write `model_roles["fast"]` and `model_roles["strong"]`. Each
   offers the list, as `provider:model` references: the `models` entries
-  that can run, then each model the settings, the agents and the roles name;
+  that can run, then each model the settings, the agents and the roles name
+  that can run by the same rule (a model is never both offered and left out);
   when the list offers no entry, each built-in provider with a key's newest
   fast, default and strong model. A listing never adds to it, where 0.6's
   picker offered every model the providers listed. A role's picker shows
@@ -2266,6 +2287,42 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A finished job's result is no longer given up when its delivery stops
+  before reaching the agent.** The CLI claimed a job's delivery before it
+  checked that the workflow was ready and looked the job's conversation
+  up: when the workflow had not started, or Ctrl+C or an error landed
+  during the lookup, the delivery was recorded failed, which is final, so
+  no later `/jobs resume` told the result, though nothing had reached the
+  agent. The delivery is now claimed after those checks
+  (`MessageProcessor.process_resume(claim=)`, called once the result can
+  reach the agent), and a job whose delivery stopped before is told by a
+  later one; an error there is said ("Background job 'build' could not be
+  resumed now: …"), each time `/jobs resume` asks and once per job and
+  conversation at turn ends. A claim taken by a request Ctrl+C stopped while it
+  waited for the claim is handed back (`JobManager.release_resume`). Ctrl+C
+  during the resume turn still records the delivery failed: the job's
+  notice may already be in the conversation.
+
+- **The status bar's `↻N` no longer counts a job whose result is being
+  delivered.** It counted every finished resume job not yet delivered, so
+  the job a resume turn was telling stayed counted while that turn ran. It
+  now counts the jobs `/jobs resume` would tell, whose delivery has not
+  started (`JobRecord.awaiting_resume`, what `JobManager.awaiting_resume`
+  returns).
+
+- **The prompt no longer freezes while another CLI of the app holds the
+  jobs directory.** The CLI called the job manager on the event loop's
+  thread: the status bar's poll every 2 seconds, each `/jobs` subcommand,
+  and the resume coordinator (listing, claiming and closing the deliveries
+  of finished jobs, at a turn's end and by `/jobs resume`). Each call takes
+  the jobs directory's lock, which every CLI of the app shares, so while
+  another held it (its `/jobs clean` over large job folders, say) the
+  prompt, its redraws and Ctrl+C waited too. Those calls now run on a
+  worker thread; Ctrl+C stops waiting for one and says "Operation
+  cancelled...", and a cancel or a clean under way finishes. A resume turn
+  still reads the job's result on the event loop (the backends'
+  `resume_with_job_result`).
+
 - **The documented lifecycle contract says what the code does.** The README's
   "Turn and lifecycle contracts", `CLAUDE.md` and `BaseWorkflowManager`'s
   docstring said `initialize_services()` takes the turn lock. It takes only the
@@ -2684,10 +2741,22 @@ step; each entry says what to use instead.
   `generateContent`: not its embedding, Imagen or Veo models), each marked
   whether it is shown: every such id is accepted and found by
   `/models <text>`, while the list the pickers offer, `/models`, the roles'
-  tier picks and the "not available" message show what they showed. Without
-  a listing, a dated Claude id is described as its alias is
+  tier picks and the "not available" message show only the shown ones:
+  Google's text models, Anthropic's dated ids under their aliases (below)
+  and OpenAI's curated and reasoning models. Without a listing, a dated Claude id is described as its alias is
   (`claude-sonnet-5-5-20261001` cannot turn thinking off and takes no
-  sampling parameters, like `claude-sonnet-5-5`).
+  sampling parameters, like `claude-sonnet-5-5`). A dated Claude id is shown
+  as the undated alias the shipped table lists for it (`claude-sonnet-4-5`,
+  `claude-haiku-4-5`, `claude-opus-4-1`, `claude-opus-4-5`, and `claude-opus-4-0`
+  and `claude-sonnet-4-0` for the 20250514 models), and no other date-stripped
+  id is accepted: `claude-opus-4` and `claude-sonnet-4`, which 0.6 offered by
+  stripping the date, are not served (the `-4-0` aliases are), and a dated id
+  the table lists no alias for, such as `claude-3-5-haiku-20241022`, is shown
+  and accepted as itself (Claude Haiku 3 has no alias, and the `-latest`
+  aliases of 3.5 Haiku and 3.7 Sonnet are retired). Google's `-latest` aliases
+  (`gemini-flash-latest`, `-flash-lite-latest`, `-pro-latest`) are described
+  as the Gemini 3 family they point at (tier, thinking levels), so a pinned
+  one thinks.
 - **On ADK, an OpenRouter model's reasoning details go back to it with the
   tool results, as on Deep Agents.** Beside its reasoning text OpenRouter
   sends `reasoning_details` (Claude's signed thinking, Gemini's thought
@@ -2920,7 +2989,9 @@ step; each entry says what to use instead.
   may have partly run. Check before running it again.", one waiting at its
   permission prompt or at a question "Not run: the user cancelled it.", a
   delegation to a sub-agent as interrupted, and a call whose job was already
-  submitted with the job's state; a request stopped before its reply (also
+  submitted with the job's state (found among the jobs the manager holds,
+  `JobManager.snapshot()`, which takes no lock: the event loop never waits
+  for another CLI); a request stopped before its reply (also
   after tool results) leaves "(Interrupted by the user.)" as the main
   agent's reply, so the next turn answers the new message alone. A turn
   ends only once that is stored: closed by its consumer (`aclosing`), or
@@ -2950,15 +3021,17 @@ step; each entry says what to use instead.
   nothing) is answered first, since Claude and OpenAI refuse it. `/jobs
   resume` and the turn-boundary resume showed every waiting job's resume
   here, another conversation's too; they now tell the current
-  conversation's jobs, and those of a conversation that can be opened no
-  more (deleted, or kept in memory by an earlier run), as unavailable.
+  conversation's jobs, and, as unavailable, those with no conversation or
+  whose conversation can be opened no more (deleted, or kept in memory by
+  an earlier run).
   `/resume` tells the finished jobs of the conversation it opens when
   `job_auto_resume` is on; at startup (`--continue`, `--resume <id>`),
   outside the input handler, where Ctrl+C could not stop a turn, a line
   names them ("A finished job waits for this conversation: /jobs resume
   tells it now.") and the first turn boundary tells them. The status bar's
-  `↻N` counts the current conversation's waiting jobs whatever the setting,
-  `↻N: /jobs resume` when it is off (it showed nothing then). The notice
+  `↻N` counts them whatever the setting, `↻N: /jobs resume` when it is off
+  (it showed nothing then). That line, `↻N` and `/jobs resume` count the
+  same jobs, by one rule (`cli/waiting_jobs.py`). The notice
   now asks the agent, on a line after its header, to tell the user what the
   job's result means: without it Gemini 2.5 Flash, live, said nothing in
   about one resume in five.
@@ -3073,7 +3146,13 @@ step; each entry says what to use instead.
   backend's `cancel` now returns whether the job stopped (None, from a
   backend written before, counts as stopped): the subprocess backend waits
   up to 2 seconds for the job's process group to exit, and the in-process
-  one stops only a job that has not started. A job still running stays
+  one stops only a job that has not started. That wait holds no lock other
+  CLIs of the app wait on: the request is recorded under the jobs
+  directory's lock, the backend waits outside it, and how the job ended is
+  recorded under it again (a terminal state recorded meanwhile, by the
+  manager that saw the job end, is kept); a backend whose `cancel` raises
+  changes nothing, the request withdrawn and the error raised to the
+  caller. A job still running stays
   RUNNING with `cancel_requested`, holding its slot, and is recorded
   CANCELLED when it ends, as any cancelled job is; the next one starts then.
   A cancel another CLI sharing the jobs directory requests is read by the

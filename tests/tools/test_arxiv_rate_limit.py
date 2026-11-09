@@ -220,13 +220,17 @@ async def test_search_arxiv_is_awaited_and_does_not_stall_the_event_loop(
             await asyncio.sleep(0.01)
 
     ticker = asyncio.create_task(tick())
+    await asyncio.sleep(0.02)  # the ticker runs first, so a block at the call's start shows too
     try:
         result = await arxiv_tools.search_arxiv("alpha")
     finally:
         ticker.cancel()
 
     assert result["success"] is True
-    assert max(_gaps(ticks)) < 0.1
+    # A search that waited on the loop stalls it for the whole delay; a busy
+    # machine's own hiccups reach about a tenth of a second (0.12 s seen), so
+    # the bound sits between the two.
+    assert max(_gaps(ticks)) < api.delay / 2
 
 
 async def test_a_cancelled_search_frees_arxiv_for_the_next_at_once(api, source):
