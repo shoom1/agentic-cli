@@ -70,6 +70,17 @@ class TestResolveTool:
         with pytest.raises(ValueError, match="Did you mean: kb_search"):
             resolve_tool("kb_searh", registry=reg)  # typo
 
+    def test_unknown_bare_name_says_to_register_the_function(self):
+        """A dotted path to an unregistered function is denied at every call, so the
+        error must not offer one as the way to a custom tool."""
+        with pytest.raises(ValueError, match="Unknown tool name 'mine'") as exc:
+            resolve_tool("mine", registry=ToolRegistry())
+
+        message = str(exc.value)
+        assert "@register_tool" in message
+        assert "dotted path to a registered function" in message
+        assert "fully-qualified" not in message
+
     def test_empty_ref_raises(self):
         with pytest.raises(ValueError, match="Empty tool reference"):
             resolve_tool("   ")

@@ -159,6 +159,34 @@ class TestLoadAgentsFromYaml:
         with pytest.raises(FileNotFoundError):
             load_agents_from_yaml(tmp_path / "nope.yaml")
 
+    def test_a_missing_instruction_file_is_a_value_error_naming_the_agent(self, tmp_path):
+        path = _write(tmp_path, "agents:\n  - name: writer\n    instruction_file: nope.md\n")
+        with pytest.raises(ValueError, match="Agent 'writer'.*instruction_file") as exc:
+            load_agents_from_yaml(path)
+        assert str(tmp_path / "nope.md") in str(exc.value)
+
+    def test_an_instruction_file_that_is_a_directory_is_a_value_error(self, tmp_path):
+        (tmp_path / "prompts").mkdir()
+        path = _write(tmp_path, "agents:\n  - name: writer\n    instruction_file: prompts\n")
+        with pytest.raises(ValueError, match="Agent 'writer'.*instruction_file"):
+            load_agents_from_yaml(path)
+
+    def test_an_instruction_file_that_is_not_utf8_is_a_value_error(self, tmp_path):
+        (tmp_path / "p.md").write_bytes(b"\xff\xfe not utf-8")
+        path = _write(tmp_path, "agents:\n  - name: writer\n    instruction_file: p.md\n")
+        with pytest.raises(ValueError, match="Agent 'writer'.*instruction_file"):
+            load_agents_from_yaml(path)
+
+    def test_a_yaml_path_that_is_a_directory_is_a_value_error(self, tmp_path):
+        with pytest.raises(ValueError, match="cannot read"):
+            load_agents_from_yaml(tmp_path)
+
+    def test_yaml_that_does_not_parse_is_a_value_error_naming_the_file(self, tmp_path):
+        path = _write(tmp_path, "agents:\n  - name: a\n    instruction: [unclosed\n")
+        with pytest.raises(ValueError, match="not valid YAML") as exc:
+            load_agents_from_yaml(path)
+        assert str(path) in str(exc.value)
+
 
 class TestCreateManagerFromYaml:
     def test_builds_manager_and_resolves_tools(self, tmp_path, mock_context):

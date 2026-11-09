@@ -87,7 +87,8 @@ def _unknown_name_error(name: str, registry: ToolRegistry) -> ValueError:
     hint = f" Did you mean: {', '.join(close)}?" if close else ""
     return ValueError(
         f"Unknown tool name {name!r} (not in the tool registry).{hint} "
-        "Use a fully-qualified dotted path for custom tools."
+        "Register the function with @register_tool and use its name, or give "
+        "a dotted path to a registered function."
     )
 
 

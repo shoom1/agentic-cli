@@ -1,0 +1,21 @@
+# The agents of the yaml_agents example. load_agents_from_yaml() turns each entry
+# into the AgentConfig the other examples write in Python: the fields are the same.
+agents:
+  # The agent the user talks to: the one that no other agent lists under sub_agents.
+  - name: coordinator
+    # The prompt, read from a file; a relative instruction_file is relative to this YAML file.
+    instruction_file: prompts/coordinator.md
+    # The agents it may delegate to, by name.
+    sub_agents: [researcher]
+
+  - name: researcher
+    # What it does: its parent chooses whom to delegate to by this.
+    description: Analyzes text it is given (counts its words) and reports the figures.
+    # What it sees when delegated to: the request alone ("inherit" adds its parent's conversation).
+    context: fresh
+    instruction_file: prompts/researcher.md
+    # A tool is a registered name (tools.py registers word_count), or a dotted path to a registered function.
+    tools: [word_count]
+
+    # More fields an agent may set, all optional: prompt (or instruction) in place of
+    # instruction_file, model, model_settings, mcp_servers, skills, include_state_tools.
