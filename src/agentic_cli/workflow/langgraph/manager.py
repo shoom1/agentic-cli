@@ -169,9 +169,6 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         self._checkpointer_cm = None
         self._store = None
 
-        # Session tracking
-        self.session_id = "default_session"
-
         logger.debug(
             "langgraph_workflow_manager_created",
             app_name=self.app_name,

@@ -40,6 +40,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_content_note
 from agentic_cli.workflow.sessions import (
@@ -215,6 +216,10 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
+        # The conversation a call without a session id belongs to
+        # (``session_ref``): ``load_session`` adopts the one a resume names,
+        # and the CLI's /status shows it.
+        self.session_id: str = "default_session"
         # --- Concurrency contract (see the class docstring) ---
         # _lifecycle_lock serializes initialize/reinitialize/cleanup: background
         # init and a first user message may call them concurrently, and the
@@ -265,6 +270,10 @@ class BaseWorkflowManager(ABC):
         self._carried_service_keys: frozenset[str] = frozenset()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
+        # What became of the turns' tool calls: a cancelled turn answers the
+        # ones it leaves open from it (workflow/interrupts.py). A question a
+        # tool asks marks its call as waiting at the prompt (request_user_input).
+        self._open_calls = OpenCalls()
         # The memory index each conversation's main agent gets (spec §11.1):
         # taken once, so the prompt prefix stays cached.
         self._index_snapshots: dict[SessionRef, str] = {}
@@ -1609,10 +1618,9 @@ class BaseWorkflowManager(ABC):
 
         # A call cancelled at its question was not run (workflow/interrupts.py).
         call = get_active_tool_call()
-        open_calls = getattr(self, "_open_calls", None)
-        if call is None or open_calls is None:
+        if call is None:
             return await callback(request)
-        with open_calls.asking(call.call_id):
+        with self._open_calls.asking(call.call_id):
             return await callback(request)
 
     # Async context manager support
@@ -1693,7 +1701,7 @@ class BaseWorkflowManager(ABC):
         return SessionRef(
             app_name=self.app_name,
             user_id=user_id or self._settings.default_user,
-            session_id=session_id or getattr(self, "session_id", "default_session"),
+            session_id=session_id or self.session_id,
         )
 
     async def save_session(
@@ -1734,8 +1742,7 @@ class BaseWorkflowManager(ABC):
                 ``settings.default_user``).
         """
         if not self.supports_sessions:
-            if hasattr(self, "session_id"):
-                self.session_id = session_id
+            self.session_id = session_id
             # A resumed conversation takes a new memory index (spec §11.1).
             self._forget_memory_index(self.session_ref(session_id, user_id))
             logger.info(
@@ -1747,8 +1754,7 @@ class BaseWorkflowManager(ABC):
             exists = await self.session_exists(session_id)
         else:
             exists = await self.session_exists(session_id, user_id=user_id)
-        if hasattr(self, "session_id"):
-            self.session_id = session_id
+        self.session_id = session_id
         self._forget_memory_index(self.session_ref(session_id, user_id))
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         return exists
