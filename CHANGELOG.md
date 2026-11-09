@@ -2296,6 +2296,22 @@ step; each entry says what to use instead.
   that start fails, the change is applied as for any workflow that is not
   running: nothing is rebuilt, and the next start uses it.
 
+- **`JobManager.complete_resume` without the cross-process lock changes
+  nothing.** It could not record the delivery, yet marked the job delivered
+  (or failed) in the manager's memory, until a refresh read the claim back
+  from disk. The record now stays as the disk has it: resuming, under this
+  process's claim, which startup recovery records failed once the process
+  is gone (the result stays readable with `/jobs <id>`).
+
+- **A job's record keeps what a later version of the app wrote in it.**
+  Every write of a job's `meta.json` (a poll that found the job ended, a
+  cancel, a launch, a delivery, startup recovery) wrote the whole record as
+  the writing version knows it, so a field a later version had added,
+  running as another CLI over the same jobs directory, was erased. A job
+  manager now writes onto the record it read and keeps every key it does
+  not know (not the legacy `resumed`, which `resume_state` replaced). A
+  0.6.4 CLI still erases the fields 0.7.0 added, such as `cancel_requested`.
+
 - **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
   a job the cancel could not reach (another CLI of the app runs it and its
   backend cannot stop it from there, or its record could not be read or
