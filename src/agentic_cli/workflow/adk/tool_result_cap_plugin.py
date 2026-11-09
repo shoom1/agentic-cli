@@ -36,7 +36,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from agentic_cli.logging import Loggers
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import get_registry
-from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
+from agentic_cli.workflow.adk.permission_plugin import tool_definition
 from agentic_cli.workflow.tool_output import cap_tool_result, is_saved_output
 
 if TYPE_CHECKING:
@@ -108,11 +108,12 @@ class ToolResultCapPlugin(BasePlugin):
     def _saved_output_read(self, tool: "BaseTool", tool_args: dict[str, Any]) -> Path | None:
         """The saved output this call reads, when it is the framework's ``read_file``.
 
-        The tool is identified as the permission plugin identifies it, by the
-        object the registry issued, never by its name.
+        The tool is identified as the permission plugin identifies it
+        (``tool_definition``), by the object the registry issued, never by its
+        name.
         """
         read_file = get_registry().get("read_file")
-        if read_file is None or PermissionPlugin._resolve_definition(tool) is not read_file:
+        if read_file is None or tool_definition(tool) is not read_file:
             return None
         try:
             path = resolve_path(tool_args["path"])

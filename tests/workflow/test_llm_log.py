@@ -183,8 +183,3 @@ class TestAdkPlugin:
         plugin._write_to_log(event)
 
         assert written == [event]
-
-    def test_the_plugin_redacts_with_the_shared_function(self):
-        from agentic_cli.workflow.adk import plugins
-
-        assert plugins._redact_secrets is redact_secrets

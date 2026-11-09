@@ -88,6 +88,14 @@ if TYPE_CHECKING:
 
 logger = Loggers.workflow()
 
+#: The plugin's name, which ADK's plugin manager names when it wraps an error
+#: the plugin raised.
+OVERFLOW_PLUGIN = "context_overflow"
+#: How that wrapper starts: ``RuntimeError("Error in plugin 'context_overflow'
+#: during …")``, with the error as its ``__cause__`` (contract-tested). The
+#: manager unwraps it (``manager._plugin_cause``).
+OVERFLOW_PLUGIN_FAILED = f"Error in plugin '{OVERFLOW_PLUGIN}'"
+
 
 class OverflowPlugin(BasePlugin):
     """Answers a context overflow (see the module docstring).
@@ -115,7 +123,7 @@ class OverflowPlugin(BasePlugin):
         summarize_now: Callable[["CallbackContext"], Awaitable["WrittenSummary | None"]],
         fit_guard: "FitGuardPlugin | None" = None,
     ) -> None:
-        super().__init__(name="context_overflow")
+        super().__init__(name=OVERFLOW_PLUGIN)
         self._root = root
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)

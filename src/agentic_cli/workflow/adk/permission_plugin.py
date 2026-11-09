@@ -152,6 +152,22 @@ class _Sentinel:
         return f"<{self._label}>"
 
 
+def tool_definition(tool: "BaseTool") -> ToolDefinition | None:
+    """The registry's definition of this exact tool object, or None.
+
+    Bound to the object itself, or to the callable one of ADK's own
+    function-tool types runs (``_TRUSTED_FUNCTION_TOOL_TYPES``); never found
+    by a name. None for anything else: an MCP tool, or a tool the framework
+    did not issue. How the permission gate (steps 1 and 2) and the tool
+    result cap identify a tool.
+    """
+    defn = identify_tool(tool)
+    if defn is not None:
+        return defn
+    func = _trusted_wrapped_callable(tool)
+    return identify_tool(func) if func is not None else None
+
+
 # The tool carries no registry identity: deny.
 _UNVERIFIED = _Sentinel("unverified-tool")
 # A genuine MCP tool: gate under the synthetic ``mcp`` capability.
@@ -187,14 +203,16 @@ def _model_side_tool(llm_request: Any, callback_context: Any) -> str | None:
     ``code_execution``, and whatever ADK's genai adds) is the model's own: the
     field that is set names it. An agent's code executor runs the model's code
     blocks and puts their output in the conversation, which nothing in the
-    request shows.
+    request shows; it is read through ADK's public
+    ``get_invocation_context()``.
     """
     config = getattr(llm_request, "config", None)
     for tool in getattr(config, "tools", None) or ():
         for field in getattr(type(tool), "model_fields", ()):
             if field != "function_declarations" and getattr(tool, field, None) is not None:
                 return field
-    invocation = getattr(callback_context, "_invocation_context", None)
+    invocation_context = getattr(callback_context, "get_invocation_context", None)
+    invocation = invocation_context() if invocation_context is not None else None
     if getattr(getattr(invocation, "agent", None), "code_executor", None) is not None:
         return "code_executor"
     return None
@@ -361,15 +379,10 @@ class PermissionPlugin(BasePlugin):
         the framework did not issue, which the caller denies. There is no
         name-based path: a name is chosen by whoever built the tool.
         """
-        defn = identify_tool(tool)
+        defn = tool_definition(tool)
         if defn is not None:
             return defn
-
-        func = _trusted_wrapped_callable(tool)
-        if func is not None:
-            return identify_tool(func) or _UNVERIFIED
-
-        if _is_mcp_tool(tool):
+        if _trusted_wrapped_callable(tool) is None and _is_mcp_tool(tool):
             return _MCP
         return _UNVERIFIED
 

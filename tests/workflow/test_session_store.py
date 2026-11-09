@@ -182,6 +182,33 @@ class TestAdkNativeSessions:
             ),
         )
 
+    async def test_existence_and_a_delete_read_only_what_they_need(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """``session_exists`` reads one event (a session without any is no
+        conversation), ``delete_session`` none: a long conversation read
+        whole costs tens of milliseconds."""
+        mgr, settings = self._manager(tmp_path)
+        await self._seed(mgr, settings, "sess-x", "remember the alpha value")
+        await mgr._session_service.create_session(
+            app_name=mgr.app_name, user_id=settings.default_user, session_id="empty"
+        )
+        asked: list = []
+        real = mgr._session_service.get_session
+
+        async def recording(**kwargs):
+            asked.append(kwargs.get("config"))
+            return await real(**kwargs)
+
+        monkeypatch.setattr(mgr._session_service, "get_session", recording)
+
+        assert await mgr.session_exists("sess-x") is True
+        assert await mgr.session_exists("empty") is False
+        assert await mgr.delete_session("sess-x") is True
+        assert await mgr.delete_session("missing") is False
+
+        assert [getattr(config, "num_recent_events", None) for config in asked] == [1, 1, 0, 0]
+
     async def test_exists_list_recent_delete(self, tmp_path: Path):
         mgr, settings = self._manager(tmp_path)
         await self._seed(mgr, settings, "sess-x", "remember the alpha value")

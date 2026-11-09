@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import logging
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -46,7 +45,7 @@ from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.interrupted_calls_plugin import InterruptedCallsPlugin, left_open
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
-from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
+from agentic_cli.workflow.adk.overflow_plugin import OVERFLOW_PLUGIN_FAILED, OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.sessions import (
@@ -77,10 +76,6 @@ if TYPE_CHECKING:
 
 
 logger = Loggers.workflow()
-
-# Suppress Google GenAI SDK warning about non-text parts (function_call) in
-# mixed responses. We already handle all part types individually in process_part.
-logging.getLogger("google_genai.types").setLevel(logging.ERROR)
 
 # The cache mechanisms ADK's context cache serves: Claude's breakpoints and
 # Gemini's server-side caches.
@@ -115,31 +110,18 @@ def _check_app_name(app_name: str) -> None:
         ) from exc
 
 
-#: How ADK's plugin manager words what the overflow handler raised.
-_OVERFLOW_PLUGIN_FAILED = "Error in plugin 'context_overflow'"
-
-
 def _plugin_cause(error: RuntimeError) -> BaseException:
     """The provider's error behind ADK's wrapper of what the overflow handler raised.
 
     A retry that fails for another reason propagates, and ADK's plugin manager
-    wraps it ("Error in plugin 'context_overflow' during …"); the turn fails
+    wraps it (``overflow_plugin.OVERFLOW_PLUGIN_FAILED``); the turn fails
     with the provider's own error instead, as any failed call does. Any other
     error is ``error`` itself, re-raised as it is.
     """
     cause = error.__cause__
-    if str(error).startswith(_OVERFLOW_PLUGIN_FAILED) and cause is not None:
+    if str(error).startswith(OVERFLOW_PLUGIN_FAILED) and cause is not None:
         return cause
     return error
-
-
-def _author_of_call(session: Any, call_id: str) -> str | None:
-    """The author of the session event that made the function call ``call_id``."""
-    for event in getattr(session, "events", None) or []:
-        for part in (event.content.parts if event.content else None) or []:
-            if part.function_call is not None and part.function_call.id == call_id:
-                return event.author
-    return None
 
 
 def _as_written(prompt: str) -> Callable[[Any], str]:
@@ -220,6 +202,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         _check_app_name(self.app_name)
         self._adk_config_path = adk_config_path
+        # The graph an initialization validated, until its agents are built.
+        self._validated_graph: AgentGraph | None = None
 
         self._session_service: BaseSessionService | None = None
         self._root_agent: Agent | None = None
@@ -236,10 +220,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._task_progress_plugin: "TaskProgressPlugin | None" = None
 
         # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
-        # configs) to the direct-API DirectAnthropicLlm instead of Vertex Claude.
-        from agentic_cli.workflow.adk.anthropic_llm import register_direct_anthropic
+        # configs) to the direct-API DirectAnthropicLlm instead of Vertex
+        # Claude: ADK's registry is the process's, so once per process.
+        from agentic_cli.workflow.adk.anthropic_llm import ensure_direct_anthropic
 
-        register_direct_anthropic()
+        ensure_direct_anthropic()
 
         logger.debug(
             "workflow_manager_created",
@@ -455,10 +440,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _create_agents(self) -> Agent:
         """Create the agent hierarchy from configs, in dependency order.
 
-        The graph is validated first (``validate_agent_graph``) so duplicate
-        names, dangling ``sub_agents`` references, self-references, cycles and
-        shapes ADK cannot represent fail with the offending agent named,
-        instead of silently producing a coordinator with missing children.
+        The graph is the one this initialization validated before anything
+        was allocated (``_validate_agent_graph``), so duplicate names,
+        dangling ``sub_agents`` references, self-references, cycles and
+        shapes ADK cannot represent failed there with the offending agent
+        named, instead of silently producing a coordinator with missing
+        children. Called outside an initialization, it validates the graph
+        itself.
 
         Construction then follows a topological order, so an agent is always
         built after the agents it delegates to — the previous leaves-then-
@@ -475,7 +463,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Raises:
             AgentGraphError: If the configured graph is invalid.
         """
-        graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
+        # The graph validated for this build, taken once: a later build
+        # validates its own.
+        graph, self._validated_graph = getattr(self, "_validated_graph", None), None
+        if graph is None:
+            graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
         agent_map: dict[str, Agent] = {}
         service_map = self._get_service_tool_map()
@@ -816,30 +808,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         Runs at the top of initialization — ahead of model listings, service
         construction and the session service — so a static configuration error
-        costs no network call and leaves nothing to roll back.
+        costs no network call and leaves nothing to roll back. The graph is
+        kept for ``_create_agents``, which builds this initialization's agents
+        from it rather than validating again.
 
         Returns:
             The graph; None for a native ADK config, whose topology ADK owns.
         """
         if self._adk_config_path:
             return None  # native ADK config: ADK owns the topology
-        return validate_agent_graph(self._agent_configs, backend=self.backend_type)
-
-    async def _ensure_initialized(self) -> None:
-        """Ensure services are initialized before processing.
-
-        Called *before* the turn lock is taken, so a turn never waits on the
-        lifecycle lock while holding the turn lock (that ordering is what keeps
-        cleanup/reinitialize from deadlocking against a running turn). Because
-        of that ordering a cleanup can still land in between, which is what
-        ``_turn_admission`` re-checks with ``_backend_ready``.
-        """
-        if not self._initialized:
-            await self.initialize_services()
-        if not self._backend_ready():
-            raise RuntimeError(
-                "Workflow Manager failed to initialize. Check API keys and configuration."
-            )
+        self._validated_graph = validate_agent_graph(
+            self._agent_configs, backend=self.backend_type
+        )
+        return self._validated_graph
 
     def _backend_ready(self) -> bool:
         """True when the runner, session service and agent tree are all live."""
@@ -1159,8 +1140,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 parts=[types.Part(function_response=function_response)],
             )
 
-        logger.debug("job_resume_caller", job_id=record.job_id,
-                     caller=_author_of_call(session, record.call_id))
         async with contextlib.aclosing(self._run_and_stream(
             session_id=ref.session_id,
             user_id=ref.user_id,
@@ -1246,6 +1225,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
         """True if the store holds this session with any events.
 
+        It reads the newest event alone (``num_recent_events=1``), not the
+        whole conversation.
+
         Args:
             session_id: Session to look up.
             user_id: Owner of the session (defaults to ``settings.default_user``).
@@ -1257,6 +1239,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name=ref.app_name,
             user_id=ref.user_id,
             session_id=ref.session_id,
+            config=GetSessionConfig(num_recent_events=1),
         )
         return session is not None and bool(getattr(session, "events", None))
 
@@ -1323,7 +1306,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Delete a persisted session from the store.
 
         ADK's own delete answers nothing, for an unknown id too, so the
-        session is looked up first.
+        session is looked up first, without its events
+        (``num_recent_events=0``).
 
         Args:
             session_id: Session to delete.
@@ -1337,6 +1321,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ref = self.session_ref(session_id, user_id)
         stored = await self._session_service.get_session(
             app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+            config=GetSessionConfig(num_recent_events=0),
         )
         if stored is None:
             return False

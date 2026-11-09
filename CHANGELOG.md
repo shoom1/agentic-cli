@@ -1263,6 +1263,18 @@ the start of the entry's title.
 
 ### Changed
 
+- **Importing the ADK backend changes no logger, and a manager no longer
+  re-registers Claude with ADK.** Importing `agentic_cli.workflow.adk.manager`
+  set the `google_genai.types` logger to ERROR for the whole process;
+  `configure_logging()`, which `BaseCLIApp` calls, does it now, beside the
+  other third-party loggers it quiets (an app that configures its own
+  logging may now see google-genai's "non-text parts in the response"
+  warning). Each `GoogleADKWorkflowManager` construction pointed ADK's
+  process-wide model registry at `DirectAnthropicLlm` for `claude-*` names
+  again and cleared its cache; the first one does it, once per process
+  (`anthropic_llm.ensure_direct_anthropic`; `register_direct_anthropic`
+  still registers when called).
+
 - **A call to a tool name the agent does not have reads the same on ADK and
   Deep Agents, and is no warning.** The model reads ADK's own first two
   lines, "<name> failed: ValueError: Tool '<name>' not found." and the
