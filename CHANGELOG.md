@@ -2210,6 +2210,22 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A job manager leaves alone a job whose backend it has not registered.**
+  A `JobManager` without a job's backend recorded the job UNKNOWN, a
+  terminal state, whoever was running it, and an app registers its own
+  backends with `register_backend` only after the constructor has read the
+  jobs on disk: a custom backend's running job was ended whenever another
+  CLI of the app started, or its own restarted, and was then resumed as
+  finished. A queued one was claimed and its launch raised `KeyError`, out
+  of the constructor, and `cancel`, `tail` and `result` raised it too. Such
+  a job is now left as it is until a manager that has its backend looks at
+  it (`job_backend_not_registered` is logged once per job): it is not
+  polled, claimed, launched or cancelled, `cancel` returns it unchanged,
+  `tail` returns no lines and `result` None. So a job on a backend the app
+  no longer registers stays as it was, RUNNING (holding a slot of the
+  concurrency cap) or queued, until its folder under `~/.<app>/jobs/` is
+  removed: `/jobs clean` removes finished jobs only.
+
 - **Cancelling a job that has already ended records how it ended.**
   `JobManager.cancel` (and so `job_cancel` and `/jobs cancel`) reloaded the
   job's record but did not poll the job, so a job that had finished since it

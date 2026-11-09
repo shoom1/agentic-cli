@@ -352,6 +352,9 @@ class JobManager:
         # and is now missing was *deleted* by another manager; one that was
         # never persisted is simply new. Writing must tell them apart.
         self._persisted: set[str] = set()
+        # Jobs already logged at warning for a backend this manager has not
+        # registered; later notices are debug.
+        self._backendless_noted: set[str] = set()
         self._load_existing()
 
     # ------------------------------------------------------------------
@@ -359,6 +362,13 @@ class JobManager:
     # ------------------------------------------------------------------
 
     def register_backend(self, backend: JobBackend) -> None:
+        """Add a backend under its ``name``, replacing one of the same name.
+
+        An app registers its own after construction, when the constructor
+        has already reconciled the jobs on disk: until then, a job on that
+        backend was left as it is (``_backend_of``), and from now on this
+        manager polls, launches and cancels it.
+        """
         self._backends[backend.name] = backend
 
     def submit(
@@ -501,7 +511,10 @@ class JobManager:
             rec = self._records.get(job_id)
             if rec is None:
                 return []
-            return self._backends[rec.backend].logs(rec, self._job_dir(job_id), n, stream)
+            backend = self._backend_of(rec)
+            if backend is None:
+                return []
+            return backend.logs(rec, self._job_dir(job_id), n, stream)
 
     def result(self, job_id: str) -> Any:
         with self._lock:
@@ -511,7 +524,10 @@ class JobManager:
             self._refresh(rec)
             if rec.state not in TERMINAL_STATES:
                 return None
-            return self._backends[rec.backend].result(rec, self._job_dir(job_id))
+            backend = self._backend_of(rec)
+            if backend is None:
+                return None
+            return backend.result(rec, self._job_dir(job_id))
 
     def cancel(self, job_id: str) -> JobRecord | None:
         """Cancel a job, if this manager can actually cancel it.
@@ -525,7 +541,8 @@ class JobManager:
         another live manager is executing is only cancelled when the backend
         can reach it from here (``cancels_foreign_jobs``); otherwise the
         record is returned unchanged rather than reported cancelled while it
-        keeps running. A job the backend could not stop
+        keeps running, as is a job whose backend this manager has not
+        registered (``_backend_of``). A job the backend could not stop
         (``JobBackend.cancel`` returned False) stays RUNNING with
         ``cancel_requested``, holding its slot, and is recorded CANCELLED when
         it ends; the next queued job starts then, not now.
@@ -550,6 +567,9 @@ class JobManager:
                     if rec.state in TERMINAL_STATES:
                         self._maybe_start_queued()  # its end may free a slot
                         return rec
+                    backend = self._backend_of(rec)
+                    if backend is None:
+                        return rec
                     if self._execution_is_foreign(rec) and not self._can_cancel_foreign(
                         rec
                     ):
@@ -559,10 +579,7 @@ class JobManager:
                             owner=rec.exec_owner,
                         )
                         return rec
-                    stopped = (
-                        self._backends[rec.backend].cancel(rec, self._job_dir(job_id))
-                        is not False
-                    )
+                    stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
                     if not stopped:
                         rec.cancel_requested = True
                         self._persist(rec, owns_shared_state=True)
@@ -1095,6 +1112,25 @@ class JobManager:
             logger.warning("job_recovery_skipped_unreadable", job_id=rec.job_id)
         return False
 
+    def _backend_of(self, rec: JobRecord) -> JobBackend | None:
+        """The job's backend, or None when this manager has not registered it.
+
+        Such a job is left exactly as it is: neither polled, judged, launched
+        (a queued one is not claimed) nor cancelled here, and nothing is
+        written. Without the backend this manager cannot tell a running job
+        from an ended one, and an app registers its own backends after the
+        constructor has reconciled (``register_backend``): writing a verdict
+        then ended a live job, and handed it to a resume as finished. Logged
+        at warning the first time for each job, at debug afterwards.
+        """
+        backend = self._backends.get(rec.backend)
+        if backend is None:
+            first = rec.job_id not in self._backendless_noted
+            self._backendless_noted.add(rec.job_id)
+            log = logger.warning if first else logger.debug
+            log("job_backend_not_registered", job_id=rec.job_id, backend=rec.backend)
+        return backend
+
     def _can_cancel_foreign(self, rec: JobRecord) -> bool:
         """Whether this manager could actually cancel a job it did not start.
 
@@ -1131,7 +1167,8 @@ class JobManager:
         not do is believe ``UNKNOWN`` — that answer means "I hold no handle for
         this", which is true of every job another manager started, and taking
         it at face value would mark a healthy job terminal and hand its
-        "result" to a resume.
+        "result" to a resume. Nor does a manager without the job's backend
+        judge it: the job is left as it is (``_backend_of``).
 
         Returns:
             The durable read status, so callers can forget a deleted record.
@@ -1141,10 +1178,8 @@ class JobManager:
             return status
         if rec.state in TERMINAL_STATES or rec.state == JobState.QUEUED:
             return status
-        backend = self._backends.get(rec.backend)
+        backend = self._backend_of(rec)
         if backend is None:
-            rec.state = JobState.UNKNOWN
-            self._persist(rec)
             return status
         new_state = backend.poll(rec, self._job_dir(rec.job_id))
         if new_state == rec.state:
@@ -1184,13 +1219,18 @@ class JobManager:
         record. Execution is therefore claimed the same way delivery is: under
         the cross-process lock, against the record *on disk*, recording the
         owner durably **before** the backend is touched. If the lock is
-        unavailable the launch is skipped — a late job beats two of them.
+        unavailable the launch is skipped — a late job beats two of them, and
+        so is a job whose backend this manager has not registered: it is not
+        claimed, and stays queued for a manager that has it.
         """
+        backend = self._backend_of(rec)
+        if backend is None:
+            return
         try:
             with self._claim_transaction():
                 if not self._claim_execution(rec):
                     return
-                self._launch(rec)
+                self._launch(rec, backend)
         except ClaimLockUnavailable as exc:
             logger.warning(
                 "job_launch_skipped_unlocked", job_id=rec.job_id, error=str(exc)
@@ -1224,9 +1264,8 @@ class JobManager:
         self._persist(rec, owns_shared_state=True)
         return True
 
-    def _launch(self, rec: JobRecord) -> None:
+    def _launch(self, rec: JobRecord, backend: JobBackend) -> None:
         """Start the backend for a claimed job. Caller holds the transaction."""
-        backend = self._backends[rec.backend]
         try:
             backend.start(rec, self._job_dir(rec.job_id))
             rec.state = JobState.RUNNING

@@ -1125,6 +1125,168 @@ class TestExecutionOwnership:
             jm.close()
 
 
+class _RemoteBackend(JobBackend):
+    """A durable remote job: any manager that has the backend can reach it."""
+
+    name = "remote"
+    survives_restart = True
+    cancels_foreign_jobs = True
+
+    def __init__(self, outcome: JobState = JobState.RUNNING) -> None:
+        self.outcome = outcome
+        self.polled: list[str] = []
+
+    def start(self, record, job_dir):
+        record.backend_handle = f"remote-{record.job_id}"
+
+    def poll(self, record, job_dir):
+        self.polled.append(record.job_id)
+        return self.outcome
+
+    def cancel(self, record, job_dir):
+        return True
+
+
+class TestAJobWhoseBackendIsNotRegistered:
+    """A manager that lacks a job's backend leaves the job as it is.
+
+    The framework builds every manager with the default backends, and an app
+    registers its own afterwards, once the constructor has reconciled. The
+    manager wrote UNKNOWN, a terminal state, over a job whose backend it did
+    not have, whoever was running it: a custom backend's running job ended
+    whenever another CLI started, or its own restarted, and was offered for
+    resume as finished. A queued one was claimed and its launch raised.
+    """
+
+    @staticmethod
+    def _owner(base: Path, **kwargs) -> tuple[JobManager, _RemoteBackend]:
+        manager = JobManager(base_dir=base, **kwargs)
+        backend = _RemoteBackend()
+        manager.register_backend(backend)
+        return manager, backend
+
+    def test_another_manager_leaves_a_running_job_alone(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        try:
+            rec = owner.submit(
+                tool="t", backend="remote", spec={}, resume_on_complete=True,
+                session_id="s", user_id="u",
+            )
+            assert owner.get(rec.job_id).state is JobState.RUNNING
+
+            other = JobManager(base_dir=base)  # the app registers "remote" later
+            try:
+                on_disk = json.loads((base / rec.job_id / "meta.json").read_text())
+                assert on_disk["state"] == JobState.RUNNING.value
+                assert other.awaiting_resume() == []
+                assert other.get(rec.job_id).state is JobState.RUNNING
+            finally:
+                other.close()
+            assert owner.get(rec.job_id).state is JobState.RUNNING
+            assert owner.awaiting_resume() == []
+        finally:
+            owner.close()
+
+    def test_a_restarted_manager_polls_it_once_the_backend_is_registered(
+        self, tmp_path: Path
+    ):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        rec = owner.submit(tool="t", backend="remote", spec={})
+        owner.close()
+
+        restarted = JobManager(base_dir=base)
+        try:
+            assert restarted.get(rec.job_id).state is JobState.RUNNING
+            backend = _RemoteBackend(outcome=JobState.SUCCEEDED)
+            restarted.register_backend(backend)
+
+            assert restarted.get(rec.job_id).state is JobState.SUCCEEDED
+            assert backend.polled == [rec.job_id]
+        finally:
+            restarted.close()
+
+    def test_a_queued_job_is_neither_claimed_nor_launched(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base, max_concurrent=1)
+        try:
+            running = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
+            assert queued.state is JobState.QUEUED
+
+            other = JobManager(base_dir=base)
+            try:
+                other.reconcile()
+                on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+                assert (on_disk["state"], on_disk["exec_owner"]) == ("queued", None)
+            finally:
+                other.close()
+
+            owner.cancel(running.job_id)  # its slot frees: the owner launches it
+            assert owner.get(queued.job_id).state is JobState.RUNNING
+        finally:
+            owner.close()
+
+    def test_cancel_tail_and_result_leave_it_alone(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        owner, backend = self._owner(base, max_concurrent=1)
+        other = None
+        try:
+            running = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
+            finished = owner.submit(tool="t", backend="remote", spec={})
+            owner.cancel(finished.job_id)  # queued: cancelled at once
+
+            other = JobManager(base_dir=base)
+            before = {
+                job_id: (base / job_id / "meta.json").read_bytes()
+                for job_id in (running.job_id, queued.job_id)
+            }
+            assert other.cancel(running.job_id).state is JobState.RUNNING
+            assert other.cancel(queued.job_id).state is JobState.QUEUED
+            for job_id, data in before.items():
+                assert (base / job_id / "meta.json").read_bytes() == data
+            assert other.tail(running.job_id) == []
+            assert other.result(finished.job_id) is None
+        finally:
+            if other is not None:
+                other.close()
+            owner.close()
+
+    def test_it_is_logged_once_per_job_at_warning(self, tmp_path: Path, monkeypatch):
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        logged: list[tuple[str, str, dict]] = []
+
+        class _Recorder:
+            def __getattr__(self, level):
+                return lambda event, **fields: logged.append((level, event, fields))
+
+        base = tmp_path / "jobs"
+        owner, _ = self._owner(base)
+        try:
+            rec = owner.submit(tool="t", backend="remote", spec={})
+            monkeypatch.setattr(jobs_manager, "logger", _Recorder())
+            other = JobManager(base_dir=base)
+            try:
+                other.reconcile()
+                other.get(rec.job_id)
+            finally:
+                other.close()
+        finally:
+            owner.close()
+
+        levels = [
+            level
+            for level, event, fields in logged
+            if event == "job_backend_not_registered"
+            and fields == {"job_id": rec.job_id, "backend": "remote"}
+        ]
+        assert levels[:1] == ["warning"]
+        assert len(levels) > 1 and set(levels[1:]) == {"debug"}
+
+
 class _GatedInProcessBackend(JobBackend):
     """In-process semantics: only the starter can poll, gated completion."""
 
