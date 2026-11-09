@@ -3043,7 +3043,9 @@ step; each entry says what to use instead.
   CLIs of the app wait on: the request is recorded under the jobs
   directory's lock, the backend waits outside it, and how the job ended is
   recorded under it again (a terminal state recorded meanwhile, by the
-  manager that saw the job end, is kept). A job still running stays
+  manager that saw the job end, is kept); a backend whose `cancel` raises
+  changes nothing, the request withdrawn and the error raised to the
+  caller. A job still running stays
   RUNNING with `cancel_requested`, holding its slot, and is recorded
   CANCELLED when it ends, as any cancelled job is; the next one starts then.
   A cancel another CLI sharing the jobs directory requests is read by the

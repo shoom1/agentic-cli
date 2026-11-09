@@ -429,3 +429,90 @@ class TestTheWaitHoldsNoLock:
         on_disk = json.loads((jobs.base_dir / job.job_id / "meta.json").read_text())
         assert (on_disk["state"], on_disk["cancel_requested"]) == ("cancelled", True)
         assert jobs.get(job.job_id).state is JobState.CANCELLED
+
+
+class _Unreachable(backends_mod.SubprocessBackend):
+    """A subprocess backend whose cancel fails before it reaches the job (a
+    remote backend's API call that times out, say)."""
+
+    def cancel(self, record, job_dir):
+        raise ConnectionError("cluster API unreachable")
+
+
+class TestABackendCancelThatRaises:
+    """A cancel whose backend raises changes nothing, as before the request
+    was recorded ahead of the backend's wait.
+
+    The request (``cancel_requested``) is written before the backend is
+    asked, so a manager that sees the job end meanwhile records it
+    CANCELLED. When the backend raised, the request stayed: the caller saw
+    the error, and a job that then ran to its end was recorded CANCELLED. The
+    request this cancel made is withdrawn now, and the error re-raised.
+    """
+
+    @pytest.fixture
+    def unreachable(self, tmp_path):
+        manager = JobManager(
+            base_dir=tmp_path / "jobs", max_concurrent=1,
+            backends={"subprocess": _Unreachable()},
+        )
+        yield manager
+        manager.close()
+
+    def _on_disk(self, jobs: JobManager, job_id: str) -> dict:
+        return json.loads((jobs.base_dir / job_id / "meta.json").read_text())
+
+    def test_a_running_job_ends_as_it_ends(self, unreachable):
+        job = unreachable.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "sleep 0.5"},
+        )
+        time.sleep(0.1)
+
+        with pytest.raises(ConnectionError, match="cluster API unreachable"):
+            unreachable.cancel(job.job_id)
+
+        assert self._on_disk(unreachable, job.job_id)["cancel_requested"] is False
+        _until(lambda: unreachable.get(job.job_id).state not in (
+            JobState.QUEUED, JobState.RUNNING,
+        ))
+        ended = unreachable.get(job.job_id)
+        assert (ended.state, ended.exit_code, ended.cancel_requested) == (
+            JobState.SUCCEEDED, 0, False,
+        )
+
+    def test_a_queued_job_stays_queued_with_no_request(self, unreachable):
+        first = unreachable.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "sleep 0.5"},
+        )
+        queued = unreachable.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "true"},
+        )
+
+        with pytest.raises(ConnectionError):
+            unreachable.cancel(queued.job_id)
+
+        on_disk = self._on_disk(unreachable, queued.job_id)
+        assert (on_disk["state"], on_disk["cancel_requested"]) == ("queued", False)
+        _until(lambda: (unreachable.reconcile(), unreachable.get(queued.job_id).state)[1]
+               is JobState.SUCCEEDED)
+        assert unreachable.get(first.job_id).state is JobState.SUCCEEDED
+
+    def test_a_request_made_before_is_kept(self, jobs, tmp_path, monkeypatch):
+        """Only the request this cancel made is withdrawn: one an earlier
+        cancel recorded, its job still running, stays."""
+        monkeypatch.setattr(backends_mod, "_CANCEL_WAIT_S", 0.2)
+        job = jobs.submit(
+            tool="run_shell_job", backend="subprocess",
+            spec={"command": "trap '' TERM; echo ready; sleep 1"},
+        )
+        _until(lambda: jobs.tail(job.job_id) == ["ready"])
+        assert jobs.cancel(job.job_id).cancel_requested is True  # it outlives SIGTERM
+        other = JobManager(base_dir=tmp_path / "jobs", backends={"subprocess": _Unreachable()})
+        try:
+            with pytest.raises(ConnectionError):
+                other.cancel(job.job_id)
+        finally:
+            other.close()
+
+        assert self._on_disk(jobs, job.job_id)["cancel_requested"] is True
+        _until(lambda: (jobs.reconcile(), jobs.get(job.job_id).state)[1] is JobState.CANCELLED)

@@ -741,7 +741,9 @@ class JobManager:
         queued job is cancelled in one transaction, as it has nothing to
         wait for and another manager could launch it meanwhile. This
         manager's own other calls still wait for the cancel (``_lock``), so
-        its backends are never called concurrently.
+        its backends are never called concurrently. A backend whose cancel
+        raises changes nothing: the request this call recorded is withdrawn
+        (``_withdraw_request``), and the error raised to the caller.
 
         Returns:
             The record — check ``state`` for what actually happened — or None
@@ -754,7 +756,9 @@ class JobManager:
             try:
                 with self._claim_transaction():
                     with self._mutate(rec) as status:
+                        already = rec.cancel_requested
                         backend = self._request_cancel(rec, status)
+                    requested = backend is not None and not already
                     if status is DurableRead.MISSING:
                         return None
                     if backend is None:
@@ -764,7 +768,7 @@ class JobManager:
                     if rec.state == JobState.QUEUED:
                         # Nothing to wait for, and unlocked another manager
                         # could launch it meanwhile.
-                        stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
+                        stopped = self._backend_cancel(backend, rec, requested)
                         return self._record_cancelled(rec, stopped)
             except ClaimLockUnavailable as exc:
                 logger.warning(
@@ -772,7 +776,7 @@ class JobManager:
                 )
                 return rec
             # Outside the cross-process lock: the backend may wait for the job.
-            stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
+            stopped = self._backend_cancel(backend, rec, requested)
             if not stopped:
                 return rec  # RUNNING, with the request recorded: it ends CANCELLED
             try:
@@ -813,6 +817,37 @@ class JobManager:
             return None
         rec.cancel_requested = True
         return backend
+
+    def _backend_cancel(self, backend: JobBackend, rec: JobRecord, requested: bool) -> bool:
+        """``backend.cancel``: whether it stopped the job (None counts as stopped).
+
+        One that raises changes nothing, as before the request was recorded
+        ahead of it: the request, when this cancel made it (``requested``),
+        is withdrawn, then the error re-raised.
+        """
+        try:
+            return backend.cancel(rec, self._job_dir(rec.job_id)) is not False
+        except Exception:
+            if requested:
+                self._withdraw_request(rec)
+            raise
+
+    def _withdraw_request(self, rec: JobRecord) -> None:
+        """Clear the ``cancel_requested`` a cancel recorded, its backend having raised.
+
+        Under the cross-process lock, on the record read back. One that has
+        ended meanwhile is left as it ended. Without the lock the request
+        stays: the job is recorded CANCELLED when it ends.
+        """
+        try:
+            with self._claim_transaction():
+                with self._mutate(rec) as status:
+                    if status is DurableRead.PRESENT and rec.state not in TERMINAL_STATES:
+                        rec.cancel_requested = False
+        except ClaimLockUnavailable as exc:
+            logger.warning(
+                "job_cancel_request_kept_unlocked", job_id=rec.job_id, error=str(exc)
+            )
 
     def _record_cancelled(self, rec: JobRecord, stopped: bool) -> JobRecord:
         """Record a job the backend ``stopped`` CANCELLED, and fill its slot.
