@@ -2232,3 +2232,108 @@ class TestInProcessShutdownDoesNotStrandQueuedJobs:
             assert observer.begin_resume(queued.job_id) is True
         finally:
             observer.close()
+
+
+class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
+    """A queued in-process job is launched by the manager that submitted it.
+
+    Its callable cannot be saved (``"<non-serializable: function>"`` on disk),
+    yet any manager that loaded the record claimed and launched it: another
+    CLI, or the manager an orchestrator switch builds while the old one is
+    still open. It failed, "launch failed: inprocess job requires a callable
+    spec['target']". Such a job is now claimed by its submitter at submit,
+    and one still queued when that manager closes is recorded FAILED.
+    """
+
+    @staticmethod
+    def _busy_then_queued(owner: JobManager, gate: Path, marker: Path, **resume):
+        busy = owner.submit(
+            tool="wait", backend="inprocess",
+            spec={"target": _wait_for_gate, "kwargs": {"path": str(gate), "timeout": 10.0}},
+        )
+        queued = owner.submit(
+            tool="mark", backend="inprocess",
+            spec={"target": _touch_marker, "args": (str(marker),)}, **resume,
+        )
+        assert (busy.state, queued.state) == (JobState.RUNNING, JobState.QUEUED)
+        return busy, queued
+
+    def test_another_manager_leaves_it_to_its_submitter(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        other = None
+        try:
+            _, queued = self._busy_then_queued(owner, gate, marker)
+
+            other = JobManager(base_dir=base)  # another CLI, or a switch's new manager
+            other.reconcile()
+            seen = other.get(queued.job_id)
+            assert seen.state is JobState.QUEUED, f"launched elsewhere: {seen.error}"
+
+            gate.write_text("go")
+            deadline = time.time() + 10
+            while owner.get(queued.job_id).state is not JobState.SUCCEEDED:
+                assert time.time() < deadline, owner.get(queued.job_id)
+                owner.reconcile()  # the busy job ends: its slot frees
+                time.sleep(0.05)
+            assert marker.read_text() == "ran"
+        finally:
+            gate.write_text("go")
+            if other is not None:
+                other.close()
+            owner.close()
+
+    def test_close_fails_one_still_queued(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        later = None
+        try:
+            _, queued = self._busy_then_queued(
+                owner, gate, marker,
+                resume_on_complete=True, call_id="c1", session_id="s", user_id="u",
+            )
+            owner.close()
+            owner.close()  # idempotent
+
+            on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+            assert on_disk["state"] == JobState.FAILED.value
+            assert "closed before the job started" in on_disk["error"]
+            assert on_disk["finished_at"] is not None
+
+            later = JobManager(base_dir=base)
+            rec = later.get(queued.job_id)
+            assert rec.state is JobState.FAILED
+            assert "closed before the job started" in rec.error
+            assert [r.job_id for r in later.awaiting_resume()] == [queued.job_id]
+            assert not marker.exists()
+        finally:
+            gate.write_text("go")
+            if later is not None:
+                later.close()
+            owner.close()
+
+    def test_close_without_the_lock_leaves_it_queued(self, tmp_path: Path, monkeypatch):
+        """Startup recovery fails it once this process is gone."""
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        base = tmp_path / "jobs"
+        gate, marker = tmp_path / "gate", tmp_path / "marker"
+        owner = JobManager(base_dir=base, max_concurrent=1)
+        try:
+            _, queued = self._busy_then_queued(owner, gate, marker)
+
+            def _boom(fd):
+                raise OSError("flock unavailable")
+
+            monkeypatch.setattr(jobs_manager, "_acquire_lock", _boom)
+            owner.close()
+
+            on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
+            assert on_disk["state"] == JobState.QUEUED.value
+            assert owner._backends["inprocess"]._pool._shutdown is True
+        finally:
+            gate.write_text("go")
+            monkeypatch.undo()
+            owner.close()

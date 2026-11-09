@@ -244,9 +244,10 @@ class JobRecord:
     resume_error: str | None = None    # why delivery failed, when it did
     resume_owner: str | None = None    # "<host>:<pid>" holding a RESUMING claim
     # "<host>:<pid>" that launched the job and owns its execution. Set when the
-    # launch is claimed, so a second CLI sharing the jobs directory neither
-    # relaunches a queued job nor writes off a running one whose handle lives
-    # in the owner's memory.
+    # launch is claimed (at submit, for a job only its submitter can launch:
+    # ``JobBackend.survives_restart`` False), so a second CLI sharing the jobs
+    # directory neither relaunches a queued job nor writes off a running one
+    # whose handle lives in the owner's memory.
     exec_owner: str | None = None
     # Set when a cancel could not stop the job (a running in-process thread, a
     # process that outlived SIGTERM): it stays RUNNING, holding its slot, and
@@ -414,7 +415,11 @@ class JobManager:
 
         The backend pins the spec now (``JobBackend.pin``): a queued job may
         be launched by another CLI, so a subprocess job's working directory
-        is the one it was submitted in, whoever launches it.
+        is the one it was submitted in, whoever launches it. A job on a
+        backend that does not survive a restart (``survives_restart`` False,
+        the in-process one: its callable is not saved) is claimed for this
+        manager now instead, so no other manager launches it; ``close()``
+        records it FAILED if it has not started by then.
         """
         if backend not in self._backends:
             raise ValueError(
@@ -424,7 +429,8 @@ class JobManager:
             session_id, user_id = self._fill_turn_context(session_id, user_id)
         if resume_on_complete and call_id is None:
             call_id, call_name = self._fill_tool_call(call_name)
-        spec = self._backends[backend].pin(dict(spec))
+        runs_on = self._backends[backend]
+        spec = runs_on.pin(dict(spec))
         with self._lock:
             job_id = uuid.uuid4().hex[:12]
             rec = JobRecord(
@@ -440,6 +446,9 @@ class JobManager:
                 call_name=call_name or (tool if resume_on_complete else None),
                 session_id=session_id,
                 user_id=user_id,
+                exec_owner=(
+                    None if runs_on.survives_restart else self._exec_owner_token()
+                ),
             )
             # Kept only once it is on disk: a record kept but never written
             # was launched by the next submit, after the tool was told this
@@ -893,7 +902,14 @@ class JobManager:
         Idempotent. Jobs themselves are not cancelled: a detached subprocess is
         meant to outlive the CLI, and its state is recovered from disk on the
         next start. Only in-process resources (thread pools) are released.
+
+        A job this manager claimed at submit (its backend does not survive a
+        restart) and has not started yet never will: no other manager can
+        launch it. It is recorded FAILED, saying so, and one submitted with
+        ``resume_on_complete`` is then delivered as any failed job is. See
+        :meth:`_fail_unstarted_claims`.
         """
+        self._fail_unstarted_claims()
         for backend in self._backends.values():
             try:
                 backend.close()
@@ -901,6 +917,42 @@ class JobManager:
                 logger.warning(
                     "job_backend_close_failed", backend=backend.name, error=str(exc)
                 )
+
+    def _fail_unstarted_claims(self) -> None:
+        """Record FAILED the jobs this manager claimed but has not started.
+
+        Only a job claimed at submit is still QUEUED under this manager's
+        token: a launch claims and starts a job in one transaction. Each is
+        judged on its record reloaded under the cross-process lock. Without
+        the lock nothing is written: the job stays QUEUED under a claim that
+        no other manager takes, and startup recovery fails it once this
+        process is gone.
+        """
+        with self._lock:
+            mine = self._exec_owner_token()
+            try:
+                with self._claim_transaction():
+                    for rec in list(self._records.values()):
+                        if rec.state != JobState.QUEUED or rec.exec_owner != mine:
+                            continue
+                        status = self._reload_durable(rec)
+                        if status is DurableRead.MISSING:
+                            self._forget(rec.job_id)
+                            continue
+                        if status is DurableRead.UNREADABLE:
+                            continue
+                        if rec.state != JobState.QUEUED or rec.exec_owner != mine:
+                            continue
+                        rec.state = JobState.FAILED
+                        rec.error = (
+                            "the app closed before the job started; a job on this "
+                            "backend runs only in the app that submitted it"
+                        )
+                        rec.finished_at = _now()
+                        self._persist(rec, owns_shared_state=True)
+                        logger.warning("job_closed_before_start", job_id=rec.job_id)
+            except ClaimLockUnavailable as exc:
+                logger.warning("job_close_skipped_unlocked", error=str(exc))
 
     # ------------------------------------------------------------------
     # Internals
@@ -1274,14 +1326,18 @@ class JobManager:
             rec.exec_owner = data.get("exec_owner")
         if rec.state != JobState.QUEUED:
             return False
+        mine = self._exec_owner_token()
+        if rec.exec_owner == mine:
+            return True  # claimed at submit: only this manager can run it
         if rec.exec_owner is not None:
-            # Already claimed: either it is running elsewhere, or its launcher
-            # died and startup recovery will fail it. Never launch it twice.
+            # Already claimed: either it is running elsewhere, it waits for
+            # the manager that submitted it, or its launcher died and startup
+            # recovery will fail it. Never launch it twice.
             logger.debug(
                 "job_launch_owned_elsewhere", job_id=rec.job_id, owner=rec.exec_owner
             )
             return False
-        rec.exec_owner = self._exec_owner_token()
+        rec.exec_owner = mine
         self._persist(rec, owns_shared_state=True)
         return True
 

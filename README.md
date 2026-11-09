@@ -1763,7 +1763,14 @@ The manager is `workflow.job_manager`, or
 It exists only when some agent's tool declares that need (`job_status` and the
 other `job_*` tools do), and `workflow.job_manager` is `None` before then.
 A backend implements `start`, `poll` and `cancel`, and may override `logs`,
-`result`, `pin` and `close`.
+`result`, `pin` and `close`. Its `survives_restart` says whether a manager
+other than the one that submitted a job may launch it from its saved record
+(another CLI, or the app after a restart or an orchestrator switch):
+`subprocess` sets it, since its command and working directory are saved;
+`inprocess` does not, since its callable cannot be, and nor does a backend
+that keeps the default, False. A job on such a backend is claimed at submit
+by the manager that submitted it, and one still queued when that manager
+closes is recorded FAILED.
 
 ## Context management
 

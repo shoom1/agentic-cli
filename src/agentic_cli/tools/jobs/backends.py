@@ -110,6 +110,13 @@ class JobBackend(ABC):
     """Uniform interface every execution backend implements for ``JobManager``."""
 
     name: str = "base"
+    # Whether a manager other than the one that submitted a job can launch it
+    # from its saved record: another CLI, or this app after a restart or an
+    # orchestrator switch. True when the spec is plain data (a command, a
+    # remote request). False when it holds what only the submitting manager
+    # has, such as a callable: that manager claims the job at submit, so no
+    # other launches it, and records it FAILED if it is still queued when the
+    # manager closes.
     survives_restart: bool = False
     streams_logs: bool = False
     # Whether a *different* manager can cancel a job this backend started.
@@ -123,11 +130,13 @@ class JobBackend(ABC):
     def pin(self, spec: dict) -> dict:
         """The spec as the job must run, fixed when it is submitted.
 
-        A queued job may be launched later by another manager (the next CLI
-        to open the jobs directory, perhaps started elsewhere): what the
-        spec would otherwise take from the launching process, such as the
-        working directory, is settled here. The environment is not: it is
-        the launching process's. Default: unchanged.
+        On a backend that survives a restart, a queued job may be launched
+        later by another manager (the next CLI to open the jobs directory,
+        perhaps started elsewhere): what the spec would otherwise take from
+        the launching process, such as the working directory, is settled
+        here. The environment is not: it is the launching process's. (On one
+        that does not, only the submitting manager launches the job.)
+        Default: unchanged.
         """
         return spec
 

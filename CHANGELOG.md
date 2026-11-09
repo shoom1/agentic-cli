@@ -2210,6 +2210,21 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A queued in-process job runs in the app that submitted it.** Its
+  callable cannot be saved, yet any job manager that read the jobs
+  directory while it was queued (another CLI of the app, or the manager an
+  orchestrator switch builds while the old one is still open) launched it,
+  and it failed: "launch failed: inprocess job requires a callable
+  spec['target']". `JobBackend.survives_restart`, which nothing read, now
+  says whether a manager other than the submitting one may launch a queued
+  job from its saved record. A job on a backend that does not (`inprocess`,
+  and a backend that keeps the default, False) is claimed at submit by the
+  manager that submitted it, which launches it when a slot frees; one still
+  queued when that manager closes is recorded FAILED ("the app closed before
+  the job started…"), and with `resume_on_complete` is delivered as any
+  failed job is. A custom backend whose queued jobs another process can
+  launch from the saved spec sets `survives_restart = True`.
+
 - **An in-process job whose target holds a lock can be submitted, and a
   submit that fails leaves nothing behind.** `JobRecord.to_dict` deep-copied
   the whole record before it replaced what JSON cannot hold, so
