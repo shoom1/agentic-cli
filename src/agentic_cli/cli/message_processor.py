@@ -470,14 +470,16 @@ class MessageProcessor:
 
             # Resume only if the backend supports it (every manager has a
             # resume_with_job_result, the base's template; supports_job_resume
-            # says whether it can run) AND the originating conversation is
-            # still available (with session_store='memory' it is gone after a
-            # restart, on ADK and Deep Agents alike, and a deleted one is gone
-            # too). Otherwise surface a notice — the result stays reachable by
-            # job id.
-            resumable = getattr(
-                workflow, "supports_job_resume", False
-            ) and await workflow.can_resume(record)
+            # says whether it can run; a workflow object without the flag, no
+            # BaseWorkflowManager, by having the method) AND the originating
+            # conversation is still available (with session_store='memory' it
+            # is gone after a restart, on ADK and Deep Agents alike, and a
+            # deleted one is gone too). Otherwise surface a notice — the
+            # result stays reachable by job id.
+            supported = getattr(workflow, "supports_job_resume", None)
+            if supported is None:
+                supported = hasattr(workflow, "resume_with_job_result")
+            resumable = supported and await workflow.can_resume(record)
             if claim is not None and not await claim():
                 return TurnResult(
                     TurnStatus.UNAVAILABLE, error="another delivery has the job"

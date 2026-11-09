@@ -115,3 +115,38 @@ async def test_notifies_when_the_backend_cannot_run_the_resume_it_has():
     assert wf.resumed == []
     assert not ui.responses()
     assert any("/jobs j1" in c[2] for c in ui.of("message"))
+
+
+class _DuckTyped:
+    """A workflow object that is no ``BaseWorkflowManager`` and predates
+    ``supports_job_resume``: it has ``resume_with_job_result`` and
+    ``can_resume``, as the CLI's own fakes had before the flag."""
+
+    backend_type = "duck"
+
+    def __init__(self) -> None:
+        self.resumed: list[str] = []
+
+    async def can_resume(self, record) -> bool:
+        return True
+
+    def set_input_callback(self, cb) -> None:
+        pass
+
+    def clear_input_callback(self) -> None:
+        pass
+
+    async def resume_with_job_result(self, record, result=None):
+        self.resumed.append(record.job_id)
+        yield WorkflowEvent(type=EventType.TEXT, content="resumed reply")
+
+
+async def test_a_workflow_without_the_flag_resumes_by_its_method():
+    wf = _DuckTyped()
+    ui = RecordingSession()
+    await MessageProcessor().process_resume(
+        record=_record(), workflow_controller=_Ctrl(wf), ui=ui, settings=_SETTINGS
+    )
+    assert wf.resumed == ["j1"]
+    assert "resumed reply" in ui.responses()
+    assert not any("unavailable" in c[2] for c in ui.of("message"))

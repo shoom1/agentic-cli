@@ -50,8 +50,6 @@ class JobsWorkflow(StoredWorkflow):
     """A ready workflow with stored conversations, a real job manager, and
     resume turns that say the job's result."""
 
-    supports_job_resume = True
-
     def __init__(self, jobs: JobManager, *stored) -> None:
         super().__init__(*stored)
         self.job_manager = jobs
