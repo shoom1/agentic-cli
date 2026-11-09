@@ -235,6 +235,31 @@ class TestATurnTypedBeforeTheStartupOpen:
         assert app.session_id == "T" != fresh
         assert workflow.turns == ["T"]
 
+    async def test_it_is_shown_under_the_conversation_it_runs_in(self, project, monkeypatch):
+        """Echoed when it runs: after "Resumed:" and the replay, not above them."""
+        workflow = Workflow(conversation("T", "Earlier work", 2))
+        app = app_on(workflow, fake_settings())
+        app.session.app = SimpleNamespace(is_running=False)
+
+        async def no_proposals():
+            return None
+
+        monkeypatch.setattr(app, "_name_waiting_proposals", no_proposals)
+        app._pending_resume = "T"
+
+        opening = asyncio.create_task(app._open_on_startup())
+        await asyncio.sleep(0.05)
+        typed = asyncio.create_task(app._handle_message("typed ahead"))
+        await asyncio.sleep(0.05)
+        app.session.app.is_running = True
+        await asyncio.wait_for(opening, 5)
+        await asyncio.wait_for(typed, 5)
+
+        shown = [args[1] for name, args, _ in app.session.mock_calls if name == "add_message"]
+        assert shown.index("typed ahead") > max(
+            shown.index(text) for text in shown if text.startswith(("Resumed:", "T message"))
+        )
+
 
 class TestAnOrchestratorSwitch:
     """``/settings`` swaps the backend: the conversation goes on there, from

@@ -1500,11 +1500,11 @@ class BaseCLIApp:
         Args:
             message: User message to process
         """
-        # Echo user input for regular messages
-        self.session.add_message("user", message)
-
         # Delegate to message processor (one turn at a time).
         async with self._turn_lock:
+            # Echoed as its turn starts: a line typed while the conversation
+            # --continue/--resume asked for opens shows under its replay.
+            self.session.add_message("user", message)
             self._turned = True  # the conversation now holds this message
             await self._message_processor.process(
                 message=message,
