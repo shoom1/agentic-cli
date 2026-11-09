@@ -5,7 +5,10 @@ agent orchestration, session management, and event streaming using Google ADK.
 
 Domain applications define agents using AgentConfig and pass them to GoogleADKWorkflowManager.
 
-For alternative orchestration backends (e.g., LangGraph), see the base_manager module.
+Deep Agents is the other backend (``workflow/deepagents/manager.py``;
+LangGraph, deprecated, goes in 0.8.0). Each builds on
+``base_manager.BaseWorkflowManager``, which holds the lifecycle and the turn,
+and ``settings.orchestrator`` picks one (``workflow/factory.py``).
 """
 
 from __future__ import annotations
@@ -179,8 +182,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Initialize the workflow manager.
 
         Args:
-            agent_configs: List of agent configurations. First agent with sub_agents
-                          is treated as the root/coordinator agent.
+            agent_configs: List of agent configurations. The root (main) agent
+                is the one no other agent delegates to (``validate_agent_graph``).
             settings: Application settings (uses get_settings() if not provided)
             app_name: Application name for sessions: ADK's app name and the key
                 of every conversation, and what an OpenRouter provider is told
@@ -191,7 +194,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
                 When set, the agent tree is built via ADK ``from_config`` instead
                 of from ``agent_configs`` (full ADK fidelity; framework service /
-                state tool injection does not apply).
+                state tool injection does not apply). Library-only for now: no
+                ``BaseCLIApp`` starts such an app.
         """
         super().__init__(
             agent_configs=agent_configs,

@@ -1312,7 +1312,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   answers the call that started it).
 - **A native ADK YAML app** (`adk_config_path`) is built by ADK and keeps
   `transfer_to_agent`: the agent it transfers to takes the conversation and
-  answers the user.
+  answers the user. It is library-only for now: an app's own code runs it,
+  `GoogleADKWorkflowManager(agent_configs=[], adk_config_path=...)`, and no
+  `BaseCLIApp` starts one (the CLI builds its manager from agent configs).
 
 ### Defining agents in YAML
 
@@ -1962,8 +1964,7 @@ model and its `max_tokens`.
   conversation `/new` left; an inheriting sub-agent's prompt
   holds the conversation, but it is not the main agent's context. On a
   model whose window is unknown (the 128k floor in use) it shows the prompt
-  alone, `ctx 45k`, as on LangGraph and in a native ADK YAML app, which
-  manage no context. A `/settings` change that rebuilds the agents (a
+  alone, `ctx 45k`, as on LangGraph, which manages no context. A `/settings` change that rebuilds the agents (a
   model, `context_summarize_at`, `context_max_tokens`) shows the new
   trigger at once; an orchestrator swap starts another conversation, and
   the segment waits for its first call, as a resumed session's does.
@@ -1991,10 +1992,11 @@ model and its `max_tokens`.
   Ctrl+C stops it, and nothing is written. `ctx` shows the smaller context
   from the next call on. With nothing before the kept tail it says "Nothing
   to summarize yet."; a summary that fails says "Could not summarize:
-  <error>". LangGraph and a native ADK YAML app have none ("/compact is not
-  supported on this backend"). An app runs the same with
-  `BaseCLIApp.compact(focus=None)`, or calls the manager's
-  `compact(session, focus=None)` itself (`supports_compact`).
+  <error>". LangGraph has none ("/compact is not supported on this
+  backend"). An app runs the same with `BaseCLIApp.compact(focus=None)`, or
+  calls the manager's `compact(session, focus=None)` itself
+  (`supports_compact`; a native ADK YAML app, which no `BaseCLIApp` starts,
+  has none either: its `compact` raises `NotImplementedError`).
 - **`/new`** starts a new conversation without a restart, through
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with

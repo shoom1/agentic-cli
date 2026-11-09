@@ -1161,8 +1161,9 @@ the start of the entry's title.
   context. It says "Nothing to summarize yet." with nothing before the kept
   tail (or no conversation yet), "Could not summarize: <error>" once when
   the summary fails (the error's type when it has no words), and "/compact
-  is not supported on this backend" on LangGraph and in a native ADK YAML
-  app, with no events box. `/new` starts a new conversation without a
+  is not supported on this backend" on LangGraph, with no events box (a
+  native ADK YAML app, which no `BaseCLIApp` starts, has no `compact`
+  either). `/new` starts a new conversation without a
   restart, under the turn lock: memories are proposed from the conversation
   being left first when `auto_extract_session_facts` is on, as at exit,
   under the status line "Looking for memories to propose…" (a failure
