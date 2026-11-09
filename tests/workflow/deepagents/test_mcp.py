@@ -434,6 +434,16 @@ def ctx(tmp_path, monkeypatch):
         yield context
 
 
+@pytest.fixture
+def sqlite_ctx(tmp_path, monkeypatch):
+    """A hermetic cwd and HOME, and a sqlite session store (real connections)."""
+    (tmp_path / "home").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with MockContext(google_api_key="test-key", session_store="sqlite") as context:
+        yield context
+
+
 def scripted(monkeypatch, **scripts) -> ScriptedModels:
     models = ScriptedModels(**scripts)
     monkeypatch.setattr(manager_module, "build_chat_model", models)
@@ -814,3 +824,78 @@ class TestLifecycle:
             assert manager._checkpointer is saver
         finally:
             await manager.cleanup()
+
+    async def test_a_switch_cancelled_twice_keeps_the_store_and_closes_the_rest(
+        self, sqlite_ctx, servers, monkeypatch
+    ):
+        """Ctrl+C during a preserving switch's new initialization, and again
+        while its rollback closes what that attempt opened: the attempt's MCP
+        sessions and catalog still close, the store and the services stay
+        with the manager, and a retry continues on them."""
+        scripted(monkeypatch, researcher=[])
+        manager = _manager(sqlite_ctx.settings, [_researcher(servers())])
+        await manager.initialize_services()
+        store = (manager._checkpointer, manager._checkpointer_cm, manager._sessions)
+        services = dict(manager.services)
+        exits: list[None] = []
+        real_exit = manager._checkpointer_cm.__aexit__
+
+        async def counted_exit(*exc):
+            exits.append(None)
+            return await real_exit(*exc)
+
+        manager._checkpointer_cm.__aexit__ = counted_exit
+
+        real_start = MCPSessions.start
+        started = asyncio.Event()
+
+        async def start_then_hang(self, agent, configs):
+            loaded = await real_start(self, agent, configs)
+            started.set()
+            await asyncio.Event().wait()
+            return loaded
+
+        real_release = manager._release_resources
+        releases: list[None] = []
+        rolling_back = asyncio.Event()
+
+        async def release(*args, **kwargs):
+            releases.append(None)
+            if len(releases) == 2:  # the switch's own release came first
+                rolling_back.set()
+            await real_release(*args, **kwargs)
+
+        monkeypatch.setattr(MCPSessions, "start", start_then_hang)
+        manager._release_resources = release
+        switching = asyncio.create_task(manager.reinitialize(preserve_sessions=True))
+        await asyncio.wait_for(started.wait(), timeout=30)
+        assert len(servers.pids()) == 2
+        switching.cancel()
+        await asyncio.wait_for(rolling_back.wait(), timeout=5)
+        switching.cancel()  # again, while the rollback's closes run
+        with pytest.raises(asyncio.CancelledError):
+            await switching
+        del manager._release_resources
+
+        for _ in range(1000):
+            if not any(_alive(pid) for pid in servers.pids()):
+                break
+            await asyncio.sleep(0.01)
+        assert [_alive(pid) for pid in servers.pids()] == [False, False]
+        assert manager.is_initialized is False
+        assert manager.catalog is None
+        assert all(now is then for now, then in zip(
+            (manager._checkpointer, manager._checkpointer_cm, manager._sessions), store
+        ))
+        assert manager.services == services
+        assert (manager._keeping_store, manager._carried_service_keys) == (False, frozenset())
+        assert exits == []
+
+        monkeypatch.setattr(MCPSessions, "start", real_start)
+        try:
+            await manager.reinitialize(preserve_sessions=True)
+            assert manager._checkpointer is store[0]
+            assert manager.services == services
+        finally:
+            await manager.cleanup()
+        assert exits == [None]
