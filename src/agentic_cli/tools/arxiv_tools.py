@@ -83,7 +83,7 @@ async def _search_arxiv_with_source(
         paper = {
             "title": result.title,
             "authors": result.metadata.get("authors", []),
-            "abstract": result.snippet,
+            "abstract": result.metadata.get("abstract", result.snippet),
             "url": result.url,
             "abs_url": result.metadata.get("abs_url", result.url),
             "pdf_url": result.metadata.get("pdf_url", ""),

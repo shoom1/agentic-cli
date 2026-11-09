@@ -1985,6 +1985,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`search_arxiv` returns each paper's whole abstract.** It returned the
+  first 500 characters of every abstract, the preview its search source
+  gives (`SearchSourceResult.snippet`), so the model judged papers on a cut
+  text. `ArxivSearchSource` now also puts the whole abstract in each result's
+  `metadata["abstract"]`, which `search_arxiv` returns; `snippet` stays the
+  preview.
+
 - **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
   tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,
   so every call was denied ("tool is not registered"); they now register them
