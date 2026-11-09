@@ -715,13 +715,24 @@ class MessageProcessor:
                 # one waits): left to the loop's finalizer, it would reset
                 # the turn's ContextVars from another context, which fails.
                 async def _consume() -> None:
-                    async with aclosing(source_factory(workflow)) as events:
-                        async for event in events:
-                            handler = dispatch.get(event.type)
-                            if handler is not None:
-                                await handler(
-                                    self, event, state, ui, settings, workflow
-                                )
+                    try:
+                        async with aclosing(source_factory(workflow)) as events:
+                            async for event in events:
+                                handler = dispatch.get(event.type)
+                                if handler is not None:
+                                    await handler(
+                                        self, event, state, ui, settings, workflow
+                                    )
+                    except Exception:
+                        if not asyncio.current_task().cancelling():
+                            raise
+                        # Ctrl+C, and the stream failed as it closed (its
+                        # own cleanup raised): the request was stopped, so
+                        # the turn ends cancelled, "Operation cancelled..."
+                        # said once, rather than as a "Workflow error". The
+                        # close error is for the log.
+                        logger.debug("turn_stream_close_failed", exc_info=True)
+                        raise asyncio.CancelledError from None
 
                 proc_task = asyncio.create_task(_consume())
                 await proc_task

@@ -2224,7 +2224,10 @@ step; each entry says what to use instead.
   the turn's context variables failed, and the loop logged "ValueError:
   <Token …> was created in a different Context". `MessageProcessor` now
   closes the stream in the turn's own task (`contextlib.aclosing`), for
-  every turn: a message, a job's resume and `/compact`.
+  every turn: a message, a job's resume and `/compact`. A stream whose own
+  cleanup raises as Ctrl+C closes it still ends the turn cancelled
+  ("Operation cancelled...", once), not as a "Workflow error"; the cleanup's
+  error is logged at debug (`turn_stream_close_failed`).
 
 - **A run whose workflow did not start says how to go on.** Starting a new
   conversation, it warned "Cannot adopt session — workflow not
