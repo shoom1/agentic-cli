@@ -405,7 +405,9 @@ def _claim_on_disk(data: dict) -> str | None:
     if state is None and data.get("resumed") is not None:
         # A record written before the lifecycle existed.
         state = (
-            ResumeState.DELIVERED.value if data["resumed"] else ResumeState.PENDING.value
+            ResumeState.DELIVERED.value
+            if data["resumed"]
+            else ResumeState.PENDING.value
         )
     return state
 
@@ -564,7 +566,7 @@ class JobManager:
             job_dir = self._job_dir(job_id)
             try:
                 job_dir.mkdir(parents=True, exist_ok=True)
-                self._persist(rec)
+                self._create(rec)
             except BaseException:
                 shutil.rmtree(job_dir, ignore_errors=True)
                 raise
@@ -685,8 +687,9 @@ class JobManager:
     def cancel(self, job_id: str) -> JobRecord | None:
         """Cancel a job, if this manager can actually cancel it.
 
-        Brings the record up to date first, as every read does (``_refresh``:
-        the durable record, then the backend's poll), and returns it as it is
+        Brings the record up to date first, as every read does (the durable
+        record, then the backend's poll, in the transaction that records the
+        cancel: ``_mutate``), and returns it as it is
         when that shows the job has ended: a job that has already finished
         stays finished, also when nobody had polled it since (terminal
         transitions are monotonic — neither a stale view nor a cancel that
@@ -710,37 +713,31 @@ class JobManager:
                 return None
             try:
                 with self._claim_transaction():
-                    status = self._refresh(rec)
-                    if status is DurableRead.MISSING:
-                        self._forget(job_id)
-                        return None
-                    if status is DurableRead.UNREADABLE:
-                        logger.warning("job_cancel_unreadable", job_id=job_id)
-                        return rec
-                    if rec.state in TERMINAL_STATES:
-                        self._maybe_start_queued()  # its end may free a slot
-                        return rec
-                    backend = self._backend_of(rec, asked=True)
-                    if backend is None:
-                        return rec
-                    if self._execution_is_foreign(rec) and not self._can_cancel_foreign(
-                        rec
-                    ):
-                        logger.warning(
-                            "job_cancel_not_reachable",
-                            job_id=job_id,
-                            owner=rec.exec_owner,
-                        )
-                        return rec
-                    stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
-                    if not stopped:
-                        rec.cancel_requested = True
-                        self._persist(rec, owns_shared_state=True)
-                        return rec
-                    rec.state = JobState.CANCELLED
-                    rec.finished_at = _now()
-                    self._persist(rec, owns_shared_state=True)
-                    self._maybe_start_queued()
+                    with self._mutate(rec) as status:
+                        if status is DurableRead.MISSING:
+                            return None
+                        if status is DurableRead.UNREADABLE:
+                            logger.warning("job_cancel_unreadable", job_id=job_id)
+                            return rec
+                        self._poll(rec)
+                        if rec.state not in TERMINAL_STATES:
+                            backend = self._backend_of(rec, asked=True)
+                            if backend is None:
+                                return rec
+                            foreign = self._execution_is_foreign(rec)
+                            if foreign and not self._can_cancel_foreign(rec):
+                                logger.warning(
+                                    "job_cancel_not_reachable",
+                                    job_id=job_id,
+                                    owner=rec.exec_owner,
+                                )
+                                return rec
+                            if backend.cancel(rec, self._job_dir(job_id)) is False:
+                                rec.cancel_requested = True  # not stopped yet
+                                return rec
+                            rec.state = JobState.CANCELLED
+                            rec.finished_at = _now()
+                    self._maybe_start_queued()  # it has ended: its slot is free
                     return rec
             except ClaimLockUnavailable as exc:
                 logger.warning(
@@ -778,12 +775,10 @@ class JobManager:
                 with self._claim_transaction():
                     removed: list[JobRecord] = []
                     for rec in list(self._records.values()):
-                        status = self._reload_durable(rec)
-                        if status is DurableRead.MISSING:
-                            self._forget(rec.job_id)
-                            continue
-                        if status is DurableRead.UNREADABLE:
-                            continue  # never delete state we could not read
+                        with self._mutate(rec) as status:
+                            pass  # read back; nothing changes, so nothing is written
+                        if status is not DurableRead.PRESENT:
+                            continue  # forgotten, or unreadable: never delete that
                         if rec.state not in TERMINAL_STATES:
                             continue
                         if rec.resume_state == ResumeState.RESUMING.value and (
@@ -866,13 +861,11 @@ class JobManager:
             if not rec.resume_on_complete:
                 return False
             try:
-                with self._claim_transaction():
-                    # Terminality is judged on the durable record, not on this
-                    # manager's snapshot: a job that finished elsewhere is
-                    # deliverable even if we still have it as RUNNING.
-                    status = self._reload_durable(rec)
+                # Terminality is judged on the durable record, not on this
+                # manager's snapshot: a job that finished elsewhere is
+                # deliverable even if we still have it as RUNNING.
+                with self._mutate(rec) as status:
                     if status is DurableRead.MISSING:
-                        self._forget(job_id)
                         return False
                     if status is DurableRead.UNREADABLE:
                         logger.warning("job_resume_claim_unreadable", job_id=job_id)
@@ -884,7 +877,6 @@ class JobManager:
                     rec.resume_state = ResumeState.RESUMING.value
                     rec.resume_owner = _owner_token()
                     rec.resume_error = None
-                    self._persist(rec, owns_shared_state=True)
             except ClaimLockUnavailable as exc:
                 logger.warning(
                     "job_resume_claim_unlocked", job_id=job_id, error=str(exc)
@@ -907,13 +899,13 @@ class JobManager:
             delivered: True only when the resume turn actually ran to completion.
             error: Why delivery failed, recorded for ``/jobs``.
 
-        If the lock cannot be taken the durable record is **left as it is** —
-        still ``RESUMING``, owned by this process. That is the failed-safe
-        outcome: an unlocked rewrite could regress a delivery another process
-        had just recorded, whereas a record stuck in ``RESUMING`` is recovered
-        as failed once this process is gone, and is never re-delivered. The
-        in-memory record still transitions, so this manager's own ``/jobs``
-        view is accurate.
+        If the lock cannot be taken nothing changes, on disk or in memory:
+        the record cannot be written, so it does not pretend to have moved.
+        It stays ``RESUMING``, owned by this process, as the disk has it.
+        That is the failed-safe outcome: an unlocked rewrite could regress a
+        delivery another process had just recorded, whereas a record stuck in
+        ``RESUMING`` is recovered as failed once this process is gone, and is
+        never re-delivered.
 
         Raises:
             ResumeStateError: If the job is unknown, was not claimed, or is
@@ -924,8 +916,37 @@ class JobManager:
             if rec is None:
                 raise ResumeStateError(f"Unknown job {job_id!r}: nothing to complete.")
             try:
-                with self._claim_transaction():
-                    self._complete_resume_locked(rec, delivered, error)
+                with self._mutate(rec) as status:
+                    if status is not DurableRead.PRESENT:
+                        # The record was cleaned away (or cannot be read) while
+                        # the turn ran. Recording the outcome would recreate a
+                        # deleted job; there is nothing left to deliver to.
+                        logger.warning(
+                            "job_resume_complete_record_gone",
+                            job_id=job_id,
+                            status=status.value,
+                        )
+                        return
+                    if rec.resume_state != ResumeState.RESUMING.value:
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is {rec.resume_state!r}, not "
+                            f"{ResumeState.RESUMING.value!r}: complete_resume() "
+                            "must follow a successful begin_resume()."
+                        )
+                    owner = _owner_token()
+                    if rec.resume_owner not in (None, owner):
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is being delivered by "
+                            f"{rec.resume_owner!r}, not {owner!r}: only the "
+                            "claiming process may complete it."
+                        )
+                    rec.resume_state = (
+                        ResumeState.DELIVERED.value
+                        if delivered
+                        else ResumeState.FAILED.value
+                    )
+                    rec.resume_error = None if delivered else error
+                    rec.resume_owner = None
             except ClaimLockUnavailable as exc:
                 logger.warning(
                     "job_resume_complete_unpersisted",
@@ -933,49 +954,6 @@ class JobManager:
                     delivered=delivered,
                     error=str(exc),
                 )
-                rec.resume_state = (
-                    ResumeState.DELIVERED.value
-                    if delivered
-                    else ResumeState.FAILED.value
-                )
-                rec.resume_error = None if delivered else error
-                rec.resume_owner = None
-
-    def _complete_resume_locked(
-        self, rec: JobRecord, delivered: bool, error: str | None
-    ) -> None:
-        """Body of :meth:`complete_resume`; the caller holds the transaction."""
-        status = self._reload_durable(rec)
-        if status is not DurableRead.PRESENT:
-            # The record was cleaned away (or cannot be read) while the turn
-            # ran. Recording the outcome would recreate a deleted job; there is
-            # nothing left to deliver to.
-            logger.warning(
-                "job_resume_complete_record_gone",
-                job_id=rec.job_id,
-                status=status.value,
-            )
-            if status is DurableRead.MISSING:
-                self._forget(rec.job_id)
-            return
-        if rec.resume_state != ResumeState.RESUMING.value:
-            raise ResumeStateError(
-                f"Job {rec.job_id!r} is {rec.resume_state!r}, not "
-                f"{ResumeState.RESUMING.value!r}: complete_resume() must "
-                "follow a successful begin_resume()."
-            )
-        owner = _owner_token()
-        if rec.resume_owner not in (None, owner):
-            raise ResumeStateError(
-                f"Job {rec.job_id!r} is being delivered by {rec.resume_owner!r}, "
-                f"not {owner!r}: only the claiming process may complete it."
-            )
-        rec.resume_state = (
-            ResumeState.DELIVERED.value if delivered else ResumeState.FAILED.value
-        )
-        rec.resume_error = None if delivered else error
-        rec.resume_owner = None
-        self._persist(rec, owns_shared_state=True)
 
     def _recover_interrupted_resumes(self) -> None:
         """Fail records left mid-delivery by a *dead* owner (called on load).
@@ -992,8 +970,8 @@ class JobManager:
         were loaded from disk before it was taken, and in that window another
         process may have claimed a job or finished delivering one. Acting on
         the pre-lock snapshot rewrote a completed delivery as failed. A record
-        that window deleted, or left unreadable, is skipped outright — see
-        :meth:`_recovery_target`.
+        that window deleted is forgotten, and one it left unreadable is left
+        as it is (``_mutate``): no verdict is written over either.
 
         If the lock is unavailable nothing is recovered — leaving a stale
         ``RESUMING`` record costs a result you can still read with
@@ -1003,21 +981,27 @@ class JobManager:
         try:
             with self._claim_transaction():
                 for rec in list(self._records.values()):
-                    if not self._recovery_target(rec):
-                        continue
-                    if rec.resume_state != ResumeState.RESUMING.value:
-                        continue
-                    if _claim_owner_is_live(rec.resume_owner):
-                        logger.debug(
-                            "job_resume_claim_active",
-                            job_id=rec.job_id,
-                            owner=rec.resume_owner,
+                    with self._mutate(rec) as status:
+                        if status is DurableRead.UNREADABLE:
+                            logger.warning(
+                                "job_recovery_skipped_unreadable", job_id=rec.job_id
+                            )
+                        if status is not DurableRead.PRESENT:
+                            continue
+                        if rec.resume_state != ResumeState.RESUMING.value:
+                            continue
+                        if _claim_owner_is_live(rec.resume_owner):
+                            logger.debug(
+                                "job_resume_claim_active",
+                                job_id=rec.job_id,
+                                owner=rec.resume_owner,
+                            )
+                            continue
+                        rec.resume_state = ResumeState.FAILED.value
+                        rec.resume_error = (
+                            "resume interrupted before the turn completed"
                         )
-                        continue
-                    rec.resume_state = ResumeState.FAILED.value
-                    rec.resume_error = "resume interrupted before the turn completed"
-                    rec.resume_owner = None
-                    self._persist(rec, owns_shared_state=True)
+                        rec.resume_owner = None
                     logger.warning("job_resume_interrupted", job_id=rec.job_id)
         except ClaimLockUnavailable as exc:
             logger.warning("job_resume_recovery_skipped", error=str(exc))
@@ -1068,21 +1052,17 @@ class JobManager:
             try:
                 with self._claim_transaction():
                     for rec in claimed:
-                        status = self._reload_durable(rec)
-                        if status is DurableRead.MISSING:
-                            self._forget(rec.job_id)
-                            continue
-                        if status is DurableRead.UNREADABLE:
-                            continue
-                        if rec.state != JobState.QUEUED or rec.exec_owner != mine:
-                            continue
-                        rec.state = JobState.FAILED
-                        rec.error = (
-                            "the app closed before the job started; a job on this "
-                            "backend runs only in the app that submitted it"
-                        )
-                        rec.finished_at = _now()
-                        self._persist(rec, owns_shared_state=True)
+                        with self._mutate(rec) as status:
+                            if status is not DurableRead.PRESENT:
+                                continue
+                            if rec.state != JobState.QUEUED or rec.exec_owner != mine:
+                                continue
+                            rec.state = JobState.FAILED
+                            rec.error = (
+                                "the app closed before the job started; a job on "
+                                "this backend runs only in the app that submitted it"
+                            )
+                            rec.finished_at = _now()
                         logger.warning("job_closed_before_start", job_id=rec.job_id)
             except ClaimLockUnavailable as exc:
                 logger.warning("job_close_skipped_unlocked", error=str(exc))
@@ -1175,6 +1155,27 @@ class JobManager:
                 )
                 return
             self._write(rec, data)
+
+    def _create(self, rec: JobRecord) -> None:
+        """Write a new job's first ``meta.json``, through ``_mutate``.
+
+        Without the lock it is written all the same: a record that is not on
+        disk yet holds nothing another manager wrote, for this write to lose.
+        One that is there after all is left as it is.
+        """
+        try:
+            with self._mutate(rec, create=True):
+                pass
+        except ClaimLockUnavailable as exc:
+            if (self._job_dir(rec.job_id) / "meta.json").exists():
+                logger.warning(
+                    "job_persist_skipped_unlocked", job_id=rec.job_id, error=str(exc)
+                )
+                return
+            logger.warning(
+                "job_persist_created_unlocked", job_id=rec.job_id, error=str(exc)
+            )
+            self._write(rec, {})
 
     def _persist(self, rec: JobRecord, *, owns_shared_state: bool = False) -> None:
         """Write a record's metadata, never clobbering a newer delivery state.
@@ -1492,29 +1493,30 @@ class JobManager:
             return
         try:
             with self._claim_transaction():
-                if not self._claim_execution(rec):
+                with self._mutate(rec) as status:
+                    claimed = self._claim_execution(rec, status)
+                if not claimed:
                     return
-                self._launch(rec, backend)
+                with self._mutate(rec) as status:
+                    if status is DurableRead.PRESENT:
+                        self._launch(rec, backend)
         except ClaimLockUnavailable as exc:
             logger.warning(
                 "job_launch_skipped_unlocked", job_id=rec.job_id, error=str(exc)
             )
 
-    def _claim_execution(self, rec: JobRecord) -> bool:
-        """Take ownership of a queued job's launch. Caller holds the transaction."""
-        status, data = self._read_persisted(rec.job_id)
+    def _claim_execution(self, rec: JobRecord, status: DurableRead) -> bool:
+        """Take ownership of a queued job's launch.
+
+        Decided on ``rec`` as ``_mutate`` read it back (``status``: what the
+        read found); the caller holds that transaction, which writes the
+        claim before the backend is touched.
+        """
         if status is DurableRead.UNREADABLE:
             logger.warning("job_launch_skipped_unreadable", job_id=rec.job_id)
             return False
-        if status is DurableRead.MISSING and rec.job_id in self._persisted:
-            self._forget(rec.job_id)
-            return False
-        if data is not None:
-            try:
-                rec.state = JobState(data.get("state", rec.state))
-            except ValueError:  # pragma: no cover - unknown state on disk
-                pass
-            rec.exec_owner = data.get("exec_owner")
+        if status is not DurableRead.PRESENT:
+            return False  # another manager removed it
         if rec.state != JobState.QUEUED:
             return False
         mine = self._exec_owner_token()
@@ -1529,11 +1531,13 @@ class JobManager:
             )
             return False
         rec.exec_owner = mine
-        self._persist(rec, owns_shared_state=True)
         return True
 
     def _launch(self, rec: JobRecord, backend: JobBackend) -> None:
-        """Start the backend for a claimed job. Caller holds the transaction."""
+        """Start the backend for a claimed job.
+
+        The caller holds ``_mutate`` on the record, which writes the outcome.
+        """
         try:
             backend.start(rec, self._job_dir(rec.job_id))
             rec.state = JobState.RUNNING
@@ -1543,7 +1547,6 @@ class JobManager:
             rec.error = f"launch failed: {exc}"
             rec.finished_at = _now()
             logger.warning("job_launch_failed", job_id=rec.job_id, error=str(exc))
-        self._persist(rec, owns_shared_state=True)
 
     def _recover_interrupted_launches(self) -> None:
         """Fail queued jobs whose launcher died mid-claim (called on load).
@@ -1553,22 +1556,27 @@ class JobManager:
         never relaunched — a duplicate side effect is worse than a job that
         must be resubmitted — and is failed with that stated plainly.
 
-        Only records the durable read still vouches for are judged; see
-        :meth:`_recovery_target`.
+        Only records the durable read still vouches for are judged: one
+        another manager deleted is forgotten, and one that cannot be read is
+        left as it is (``_mutate``).
         """
         try:
             with self._claim_transaction():
                 for rec in list(self._records.values()):
-                    if not self._recovery_target(rec):
-                        continue
-                    if rec.state != JobState.QUEUED or rec.exec_owner is None:
-                        continue
-                    if _claim_owner_is_live(rec.exec_owner):
-                        continue
-                    rec.state = JobState.FAILED
-                    rec.error = "launch interrupted before the job started"
-                    rec.finished_at = _now()
-                    self._persist(rec, owns_shared_state=True)
+                    with self._mutate(rec) as status:
+                        if status is DurableRead.UNREADABLE:
+                            logger.warning(
+                                "job_recovery_skipped_unreadable", job_id=rec.job_id
+                            )
+                        if status is not DurableRead.PRESENT:
+                            continue
+                        if rec.state != JobState.QUEUED or rec.exec_owner is None:
+                            continue
+                        if _claim_owner_is_live(rec.exec_owner):
+                            continue
+                        rec.state = JobState.FAILED
+                        rec.error = "launch interrupted before the job started"
+                        rec.finished_at = _now()
                     logger.warning("job_launch_interrupted", job_id=rec.job_id)
         except ClaimLockUnavailable as exc:
             logger.warning("job_launch_recovery_skipped", error=str(exc))
