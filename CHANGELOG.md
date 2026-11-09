@@ -1217,7 +1217,9 @@ the start of the entry's title.
   them. A conversation's memories (`auto_extract_session_facts`) are proposed
   once per conversation used: on leaving it (`/new`, `/resume`) or at exit,
   only when a turn ran in it since it was opened, so switching back and
-  forth, or resuming one and leaving it as it was, files no duplicates.
+  forth, or resuming one and leaving it as it was, files no duplicates. An
+  orchestrator switch leaves the conversation unused on the new backend,
+  which holds none of its earlier turns.
 - **`BaseCLIApp.main()`: every app takes `--continue` and `--resume
   [ID]`.** Point an app's console script at it (`my-app =
   "my_app.cli:MyApp.main"`): it parses the session flags
@@ -2010,6 +2012,16 @@ the start of the entry's title.
 
 ### Deprecated
 
+- **Setting `BaseCLIApp.session_id`** is deprecated: switch with `await
+  app.resume_session(id)` or `await app.start_new_session()`. It moved the
+  next turn to another conversation and did nothing else. It still
+  switches, as far as a setter can, with a `DeprecationWarning`: the
+  conversation is held (one another process has open raises `RuntimeError`,
+  and nothing changes), the one before let go, and the task list and the
+  usage counters start over; the workflow is not told until the next turn
+  names the id, and the memories of the conversation left are not
+  proposed.
+
 - **`_release_resources(keep_session_service=True)`**, which kept ADK's
   session service through a release, is deprecated and will be removed in
   0.8.0. It still keeps the session store for that release, with a
@@ -2311,6 +2323,11 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **An orchestrator switch in `/settings` no longer redraws the previous
+  backend's task list.** The new backend starts the conversation empty, but
+  the next turn drew the old one's "Tasks" box again, as if its plan went
+  on. The task list now starts over with the switch, as with `/new`.
 
 - **A finished job's result is no longer given up when its delivery stops
   before reaching the agent.** The CLI claimed a job's delivery before it
@@ -3080,7 +3097,17 @@ step; each entry says what to use instead.
   '<other>'."; several are named, past three a count), or starts a new
   conversation when none of the 50 newest is free. A switch holds
   the conversation it leaves until it is done, so a Ctrl+C or a failure
-  keeps the right one held. ADK's stale
+  keeps the right one held. The lock follows the conversation the turns
+  write to, however it changes (`cli/conversation.py`: `ConversationCore`,
+  one switch for `/new`, `/resume`, the start and an orchestrator switch):
+  a run holds its conversation from the start, also when the workflow fails
+  to start (the user fixes it with `/settings` and goes on in it); a line
+  typed before `--continue` or `--resume` has opened its conversation waits
+  for it and runs there; an orchestrator switch moves the lock to the new
+  backend's key. It is keyed by the backend and the store the workflow
+  runs, recorded as it starts and at an orchestrator switch, so a
+  `/settings` change of `session_store`, which takes effect at the next
+  start, does not stop the locking before. ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message
