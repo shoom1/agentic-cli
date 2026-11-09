@@ -21,7 +21,7 @@ For resilience patterns, use tenacity, pybreaker, aiolimiter directly.
 # Agents delegation tool, so an application tool cannot take the name.
 from agentic_cli.tools._core import delegation as _delegation  # noqa: F401
 
-from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor, ExecutionTimeoutError
+from agentic_cli.tools.executor import SafePythonExecutor, MockPythonExecutor
 
 # File operation tools - READ (safe)
 from agentic_cli.tools.file_read import read_file, diff_compare
@@ -96,7 +96,6 @@ __all__ = [
     # Executor classes
     "SafePythonExecutor",
     "MockPythonExecutor",
-    "ExecutionTimeoutError",
     # File operations - READ tools (safe)
     "read_file",
     "diff_compare",
