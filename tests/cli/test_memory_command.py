@@ -11,7 +11,7 @@ from thinking_prompt import ChoiceField
 from agentic_cli.cli.memory_command import NOT_READY, MemoryCommand, proposals_line
 from agentic_cli.memory import Candidate, MemoryStore
 from tests.cli.dialog_fakes import autospec_session
-from tests.memory.memory_files import T0, Clock
+from tests.memory.memory_files import T0, Clock, memory_text, write_memory
 
 
 class _App:
@@ -323,3 +323,199 @@ async def test_a_discard_the_store_cannot_do_says_discard(store, monkeypatch):
     [error] = [call.args[0] for call in app.session.add_error.call_args_list]
     assert error == "Could not discard 'Uses metric': another process holds the lock"
     assert [p.id for p in store.proposals()] == [proposal.id]
+
+
+def focused_button(dialog) -> str:
+    """The button a real dialog box puts the cursor on: Enter presses it.
+
+    Built and focused as ``ThinkingPromptSession.show_dialog`` does for the
+    box placement: a ``ButtonConfig(focused=True)`` button, else the widget's
+    first focusable element, its first button."""
+    from prompt_toolkit.layout import Layout
+    from thinking_prompt.dialog_box import build_box
+
+    box = build_box(dialog)
+    layout = Layout(box.widget)
+    layout.focus(box.initial_focus or box.widget)
+    return next(button.text for button in box.buttons if button.window is layout.current_window)
+
+
+# -- Enter must never press a destructive button ------------------------------------------------
+
+
+@pytest.mark.parametrize("with_history", [False, True])
+def test_enter_in_the_memory_view_closes_it(store, with_history):
+    from agentic_cli.cli.memory_command import memory_view
+
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    assert focused_button(memory_view(memory, with_history)) == "Close"
+
+
+async def test_enter_in_the_version_view_does_not_restore(store, clock):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    clock.now = T0 + timedelta(minutes=1)
+    store.update(memory.id, content="Tabs, width 4.")
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], None)
+    await MemoryCommand().execute("history", app)
+    _, version = shown(app)
+    assert focused_button(version) == "Close"
+
+
+async def test_enter_in_the_inbox_skips_even_a_proposal_from_outside_content(store):
+    store.propose(Candidate("new", None, "Uses metric", "km.", "user", "user"), outside_content="web_fetch")
+    store.propose(Candidate("new", None, "Likes otters", "Otters.", "user", "user"))
+    app = _App(store)
+    app.session.show_dialog.return_value = None
+    await MemoryCommand().execute("inbox", app)
+    [first] = shown(app)
+    assert focused_button(first) == "Skip"
+
+
+# -- What was shown is what a button acts on -----------------------------------------------------
+
+
+async def test_delete_of_a_memory_removed_elsewhere_says_so(store):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    app = _App(store)
+
+    def removed_then_delete(dialog):
+        store.delete(memory.id)  # another process, after the view opened
+        return "delete"
+
+    app.session.show_dialog.side_effect = removed_then_delete
+    await MemoryCommand().execute(memory.id, app)
+    app.session.add_message.assert_called_once_with("system", f"Memory {memory.id} was already deleted.")
+    app.session.add_success.assert_not_called()
+
+
+async def test_delete_does_not_remove_a_version_that_was_never_shown(store, tmp_path, clock):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    other = MemoryStore(tmp_path / "user", tmp_path / "proj" / "memory", project_name="app", now=clock)
+    app = _App(store)
+    answers = iter(["delete", None])
+
+    def updated_then_delete(dialog):
+        if len(shown(app)) == 1:  # another process updates it after the first view opened
+            clock.now = T0 + timedelta(minutes=1)
+            other.update(memory.id, content="Tabs, width 4, after a long talk.")
+        return next(answers)
+
+    app.session.show_dialog.side_effect = updated_then_delete
+    await MemoryCommand().execute(memory.id, app)
+    assert store.read(memory.id).content == "Tabs, width 4, after a long talk."
+    app.session.add_success.assert_not_called()
+    app.session.add_message.assert_called_once_with(
+        "system", f"Memory {memory.id} changed since it was shown, so it was not deleted. It is shown again."
+    )
+    first, again = shown(app)
+    assert "Tabs, width 4, after a long talk." not in str(first.body)
+    assert "Tabs, width 4, after a long talk." in str(again.body)
+
+
+async def test_delete_of_a_memory_whose_file_a_person_broke_since_says_so(store):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    app = _App(store)
+
+    def broken_then_delete(dialog):
+        memory.path.write_text(memory.path.read_text().replace("type: feedback", "type: preference"))
+        return "delete"
+
+    app.session.show_dialog.side_effect = broken_then_delete
+    await MemoryCommand().execute(memory.id, app)
+    [(_, text)] = [call.args for call in app.session.add_message.call_args_list]
+    assert str(memory.path) in text and "Problems" in text and "already deleted" not in text
+    assert memory.path.exists()
+
+
+async def test_discard_of_a_proposal_handled_elsewhere_says_so(store):
+    proposal = store.propose(Candidate("new", None, "Uses metric", "km.", "user", "user"))
+    app = _App(store)
+
+    def discarded_then_discard(dialog):
+        store.discard(proposal.id)  # another session, after the dialog opened
+        return "discard"
+
+    app.session.show_dialog.side_effect = discarded_then_discard
+    await MemoryCommand().execute("inbox", app)
+    assert [call.args[1] for call in app.session.add_message.call_args_list] == [
+        "That proposal was already handled.", "Accepted 0, discarded 0, 0 waiting.",
+    ]
+
+
+# -- An update proposal shows the memory it changes, whatever state its file is in ---------------
+
+
+async def test_an_update_proposal_shows_the_type_it_changes(store):
+    target = store.save("Prefers spaces", "Spaces.", "feedback", scope="user")
+    store.propose(Candidate("update", target.id, "Prefers tabs", "Tabs.", "user", "user"))
+    app = _App(store)
+    app.session.show_dialog.return_value = None
+    await MemoryCommand().execute("inbox", app)
+    [dialog] = shown(app)
+    body = str(dialog.body)
+    assert "Now:\nPrefers spaces\nType: feedback" in body
+    assert "Proposed:\nPrefers tabs\nType: user" in body
+
+
+async def test_an_update_proposal_whose_memory_is_deleted_suggests_discarding(store):
+    target = store.save("Prefers spaces", "Spaces.", "feedback", scope="user")
+    store.propose(Candidate("update", target.id, "Prefers tabs", "Tabs.", "feedback", "user"))
+    store.delete(target.id)
+    app = _App(store)
+    app.session.show_dialog.return_value = None
+    await MemoryCommand().execute("inbox", app)
+    [dialog] = shown(app)
+    assert "Now:\n(deleted: discard this proposal)" in str(dialog.body)
+
+
+async def test_an_update_proposal_whose_memory_file_is_broken_names_the_file_and_does_not_suggest_discarding(store):
+    target = store.save("Prefers spaces", "Spaces.", "feedback", scope="user")
+    store.propose(Candidate("update", target.id, "Prefers tabs", "Tabs.", "feedback", "user"))
+    target.path.write_text(target.path.read_text().replace("type: feedback", "type: preference"))
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking("accept")
+    await MemoryCommand().execute("inbox", app)
+    [dialog] = shown(app)
+    body = str(dialog.body)
+    assert f"its file cannot be used (see Problems in /memory): {target.path}" in body
+    assert "deleted" not in body and "discard" not in body
+    [error] = [call.args[0] for call in app.session.add_error.call_args_list]
+    assert str(target.path) in error and "fix or remove it" in error
+    assert len(store.proposals()) == 1
+
+
+# -- Ids, and files the store cannot use ---------------------------------------------------------
+
+
+async def test_memory_by_id_ignores_the_case_it_is_typed_in(tmp_path, clock):
+    write_memory(tmp_path / "user", "mine-4F2A9C1E.md", memory_text("4F2A9C1E"))
+    store = MemoryStore(tmp_path / "user", now=clock)
+    for typed in ("4f2a9c1e", "4F2A9C1E"):
+        app = _App(store)
+        app.session.show_dialog.return_value = None
+        await MemoryCommand().execute(typed, app)
+        [view] = shown(app)
+        assert view.title == "Memory 4F2A9C1E"
+
+
+async def test_an_id_a_broken_file_holds_points_to_the_problems_row(store):
+    memory = store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    memory.path.write_text(memory.path.read_text().replace("type: feedback", "type: preference"))
+    app = _App(store)
+    await MemoryCommand().execute(memory.id.upper(), app)
+    [(role, text)] = [call.args for call in app.session.add_message.call_args_list]
+    assert role == "system" and "No memory with id" not in text
+    assert str(memory.path) in text and "bad_field" in text and "Problems" in text
+
+
+async def test_a_broken_proposal_file_is_in_the_problems_row(store, tmp_path):
+    inbox = tmp_path / "user" / ".inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "nonsense.md").write_text("no frontmatter\n")
+    app = _App(store)
+    app.session.show_dialog.side_effect = picking(lambda options: options[-1], None)
+    await MemoryCommand().execute("", app)
+    listing, problems = shown(app)
+    assert listing.fields[0].options == ["Problems (1)"]
+    assert "nonsense.md" in str(problems.body) and "bad_proposal" in str(problems.body)

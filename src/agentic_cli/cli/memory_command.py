@@ -7,6 +7,9 @@ proposals, ``/memory stale`` lists memories not updated for 90 days. The
 command acts as the user, through the store: no permission prompt, and every
 change keeps the previous version. Store calls read files, so they run on a
 worker thread.
+
+Enter must never be a destructive press: the button a dialog opens on is the
+harmless one (Close, Skip), and Delete acts only on the memory as it was shown.
 """
 
 from __future__ import annotations
@@ -107,8 +110,17 @@ def memory_view(memory: "Memory", has_history: bool) -> Dialog:
     buttons = [ButtonConfig("Delete", result="delete")]
     if has_history:
         buttons.append(ButtonConfig("History", result="history"))
-    buttons.append(ButtonConfig("Close", result=None))
+    buttons.append(ButtonConfig("Close", result=None, focused=True))
     return Dialog(f"Memory {memory.id}", body=body, buttons=buttons)
+
+
+def _find(store: "MemoryStore", memory_id: str) -> "Memory | None":
+    """The memory with this id, whatever the case it is typed in."""
+    memory = store.read(memory_id)
+    if memory is None:
+        wanted = memory_id.casefold()
+        memory = next((m for m in store.memories() if m.id.casefold() == wanted), None)
+    return memory
 
 
 def _claiming(store: "MemoryStore", memory_id: str) -> "Problem | None":
@@ -126,24 +138,41 @@ def version_body(version: "Version", current: "Memory | None", unusable: "Proble
     if current is not None:
         lines += [current.description, "", current.content]
     elif unusable is not None:
-        lines += [f"its file cannot be used (see Problems in /memory): {unusable.path}"]
+        lines += [_unusable(unusable)]
     else:
         lines += ["deleted"]
     return "\n".join(lines)
 
 
-def proposal_body(proposal: "Proposal", current: "Memory | None") -> str:
-    """What a proposal would do: a new memory, or a change beside the memory now."""
+def _unusable(problem: "Problem") -> str:
+    """Where a memory is, when a person's broken file holds its id."""
+    return f"its file cannot be used (see Problems in /memory): {problem.path}"
+
+
+def proposal_body(
+    proposal: "Proposal", current: "Memory | None", unusable: "Problem | None" = None
+) -> str:
+    """What a proposal would do: a new memory, or a change beside the memory now.
+
+    When that memory is gone, the body says so: deleted (the proposal can be
+    discarded), or its file is one a person broke (``unusable``: fix it, and
+    nothing is to be discarded).
+    """
     lines: list[str] = []
     if proposal.outside_content:
         lines += [f"From a conversation that read outside content ({proposal.outside_content}).", ""]
     if proposal.action == "update":
         lines += ["A change to a memory.", "", "Now:"]
-        lines += ["(deleted: discard this proposal)"] if current is None else [current.description, "", current.content]
-        lines += ["", "Proposed:"]
+        if current is not None:
+            lines += [current.description, f"Type: {current.type}", "", current.content]
+        elif unusable is not None:
+            lines += [_unusable(unusable)]
+        else:
+            lines += ["(deleted: discard this proposal)"]
+        lines += ["", "Proposed:", proposal.description, f"Type: {proposal.type}", "", proposal.content]
     else:
-        lines += [f"A new {proposal.scope} memory ({proposal.type}).", ""]
-    lines += [proposal.description, "", proposal.content, "", f"Conversation: {proposal.conversation or '-'}"]
+        lines += [f"A new {proposal.scope} memory ({proposal.type}).", "", proposal.description, "", proposal.content]
+    lines += ["", f"Conversation: {proposal.conversation or '-'}"]
     return "\n".join(lines)
 
 
@@ -209,26 +238,56 @@ class MemoryCommand(Command):
         ))
 
     async def _show(self, app: Any, store: "MemoryStore", memory_id: str) -> None:
-        from agentic_cli.memory import MemoryStoreError
-
-        memory = await asyncio.to_thread(store.read, memory_id)
+        memory = await asyncio.to_thread(_find, store, memory_id)
         if memory is None:
-            app.session.add_message("system", f"No memory with id {memory_id}.")
+            await self._missing(app, store, memory_id, shown=False)
             return
         versions = await asyncio.to_thread(store.history, memory.id)
         choice = await app.session.show_dialog(memory_view(memory, bool(versions)))
         if choice == "delete":
-            try:
-                deleted = await asyncio.to_thread(store.delete, memory.id)
-            except (MemoryStoreError, OSError) as e:
-                app.session.add_error(f"Could not delete memory {memory.id}: {e}")
-                return
-            if deleted:
-                app.session.add_success(
-                    f"Deleted memory {memory.id} (restorable for 30 days: /memory history)."
-                )
+            await self._delete(app, store, memory)
         elif choice == "history":
             await self._history(app, store, memory.id)
+
+    async def _missing(self, app: Any, store: "MemoryStore", memory_id: str, *, shown: bool) -> None:
+        """Say why there is no memory ``memory_id``: its file cannot be used (and
+        where it is listed), it was deleted since it was shown, or it never was."""
+        problem = await asyncio.to_thread(_claiming, store, memory_id)
+        if problem is not None:
+            line = (
+                f"Memory {memory_id} is in a file that cannot be used: {problem.path} "
+                f"({problem.kind}: {problem.detail}). It is listed under Problems in /memory."
+            )
+        elif shown:
+            line = f"Memory {memory_id} was already deleted."
+        else:
+            line = f"No memory with id {memory_id}."
+        app.session.add_message("system", line)
+
+    async def _delete(self, app: Any, store: "MemoryStore", shown: "Memory") -> None:
+        """Delete ``shown`` only if it is still what the person saw: another
+        process may have changed or removed it since the view opened."""
+        from agentic_cli.memory import MemoryStoreError
+
+        current = await asyncio.to_thread(store.read, shown.id)
+        if current is None:
+            await self._missing(app, store, shown.id, shown=True)
+            return
+        if current != shown:
+            app.session.add_message(
+                "system", f"Memory {shown.id} changed since it was shown, so it was not deleted. It is shown again."
+            )
+            await self._show(app, store, shown.id)
+            return
+        try:
+            deleted = await asyncio.to_thread(store.delete, shown.id)
+        except (MemoryStoreError, OSError) as e:
+            app.session.add_error(f"Could not delete memory {shown.id}: {e}")
+            return
+        if deleted:
+            app.session.add_success(f"Deleted memory {shown.id} (restorable for 30 days: /memory history).")
+        else:
+            app.session.add_message("system", f"Memory {shown.id} was already deleted.")
 
     async def _history(self, app: Any, store: "MemoryStore", memory_id: str | None) -> None:
         from agentic_cli.memory import MemoryStoreError
@@ -258,7 +317,7 @@ class MemoryCommand(Command):
         choice = await app.session.show_dialog(Dialog(
             f"Version of {version.memory_id}",
             body=version_body(version, current, unusable),
-            buttons=[ButtonConfig("Restore", result="restore"), ButtonConfig("Close", result=None)],
+            buttons=[ButtonConfig("Restore", result="restore"), ButtonConfig("Close", result=None, focused=True)],
         ))
         if choice != "restore":
             return
@@ -278,16 +337,18 @@ class MemoryCommand(Command):
             return
         accepted = discarded = 0
         for number, proposal in enumerate(proposals, start=1):
-            current = (
-                await asyncio.to_thread(store.read, proposal.target) if proposal.action == "update" else None
-            )
+            current = unusable = None
+            if proposal.action == "update":
+                current = await asyncio.to_thread(store.read, proposal.target or "")
+                if current is None:
+                    unusable = await asyncio.to_thread(_claiming, store, proposal.target or "")
             choice = await app.session.show_dialog(Dialog(
                 f"Memory proposal {number} of {len(proposals)}",
-                body=proposal_body(proposal, current),
+                body=proposal_body(proposal, current, unusable),
                 buttons=[
                     ButtonConfig("Accept", result="accept"),
                     ButtonConfig("Discard", result="discard"),
-                    ButtonConfig("Skip", result="skip"),
+                    ButtonConfig("Skip", result="skip", focused=True),
                 ],
             ))
             if choice is None:  # Esc stops; what is left waits
@@ -296,8 +357,11 @@ class MemoryCommand(Command):
                 if choice == "accept":
                     await asyncio.to_thread(store.accept, proposal.id)
                     accepted += 1
-                elif choice == "discard" and await asyncio.to_thread(store.discard, proposal.id):
-                    discarded += 1
+                elif choice == "discard":
+                    if await asyncio.to_thread(store.discard, proposal.id):
+                        discarded += 1
+                    else:
+                        app.session.add_message("system", "That proposal was already handled.")
             except (MemoryStoreError, OSError) as e:
                 app.session.add_error(f"Could not {choice} {proposal.description!r}: {e}")
         waiting = len(await asyncio.to_thread(store.proposals))
