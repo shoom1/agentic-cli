@@ -1,10 +1,12 @@
 """The model-list cache: ``~/.<app>/model_cache.json``, read at startup, written after listings.
 
 Fresh entries (under 24 hours) spare startup the network; stale ones are used
-while a background refresh runs; a broken file, a file from before version 2,
+while a background refresh runs; a broken file, a file from before version 3,
 or an entry for another address or kind is ignored and listed again (R9). A
 catalog writes only the providers it listed and keeps every other entry as the
-file holds it (another catalog may have written it), and a search adopts one.
+file holds it (another catalog may have written it, another release too: an
+entry this version cannot read is carried over as it is, and a file of a newer
+version is never written), and a search adopts one.
 The file is private and holds no credential.
 """
 
@@ -402,7 +404,7 @@ async def test_an_unwritable_cache_never_fails_startup(tmp_path):
 BROKEN = {
     "invalid JSON": lambda doc: b"{not json",
     "not an object": lambda doc: b"[1, 2, 3]",
-    "wrong version": lambda doc: json.dumps({**doc, "version": 4}).encode(),
+    "an older version": lambda doc: json.dumps({**doc, "version": 2}).encode(),
     "no version": lambda doc: json.dumps({"providers": doc["providers"]}).encode(),
     "fetched_at a string": lambda doc: _with_google(doc, fetched_at="yesterday"),
     "ok a number": lambda doc: _with_google(doc, ok=1),
@@ -535,6 +537,182 @@ async def test_a_version_2_cache_is_listed_again(cache):
     ):
         assert catalog.record(ref).ref == ref
     assert read(cache)["version"] == 3
+
+
+# --- a file this version cannot fully read ------------------------------------------------
+# Two releases of one app (a dev checkout beside the installed app) share the file. What
+# one cannot read, the other has written: a catalog keeps every entry it did not list as the
+# file holds it, readable or not, and never writes a file of a newer version.
+
+GEMINI_PRO = ModelRef("google", "gemini-3.1-pro-preview")
+
+
+async def _shared_file(cache, clock) -> dict:
+    """A healthy file holding Google, Anthropic and OpenRouter; the document as read."""
+    await make(
+        cache, references=ON_OPENROUTER, google=KEYS["google"], anthropic=KEYS["anthropic"],
+        openrouter=KEYS["openrouter"], clock=clock,
+    ).load()
+    document = read(cache)
+    assert set(document["providers"]) == {"google", "anthropic", "openrouter"}
+    return document
+
+
+async def _listing_only_google(cache, clock, api=None) -> tuple[ModelCatalog, ProviderAPI]:
+    """A catalog whose one entry is a Google model: Google is the one provider in use."""
+    api = api or ProviderAPI()
+    catalog = make(
+        cache, api, entries={GEMINI_PRO: ModelEntry()}, google=KEYS["google"],
+        anthropic=KEYS["anthropic"], openrouter=KEYS["openrouter"], clock=clock,
+    )
+    await catalog.load()
+    return catalog, api
+
+
+async def test_a_cached_model_with_a_field_this_version_does_not_know_is_read(cache):
+    """A release that adds a field to a cached model needs no version bump: an
+    older one reads the model without it."""
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    document["providers"]["openrouter"]["models"][0]["pricing"] = 1.0
+    cache.write_text(json.dumps(document))
+
+    catalog = make(cache, NoNetwork(), references=ON_OPENROUTER, openrouter=KEYS["openrouter"],
+                   clock=clock)
+    await catalog.load()
+
+    assert states(catalog) == {"openrouter": ProviderState.FRESH}
+    assert catalog.record(ON_OPENROUTER[0]).ref == ON_OPENROUTER[0]
+
+
+async def test_a_cached_model_with_an_unknown_field_costs_no_other_entry(cache):
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    del document["providers"]["google"]
+    document["providers"]["openrouter"]["models"][0]["pricing"] = 1.0
+    cache.write_text(json.dumps(document))
+
+    _, api = await _listing_only_google(cache, clock)
+
+    assert api.calls == ["google"]
+    written = read(cache)
+    assert written["version"] == 3
+    assert set(written["providers"]) == {"google", "anthropic", "openrouter"}
+    assert written["providers"]["anthropic"] == document["providers"]["anthropic"]
+    assert written["providers"]["openrouter"] == document["providers"]["openrouter"]  # the field too
+
+
+DAMAGE = {
+    "ok a string": lambda entry: {**entry, "ok": "yes"},
+    "no fetched_at": lambda entry: {key: v for key, v in entry.items() if key != "fetched_at"},
+    "an unknown field": lambda entry: {**entry, "api_key": "x"},
+    "not an object": lambda entry: [entry],
+}
+
+
+@pytest.mark.parametrize("damage", list(DAMAGE))
+async def test_an_entry_this_version_cannot_read_survives_a_write_of_another(cache, damage):
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    del document["providers"]["google"]
+    document["providers"]["openrouter"] = DAMAGE[damage](document["providers"]["openrouter"])
+    cache.write_text(json.dumps(document))
+
+    _, api = await _listing_only_google(cache, clock)
+
+    assert api.calls == ["google"]
+    written = read(cache)["providers"]
+    assert set(written) == {"google", "anthropic", "openrouter"}
+    assert written["openrouter"] == document["providers"]["openrouter"]
+    assert written["anthropic"] == document["providers"]["anthropic"]
+
+
+async def test_a_damaged_entry_is_replaced_by_its_own_provider_s_listing(cache):
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    document["providers"]["google"]["ok"] = "yes"
+    cache.write_text(json.dumps(document))
+
+    _, api = await _listing_only_google(cache, clock)
+
+    assert api.calls == ["google"]
+    written = read(cache)["providers"]
+    assert written["google"]["ok"] is True and written["google"]["models"]
+    assert written["anthropic"] == document["providers"]["anthropic"]
+
+
+async def test_a_file_of_a_newer_version_is_listed_around_and_never_written(cache):
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    cache.write_text(json.dumps({**document, "version": 4}))
+    before = cache.read_bytes()
+
+    catalog, api = await _listing_only_google(cache, clock)
+    await catalog.refresh()
+    await catalog.search("gemini")
+
+    assert "google" in api.calls  # nothing in the file was used
+    assert states(catalog)["google"] is ProviderState.FRESH  # the listings are kept in memory
+    assert cache.read_bytes() == before
+
+
+async def test_a_newer_file_is_not_used_by_this_version(cache):
+    clock = Clock()
+    document = await _shared_file(cache, clock)
+    cache.write_text(json.dumps({**document, "version": 4}))
+    api = ProviderAPI()
+
+    catalog = make(cache, api, google=KEYS["google"], anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+
+    assert sorted(api.calls) == ["anthropic", "google"]
+
+
+# --- one cache, several projects: what each catalog says is absent --------------------------
+
+
+async def test_two_projects_with_different_retired_entries_list_once_each(cache):
+    """Two projects of one app share the file, and each names a model the
+    provider has retired. Each is confirmed by one listing, and no start then
+    lists for it while the listing is fresh: neither project's record of what
+    is absent replaces the other's."""
+    clock = Clock()
+    good = ModelRef("anthropic", "claude-sonnet-4-6")
+    retired_here, retired_there = RETIRED, ModelRef("anthropic", "claude-opus-3")
+    project_a = {retired_here: ModelEntry(), good: ModelEntry()}
+    project_b = {retired_there: ModelEntry(), good: ModelEntry()}
+    listings = []
+
+    for entries in (project_a, project_a, project_b, project_a, project_b, project_a):
+        api = ProviderAPI()
+        catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+        await catalog.load()
+        listings.append(len(api.calls))
+        clock.now += 600  # still fresh
+
+    assert listings == [1, 0, 1, 0, 0, 0]
+    assert read(cache)["providers"]["anthropic"]["absent"] == [
+        retired_there.model, retired_here.model,
+    ]
+
+
+async def test_a_model_the_provider_serves_leaves_the_recorded_absent(cache):
+    """The file's record of what is absent is another catalog's too, from a listing
+    that may predate a model: a new listing that serves it drops it from the record."""
+    clock = Clock()
+    served = "claude-sonnet-4-6"
+    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    document = read(cache)
+    document["providers"]["anthropic"]["absent"] = ["claude-opus-3", served, RETIRED.model]
+    cache.write_text(json.dumps(document))
+    catalog = make(
+        cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+
+    await catalog.refresh(["anthropic"])
+
+    assert read(cache)["providers"]["anthropic"]["absent"] == ["claude-opus-3", RETIRED.model]
 
 
 # --- search: a provider not in use, from the cache or listed --------------------------

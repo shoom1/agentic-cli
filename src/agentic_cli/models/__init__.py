@@ -23,7 +23,9 @@ both); each backend's adapter turns what it resolves into SDK objects.
 - ``catalog``: ``ModelCatalog``, the records merged from ``models`` entries,
   listings and the table; which ids each provider rejects; the providers in
   use, the list the model pickers offer, and search over full listings; the
-  listing cache and its background refresh.
+  background refresh. It builds records with ``listing_records`` and keeps
+  listings in the file ``listing_cache`` reads and writes (neither is
+  exported).
 """
 
 from agentic_cli.models.catalog import ModelCatalog, ProviderState, ProviderStatus

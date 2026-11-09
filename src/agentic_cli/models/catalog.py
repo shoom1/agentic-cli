@@ -49,44 +49,48 @@ rejects one the provider is listed again, once: while loading for an entry's
 model, through ``confirm_rejections`` for a referenced one. A listing records
 the entries' models it lacked (``absent``, in the cache too), and a later
 start trusts that record: a model a provider retired costs one listing, not
-one at every start.
+one at every start, whichever project's list names it.
 
 **Cache.** Listings are kept in a JSON file (``~/.<app>/model_cache.json`` in
-the workflow), one entry per provider: fetch time, outcome, address, kind,
-models (each with whether it is shown) and the entries' models it lacked,
-never a key. Startup reads it and waits on the network only for a
-provider in use that has credentials and no entry for its address and kind;
-a fresh entry needs no listing, and an older one (or a cached failure) is
-used while ``start_background_refresh`` lists it again. A broken file, one
-from an older version, or an entry for another address or kind is ignored
-and listed again. A listing writes its own provider's entry and leaves every
-other entry as the file then holds it: several catalogs share the file (two
-terminals, two projects of one app), and a catalog's own copy of an entry may
-be older than the file's. A failed listing never replaces a listing of the
-provider's address and kind.
+the workflow; ``listing_cache.ListingCache`` reads and writes it), one entry
+per provider: fetch time, outcome, address, kind, models (each with whether
+it is shown) and the entries' models it lacked, never a key. Startup reads it
+and waits on the network only for a provider in use that has credentials and
+no entry for its address and kind; a fresh entry needs no listing, and an
+older one (or a cached failure) is used while ``start_background_refresh``
+lists it again. A broken file, one from an older version, an entry this
+version cannot read, or an entry for another address or kind is ignored and
+listed again; a file of a newer version is not used, and never written (the
+listings stay in memory). A listing writes its own provider's entry and
+leaves every other entry as the file then holds it, one this version cannot
+read included: several catalogs share the file (two terminals, two projects
+of one app, two releases of it), and a catalog's own copy of an entry may be
+older than the file's. A failed listing never replaces a listing of the
+provider's address and kind, and the models recorded absent are the file's
+and this catalog's together, less those the listing serves.
 """
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-import json
 import logging
-import os
-import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from agentic_cli.models.discovery import DEFAULT_TIMEOUT, ListedModel, Listing, list_models
+from agentic_cli.models.discovery import DEFAULT_TIMEOUT, Listing, list_models
 from agentic_cli.models.entries import ModelEntry
+from agentic_cli.models.listing_cache import (  # noqa: F401 - CACHE_VERSION stays importable from here
+    CACHE_VERSION,
+    CacheContents,
+    CacheEntry,
+    ListingCache,
+)
 from agentic_cli.models.listing_records import records_for, with_entry
 from agentic_cli.models.providers import Provider
 from agentic_cli.models.records import ModelRecord
@@ -98,11 +102,6 @@ logger = logging.getLogger(__name__)
 
 #: Seconds a listing stays fresh.
 DEFAULT_TTL = 86400.0
-#: Version 3 holds every model a provider serves, and which are shown
-#: (version 2 held only those shown, so it rejected the others while fresh);
-#: a file of another version is listed again.
-CACHE_VERSION = 3
-
 # The tiers the list offers of each built-in provider when no entry can run.
 _TIERS = ("fast", "default", "strong")
 # How many models an "is not available" message names.
@@ -221,7 +220,7 @@ class ModelCatalog:
         timeout: float = DEFAULT_TIMEOUT,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._cache_path = Path(cache_path) if cache_path is not None else None
+        self._cache = ListingCache(cache_path)
         self._table = table or load_table()
         self._ttl = ttl_seconds
         self._transport = transport
@@ -263,13 +262,13 @@ class ModelCatalog:
         key is missing (``not_offered`` says that). Never raises for a
         network or cache problem.
         """
-        cached = self._read_cache()
+        cached = self._cache.read()
         to_list: list[str] = []
         for name, state in self._states.items():
-            entry = cached.get(name)
             if name not in self._in_use or not state.listable:
                 continue
-            if entry is None or not _describes(entry, state.provider):
+            entry = cached.entry(name, state.provider)
+            if entry is None:
                 to_list.append(name)
             else:
                 self._adopt(state, entry)
@@ -364,10 +363,11 @@ class ModelCatalog:
         listable = [name for name, state in self._states.items() if state.listable]
         unlisted = [n for n in listable if self._states[n].known is ProviderState.UNATTEMPTED]
         if unlisted:
-            cached = self._read_cache()
+            cached = self._cache.read()
             for name in unlisted:
-                entry, state = cached.get(name), self._states[name]
-                if entry is not None and _describes(entry, state.provider):
+                state = self._states[name]
+                entry = cached.entry(name, state.provider)
+                if entry is not None:
                     self._adopt(state, entry)
             self._searched.update(unlisted)
         stale = [n for n in listable if self._states[n].known is not ProviderState.FRESH]
@@ -497,7 +497,7 @@ class ModelCatalog:
             if state.provider.builtin and state.provider.has_credentials
         ]
 
-    async def _load_builtins_now_needed(self, cached: Mapping[str, _CacheEntry]) -> None:
+    async def _load_builtins_now_needed(self, cached: CacheContents) -> None:
         """Ask the built-ins' rules again with the entries the listings left
         offered, and load the built-ins they now need: from the cache when it
         holds their listing, else listed once (a retired entry may have been
@@ -511,11 +511,12 @@ class ModelCatalog:
         self._in_use = tuple(n for n in self._states if n in self._in_use or n in needed)
         to_list: list[str] = []
         for name in needed:
-            entry, state = cached.get(name), self._states[name]
-            if entry is not None and _describes(entry, state.provider):
-                self._adopt(state, entry)
-            else:
+            state = self._states[name]
+            entry = cached.entry(name, state.provider)
+            if entry is None:
                 to_list.append(name)
+            else:
+                self._adopt(state, entry)
         await self._list_now(to_list)
 
     def _listed_names(self) -> list[str]:
@@ -632,17 +633,17 @@ class ModelCatalog:
                 for ref in self._entries
                 if ref.provider == name and ref.model not in state.accepted
             )
-        self._write_cache(name)
+        # A failed attempt writes the listing kept through it, else the failure;
+        # the cache never lets either replace a listing of the same address and kind.
+        latest = state.listing or state.failure
+        if latest is not None:
+            self._cache.put(
+                name, state.provider, latest, state.absent, after_failure=state.failure is not None
+            )
 
-    def _adopt(self, state: _ProviderState, entry: _CacheEntry) -> None:
+    def _adopt(self, state: _ProviderState, entry: CacheEntry) -> None:
         """Use a cache entry: fresh, stale, or a cached failure."""
-        listing = Listing(
-            provider=state.provider.name,
-            ok=entry.ok,
-            models=tuple(ListedModel(**model.model_dump()) for model in entry.models),
-            fetched_at=entry.fetched_at,
-            error=entry.error,
-        )
+        listing = entry.to_listing(state.provider.name)
         if listing.ok:
             age = self._clock() - listing.fetched_at
             fresh = 0 <= age < self._ttl
@@ -681,66 +682,6 @@ class ModelCatalog:
             state.provider, state.listing, self._table, self._entries
         )
 
-    # --- the cache file ---------------------------------------------------------
-
-    def _read_cache(self) -> dict[str, _CacheEntry]:
-        """The cache's entries; empty for a missing, unreadable or broken file."""
-        if self._cache_path is None:
-            return {}
-        try:
-            raw = self._cache_path.read_bytes()
-        except FileNotFoundError:
-            return {}
-        except OSError as exc:
-            logger.debug("Ignoring the model cache %s: %s", self._cache_path, exc)
-            return {}
-        try:
-            document = _CacheFile.model_validate_json(raw)
-        except ValidationError as exc:
-            logger.debug(
-                "Ignoring the model cache %s: %d problem(s), first: %s",
-                self._cache_path,
-                exc.error_count(),
-                exc.errors(include_input=False)[0]["msg"],
-            )
-            return {}
-        return dict(document.providers)
-
-    def _write_cache(self, name: str) -> None:
-        """Write ``name``'s entry after its listing, keeping every other entry
-        as the file holds it now; a failure is logged, never raised.
-
-        A failed listing keeps a listing: the file's, when it holds one for
-        the provider's address and kind (another catalog may have written it
-        since this one read the file), else this catalog's earlier one. The
-        failure is written only when there is neither.
-        """
-        if self._cache_path is None:
-            return
-        cached = self._read_cache()
-        state = self._states[name]
-        if state.failure is not None:
-            entry = cached.get(name)
-            if entry is not None and entry.ok and _describes(entry, state.provider):
-                return
-        listing = state.listing or state.failure
-        if listing is None:
-            return
-        providers: dict[str, Any] = {n: entry.model_dump() for n, entry in cached.items()}
-        providers[name] = {
-            "fetched_at": listing.fetched_at,
-            "ok": listing.ok,
-            "error": listing.error,
-            "base_url": state.provider.base_url,
-            "kind": state.provider.kind.value,
-            "models": [dataclasses.asdict(model) for model in listing.models],
-            "absent": sorted(state.absent) if listing.ok else [],
-        }
-        try:
-            _atomic_write_json(self._cache_path, {"version": CACHE_VERSION, "providers": providers})
-        except OSError as exc:
-            logger.debug("Could not write the model cache %s: %s", self._cache_path, exc)
-
 
 def _parsed(specs: Iterable[str]) -> Iterator[ModelRef]:
     """Each of ``specs`` that is a reference or a bare model id; the rest skipped."""
@@ -749,69 +690,3 @@ def _parsed(specs: Iterable[str]) -> Iterator[ModelRef]:
             yield parse_ref(spec)
         except ModelSpecError:
             continue
-
-
-def _describes(entry: _CacheEntry, provider: Provider) -> bool:
-    """Whether a cache entry is a listing of ``provider``: of its address and kind."""
-    return entry.base_url == provider.base_url and entry.kind == provider.kind.value
-
-
-def _atomic_write_json(path: Path, data: Any) -> None:
-    """Write ``data`` as JSON through a private (0600) temp file and a rename.
-
-    The same contract as ``agentic_cli.file_utils.atomic_write_json``; the
-    package keeps its own copy so it imports nothing from agentic-cli.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=1)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
-
-# --- the cache file's schema: strict, so a damaged file is ignored, not misread ---
-
-
-class _Strict(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
-
-
-class _CachedModel(_Strict):
-    """A ``ListedModel``, as written."""
-
-    id: str = Field(min_length=1)
-    display_name: str = ""
-    context_window: int | None = None
-    max_output: int | None = None
-    image_input: bool | None = None
-    tools: bool | None = None
-    reasoning: bool | None = None
-    thinking_types: tuple[str, ...] = ()
-    effort_levels: tuple[str, ...] = ()
-    can_disable: bool | None = None
-    shown: bool = True
-    alias: str | None = Field(default=None, min_length=1)
-
-
-class _CacheEntry(_Strict):
-    fetched_at: float
-    ok: bool
-    error: str | None = None
-    base_url: str | None = None
-    #: The provider's kind (``ProviderKind``'s value): another kind lists again.
-    kind: str | None = None
-    models: tuple[_CachedModel, ...] = ()
-    #: The entries' models the listing lacked (``_ProviderState.absent``).
-    absent: tuple[str, ...] = ()
-
-
-class _CacheFile(_Strict):
-    version: Literal[3]
-    providers: dict[str, _CacheEntry]
