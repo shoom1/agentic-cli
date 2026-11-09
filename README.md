@@ -1361,9 +1361,10 @@ session store and services, also when it fails. A backend of your own
 implements `backend_type`, `_get_state_tools`, `_do_initialize` (its build)
 and `process`, and two hooks for what it holds: `_detach_backend()` (what each
 initialization builds: agents, a runner, MCP sessions) and `_detach_store()`
-(the store its conversations live in, which a model switch keeps). Each sets
-its handles to `None` and returns `(name, close)` pairs; both default to
-nothing. `BaseWorkflowManager`'s docstring ends with such a backend.
+(the store its conversations live in, which a model switch keeps). Each is
+synchronous (`def`), sets its handles to `None` and returns `(name, close)`
+pairs; both default to nothing. `BaseWorkflowManager`'s docstring ends with
+such a backend.
 
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
 `FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a

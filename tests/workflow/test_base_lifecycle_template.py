@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import gc
+import warnings
 from collections import Counter
 from collections.abc import Callable
 from types import SimpleNamespace
@@ -229,6 +231,30 @@ class TestTheBaseReleaseResetsTheBaseState:
         assert (manager._budgets, manager._index_snapshots) == ({}, {})
         assert await _reply(manager) == ["graph 2"]
         await manager.cleanup()
+
+
+class TestAHookMustBeSynchronous:
+    async def test_an_async_hook_fails_the_release_loudly(self, ctx):
+        """A hook written ``async def`` by mistake detaches nothing (its body
+        never runs): the release says so, and still releases the rest."""
+
+        class AsyncHook(_HooksOnly):
+            async def _detach_backend(self):  # the mistake
+                return super()._detach_backend()
+
+        manager = AsyncHook([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+        await manager.initialize_services()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match=r"_detach_backend must be synchronous"):
+                await manager.cleanup()
+            gc.collect()
+
+        assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
+        assert manager.is_initialized is False
+        assert manager.closed == ["store 1"]
+        assert manager.catalog is None and manager.services == {}
 
 
 # ---------------------------------------------------------------------------

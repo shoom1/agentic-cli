@@ -1254,14 +1254,17 @@ the start of the entry's title.
   sessions) and `_detach_store()` (the store the conversations live in),
   closes the services, then closes the rest in one task of its own, in that
   order, each close isolated, awaited under a shield: a Ctrl+C during a model
-  switch stops only the wait, and nothing is left open. Each hook detaches its
-  handles and returns `(name, close)` pairs; both default to nothing. A model
-  switch (`reinitialize(preserve_sessions=True)`) keeps the store and the
-  services with one mechanism, `_keeping(preserve)` (`_carrying_services` is
-  its other name), also through a switch that fails. A backend now implements
-  `backend_type`, `_get_state_tools`, `_do_initialize`, `process` and the hooks
-  for what it holds, as the class docstring's example does; one that overrides
-  `cleanup` or `reinitialize` keeps its own (the LangGraph backend does).
+  switch stops only the wait, and nothing is left open. Each hook is
+  synchronous, detaches its handles and returns `(name, close)` pairs; both
+  default to nothing, and one that returns an awaitable (`async def` by
+  mistake) fails the release with a `TypeError` once the rest is released. A
+  model switch (`reinitialize(preserve_sessions=True)`) keeps the store and
+  the services with one mechanism, `_keeping(preserve)` (`_carrying_services`
+  is its other name), also through a switch that fails. A backend now
+  implements `backend_type`, `_get_state_tools`, `_do_initialize`, `process`
+  and the hooks for what it holds, as the class docstring's example does; one
+  that overrides `cleanup` or `reinitialize` keeps its own (the LangGraph
+  backend does).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -1965,7 +1968,10 @@ the start of the entry's title.
   session service through a release, is deprecated and will be removed in
   0.8.0. It still keeps the session store for that release, with a
   `DeprecationWarning`; release inside `with manager._keeping(True):`
-  instead, as `reinitialize(preserve_sessions=True)` does.
+  instead, as `reinitialize(preserve_sessions=True)` does. An override of
+  `_release_resources` is called without the keyword during a model switch
+  (the base keeps the store through `_keeping`): it reads
+  `self._keeping_store` to know whether the store is being kept.
 
 - **The LangGraph backend** (`orchestrator="langgraph"`,
   `LangGraphWorkflowManager` and its alias `LangGraphManager`, and the

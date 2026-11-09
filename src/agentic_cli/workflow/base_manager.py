@@ -198,10 +198,12 @@ class BaseWorkflowManager(ABC):
         ``_release_resources``. A backend builds in ``_do_initialize`` and
         takes part in the release through two hooks, ``_detach_backend``
         (what it built for this initialization) and ``_detach_store`` (the
-        store its conversations live in), each detaching its handles and
-        returning their closers; the base closes them under a shield, so a
-        cancel never leaves one open. A backend that overrides ``cleanup`` or
-        ``reinitialize`` keeps its own (the deprecated LangGraph backend
+        store its conversations live in), each synchronous, detaching its
+        handles and returning their closers; the base closes them under a
+        shield, so cancelling the caller never leaves one open (only an event
+        loop shutting down, which cancels the closing task itself, skips the
+        closers after the one running). A backend that overrides ``cleanup``
+        or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
 
     Example:
@@ -1603,7 +1605,7 @@ class BaseWorkflowManager(ABC):
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False
     ) -> None:
-        """Release everything this manager owns. Idempotent, never raises.
+        """Release everything this manager owns. Idempotent.
 
         The one release protocol: ``cleanup()``, ``reinitialize()`` and the
         rollback of a failed initialization (``_initialize_locked``) all run
@@ -1623,14 +1625,32 @@ class BaseWorkflowManager(ABC):
         4. The closers, in one task of its own, in a fixed order: the
            backend's, the store's, then the catalog's. Each is isolated (one
            that raises is logged, and the rest still run), and the task is
-           awaited under a shield: a cancel (Ctrl+C during a ``/settings``
-           model switch, a cancelled ``async with manager``) stops only the
-           wait, and everything still closes, once.
+           awaited under a shield: a cancel of the caller (Ctrl+C during a
+           ``/settings`` model switch, a cancelled ``async with manager``)
+           stops only the wait, and everything still closes, once. Only an
+           event loop shutting down, which cancels the closing task itself,
+           skips the closers after the one running.
+
+        It raises nothing a close raises. It raises ``TypeError`` for a hook
+        that is not synchronous (returns an awaitable), after releasing
+        everything else: that hook detached nothing, so its handles are still
+        open.
+
+        A subclass that overrides this method (as 0.6's ADK backend did, with
+        ``keep_session_service``) and calls it is called without the keyword
+        during a model switch, since :meth:`reinitialize` keeps the store
+        through :meth:`_keeping`: the override reads ``self._keeping_store``
+        to know whether the store is being kept.
 
         Args:
             keep_session_service: Deprecated, removed in 0.8.0: keeps the
                 session store for this release, as :meth:`_keeping` does.
-            keep_checkpointer: Deprecated, removed in 0.8.0: the same.
+            keep_checkpointer: Deprecated: the same, accepted for code written
+                against the 0.7 development line (Deep Agents' own release
+                took it).
+
+        Raises:
+            TypeError: A detach hook returned an awaitable.
         """
         logger.debug("cleaning_up_workflow_manager")
         if keep_session_service or keep_checkpointer:
@@ -1648,9 +1668,10 @@ class BaseWorkflowManager(ABC):
         self._index_snapshots.clear()
         catalog, self._catalog = self._catalog, None
 
-        closers = self._detached(self._detach_backend)
+        not_synchronous: list[TypeError] = []
+        closers = self._detached(self._detach_backend, not_synchronous)
         if not keep_store:
-            closers += self._detached(self._detach_store)
+            closers += self._detached(self._detach_store, not_synchronous)
         closers.append((
             "model_catalog",
             functools.partial(self._aclose_owned, catalog, "model_catalog"),
@@ -1663,6 +1684,8 @@ class BaseWorkflowManager(ABC):
         closing.add_done_callback(_CLOSING.discard)
         await asyncio.shield(closing)
         logger.info("workflow_manager_cleaned_up")
+        if not_synchronous:
+            raise not_synchronous[0]
 
     def _detach_backend(self) -> list[Closer]:
         """Detach what the backend built for this initialization, and say how to close it.
@@ -1671,8 +1694,13 @@ class BaseWorkflowManager(ABC):
         handle a turn runs on to None (so ``_backend_ready`` is False and a
         repeat release finds nothing) and return the closers of what they
         held, in the order they must run. Called on every release, a model
-        switch's included. It must not await or raise. The base holds
-        nothing here.
+        switch's included. It must be synchronous (``def``, never
+        ``async def``) and must not raise. The services are already closed
+        when its closers run (the base closes them first, synchronously, so a
+        cancel cannot skip them); that is safe because no turn is in flight
+        (a release holds the turn lock, or rolls back an attempt no turn ran
+        on) and the services never reach the backend's MCP servers or its
+        store. The base holds nothing here.
         """
         return []
 
@@ -1681,22 +1709,44 @@ class BaseWorkflowManager(ABC):
 
         A backend hook of the release (:meth:`_release_resources`), as
         :meth:`_detach_backend` is, for the store the conversations live in
-        (a session service, a checkpointer and its connections). Not called
-        while a model switch keeps the store (:meth:`_keeping`): the backend
-        then finds its store still attached when it builds again, and must
-        reuse it rather than open another. The base holds nothing here.
+        (a session service, a checkpointer and its connections): synchronous,
+        never raising, and its closers run after the services closed, which
+        is safe for the same reasons (no turn in flight; no service reaches
+        the store). Not called while a model switch keeps the store
+        (:meth:`_keeping`): the backend then finds its store still attached
+        when it builds again, and must reuse it rather than open another. The
+        base holds nothing here.
         """
         return []
 
     @staticmethod
-    def _detached(detach: Callable[[], list[Closer]]) -> list[Closer]:
-        """What a detach hook returns; nothing, logged, when it raises."""
+    def _detached(
+        detach: Callable[[], list[Closer]], not_synchronous: list[TypeError]
+    ) -> list[Closer]:
+        """What a detach hook returns; nothing, logged, when it raises.
+
+        A hook that returns an awaitable (written ``async def`` by mistake)
+        detached nothing, since its body never ran: the awaitable is closed,
+        so no "never awaited" warning follows, and a ``TypeError`` naming the
+        hook is added to ``not_synchronous`` for the release to raise once
+        everything else is released.
+        """
+        name = getattr(detach, "__qualname__", repr(detach))
         try:
-            return list(detach())
+            closers = detach()
+            if inspect.isawaitable(closers):
+                if inspect.iscoroutine(closers):
+                    closers.close()
+                not_synchronous.append(TypeError(
+                    f"{name} must be synchronous (def, not async def): it "
+                    "returned an awaitable, so it detached nothing and what it "
+                    "holds is still open. Set its handles to None and return "
+                    "their closers; the closers may be coroutine functions."
+                ))
+                return []
+            return list(closers)
         except Exception as exc:  # noqa: BLE001 - shutdown must not fail
-            logger.warning(
-                "resource_detach_failed", hook=detach.__name__, error=str(exc)
-            )
+            logger.warning("resource_detach_failed", hook=name, error=str(exc))
             return []
 
     @staticmethod
