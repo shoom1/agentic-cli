@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import inspect
 import warnings
@@ -779,14 +780,18 @@ class BaseWorkflowManager(ABC):
         self._publish_services(built)
 
     def _discard_built_services(self, build: "asyncio.Future[dict[str, Any]]") -> None:
-        """Release services constructed for an attempt that no longer owns init."""
+        """Release services constructed for an attempt that no longer owns init.
+
+        A done callback, on the event loop: the closes run on a worker thread
+        (:meth:`_start_closing_services`).
+        """
         if build.cancelled() or build.exception() is not None:
             return
         built = build.result()
         if not built:
             return
         logger.warning("services_discarded_after_rollback", services=sorted(built))
-        self._close_services(built)
+        self._start_closing_services(built)
 
     async def summarize(self, content: str, prompt: str) -> str:
         """Summarize content using the configured LLM.
@@ -1267,16 +1272,42 @@ class BaseWorkflowManager(ABC):
         close_services(services, cls._SYNC_SERVICE_CLOSERS)
 
     def _cleanup_managers(self) -> None:
-        """Release the synchronous resources this manager owns.
+        """Release the synchronous resources this manager owns, here and now.
 
         Only services this manager created are released (see
         ``_build_services``). Idempotent: the registry is emptied, so a second
         call finds nothing. The registry is cleared regardless of failures.
 
         Services a reinitialize is carrying over (:meth:`_keeping`) stay
-        published and open.
+        published and open. The closers block, so this runs them on the
+        calling thread: the base's release does not call it, it closes them
+        on a worker thread (:meth:`_release_resources`); LangGraph's
+        ``cleanup`` does.
         """
         self._close_services(self._service_set.release())
+
+    def _start_closing_services(
+        self, services: dict[str, Any]
+    ) -> "asyncio.Future[None] | None":
+        """Start closing ``services`` on a worker thread now; what to await, or None.
+
+        Their closers block (a container removed, a kernel shut down, the
+        jobs directory's lock waited for), so they never run on the event
+        loop, where they froze the app. Started at once, they run to their
+        end whatever becomes of the caller: a thread cannot be cancelled, and
+        the loop's default executor is joined when the loop shuts down. A
+        loop whose executor is already shut down closes them here.
+        """
+        if not services:
+            return None
+        close = functools.partial(
+            contextvars.copy_context().run, self._close_services, services
+        )
+        try:
+            return asyncio.get_running_loop().run_in_executor(None, close)
+        except RuntimeError:  # no loop, or its executor is shut down
+            close()
+            return None
 
     @contextlib.contextmanager
     def _keeping(self, preserve: bool) -> Iterator[None]:
@@ -1805,16 +1836,20 @@ class BaseWorkflowManager(ABC):
            store), which is not called while a model switch keeps the store
            (:meth:`_keeping`). Each detaches its handles and returns their
            closers.
-        3. The services, closed now (synchronously), except those a model
-           switch carries.
+        3. The services, detached now, except those a model switch carries,
+           and their closes started on a worker thread
+           (:meth:`_start_closing_services`): they block, and on the event
+           loop they froze the app.
         4. The closers, in one task of its own, in a fixed order: the
-           backend's, the store's, then the catalog's. Each is isolated (one
-           that raises is logged, and the rest still run), and the task is
-           awaited under a shield: a cancel of the caller (Ctrl+C during a
-           ``/settings`` model switch, a cancelled ``async with manager``)
-           stops only the wait, and everything still closes, once. Only an
-           event loop shutting down, which cancels the closing task itself,
-           skips the closers after the one running.
+           services' closes waited for, then the backend's, the store's and
+           the catalog's. Each is isolated (one that raises is logged, and
+           the rest still run), and the task is awaited under a shield: a
+           cancel of the caller (Ctrl+C during a ``/settings`` model switch,
+           a cancelled ``async with manager``) stops only the wait, and
+           everything still closes, once. Only an event loop shutting down,
+           which cancels the closing task itself, skips the closers after
+           the one running (the services' closes, on their thread, still
+           run to their end).
 
         It raises nothing a close raises. It raises ``TypeError`` for a hook
         that is not synchronous (returns an awaitable), after releasing
@@ -1862,7 +1897,9 @@ class BaseWorkflowManager(ABC):
             functools.partial(self._aclose_owned, catalog, "model_catalog"),
         ))
 
-        self._cleanup_managers()
+        services = self._start_closing_services(self._service_set.release())
+        if services is not None:
+            closers.insert(0, ("services", lambda: services))
 
         closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)
@@ -1881,9 +1918,10 @@ class BaseWorkflowManager(ABC):
         held, in the order they must run. Called on every release, a model
         switch's included. It must be synchronous (``def``, never
         ``async def``) and must not raise. The services are already closed
-        when its closers run (the base closes them first, synchronously, so a
-        cancel cannot skip them); that is safe because no turn is in flight
-        (a release holds the turn lock, or rolls back an attempt no turn ran
+        when its closers run (the base starts closing them first, on a
+        worker thread, and waits for them before any closer, so a cancel
+        cannot skip them); that is safe because no turn is in flight (a
+        release holds the turn lock, or rolls back an attempt no turn ran
         on) and the services never reach the backend's MCP servers or its
         store. The base holds nothing here.
         """
