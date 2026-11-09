@@ -356,11 +356,13 @@ async def test_a_call_that_finished_beside_it_keeps_its_result(hermetic, monkeyp
 async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
     hermetic, monkeypatch, backend
 ):
-    """A finished result the tool result cap cuts is still the call's result.
+    """A finished result the tool result cap cuts is still the call's result,
+    as the cap cut it, and its full output is saved once.
 
     On ADK the plugin that records each finished result runs before the
     cap, which returns its cut and so ends ADK's after-tool callbacks: after
-    the cap, it would never see a result the cap cut.
+    the cap, it would never see a result the cap cut. The cancelled turn's
+    seal sends the cut the cap made, not a second one with a file of its own.
     """
     claude = serve(monkeypatch, Claude(Answer=[
         calls(("ic_long", {"topic": "tea"}, "toolu_f"), ("ic_wait", {}, "toolu_w")),
@@ -383,7 +385,9 @@ async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
     assert claude.refused == []
     assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER not in sent["toolu_f"]
     assert LONG_FACT not in sent["toolu_f"]
-    assert "Full output: ./.agentic_cli/tool-output/ic_long-" in sent["toolu_f"]
+    saved = [path.name for path in Path.cwd().glob(".agentic_cli/tool-output/ic_long-*")]
+    assert len(saved) == 1, saved
+    assert f"Full output: ./.agentic_cli/tool-output/{saved[0]};" in sent["toolu_f"]
     assert INTERRUPTED_BY_USER in sent["toolu_w"]
 
 

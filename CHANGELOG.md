@@ -3051,9 +3051,10 @@ step; each entry says what to use instead.
   OpenAI refuse, so every later turn of that conversation failed. Deep
   Agents reported a call that had finished beside the cancelled one as "did
   not complete", so a side effect could be repeated. Now a call that
-  finished keeps its result and the state it changed (`save_tasks`' tasks),
-  a running one is answered "Interrupted by the user before it finished; it
-  may have partly run. Check before running it again.", one waiting at its
+  finished keeps its result (as the tool result cap cut it, its full output
+  saved once) and the state it changed (`save_tasks`' tasks), a running one
+  is answered "Interrupted by the user before it finished; it may have
+  partly run. Check before running it again.", one waiting at its
   permission prompt or at a question "Not run: the user cancelled it.", a
   delegation to a sub-agent as interrupted, and a call whose job was already
   submitted with the job's state (found among the jobs the manager holds,

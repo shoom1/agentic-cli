@@ -18,13 +18,14 @@ without its result in every later request, which Claude and OpenAI refuse,
 and drop any other one, logging "Dropping function calls" on every request.
 
 ADK stops at the first plugin whose ``after_tool_callback`` returns a value,
-so this one is registered before ``ToolResultCapPlugin``; a finished result
-it answers with is cut as that plugin would have cut it.
+so this one is registered before ``ToolResultCapPlugin``, which tells it each
+cut it makes (``ToolResultCapPlugin.on_cut``): a finished result it answers
+with is the cap's own cut, whose full output was saved once.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from google.adk.events import Event
@@ -53,15 +54,15 @@ ABORTED = "INVOCATION_ABORTED"
 
 @dataclass(frozen=True, slots=True)
 class _Finished:
-    """A call that returned before the cancel: what the cap needs to cut it,
-    and the state it changed (ADK stores a call's state change with its
-    result, which a seal replaces: save_tasks would say it saved, and not)."""
+    """A call that returned before the cancel: its result, the cap's cut of
+    it (None when the cap left it as it was), and the state it changed (ADK
+    stores a call's state change with its result, which a seal replaces:
+    save_tasks would say it saved, and not)."""
 
-    tool: "BaseTool"
-    tool_args: dict[str, Any]
     result: Any
     state_delta: dict[str, Any]
     artifact_delta: dict[str, Any]
+    cut: Any = None
 
 
 class InterruptedCallsPlugin(BasePlugin):
@@ -69,13 +70,17 @@ class InterruptedCallsPlugin(BasePlugin):
 
     Args:
         open_calls: The manager's record of its calls.
-        cap: The tool result cap, for a finished result answered here.
+        cap: The tool result cap, registered after this plugin: it tells
+            this plugin each cut it makes, which a finished call's seal
+            sends.
     """
 
     def __init__(self, open_calls: OpenCalls, cap: "ToolResultCapPlugin | None" = None) -> None:
         super().__init__(name="interrupted_calls")
         self._open = open_calls
         self._cap = cap
+        if cap is not None:
+            cap.on_cut = self._keep_cut
         # Each running call's active-tool-call token, by call id.
         self._active: dict[str, Any] = {}
 
@@ -110,17 +115,19 @@ class InterruptedCallsPlugin(BasePlugin):
             return None
         actions = tool_context.actions
         self._open.finished(tool_context.function_call_id, _Finished(
-            tool, tool_args, result,
-            dict(actions.state_delta or {}), dict(actions.artifact_delta or {}),
+            result, dict(actions.state_delta or {}), dict(actions.artifact_delta or {}),
         ))
         return None
 
-    async def on_tool_error_callback(
-        self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext",
-        error: Exception,
-    ) -> None:
-        self._done(getattr(tool_context, "function_call_id", None))
-        return None
+    def _keep_cut(self, call_id: str, cut: Any) -> None:
+        """Keep the cap's cut of a finished call's result on its record.
+
+        The cap runs right after ``after_tool_callback`` recorded the call,
+        in the same turn: nothing awaits between them.
+        """
+        finished = self._open.recorded(call_id)
+        if isinstance(finished, _Finished):
+            self._open.finished(call_id, replace(finished, cut=cut))
 
     def _done(self, call_id: str | None) -> None:
         token = self._active.pop(call_id, None) if call_id else None
@@ -161,13 +168,10 @@ class InterruptedCallsPlugin(BasePlugin):
         ))
 
     async def _capped(self, finished: _Finished) -> Any:
-        if self._cap is None:
-            return finished.result
-        capped = await self._cap.after_tool_callback(
-            tool=finished.tool, tool_args=finished.tool_args, tool_context=None,
-            result=finished.result,
-        )
-        return finished.result if capped is None else capped
+        """What the model would have read for ``finished``: the cap's cut, or
+        the result as it was. Never cut again, which would save its full
+        output a second time."""
+        return finished.result if finished.cut is None else finished.cut
 
 
 def _result(answer: Any) -> Any:

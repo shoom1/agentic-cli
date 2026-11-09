@@ -27,6 +27,7 @@ included.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -51,12 +52,19 @@ class ToolResultCapPlugin(BasePlugin):
     Args:
         max_chars: ``tool_result_max_chars``.
         folder: Where full outputs are saved (``tool_output_dir``).
+
+    Attributes:
+        on_cut: Told each cut this plugin makes, with its call's id, or
+            None. ``InterruptedCallsPlugin`` sets it to keep the cut on the
+            call's record, so a cancelled turn's seal sends the cut the
+            model would have read, without cutting (and saving) it again.
     """
 
     def __init__(self, max_chars: int, folder: Path) -> None:
         super().__init__(name="tool_result_cap")
         self.max_chars = max_chars
         self.folder = folder
+        self.on_cut: Callable[[str, Any], None] | None = None
 
     async def after_tool_callback(
         self,
@@ -91,7 +99,11 @@ class ToolResultCapPlugin(BasePlugin):
             return None
         if not isinstance(capped, dict):
             capped = {"result": capped}
-        return _note_where_sent(capped)
+        capped = _note_where_sent(capped)
+        call_id = getattr(tool_context, "function_call_id", None)
+        if call_id and self.on_cut is not None:
+            self.on_cut(call_id, capped)
+        return capped
 
     def _saved_output_read(self, tool: "BaseTool", tool_args: dict[str, Any]) -> Path | None:
         """The saved output this call reads, when it is the framework's ``read_file``.
