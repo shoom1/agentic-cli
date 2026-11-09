@@ -24,6 +24,7 @@ from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin, inde
 from agentic_cli.workflow.adk.overflow_plugin import _with_summary  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import ContextBudget  # noqa: E402
+from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.workflow.adk.test_fit_guard import (  # noqa: E402
     CLAUDE,
@@ -45,6 +46,7 @@ from tests.workflow.test_adk_compaction import (  # noqa: E402,F401
     turn,
 )
 from tests.workflow.test_adk_overflow import SHAPES  # noqa: E402
+from tests.workflow.test_memory_index_snapshot import _manager as _index_manager  # noqa: E402
 
 INDEX = f"{INDEX_OPEN}\nNotes saved in earlier conversations.\n- [a1] 2026-11-08 feedback: Prefers tabs\n</memory-index>"
 
@@ -103,25 +105,43 @@ class TestFolding:
         assert texts(retry[0]) == [INDEX, f"{SUMMARY_PREFIX}\n\nNew summary.", "Two?"]
 
 
-async def test_the_index_survives_dropped_turns_and_stays_identical():
+async def test_the_index_survives_dropped_turns_and_stays_identical(tmp_path):
     """Review Focus 5: over the budget, the oldest turn goes but the index stays
-    first, and two requests carry byte-identical index text."""
-    history = [user(LONG), model("A1."), user(LONG), model("A2."), user("Three?")]
-    with_index = [user(INDEX), *history]
-    over = tokens(with_index) - 1
-    budget = ContextBudget(window=over * 2, window_known=True, budget=over,
-                           trigger=tokens([user(INDEX), *history[2:]]) + NOTE_ROOM, keep=0)
-    index_plugin = MemoryIndexPlugin(root="solo", index_for=lambda: INDEX)
-    guard = FitGuardPlugin({"solo": budget}, {"solo": CLAUDE})
-    sent = []
-    for _ in range(2):
-        request = LlmRequest(contents=list(history))
-        await index_plugin.before_model_callback(callback_context=call_context(), llm_request=request)
-        await guarded(guard, request, Recorded())
-        sent.append(request.contents)
-    for contents in sent:
-        assert texts(contents[0])[:2] == [INDEX, FIT_NOTE]
-    assert sent[0][0].parts[0].text == sent[1][0].parts[0].text
+    first, and every request carries byte-identical index text: the manager's
+    snapshot, wired into the plugin as the manager wires it, not a constant."""
+    manager, store = _index_manager(tmp_path)  # a root named "root" with memory tools
+    token = set_active_turn(SessionRef(app_name="agentic_cli", user_id="u", session_id="s"))
+    try:
+        store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+        snapshot = manager._memory_index_now()  # taken with the conversation's first request
+        history = [user(LONG), model("A1."), user(LONG), model("A2."), user("Three?")]
+        over = tokens([index_content(snapshot), *history]) - 1
+        budget = ContextBudget(
+            window=over * 2, window_known=True, budget=over,
+            trigger=tokens([index_content(snapshot), *history[2:]]) + NOTE_ROOM, keep=0,
+        )
+        index_plugin = MemoryIndexPlugin(root="root", index_for=manager._memory_index_now)
+        guard = FitGuardPlugin({"root": budget}, {"root": CLAUDE})
+        sent = []
+        # One request under the budget, then two the guard cuts; memories saved
+        # meanwhile reach none of them.
+        for contents in ([user("Hi.")], history, history):
+            store.save(f"Prefers dark mode {len(sent)}", "Dark.", "user", scope="user")
+            request = LlmRequest(contents=list(contents))
+            await index_plugin.before_model_callback(
+                callback_context=call_context("root"), llm_request=request
+            )
+            await guarded(guard, request, Recorded(), agent="root")
+            sent.append(request.contents)
+        assert manager._memory_index_cached() == snapshot
+    finally:
+        reset_active_turn(token)
+    assert "Prefers tabs" in snapshot and "dark mode" not in snapshot
+    assert [texts(contents[0])[0] for contents in sent] == [snapshot] * 3
+    for contents in sent[1:]:
+        assert texts(contents[0])[:2] == [snapshot, FIT_NOTE]
+        # The oldest turn went (one long question is left), the index did not.
+        assert sum(LONG in text for content in contents for text in texts(content)) == 1
 
 
 # -- on the real manager -------------------------------------------------------
