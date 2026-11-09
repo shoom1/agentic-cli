@@ -19,11 +19,12 @@ the root agent (``resume_with_job_result``). The root agent's conversation is
 summarized on demand by ``compact`` (``/compact``), with its own summarization
 middleware, kept when the agents are built.
 
-Lifecycle follows ADK's contract (``workflow/adk/manager.py``): initialization,
+The lifecycle is the base's (``BaseWorkflowManager``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
-lock, turns enter through ``_turn_admission``, and a model switch is
+lock, turns enter through ``_turn_admission``, a model switch is
 transactional, carrying the conversation's services and the checkpointer
-across.
+across, and a release closes everything under a shield. This manager
+implements the release's hooks (``_detach_backend``, ``_detach_store``).
 
 Installed by the ``deepagents`` extra: ``pip install 'agentic-cli[deepagents]'``.
 """
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
@@ -43,7 +45,7 @@ from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
 from agentic_cli.tools.skills import SkillStore
 from agentic_cli.tools.skills.langchain_tools import SKILL_TOOL_NAMES, make_skill_tools
-from agentic_cli.workflow.base_manager import BaseWorkflowManager
+from agentic_cli.workflow.base_manager import BaseWorkflowManager, Closer
 from agentic_cli.workflow.checkpointers import (
     deepagents_sqlite_path,
     open_checkpointer,
@@ -153,11 +155,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         # The checkpointer, and what owns its connection and the session
         # index's (an exit stack; the index's store is the session hooks').
-        # Pinned while reinitialize(preserve_sessions=True) carries them
-        # across, so neither its release nor a rollback closes them.
+        # A model switch keeps them (the base's _keeping), so neither its
+        # release nor a rollback closes them.
         self._checkpointer: BaseCheckpointSaver | None = None
         self._checkpointer_cm: AbstractAsyncContextManager | None = None
-        self._checkpointer_pinned = False
         self._sessions: CheckpointSessions | None = None
 
         self._root: CompiledStateGraph | None = None
@@ -373,52 +374,34 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         definition = self._mcp.identify(obj)
         return definition if definition is not None else identify_tool(obj)
 
-    async def cleanup(self) -> None:
-        """Release everything this manager owns.
+    def _detach_backend(self) -> list[Closer]:
+        """The agents and their MCP sessions; the notices about them go with them.
 
-        Idempotent: references are detached before they are closed, so a
-        repeat call finds nothing. Takes the lifecycle and turn locks, so it
-        waits for a running turn.
+        The MCP sessions are closed on every release, a model switch's
+        included (the next initialization opens them again). They move to
+        their own instance at once, so a later initialization starts its
+        sessions on a fresh one whatever closing these takes;
+        ``MCPSessions.aclose`` never raises, and each session's owner leaves
+        it even if the close is cancelled.
         """
-        async with self._lifecycle_lock:
-            async with self._turn_lock:
-                await self._release_resources()
-
-    async def _release_resources(self, keep_checkpointer: bool = False) -> None:
-        """Release owned resources; never raises.
-
-        The MCP sessions are closed on every path, a model switch's included,
-        and the notices about them dropped. The checkpointer's connection is
-        closed, not merely dropped; ``reinitialize(preserve_sessions=True)``
-        keeps the checkpointer instead and reuses it, and so does the rollback
-        of a failed attempt inside it (the checkpointer is pinned then).
-
-        Args:
-            keep_checkpointer: Keep the checkpointer, the session index and
-                their connections open.
-        """
-        logger.debug("cleaning_up_workflow_manager")
-
-        # Detach first, so a concurrent or repeat cleanup cannot close twice.
-        connection = None
-        if not (keep_checkpointer or self._checkpointer_pinned):
-            connection, self._checkpointer_cm = self._checkpointer_cm, None
-            self._checkpointer = None
-            self._sessions = None
         self._root = None
         self._root_summarization = None
-        self._budgets = {}
-        self._index_snapshots.clear()
-        self._initialized = False
         self._pending_notices = []
+        sessions, self._mcp = self._mcp, MCPSessions()
+        return [("mcp_sessions", sessions.aclose)]
 
-        # Never raises; each session's owner leaves it even if this is cancelled.
-        await self._mcp.aclose()
-        await self._close_connection(connection)
-        await self._close_catalog()
-        self._cleanup_managers()
+    def _detach_store(self) -> list[Closer]:
+        """The checkpointer and the session index, whose connections one exit stack owns.
 
-        logger.info("workflow_manager_cleaned_up")
+        The connections are closed, not merely dropped. A model switch keeps
+        them instead (``reinitialize(preserve_sessions=True)``), also through
+        the rollback of a failed attempt, and ``_do_initialize`` then reuses
+        the checkpointer it finds.
+        """
+        connection, self._checkpointer_cm = self._checkpointer_cm, None
+        self._checkpointer = None
+        self._sessions = None
+        return [("checkpointer", functools.partial(self._close_connection, connection))]
 
     async def _close_connection(self, connection: "AbstractAsyncContextManager | None") -> None:
         """Exit what owns the checkpointer's and the index's connections.
@@ -431,68 +414,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             await connection.__aexit__(None, None, None)
         except Exception as exc:  # noqa: BLE001 - shutdown must not fail
             logger.warning("resource_close_failed", resource="checkpointer", error=str(exc))
-
-    async def reinitialize(
-        self,
-        model: str | None = None,
-        preserve_sessions: bool = True,
-    ) -> None:
-        """Rebuild the agents with a new configuration (a model switch).
-
-        Transactional: on failure the manager is left *uninitialized*, with
-        nothing half-built. A preserved checkpointer survives both outcomes,
-        so a retry continues the same conversations; so do the services
-        scoped to them (session grants, sandbox kernels, jobs, knowledge
-        bases; see ``_carrying_services``).
-
-        Args:
-            model: The new default model; None re-resolves it from settings.
-            preserve_sessions: Keep the checkpointer (the same saver and
-                connection) and the services, and rebuild only the agents.
-                False closes them and opens fresh ones.
-
-        Raises:
-            Exception: Whatever initialization raised, after the rollback.
-        """
-        logger.info(
-            "reinitializing_workflow_manager",
-            new_model=model,
-            preserve_sessions=preserve_sessions,
-        )
-
-        async with self._lifecycle_lock:
-            async with self._turn_lock:
-                preserved = (
-                    (self._checkpointer, self._checkpointer_cm, self._sessions)
-                    if preserve_sessions
-                    else None
-                )
-                with self._carrying_services(preserve_sessions):
-                    await self._release_resources(keep_checkpointer=preserve_sessions)
-                    self._reset_model(model)
-                    self._checkpointer_pinned = preserve_sessions
-                    try:
-                        # _do_initialize reuses self._checkpointer when set, so
-                        # nothing replaces a preserved one.
-                        await self._initialize_locked()
-                    except BaseException:
-                        # The rollback left the pinned checkpointer alone;
-                        # restore it anyway, so a retry can use it.
-                        if preserved is not None and preserved[0] is not None:
-                            (
-                                self._checkpointer,
-                                self._checkpointer_cm,
-                                self._sessions,
-                            ) = preserved
-                        raise
-                    finally:
-                        self._checkpointer_pinned = False
-
-        logger.info(
-            "workflow_manager_reinitialized",
-            model=self.model,
-            sessions_preserved=preserve_sessions,
-        )
 
     # -------------------------------------------------------------------------
     # Turns

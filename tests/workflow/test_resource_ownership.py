@@ -590,7 +590,6 @@ def _deepagents_manager(connection, mcp=None):
     mgr._services = {}
     mgr._checkpointer = object()
     mgr._checkpointer_cm = connection
-    mgr._checkpointer_pinned = False
     mgr._sessions = object()
     mgr._root = object()
     mgr._root_agent_name = "a"
@@ -653,12 +652,23 @@ class TestDeepAgentsMCPClose:
     async def test_a_release_that_keeps_the_checkpointer_still_closes_them(self):
         connection, mcp = _CountedConnection(), _CountedMCP()
         mgr = _deepagents_manager(connection, mcp)
-        mgr._checkpointer_pinned = True  # the rollback inside a model switch
 
-        await mgr._release_resources()
-        await mgr._release_resources(keep_checkpointer=True)
+        with mgr._keeping(True):  # a model switch, and the rollback inside it
+            await mgr._release_resources()
 
-        assert (mcp.closes, connection.closes) == (2, 0)
+        assert (mcp.closes, connection.closes) == (1, 0)
+        assert mgr._checkpointer_cm is connection
+        assert mgr._mcp is not mcp, "the next initialization reuses closed sessions"
+
+    async def test_the_deprecated_keyword_still_keeps_the_checkpointer(self):
+        connection = _CountedConnection()
+        mgr = _deepagents_manager(connection)
+
+        with pytest.warns(DeprecationWarning, match="_keeping"):
+            await mgr._release_resources(keep_checkpointer=True)
+
+        assert connection.closes == 0
+        assert mgr._checkpointer_cm is connection
 
     async def test_their_notices_go_with_them(self):
         mgr = _deepagents_manager(None)

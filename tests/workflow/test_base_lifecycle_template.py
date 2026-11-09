@@ -313,8 +313,6 @@ _EVERYTHING = {"backend": 1, "store": 1, "catalog": 1, "sandbox": 1, "jobs": 1}
 
 @pytest.fixture(params=sorted(_BACKENDS))
 def backend(request):
-    if request.param == "deepagents" and request.node.cls is TestACancelDuringARelease:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="Deep Agents closes unshielded"))
     return _BACKENDS[request.param]
 
 
