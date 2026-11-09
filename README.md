@@ -188,12 +188,12 @@ import argparse
 
 class MyApp(BaseCLIApp):
     def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose  # before super().__init__(): the hooks run in it
         super().__init__(
             app_info=AppInfo(name="My App", version="0.1.0"),
             agent_configs=AGENTS,
             settings=BaseSettings(),
         )
-        self.verbose = verbose
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
@@ -235,6 +235,13 @@ class MyApp(BaseCLIApp):
             return dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box="fg:#9b59b6")
         return super().get_theme(name)
 ```
+
+The hooks run while the app is built: `get_theme()` as the session is built,
+and `register_commands()` last, once the session, the settings and the
+workflow controller exist. An attribute of your own that a hook reads is set
+before `super().__init__()`, as `self.verbose` is above. A command
+registered later (`app.command_registry.register(...)`) completes and is
+listed by `/help` too.
 
 The session draws in `get_theme(name)` for the user's `ui_theme` (see
 [Theme and dialog placement](#theme-and-dialog-placement)): `dark` unless they
@@ -604,9 +611,10 @@ key from the file. `examples/research_demo` lists both.
   `dark` from `COLORFGBG` when the terminal sets it, and `terminal` (the
   terminal's own palette) otherwise; agentic-cli's dark colors do not apply
   there. `NO_COLOR` draws in mono whatever the theme.
-- **The placement** applies from the next dialog agentic-cli opens: `/settings`
-  and the tools' questions, permission prompts included. An app's own dialogs
-  keep the placement the session started with, unless they pass
+- **The placement** applies from the next dialog agentic-cli opens: `/settings`,
+  the `/resume` picker, `/memory`'s dialogs and the tools' questions,
+  permission prompts included. An app's own dialogs keep the placement the
+  session started with, unless they pass
   `placement=self.settings.dialog_placement`.
 
 ### Settings Context
@@ -1965,10 +1973,16 @@ class MyCommand(Command):
         app.session.add_response(f"Executed with args: {args}")
 
 class MyApp(BaseCLIApp):
-    def _register_builtin_commands(self) -> None:
-        super()._register_builtin_commands()
+    def register_commands(self) -> None:
         self.command_registry.register(MyCommand())
 ```
+
+`register_commands()` runs last in the constructor, after the built-ins
+(`_register_builtin_commands()`), so a command of the same name or alias
+replaces a built-in one. An app that overrides `_register_builtin_commands()`
+instead, calling `super()._register_builtin_commands()` first and then
+registering its own, keeps working: its commands are registered just before
+`register_commands()` runs.
 
 ## Events
 

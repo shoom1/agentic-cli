@@ -86,6 +86,40 @@ PROJECT_SETTABLE_KEYS = frozenset({
 # lists them (BaseCLIApp._build_ui_items), unlike any other user-scoped key.
 USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 
+# When a change made while the app runs takes effect (BaseCLIApp.apply_settings,
+# which /settings calls). Every key /settings may show, PROJECT_SETTABLE_KEYS
+# and USER_PREFERENCE_KEYS, is in exactly one of the three sets, and a new one
+# is placed when it is added (tests/cli/test_settings_take_effect.py fails
+# until it is). An app's own key, in none of them, applies at once.
+#
+# Read when the workflow builds its agents and their models: the models and
+# their thinking, the backend, each agent's summary thresholds and result
+# cap, and what each model's client is built with (its retries and request
+# timeout). A change rebuilds the workflow, keeping its sessions.
+REBUILD_KEYS = frozenset({
+    "default_model", "model_roles", "models", "thinking_effort", "orchestrator",
+    "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
+    "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
+    "anthropic_request_timeout",
+})
+
+# Read only as the app starts: logging is configured once, in the app's
+# constructor, and a rebuild keeps the session store it has. A change is
+# saved, and takes effect at the next start.
+RESTART_KEYS = frozenset({"session_store", "log_level", "log_format"})
+
+# Read each time they are used (a tool call, a sandbox or a container started,
+# a dialog, an event shown): a change takes effect at once.
+LIVE_KEYS = frozenset({
+    "python_executor_timeout", "sandbox_timeout",
+    "sandbox_max_sessions", "sandbox_memory_mb", "sandbox_cpus", "sandbox_pids_limit",
+    "search_backend",
+    "webfetch_cache_ttl_seconds", "webfetch_max_content_bytes", "webfetch_max_pdf_bytes",
+    "webfetch_max_download_bytes", "webfetch_saved_max_age_days", "webfetch_saved_max_mb",
+    "arxiv_max_pdf_bytes",
+    "verbose_thinking", "ui_theme", "dialog_placement",
+})
+
 # Sections of the project file that are not settings: the permission engine
 # reads its deny rules from the file itself (workflow/permissions/store.py,
 # load_project_denies), so the loader passes over them and every save keeps

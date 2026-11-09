@@ -3,7 +3,8 @@
 This module provides the base CLI application that:
 1. Uses ThinkingPromptSession for all UI (thinking boxes, messages, etc.)
 2. Connects to domain-specific workflow managers
-3. Tracks message history for persistence
+3. Opens, switches and resumes the conversation its turns run in (the
+   workflow's session store keeps each one)
 """
 
 from __future__ import annotations
@@ -47,12 +48,14 @@ from agentic_cli.cli.session_resume import (
     show_replay,
 )
 from agentic_cli.cli.usage_tracker import UsageTracker
-from agentic_cli.cli.workflow_controller import WorkflowController
+from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
 from agentic_cli.settings_persistence import (
     HAND_EDITED_KEYS,
     PROJECT_SETTABLE_KEYS,
+    REBUILD_KEYS,
+    RESTART_KEYS,
     USER_PREFERENCE_KEYS,
 )
 from agentic_cli.workflow.settings import OrchestratorType
@@ -367,6 +370,18 @@ _SWAP_NOTE = (
     "to continue it. Here it starts empty."
 )
 
+#: How ``/settings`` reports a change of a key read only as the app starts
+#: (``settings_persistence.RESTART_KEYS``).
+_AT_NEXT_START = "(takes effect at the next start)"
+
+#: The restart-only keys the workflow's start reads: a change of one made
+#: while a start runs waits for it, as a rebuild does, or the start could take
+#: the new value and "(takes effect at the next start)" would be false. The
+#: session store is built as the workflow starts; ``log_level`` and
+#: ``log_format`` are read by the app's constructor only, so a change of them
+#: does not wait.
+_READ_BY_THE_START = frozenset({"session_store"})
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -444,13 +459,28 @@ def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -
 class SlashCommandCompleter(Completer):
     """Completer that only triggers for slash commands."""
 
-    def __init__(self, commands: list[str]) -> None:
-        """Initialize with a list of command names (without leading slash).
+    def __init__(self, commands: "CommandRegistry | Iterable[str]") -> None:
+        """Initialize with the commands to complete.
 
         Args:
-            commands: List of command names, e.g., ["help", "settings", "quit"]
+            commands: A ``CommandRegistry``, read each time a completion is
+                asked for (a command registered later completes too, as the
+                app's session does), or command names without the leading
+                slash, e.g. ``["help", "settings", "quit"]``, fixed here.
         """
-        self.commands = sorted(commands)
+        if isinstance(commands, CommandRegistry):
+            self._registry: CommandRegistry | None = commands
+            self._names: list[str] = []
+        else:
+            self._registry = None
+            self._names = sorted(commands)
+
+    @property
+    def commands(self) -> list[str]:
+        """The command names and aliases it completes, sorted."""
+        if self._registry is not None:
+            return self._registry.get_completions()
+        return self._names
 
     def get_completions(self, document: Document, complete_event):
         """Yield completions only when text starts with /."""
@@ -520,7 +550,15 @@ class BaseCLIApp:
     - register_commands(): Register domain-specific commands
     - get_theme(name): Customize a theme's colors
     - get_ui_setting_keys(): Customize settings dialog fields
-    - apply_settings(): Handle additional custom settings
+    - apply_settings(changes): Handle additional custom settings
+    - save_settings(keys): Persist the settings ``/settings`` changed
+    - add_arguments(parser), from_args(args): The app's own command-line
+      flags, and how ``main()`` builds the app from them (classmethods)
+
+    ``register_commands()`` and ``get_theme()`` run during construction:
+    ``register_commands()`` last, ``get_theme()`` as the session is built
+    in its theme, everything else in place. An attribute of the app's own
+    that one reads is set before ``super().__init__()``.
     """
 
     #: A turn ran in the current conversation since it was opened (its memories
@@ -578,11 +616,6 @@ class BaseCLIApp:
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
-        # === Command Registry ===
-        self.command_registry = CommandRegistry()
-        self._register_builtin_commands()
-        self.register_commands()  # Domain-specific commands
-
         # === Components ===
         self._usage_tracker = UsageTracker()
         self._workflow_controller = WorkflowController(
@@ -592,22 +625,31 @@ class BaseCLIApp:
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
 
-        # Serializes turns: a user turn and a background-job resume turn must
-        # never overlap (shared session + thinking boxes).
+        # Serializes what writes to the conversation: a turn, a job's resume,
+        # /compact, /new and /resume (not /settings, nor the /resume picker,
+        # which waits on a dialog). thinking-prompt runs one input handler at
+        # a time, so it orders them against the startup resume
+        # (_open_on_startup, a task of its own) and an app's own tasks.
         self._turn_lock = asyncio.Lock()
         # Whether a turn ran in the current conversation since it was adopted:
         # its memories are proposed on leaving it, or at exit, only then.
         self._turned = False
+        self.should_exit = False
+
+        # === Commands: registered once the session exists (below) ===
+        self.command_registry = CommandRegistry()
 
         # === UI: ThinkingPromptSession ===
-        completer = SlashCommandCompleter(self.command_registry.get_completions())
-
+        # get_theme() runs here, with every attribute above in place: its
+        # theme is the one the session is built with.
         self.session = ThinkingPromptSession(
             message=">>> ",
             app_info=self._app_info,
             theme=self.get_theme(settings.ui_theme),
             history=InMemoryHistory(),
-            completer=completer,
+            # Reads the registry as it completes: a command registered later
+            # completes too.
+            completer=SlashCommandCompleter(self.command_registry),
             complete_while_typing=True,
             completions_menu_height=8,
             enable_status_bar=True,
@@ -620,8 +662,9 @@ class BaseCLIApp:
             dialog_placement=settings.dialog_placement,
         )
 
-        # === State ===
-        self.should_exit = False
+        # === Hooks: last, on the built app ===
+        self._register_builtin_commands()
+        self.register_commands()  # Domain-specific commands
 
         logger.debug("app_initialized_fast")
 
@@ -635,7 +678,11 @@ class BaseCLIApp:
         lets thinking-prompt choose from the terminal (mono under
         ``NO_COLOR``, light or dark from ``COLORFGBG``, else the terminal's
         own colors), so agentic-cli's colors do not apply there. The session
-        is built in ``get_theme(settings.ui_theme)``.
+        is built in ``get_theme(settings.ui_theme)``: it is called while the
+        constructor builds the session, with every other attribute of the
+        app in place, and again when ``/settings`` changes ``ui_theme``. An
+        attribute of the app's own that it reads is set before
+        ``super().__init__()``.
 
         Override to recolor a theme, e.g. for ``"dark"`` return
         ``dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box=...)``
@@ -648,7 +695,14 @@ class BaseCLIApp:
     def register_commands(self) -> None:
         """Register domain-specific commands.
 
-        Override to register additional commands.
+        Override to register additional commands
+        (``self.command_registry.register(...)``). Called last in the
+        constructor, after the built-ins (``_register_builtin_commands``),
+        once the settings, the usage tracker, the workflow controller and
+        the session exist. An attribute of the app's own that it reads is
+        set before ``super().__init__()``. A command registered later works
+        too: the slash-command completer and ``/help`` read the registry each
+        time.
         """
         pass
 
@@ -673,6 +727,15 @@ class BaseCLIApp:
         everywhere, so they are saved there; the default list leaves them
         out, and an app shows them by listing them:
         ``[*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]``.
+
+        When a Save takes effect is declared for each of those keys beside
+        them in ``settings_persistence``: one in ``REBUILD_KEYS`` (the model
+        pickers, ``thinking_effort``, ``orchestrator``, the summary
+        thresholds, ``tool_result_max_chars``, the retries and
+        ``anthropic_request_timeout``) rebuilds the workflow; one in
+        ``RESTART_KEYS`` (``session_store``, ``log_level``, ``log_format``)
+        is saved, and its line says it takes effect at the next start; one
+        in ``LIVE_KEYS`` (the rest) applies at once.
 
         Returns:
             List of field names that should appear in the settings UI
@@ -860,6 +923,13 @@ class BaseCLIApp:
         return self._workflow_controller.workflow
 
     @property
+    def workflow_error(self) -> Exception | None:
+        """Why the workflow is not running: the error its start, or its last
+        rebuild, failed with (``/status`` shows it). None while it runs, while
+        it is still starting, and before it was ever started."""
+        return self._workflow_controller.init_error
+
+    @property
     def agent_configs(self) -> tuple["AgentConfig", ...]:
         """The agents the workflow is built from, ready or not (``/models``
         and the model pickers offer their models)."""
@@ -976,12 +1046,28 @@ class BaseCLIApp:
         cancel is re-raised (``/settings`` saves it), so the settings name
         the backend that runs.
 
-        Settings are applied in two ways:
-        1. Special settings (model, a role's model, thinking_effort) use
-           dedicated setters and trigger workflow reinitialization
-        2. All other settings are applied directly to the settings object
+        Each change is set on the settings object (``update_setting``; the
+        model pickers and the thinking effort through their own setters) and
+        takes effect as ``settings_persistence`` declares for its field:
 
-        A reinitialization keeps the sessions, as a model switch does. A
+        1. ``REBUILD_KEYS`` (read when the workflow builds its agents and
+           their models: the models, the orchestrator, the summary
+           thresholds, the result cap, the retries and request timeout)
+           reinitialize the workflow, or swap it for an orchestrator change;
+        2. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
+           ``log_level``, ``log_format``) are applied and saved, and their
+           line says "(takes effect at the next start)";
+        3. any other key (``LIVE_KEYS``, or an app's own) applies at once:
+           what reads it reads the settings each time.
+
+        A reinitialization keeps the sessions, as a model switch does. One
+        asked for while the workflow is still starting waits for that start
+        first, as a turn does ("Waiting for initialization...": the start
+        resolved its models from the settings before the change), and so
+        does a change of ``session_store``, which that start reads; Ctrl+C
+        stops the wait, re-raised, and changes nothing. When that start
+        fails, the change is applied as for any workflow that is not
+        running: nothing is rebuilt, and the next start uses it. A
         switch to the deprecated LangGraph orchestrator ends with its
         deprecation warning. A change of ``ui_theme`` switches the session to
         ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
@@ -997,28 +1083,37 @@ class BaseCLIApp:
             self.session.add_message("system", "No changes made.")
             return True
 
-        needs_reinit = False
+        # When each change takes effect (settings_persistence): a key the
+        # workflow reads as it builds its agents and models rebuilds it (an
+        # orchestrator change swaps the backend); one read only as the app
+        # starts is said to take effect at the next start; the rest apply at
+        # once, read where they are used.
+        needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
+        at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
+
+        read_by_the_start = needs_reinit or any(
+            _ui_key_target_field(key) in _READ_BY_THE_START for key in changes
+        )
+
+        controller = self._workflow_controller
+        if read_by_the_start and controller.state is WorkflowState.INITIALIZING:
+            # The start in progress read the settings as they are (its models
+            # first, its session store too): wait for it, as a turn does, so
+            # the rebuild below runs on the new values and the session store
+            # is not taken half way. Ctrl+C stops the wait before anything
+            # changed. A start that fails leaves the workflow down, and the
+            # change is applied for the next start, as for any failed workflow.
+            with _says_so_when_stopped(self.session):
+                await controller.ensure_initialized(self.session)
+
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
         was_langgraph = _runs_langgraph(self._settings)
         theme_before = self._settings.ui_theme
 
-        # `orchestrator` triggers a reinit too: the controller swaps the backend
-        # when it changes (otherwise the change only took effect on restart).
-        # So does a role's model ("model_role:<role>"): agents resolve their
-        # roles when the workflow initializes. And so do the settings of when
-        # to summarize and where a tool result is cut: each agent's
-        # thresholds and cap are fixed when it is built.
-        reinit_settings = {
-            "model", "thinking_effort", "orchestrator",
-            "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
-        }
-
         for key, value in changes.items():
             try:
                 self._settings.update_setting(key, value)
-                if key in reinit_settings or key.startswith(MODEL_ROLE_KEY_PREFIX):
-                    needs_reinit = True
             except ValueError as e:
                 _restore_settings(self._settings, snapshot)
                 label = _setting_label(key, self._settings)
@@ -1026,7 +1121,6 @@ class BaseCLIApp:
                 return False
 
         # Reinitialize workflow if needed
-        controller = self._workflow_controller
         switched: list[str] = []
         swap_note: str | None = None
         interrupted: asyncio.CancelledError | None = None
@@ -1086,7 +1180,10 @@ class BaseCLIApp:
 
         # Report changes
         for key, value in changes.items():
-            self.session.add_success(f"{_setting_label(key, self._settings)}: {value}")
+            line = f"{_setting_label(key, self._settings)}: {value}"
+            if key in at_next_start:
+                line += f" {_AT_NEXT_START}"
+            self.session.add_success(line)
         for notice in switched:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
@@ -1187,6 +1284,15 @@ class BaseCLIApp:
                 await command.execute(args, self)
                 logger.debug("command_completed", command=command.name)
             except Exception as e:
+                # A command that raises is a bug: the line says what, the log
+                # which command and its type, and its traceback at debug. At
+                # info: a warning would print above the prompt (the default
+                # level), beside the line the user already sees.
+                logger.info(
+                    "command_failed", command=command.name,
+                    error_type=type(e).__name__, error=str(e),
+                )
+                logger.debug("command_failed", command=command.name, exc_info=e)
                 self.session.add_error(f"Error executing command: {e}")
         else:
             # Echo unknown command before error
@@ -1473,7 +1579,8 @@ class BaseCLIApp:
             True once ``session_id`` is the current conversation. False, with
             nothing changed, when it is already ("Already in this
             conversation."), is not stored ("No conversation '<id>'
-            found."), or could not be read ("Could not open '<id>': ...").
+            found.", also when it is deleted while it opens), or could not
+            be read ("Could not open '<id>': ...").
         """
         with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(session_id)
@@ -1566,11 +1673,19 @@ class BaseCLIApp:
                     await self._saving_facts(old)
                     self._turned = False  # proposed: a switch that fails now proposes none again
                 try:
-                    await workflow.load_session(session_id)
+                    stored = await workflow.load_session(session_id)
+                    # Not stored now: deleted since it was read (another
+                    # process's /sessions --delete), unless it is still
+                    # listed, holding no message yet.
+                    gone = not stored and await workflow.session_info(session_id) is None
                 except Exception as error:  # noqa: BLE001 - the id is not adopted
                     logger.debug("session_open_failed", session_id=session_id, exc_info=True)
                     reason = str(error) or type(error).__name__
                     self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                if gone:
+                    await self._readopt(workflow, old)
+                    self.session.add_error(f"No conversation '{session_id}' found.")
                     return False
                 adopted = True
             finally:
@@ -1587,6 +1702,16 @@ class BaseCLIApp:
             self.session.add_message("system", line)
             show_replay(self.session, replay)
             return True
+
+    @staticmethod
+    async def _readopt(workflow: Any, session_id: str) -> None:
+        """Give ``session_id`` back to the workflow, after a load that adopted
+        another conversation and found it gone. Never raises: the turns name
+        their conversation anyway."""
+        try:
+            await workflow.load_session(session_id)
+        except Exception:  # noqa: BLE001 - a lookup, the next turn goes on
+            logger.debug("session_readopt_failed", session_id=session_id, exc_info=True)
 
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
@@ -1611,7 +1736,11 @@ class BaseCLIApp:
             note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
             self.session.add_message("system", f"No other conversations to resume.{note}")
             return None
-        dialog, ids = picker(rows, datetime.now(timezone.utc))
+        # Drawn where the settings say now: /settings may have changed the
+        # placement since the session started with its own.
+        dialog, ids = picker(
+            rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement
+        )
         picked = await self.session.show_dialog(dialog)
         return None if picked is None else ids.get(picked)
 
@@ -1718,7 +1847,11 @@ class BaseCLIApp:
                           f"Fix it with /settings, then /resume {target}.",
                 "continue": "Could not continue: the workflow did not start. "
                             "Fix it with /settings, then /resume.",
-            }.get(mode, "Cannot adopt session — workflow not initialized."))
+            }.get(
+                mode,
+                "The workflow did not start. Fix it with /settings; "
+                "your next message starts it again.",
+            ))
             return True
 
         workflow = self._workflow_controller.workflow
@@ -1970,7 +2103,8 @@ class BaseCLIApp:
                 # What --continue / --resume open, once the prompt is up.
                 opening = asyncio.create_task(self._open_on_startup())
                 try:
-                    # Run the session - user sees prompt immediately!
+                    # Run the session: the prompt shows now, after the
+                    # start above (which waited for the workflow).
                     with _log_lines_above_prompt(self.session):
                         await self.session.run_async()
                 finally:
