@@ -2847,6 +2847,8 @@ step; each entry says what to use instead.
   one stops only a job that has not started. A job still running stays
   RUNNING with `cancel_requested`, holding its slot, and is recorded
   CANCELLED when it ends, as any cancelled job is; the next one starts then.
+  A cancel another CLI sharing the jobs directory requests is read by the
+  manager running the job, which does the same.
   `job_cancel` and `/jobs cancel` say the job is still running.
 - **Budget-thinking Claude with a per-agent `max_tokens` failed on ADK with
   HTTP 400.** ADK 2.12's `AnthropicLlm` sends the agent config's
