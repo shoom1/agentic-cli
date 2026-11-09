@@ -1,12 +1,17 @@
 """When a ``/settings`` change takes effect, as the user is told.
 
 Every key ``/settings`` may show (``PROJECT_SETTABLE_KEYS`` and
-``USER_PREFERENCE_KEYS``) is placed in one of three sets beside them in
+``USER_PREFERENCE_KEYS``) is placed in one of four sets beside them in
 ``settings_persistence``:
 
 - ``REBUILD_KEYS``: read when the workflow builds its agents and their models
   (the retry and request-timeout settings among them). A change rebuilds the
-  workflow, keeping its sessions, and its line is the plain "<Label>: <value>".
+  workflow, keeping its sessions and its backend, and its line is the plain
+  "<Label>: <value>".
+- ``NEW_CONVERSATION_KEYS``: the backend of new conversations
+  (``orchestrator``). A conversation never changes backend, so a change starts
+  a new conversation there when the open one holds nothing yet, else applies
+  to the next ``/new`` (``tests/cli/test_conversation_switch.py``).
 - ``RESTART_KEYS``: read only as the app or its session store starts. A
   change is saved and its line says "(takes effect at the next start)";
   nothing is rebuilt. A change of ``session_store`` waits for a start in
@@ -32,6 +37,7 @@ from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.config import BaseSettings
 from agentic_cli.settings_persistence import (
     LIVE_KEYS,
+    NEW_CONVERSATION_KEYS,
     PROJECT_SETTABLE_KEYS,
     REBUILD_KEYS,
     RESTART_KEYS,
@@ -96,19 +102,26 @@ def successes(app: BaseCLIApp) -> list[str]:
 
 class TestEveryKeyIsPlaced:
     def test_each_settable_key_is_in_exactly_one_set(self):
-        placed = [REBUILD_KEYS, RESTART_KEYS, LIVE_KEYS]
+        placed = [REBUILD_KEYS, NEW_CONVERSATION_KEYS, RESTART_KEYS, LIVE_KEYS]
         settable = PROJECT_SETTABLE_KEYS | USER_PREFERENCE_KEYS
 
-        unplaced = settable - REBUILD_KEYS - RESTART_KEYS - LIVE_KEYS
-        assert not unplaced, f"place each in REBUILD_KEYS, RESTART_KEYS or LIVE_KEYS: {unplaced}"
+        unplaced = settable.difference(*placed)
+        assert not unplaced, (
+            "place each in REBUILD_KEYS, NEW_CONVERSATION_KEYS, RESTART_KEYS or "
+            f"LIVE_KEYS: {unplaced}"
+        )
         for i, one in enumerate(placed):
             for other in placed[i + 1:]:
                 assert not one & other
-        assert REBUILD_KEYS | RESTART_KEYS | LIVE_KEYS == settable
+        assert set().union(*placed) == settable
+
+    def test_the_backend_is_a_new_conversations(self):
+        """A conversation never changes backend: no rebuild moves one."""
+        assert NEW_CONVERSATION_KEYS == {"orchestrator"}
 
     def test_the_sets_name_settings_fields(self):
         fields = set(BaseSettings.model_fields)
-        assert REBUILD_KEYS | RESTART_KEYS | LIVE_KEYS <= fields
+        assert REBUILD_KEYS | NEW_CONVERSATION_KEYS | RESTART_KEYS | LIVE_KEYS <= fields
 
 
 class TestARebuildKey:

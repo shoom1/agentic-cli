@@ -308,7 +308,7 @@ async def test_a_switch_that_is_rolled_back_says_nothing(backends):
 
     assert app.settings.orchestrator is OrchestratorType.ADK
     assert any(
-        kind == "error" and text.startswith("Failed to reinitialize workflow")
+        kind == "error" and text.startswith("Could not start a new conversation on langgraph")
         for kind, text in session.shown
     )
     assert session.notices == []

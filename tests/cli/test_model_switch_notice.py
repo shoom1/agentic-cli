@@ -4,14 +4,13 @@ The conversation is kept, but no model is sent another provider's reasoning
 (both backends leave it out), and the new provider has none of the old one's
 prompt cache. That switch used to be silent. Now ``apply_settings`` adds one
 system line per switch, naming the agents and both models; a switch within
-one provider loses nothing and stays silent, and so does an orchestrator swap,
-which starts a new manager: it says, instead, that the conversation's history
-stays with the previous backend.
+one provider loses nothing and stays silent. (The backend never changes under
+a conversation: another backend is a new conversation's,
+``tests/cli/test_conversation_switch.py``.)
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -19,7 +18,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agentic_cli.cli.app import BaseCLIApp
-from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelRef, ProviderKind, parse_ref
@@ -62,9 +60,6 @@ def _app(settings: BaseSettings, workflow) -> BaseCLIApp:
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._settings = settings
     app._workflow_controller = controller
-    # An orchestrator swap switches the conversation (the turn lock, the task list).
-    app._turn_lock, app._message_processor = asyncio.Lock(), MessageProcessor()
-    app._usage_tracker = None
     app.notices, app.errors = [], []
     app.session = SimpleNamespace(
         add_message=lambda role, text: app.notices.append(text),
@@ -174,30 +169,6 @@ class FakeManager:
 
     async def reinitialize(self, model=None, preserve_sessions=True):
         self._use(model or self.model)
-
-
-async def test_an_orchestrator_swap_opens_the_conversation_there_and_says_so():
-    """A swap starts another manager, and sessions do not move between
-    backends: the new one takes the conversation's id, from empty (so
-    /status and the facts saved at exit name it, not its default session),
-    and one line says where the history stays."""
-    settings = _settings()
-    app = _app(settings, FakeManager(GEMINI))
-    app._session_id = "conv-1"
-    replacement = FakeManager(CLAUDE, backend="langgraph")
-
-    with patch(
-        "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
-        lambda **kw: replacement,
-    ):
-        assert await app.apply_settings({"orchestrator": "langgraph", "model": CLAUDE})
-
-    assert app._workflow_controller.workflow is replacement
-    assert replacement.loaded == ["conv-1"]
-    assert app.notices == [
-        "This conversation's history stays with the previous backend: switch back "
-        "to continue it. Here it starts empty."
-    ]
 
 
 async def test_a_manager_without_agent_models_is_silent():

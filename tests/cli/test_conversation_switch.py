@@ -261,76 +261,6 @@ class TestATurnTypedBeforeTheStartupOpen:
         )
 
 
-class TestAnOrchestratorSwitch:
-    """``/settings`` swaps the backend: the conversation goes on there, from
-    empty, under the same id, through the same switch. Its lock moved to the
-    new backend's key (it stayed on the old one's, so another process could
-    open the conversation this one writes to); the old backend's task list
-    and the memories it holds stay behind (the next turn redrew its tasks in
-    the new, empty conversation, and the exit proposed memories from it)."""
-
-    @staticmethod
-    def swapping(app_settings):
-        workflow = Workflow()
-        workflow.backend_type = "adk"
-        app = app_on(workflow, app_settings)
-        replacement = Workflow()
-        replacement.backend_type = "deepagents"
-        replacement.initialize_services = AsyncMock()
-        return app, replacement
-
-    @staticmethod
-    async def swap(app, replacement) -> None:
-        with patch(
-            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
-            return_value=replacement,
-        ):
-            assert await app.apply_settings({"orchestrator": "deepagents"})
-        assert app._workflow_controller.workflow is replacement
-
-    async def test_the_lock_follows_it_to_the_new_backend(self, home):
-        app, replacement = self.swapping(BaseSettings(session_store="sqlite"))
-        assert app._hold(app.session_id) is None  # as the start does
-        old_key = app._conversation_key(app.session_id)
-
-        await self.swap(app, replacement)
-
-        key = app._conversation_key(app.session_id)
-        assert key[0] == "deepagents" and key[1:] == old_key[1:]
-        assert not free(app, key) and free(app, old_key)
-        assert replacement.calls == [f"load_session {app.session_id}"]
-
-    async def test_the_old_backends_tasks_and_memories_stay_behind(self, home):
-        app, replacement = self.swapping(fake_settings(auto_extract_session_facts=True))
-        app._message_processor._last_task_progress = "- [x] the old backend's task"
-        app._turned = True  # a turn ran on the old backend
-
-        await self.swap(app, replacement)
-        await app._extract_session_facts_on_exit()
-
-        assert app._message_processor._last_task_progress is None
-        assert app._turned is False and replacement.ended == []
-
-    async def test_one_open_on_the_new_backend_elsewhere_starts_a_new_one_there(self, home):
-        app, replacement = self.swapping(BaseSettings(session_store="sqlite"))
-        old = app.session_id
-        assert app._hold(old) is None
-        there = ("deepagents", *app._conversation_key(old)[1:])
-        other = open_elsewhere(app, there)
-
-        await self.swap(app, replacement)
-        other.release()
-
-        new = app.session_id
-        assert new != old and app._conversation_key(new)[0] == "deepagents"
-        assert not free(app, app._conversation_key(new))
-        assert said(app.session, "add_message")[-1] == (
-            f"This conversation is open in another process ({os.getpid()}) on deepagents: "
-            f"a new one starts here, {new}. Its history stays with the previous "
-            "backend: switch back to continue it."
-        )
-
-
 class TestTheSessionIdSetter:
     """``app.session_id = <id>`` moved the turns to another conversation with
     no lock, no load and no reset: the next turn wrote to a conversation
@@ -692,3 +622,156 @@ class TestANewConversationOnAnotherBackend:
         assert app._conversation_key(app.session_id)[0] == "deepagents"
         assert not free(app, app._conversation_key(app.session_id))
         await app._workflow_controller.close()
+
+
+class TestAnOrchestratorChange:
+    """``/settings`` changes ``orchestrator``, the backend of new
+    conversations, while the workflow runs. A conversation never changes
+    backend (its history is in its backend's store alone), so the open one
+    stays where it is: when nothing of it is stored yet (no turn ran in it,
+    and it was not opened from the store) a new conversation starts on the
+    new backend at once, as ``/new <backend>`` starts one; else the change
+    applies to the next ``/new``, and nothing is rebuilt. (It moved the open
+    conversation's id to the new backend, from empty, and its lock and task
+    list with it or not.)"""
+
+    on_adk = TestANewConversationOnAnotherBackend.on_adk
+    running = staticmethod(TestANewConversationOnAnotherBackend.running)
+
+    @staticmethod
+    async def saved_by_settings(app, edits: dict) -> AsyncMock:
+        """``/settings`` with ``edits`` saved: what it saved."""
+        from thinking_prompt import TextField
+
+        from agentic_cli.cli.settings_command import SettingsCommand
+        from tests.cli.dialog_fakes import edited_dialog
+
+        app._build_ui_items = lambda: [TextField(key, key) for key in edits]
+        app.session.show_dialog.return_value = True  # Save
+        app.save_settings = AsyncMock(return_value=SimpleNamespace(
+            project_path=None, user_path=None, user_scoped_keys=()))
+        with patch("agentic_cli.cli.settings_command.Dialog", edited_dialog(edits)):
+            await SettingsCommand().execute("", app)
+        return app.save_settings
+
+    async def test_a_used_conversation_stays_and_the_next_new_runs_there(
+        self, home, monkeypatch
+    ):
+        app, adk, built = self.on_adk(monkeypatch)
+        await app.process_input("Hello.")
+        conversation, key = app.session_id, app._conversation_key(app.session_id)
+
+        saved = await self.saved_by_settings(app, {"orchestrator": "deepagents"})
+
+        assert built == [] and adk.reinitialize.await_count == 0
+        assert app.session_id == conversation and self.running(app) == "adk"
+        assert app._conversation_key(conversation) == key and not free(app, key)
+        assert app.settings.orchestrator.value == "deepagents"
+        saved.assert_awaited_once_with(keys={"orchestrator"})
+        assert said(app.session, "add_success")[0] == (
+            "Orchestrator: deepagents (applies to the next /new)"
+        )
+
+        await app.process_input("/new")
+        assert self.running(app) == "deepagents"
+
+    async def test_one_opened_from_the_store_stays_too(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        adk.stored = {"abc"}
+        adk.session_info = lambda session_id, *, user_id=None: _row_of(session_id)
+        adk.recent_messages = _no_messages
+        assert await app.resume_session("abc")
+
+        assert await app.apply_settings({"orchestrator": "deepagents"})
+
+        assert built == [] and app.session_id == "abc" and self.running(app) == "adk"
+
+    async def test_a_fresh_conversation_starts_a_new_one_there(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        old, old_key = app.session_id, app._conversation_key(app.session_id)
+
+        saved = await self.saved_by_settings(app, {"orchestrator": "deepagents"})
+
+        new = app.session_id
+        assert new != old and self.running(app) == "deepagents"
+        assert [m.backend_type for m in built] == ["deepagents"]
+        assert app._conversation_key(new)[0] == "deepagents"
+        assert not free(app, app._conversation_key(new)) and free(app, old_key)
+        saved.assert_awaited_once_with(keys={"orchestrator"})
+        assert said(app.session, "add_message")[-1] == f"New conversation {new} on deepagents."
+        assert said(app.session, "add_success")[0] == "Orchestrator: deepagents"
+
+    async def test_a_backend_that_cannot_start_changes_nothing(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: True)
+        old = app.session_id
+
+        assert await app.apply_settings({"orchestrator": "deepagents"}) is False
+
+        assert app.session_id == old and self.running(app) == "adk"
+        assert app.settings.orchestrator.value == "adk"
+        assert said(app.session, "add_error") == [
+            "Could not start a new conversation on deepagents: deepagents cannot start "
+            "(its extra is missing). Settings were not changed."
+        ]
+
+    async def test_ctrl_c_before_the_new_backend_runs_changes_nothing(self, home, monkeypatch):
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+        starting = asyncio.Event()
+
+        async def initialize_services():
+            starting.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(self.Manager, "initialize_services", lambda self: initialize_services())
+        applying = asyncio.create_task(app.apply_settings({"orchestrator": "deepagents"}))
+        await asyncio.wait_for(starting.wait(), 5)
+        applying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+
+        assert app.session_id == old and self.running(app) == "adk"
+        assert app.settings.orchestrator.value == "adk"
+
+    async def test_ctrl_c_once_the_new_backend_runs_keeps_the_change_and_saves_it(
+        self, home, monkeypatch
+    ):
+        """Too late to undo: the new conversation runs there, the setting
+        names the backend that runs, and ``/settings`` saves it."""
+        app, adk, built = self.on_adk(monkeypatch)
+        old = app.session_id
+        releasing, released = asyncio.Event(), asyncio.Event()
+
+        async def cleanup():
+            releasing.set()
+            await released.wait()
+
+        adk.cleanup = cleanup
+        saving = asyncio.create_task(self.saved_by_settings(app, {"orchestrator": "deepagents"}))
+        await asyncio.wait_for(releasing.wait(), 5)
+        saving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await saving
+        released.set()
+
+        assert app.session_id != old and self.running(app) == "deepagents"
+        assert app.settings.orchestrator.value == "deepagents"
+        app.save_settings.assert_awaited_once_with(keys={"orchestrator"})
+        assert "Orchestrator: deepagents" in said(app.session, "add_success")
+        await app._workflow_controller.close()
+
+    Manager = TestAPlaceChangeWhileTheWorkflowIsDown.Manager
+
+
+def _row_of(session_id):
+    from agentic_cli.workflow.sessions import SessionInfo
+
+    async def row():
+        return SessionInfo(session_id, "Earlier", 1, None)
+
+    return row()
+
+
+async def _no_messages(session_id, limit=20, *, user_id=None):
+    return []

@@ -88,20 +88,27 @@ USER_PREFERENCE_KEYS = frozenset({"ui_theme", "dialog_placement"})
 
 # When a change made while the app runs takes effect (BaseCLIApp.apply_settings,
 # which /settings calls). Every key /settings may show, PROJECT_SETTABLE_KEYS
-# and USER_PREFERENCE_KEYS, is in exactly one of the three sets, and a new one
+# and USER_PREFERENCE_KEYS, is in exactly one of the four sets, and a new one
 # is placed when it is added (tests/cli/test_settings_take_effect.py fails
 # until it is). An app's own key, in none of them, applies at once.
 #
 # Read when the workflow builds its agents and their models: the models and
-# their thinking, the backend, each agent's summary thresholds and result
-# cap, and what each model's client is built with (its retries and request
-# timeout). A change rebuilds the workflow, keeping its sessions.
+# their thinking, each agent's summary thresholds and result cap, and what
+# each model's client is built with (its retries and request timeout). A
+# change rebuilds the workflow, keeping its sessions and its backend.
 REBUILD_KEYS = frozenset({
-    "default_model", "model_roles", "models", "thinking_effort", "orchestrator",
+    "default_model", "model_roles", "models", "thinking_effort",
     "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
     "retry_max_attempts", "retry_initial_delay", "retry_backoff_factor",
     "anthropic_request_timeout",
 })
+
+# Read when a conversation starts: the backend it runs on, for its whole life
+# (its history is in that backend's store alone). A change applies at once
+# to a conversation with nothing stored yet, which is left for a new one on
+# the new backend; else it is saved and applies to the next new conversation
+# (/new).
+NEW_CONVERSATION_KEYS = frozenset({"orchestrator"})
 
 # Read only as the app starts: logging is configured once, in the app's
 # constructor, and a rebuild keeps the session store it has. A change is

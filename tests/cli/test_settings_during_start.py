@@ -146,8 +146,12 @@ async def test_the_workflow_runs_the_model_the_settings_name(settings, monkeypat
     await app._workflow_controller.close()
 
 
-async def test_an_orchestrator_change_is_made_before_the_next_rebuild(settings, monkeypatch):
-    """Swapped once the start is done, not by some later unrelated rebuild."""
+async def test_an_orchestrator_change_waits_for_the_start_then_starts_there(
+    settings, monkeypatch
+):
+    """Whether the change starts a new conversation (one with nothing stored
+    yet does) needs the start's outcome: it waits, then the conversation the
+    start opened, still empty, is left for one on the new backend."""
     starts = Starts()
     app = starting_app(settings, monkeypatch, starts)
 

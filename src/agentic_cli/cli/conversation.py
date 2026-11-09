@@ -142,11 +142,26 @@ class ConversationCore:
 
     def __init__(self, session_id: str | None = None, place: Place | None = None) -> None:
         self.session_id = session_id
-        #: A turn ran in it since it was opened: its memories are proposed on
-        #: leaving it, or at exit, only then.
-        self.turned = False
+        #: Nothing of it is stored yet: it began in this run, and no turn ran
+        #: in it (one opened from the store is not, nor one a turn ran in).
+        #: A change of the backend of new conversations then starts a new one
+        #: there at once, instead of waiting for the next one.
+        self.fresh = True
+        self._turned = False
         self.place = place
         self._lock: ConversationLock | None = None
+
+    @property
+    def turned(self) -> bool:
+        """A turn ran in it since it was opened: its memories are proposed on
+        leaving it, or at exit, only then. Set, it is no longer ``fresh``."""
+        return self._turned
+
+    @turned.setter
+    def turned(self, value: bool) -> None:
+        self._turned = value
+        if value:
+            self.fresh = False
 
     def acquire(self, session_id: str, place: Place | None = None) -> Hold | int:
         """Hold ``session_id``'s conversation beside the one held now.
@@ -270,7 +285,8 @@ class ConversationCore:
         loaded: bool | None = None
         try:
             if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
-                self._make(hold, parts, swapped=swapped)
+                fresh = self.fresh if to == left else not stored
+                self._make(hold, parts, swapped=swapped, fresh=fresh)
                 made = True
             elif propose and self.turned:
                 await parts.propose(left)
@@ -280,8 +296,10 @@ class ConversationCore:
                 told = True
                 if stored and not loaded and await workflow.session_info(to) is None:
                     return Switch(made=False, gone=True)
+                if loaded:  # it holds what an earlier run stored
+                    self.fresh = False
             if not made:
-                self._make(hold, parts, swapped=swapped)
+                self._make(hold, parts, swapped=swapped, fresh=not (stored or loaded))
                 made = True
         finally:
             if not made:
@@ -319,17 +337,18 @@ class ConversationCore:
         taken = self.acquire(to)
         if isinstance(taken, int):
             return taken
-        self._make(taken, parts, swapped=False)
+        self._make(taken, parts, swapped=False, fresh=False)  # what it holds is unknown
         parts.status(False)
         return None
 
-    def _make(self, hold: Hold, parts: SwitchParts, *, swapped: bool) -> None:
+    def _make(self, hold: Hold, parts: SwitchParts, *, swapped: bool, fresh: bool) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters."""
         self.commit(hold)
         self.place = hold.place
         self.session_id = hold.session_id
         self.turned = False
+        self.fresh = fresh
         _start_over(parts, swapped=swapped)
 
     def _at(self, place: Place | None) -> Place:

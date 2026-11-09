@@ -56,6 +56,7 @@ from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
 from agentic_cli.settings_persistence import (
     HAND_EDITED_KEYS,
+    NEW_CONVERSATION_KEYS,
     PROJECT_SETTABLE_KEYS,
     REBUILD_KEYS,
     RESTART_KEYS,
@@ -388,13 +389,18 @@ _SESSION_ID_SETTER_DEPRECATED = (
 #: (``settings_persistence.RESTART_KEYS``).
 _AT_NEXT_START = "(takes effect at the next start)"
 
-#: The restart-only keys the workflow's start reads: a change of one made
-#: while a start runs waits for it, as a rebuild does, or the start could take
-#: the new value and "(takes effect at the next start)" would be false. The
-#: session store is built as the workflow starts; ``log_level`` and
-#: ``log_format`` are read by the app's constructor only, so a change of them
-#: does not wait.
-_READ_BY_THE_START = frozenset({"session_store"})
+#: How ``/settings`` reports a change of the backend of new conversations
+#: (``settings_persistence.NEW_CONVERSATION_KEYS``) that the open one keeps.
+_AT_NEXT_NEW = "(applies to the next /new)"
+
+#: The keys besides the rebuild keys that the workflow's start reads: a change
+#: of one made while a start runs waits for it, as a rebuild does, or the
+#: start could take the new value and its line would be false. The session
+#: store is built as the workflow starts, and the orchestrator chooses what it
+#: builds (whether the change starts a new conversation needs the start's
+#: outcome); ``log_level`` and ``log_format`` are read by the app's
+#: constructor only, so a change of them does not wait.
+_READ_BY_THE_START = frozenset({"session_store", "orchestrator"})
 
 #: The settings that say where conversations are kept: the backend and the
 #: session store (``Place``), which key a conversation's lock.
@@ -800,12 +806,15 @@ class BaseCLIApp:
 
         When a Save takes effect is declared for each of those keys beside
         them in ``settings_persistence``: one in ``REBUILD_KEYS`` (the model
-        pickers, ``thinking_effort``, ``orchestrator``, the summary
-        thresholds, ``tool_result_max_chars``, the retries and
+        pickers, ``thinking_effort``, the summary thresholds,
+        ``tool_result_max_chars``, the retries and
         ``anthropic_request_timeout``) rebuilds the workflow; one in
-        ``RESTART_KEYS`` (``session_store``, ``log_level``, ``log_format``)
-        is saved, and its line says it takes effect at the next start; one
-        in ``LIVE_KEYS`` (the rest) applies at once.
+        ``NEW_CONVERSATION_KEYS`` (``orchestrator``) starts a new conversation
+        on that backend when the open one holds nothing yet, else applies to
+        the next ``/new``; one in ``RESTART_KEYS`` (``session_store``,
+        ``log_level``, ``log_format``) is saved, and its line says it takes
+        effect at the next start; one in ``LIVE_KEYS`` (the rest) applies at
+        once.
 
         Returns:
             List of field names that should appear in the settings UI
@@ -1159,31 +1168,39 @@ class BaseCLIApp:
         workflow is brought back on the model it was running, so nothing
         unusable stays in memory to be saved by ``/settings``. A restart
         interrupted by Ctrl+C is undone the same way, without a word, and the
-        cancel is re-raised. An orchestrator switch interrupted once the new
-        backend runs (while the old one is released, which goes on) is too
-        late to undo: the change stands and is reported as usual before the
-        cancel is re-raised (``/settings`` saves it), so the settings name
-        the backend that runs.
+        cancel is re-raised. A new conversation on another backend
+        interrupted once that backend runs (while the old one is released,
+        which goes on) is too late to undo: the change stands and is reported
+        as usual before the cancel is re-raised (``/settings`` saves it), so
+        the settings name the backend that runs.
 
         Each change is set on the settings object (``update_setting``; the
         model pickers and the thinking effort through their own setters) and
         takes effect as ``settings_persistence`` declares for its field:
 
         1. ``REBUILD_KEYS`` (read when the workflow builds its agents and
-           their models: the models, the orchestrator, the summary
-           thresholds, the result cap, the retries and request timeout)
-           reinitialize the workflow, or swap it for an orchestrator change;
-        2. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
+           their models: the models, the summary thresholds, the result cap,
+           the retries and request timeout) reinitialize the workflow in
+           place, on the backend it runs;
+        2. ``NEW_CONVERSATION_KEYS`` (``orchestrator``: the backend of new
+           conversations; a conversation never changes backend) start a new
+           conversation on the new backend at once when the open one holds
+           nothing yet (``ConversationCore.fresh``: it began in this run and
+           no turn ran in it), as ``/new <backend>`` does, and the line of
+           the new conversation names its backend; else they are saved, and
+           their line says "(applies to the next /new)": nothing is rebuilt;
+        3. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
            ``log_level``, ``log_format``) are applied and saved, and their
            line says "(takes effect at the next start)";
-        3. any other key (``LIVE_KEYS``, or an app's own) applies at once:
+        4. any other key (``LIVE_KEYS``, or an app's own) applies at once:
            what reads it reads the settings each time.
 
         A reinitialization keeps the sessions, as a model switch does. One
         asked for while the workflow is still starting waits for that start
         first, as a turn does ("Waiting for initialization...": the start
         resolved its models from the settings before the change), and so
-        does a change of ``session_store``, which that start reads; Ctrl+C
+        does a change of ``session_store`` or ``orchestrator``, which that
+        start reads; Ctrl+C
         stops the wait, re-raised, and changes nothing. When that start
         fails, the change is applied as for any workflow that is not
         running: nothing is rebuilt, and the next start uses it. A change of
@@ -1207,10 +1224,10 @@ class BaseCLIApp:
             return True
 
         # When each change takes effect (settings_persistence): a key the
-        # workflow reads as it builds its agents and models rebuilds it (an
-        # orchestrator change swaps the backend); one read only as the app
-        # starts is said to take effect at the next start; the rest apply at
-        # once, read where they are used.
+        # workflow reads as it builds its agents and models rebuilds it; the
+        # backend of new conversations starts one on it, or waits for /new;
+        # one read only as the app starts is said to take effect at the next
+        # start; the rest apply at once, read where they are used.
         needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
         at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
 
@@ -1245,23 +1262,32 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set {label}: {e}")
                 return False
 
-        # The backend new conversations run on, and whether it is another.
+        # The backend new conversations run on, and whether it is another than
+        # the open conversation's. A conversation never changes backend: one
+        # with nothing stored yet is left for a new conversation there at once
+        # (no rebuild first: the new manager is built on the new values);
+        # else the change waits for /new, and while the workflow is down and
+        # its next start builds from the settings, that start runs it (below).
         target = orchestrator_of(self._settings).value
         moves_backend = "orchestrator" in changes and target != backend_before
+        down = not controller.is_ready
+        starts_anew = moves_backend and not down and self._conversation.fresh
+        at_next_new = (
+            {key for key in changes if _ui_key_target_field(key) in NEW_CONVERSATION_KEYS}
+            if moves_backend and not starts_anew
+            and not (down and controller.next_start_builds) else set()
+        )
 
         # Reinitialize workflow if needed
         switched: list[str] = []
         swap_note: str | None = None
         interrupted: asyncio.CancelledError | None = None
-        if needs_reinit and controller.is_ready:
+        if needs_reinit and controller.is_ready and not starts_anew:
             previous = controller.workflow
             previous_model = previous.model
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
-                if moves_backend:  # (until the new-conversation path: the swap)
-                    await controller.switch_backend(target)
-                else:
-                    await controller.reinitialize(model=new_model)
+                await controller.reinitialize(model=new_model)
             except asyncio.CancelledError as cancel:
                 if not (controller.is_ready and controller.workflow is not previous):
                     # Ctrl+C stopped /settings mid-restart. Nothing of the
@@ -1310,6 +1336,28 @@ class BaseCLIApp:
                 controller, self.session, swapped=controller.workflow is not previous
             )
 
+        if starts_anew:
+            try:
+                async with self._turn_lock:
+                    await self._new_conversation(target, warn=False)
+            except asyncio.CancelledError as cancel:
+                if controller.backend != target:
+                    # Stopped before the new backend ran: nothing of the Save
+                    # stays, and nothing is said.
+                    _restore_settings(self._settings, snapshot)
+                    raise
+                # It runs, and its conversation is open: too late to undo. The
+                # change is reported (and saved), then the cancel goes on.
+                interrupted = cancel
+            except Exception as error:
+                _restore_settings(self._settings, snapshot)
+                reason = (str(error) or type(error).__name__).split("\n")[0]
+                self.session.add_error(
+                    f"Could not start a new conversation on {target}: {reason}. "
+                    "Settings were not changed."
+                )
+                return False
+
         # Where conversations are kept changed while the workflow is down, and
         # its next start builds a manager from the settings as they are now
         # (no manager is kept to revive): the conversation is held there from
@@ -1337,6 +1385,8 @@ class BaseCLIApp:
             line = f"{_setting_label(key, self._settings)}: {value}"
             if key in at_next_start:
                 line += f" {_AT_NEXT_START}"
+            elif key in at_next_new:
+                line += f" {_AT_NEXT_NEW}"
             self.session.add_success(line)
         for notice in switched:
             self.session.add_message("system", notice)
@@ -1801,9 +1851,10 @@ class BaseCLIApp:
             async with self._turn_lock:
                 return await self._new_conversation(target)
 
-    async def _new_conversation(self, backend: str | None) -> str:
+    async def _new_conversation(self, backend: str | None, *, warn: bool = True) -> str:
         """``start_new_session``'s switch, under the turn lock: on ``backend``
-        (the settings' orchestrator when None)."""
+        (the settings' orchestrator when None). ``warn``: a new conversation
+        on LangGraph says it is deprecated (``apply_settings`` says it itself)."""
         import uuid
 
         controller = self._workflow_controller
@@ -1841,7 +1892,7 @@ class BaseCLIApp:
             if stored:
                 line += f" Previous: {old}, listed in /sessions."
         self.session.add_message("system", line)
-        if moving and target == OrchestratorType.LANGGRAPH.value:
+        if warn and moving and target == OrchestratorType.LANGGRAPH.value:
             self.session.add_warning(_LANGGRAPH_DEPRECATION)
         if interrupted is not None:
             raise interrupted
