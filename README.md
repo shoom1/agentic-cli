@@ -968,9 +968,9 @@ as 128,000 tokens.
   it is listed again in the background. Every process of the app shares the
   file, and a listing writes only its own provider's entry and keeps the
   others as the file holds them (an entry this release cannot read too; a file
-  of a newer release is neither read nor written, and this process keeps its
-  listings in memory); a failed listing never replaces one of the provider's
-  address and kind.
+  of a newer release is neither read nor written: this process keeps its
+  listings in memory and logs once that every start lists); a failed listing
+  never replaces one of the provider's address and kind.
 - **Checking ids**: a model a provider does not list is rejected only when
   that provider's listing is fresh; a failed, untried or older listing
   accepts any id. A rejection read from the cache is confirmed by one new

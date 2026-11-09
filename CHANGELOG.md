@@ -1525,10 +1525,10 @@ the start of the entry's title.
   provider's entry and keeps every other entry as the file holds it, one this
   release cannot read included, and a failed listing never replaces the
   provider's listing of its address and kind. A file of a newer version is
-  not read or written (this process lists for itself and keeps its listings
-  in memory). A listing also records which of the `models` entries' models it
-  lacked, so a model a provider retired costs one listing, not one at every
-  start, whichever project's list names it.
+  not read or written: this process lists for itself, keeps its listings in
+  memory and says once why every start lists. A listing also records which of
+  the `models` entries' models it lacked, so a model a provider retired costs
+  one listing, not one at every start, whichever project's list names it.
 - **`budget` thinking on a model without budget thinking fails at startup.**
   Gemini 3 and adaptive Claude (4.6 and later) take levels, not budgets; 0.6
   reinterpreted `budget` on them (as a raw budget, or as plain adaptive

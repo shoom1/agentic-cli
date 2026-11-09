@@ -12,6 +12,7 @@ written; the format (version 3) does not change.
 from __future__ import annotations
 
 import json
+import logging
 import stat
 
 import pytest
@@ -253,6 +254,65 @@ class TestAFileItCannotUse:
         cache.put("anthropic", ANTHROPIC, failed(ANTHROPIC))
 
         assert path.read_bytes() == newer
+
+
+class TestANewerFileIsSaidOnce:
+    """A release that cannot use a newer cache lists at each start: it tells the user
+    why, once, naming the file and both versions."""
+
+    LOGGER = "agentic_cli.models.listing_cache"
+
+    @staticmethod
+    def newer(path, version: int = 4) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"version": version, "providers": {}}))
+
+    def infos(self, caplog) -> list[str]:
+        return [
+            r.getMessage() for r in caplog.records
+            if r.name == self.LOGGER and r.levelno == logging.INFO
+        ]
+
+    def test_one_line_at_info_whatever_is_read_or_written_after(self, path, caplog):
+        self.newer(path)
+        cache = ListingCache(path)
+
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            cache.read()
+            cache.put("google", GOOGLE, ok(GOOGLE))
+            cache.read()
+            ListingCache(path).read()  # another catalog of the same process
+
+        assert self.infos(caplog) == [
+            f"The model cache {path} is of version 4, newer than this release's (3): "
+            "this release does not use it, and lists the providers in use at each start"
+        ]
+
+    def test_another_version_of_the_file_is_said_again(self, path, caplog):
+        self.newer(path, 5)
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            ListingCache(path).read()
+            self.newer(path, 6)
+            ListingCache(path).read()
+
+        assert [line.split(" is of ")[1].split(",")[0] for line in self.infos(caplog)] == [
+            "version 5", "version 6",
+        ]
+
+    @pytest.mark.parametrize("content", [
+        json.dumps({"version": 3, "providers": {}}).encode(),
+        json.dumps({"version": 2, "providers": {}}).encode(),
+        b"{not json",
+    ], ids=["this version", "an older one", "broken"])
+    def test_a_file_this_release_can_use_or_replace_is_not_said(self, path, caplog, content):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(content)
+
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            ListingCache(path).read()
+            ListingCache(path).put("google", GOOGLE, ok(GOOGLE))
+
+        assert self.infos(caplog) == []
 
 
 # --- a failure never replaces a listing --------------------------------------------------------

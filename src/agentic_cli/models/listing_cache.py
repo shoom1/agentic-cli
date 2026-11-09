@@ -19,12 +19,16 @@ changes one provider's entry only:
   entry's own fields are strict: it cannot be misread);
 - a file of a **newer** version is neither read nor written: this catalog
   lists as if there were none and keeps its listings in memory, so the newer
-  release's entries are not lost. A broken file, or one of an older version
-  (its models meant something else), is ignored and rewritten;
+  release's entries are not lost (it says so once, at info: the user sees why
+  every start lists). A broken file, or one of an older version (its models
+  meant something else), is ignored and rewritten;
 - a failed listing never replaces a listing of the provider's address and
   kind, and ``absent`` is the file's record of that listing joined to this
   catalog's (two projects name different retired models), less every id the
   listing now serves.
+
+A format an older release cannot read goes under a new file name, so each
+release keeps its own cache (see ``CACHE_VERSION``).
 
 The format (``CACHE_VERSION``) is unchanged: a file this module writes is one
 the reader it replaced accepts, and this module reads what that one wrote.
@@ -52,8 +56,16 @@ logger = logging.getLogger(__name__)
 #: Version 3 holds every model a provider serves, and which are shown
 #: (version 2 held only those shown, so it rejected the others while fresh);
 #: a file of an older version is listed again, one of a newer version is left
-#: as it is.
+#: as it is. A format an older release cannot read goes under a new file name
+#: (``model_cache.v4.json``, say), so each release keeps its own cache and
+#: none rewrites another's. Within a version a field is added only to a cached
+#: model (``CachedModel`` ignores what it does not know): a field added to an
+#: entry makes the entry unreadable to the releases before it.
 CACHE_VERSION = 3
+
+#: The (file, version) pairs of newer caches already said to be unusable: once
+#: per process, though a manager builds a catalog at every reinitialize.
+_NEWER_SAID: set[tuple[str, int]] = set()
 
 
 # --- the schema: strict, so a damaged entry is ignored, not misread ---------------------------
@@ -227,7 +239,15 @@ class ListingCache:
             return {}, True
         version, providers = document.get("version"), document.get("providers")
         if type(version) is int and version > CACHE_VERSION:
-            logger.debug("Ignoring the model cache %s: version %s is newer", self._path, version)
+            if (str(self._path), version) not in _NEWER_SAID:
+                _NEWER_SAID.add((str(self._path), version))
+                logger.info(
+                    "The model cache %s is of version %d, newer than this release's (%d): "
+                    "this release does not use it, and lists the providers in use at each start",
+                    self._path,
+                    version,
+                    CACHE_VERSION,
+                )
             return {}, False
         if type(version) is not int or version != CACHE_VERSION or not isinstance(providers, dict):
             logger.debug("Ignoring the model cache %s: not a version %d file", self._path, CACHE_VERSION)
