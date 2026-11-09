@@ -98,6 +98,53 @@ class TestAnthropic:
         assert list(served) == ["claude-sonnet-4-5-20250929", "claude-sonnet-4-5", "claude-opus-4-7"]
         assert shown == ["claude-sonnet-4-5", "claude-opus-4-7"]
 
+    @pytest.mark.parametrize(
+        ("dated", "alias"),
+        [
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+            ("claude-opus-4-1-20250805", "claude-opus-4-1"),
+            ("claude-sonnet-5-5-20261001", "claude-sonnet-5-5"),
+            ("claude-fable-5-20261101", "claude-fable-5"),
+            ("claude-sonnet-4-5@2025-09-29", "claude-sonnet-4-5"),
+        ],
+    )
+    def test_a_dated_id_of_a_family_the_table_names_is_shown_as_its_alias(self, dated, alias):
+        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=alias, shown=False))
+
+        assert list(served) == [dated, alias]
+        assert shown == [alias]
+
+    @pytest.mark.parametrize(
+        ("dated", "invented"),
+        [
+            ("claude-3-5-haiku-20241022", "claude-3-5-haiku"),
+            ("claude-3-haiku-20240307", "claude-3-haiku"),
+            ("claude-3-7-sonnet-20250219", "claude-3-7-sonnet"),
+            ("claude-nova-5-20261101", "claude-nova-5"),
+        ],
+    )
+    def test_a_dated_id_of_any_other_family_has_no_alias_and_is_shown_as_it_is(self, dated, invented):
+        """Anthropic serves no ``claude-3-5-haiku``: the date-stripped id of a family the
+        table does not name is no alias, so it is neither accepted nor shown (a listing
+        the cache holds from before carries it as an alias too)."""
+        served, shown = served_and_shown("anthropic", ListedModel(dated, alias=invented, shown=False))
+
+        assert list(served) == [dated]
+        assert shown == [dated]
+
+    def test_a_table_without_family_rules_gives_no_alias(self):
+        raw = json.loads(
+            resources.files("agentic_cli.models").joinpath("data", "table.json").read_text("utf-8")
+        )
+        rules = raw["providers"]["anthropic"]["rules"]
+        raw["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] == "^claude-"]
+        listed = ListedModel("claude-sonnet-4-5-20250929", alias="claude-sonnet-4-5", shown=False)
+
+        served, shown = records_for(PROVIDERS["anthropic"], listing("anthropic", listed), ShippedTable(raw))
+
+        assert list(served) == ["claude-sonnet-4-5-20250929"]
+        assert [record.model for record in shown] == ["claude-sonnet-4-5-20250929"]
+
     def test_the_alias_takes_the_facts_of_the_first_id_listed_under_it(self):
         served, shown = served_and_shown(
             "anthropic",

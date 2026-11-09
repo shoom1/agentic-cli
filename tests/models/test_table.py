@@ -47,6 +47,9 @@ def _record(kind: ProviderKind, model: str):
         (G, "gemini-3.5-flash-lite", "fast", ThinkingMechanism.GEMINI_LEVEL, "gemini", "always"),
         (G, "gemini-3.5-flash", "default", ThinkingMechanism.GEMINI_LEVEL, "gemini", "always"),
         (G, "gemini-4-argon", None, ThinkingMechanism.GEMINI_LEVEL, "gemini", "never"),
+        (G, "gemini-flash-lite-latest", "fast", ThinkingMechanism.GEMINI_LEVEL, "gemini", "always"),
+        (G, "gemini-flash-latest", "default", ThinkingMechanism.GEMINI_LEVEL, "gemini", "always"),
+        (G, "gemini-pro-latest", "strong", ThinkingMechanism.GEMINI_LEVEL, "gemini", "always"),
         (A, "claude-fable-5", None, ThinkingMechanism.ANTHROPIC_ADAPTIVE, "anthropic", "never"),
         (A, "claude-haiku-5-5", "fast", ThinkingMechanism.ANTHROPIC_ADAPTIVE, "anthropic", "never"),
         (A, "claude-haiku-4-5", "fast", ThinkingMechanism.ANTHROPIC_BUDGET, "anthropic", "without_thinking"),
@@ -113,6 +116,29 @@ class TestGemini:
             rule = _record(G, model).thinking
             assert rule.levels == ("minimal", "low", "medium", "high"), model
             assert rule.can_disable is False
+
+    @pytest.mark.parametrize(
+        ("alias", "family"),
+        [
+            ("gemini-flash-latest", "gemini-3.5-flash"),
+            ("gemini-flash-lite-latest", "gemini-3.5-flash-lite"),
+            ("gemini-pro-latest", "gemini-3-pro-preview"),
+        ],
+    )
+    def test_a_latest_alias_thinks_as_the_family_it_points_at(self, alias, family):
+        """Google's -latest aliases name the newest Flash, Flash-Lite and Pro, so each
+        takes the rule of that family's Gemini 3 and later models: a user who pins
+        one does not get thinking silently off."""
+        record, pointed = _record(G, alias), _record(G, family)
+
+        assert record.thinking == pointed.thinking
+        assert (record.tier, record.cache, record.sampling, record.reasoning_text) == (
+            pointed.tier, pointed.cache, pointed.sampling, pointed.reasoning_text,
+        )
+
+    @pytest.mark.parametrize("model", ["gemini-flash-latest-001", "gemini-ultra-latest", "gemini-2.5-flash-latest"])
+    def test_no_other_latest_name_is_taken_for_one(self, model):
+        assert _record(G, model).thinking == ThinkingRule()
 
     def test_gemini_reasoning_text(self):
         assert _record(G, "gemini-2.5-flash").reasoning_text is True
@@ -458,3 +484,39 @@ class TestTableFile:
 
         with pytest.raises(ValueError):
             ShippedTable(raw)
+
+
+class TestIsClaudeAlias:
+    """Anthropic serves an undated alias (``claude-sonnet-4-5``) for the dated ids of the
+    families the table names; the 3.x line's ids put the version first, and its aliases
+    are ``-latest`` ones (or none), never the date-stripped id."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1", "claude-opus-4",
+            "claude-sonnet-5-5", "claude-opus-5", "claude-haiku-5-5", "claude-fable-5",
+        ],
+    )
+    def test_a_family_the_table_names_has_one(self, model):
+        assert load_table().is_claude_alias(model)
+
+    @pytest.mark.parametrize(
+        "model",
+        ["claude-3-5-haiku", "claude-3-haiku", "claude-3-7-sonnet", "claude-3-opus", "claude-nova-5", "claude"],
+    )
+    def test_any_other_id_does_not(self, model):
+        assert not load_table().is_claude_alias(model)
+
+    def test_a_table_without_family_rules_names_no_alias(self):
+        raw = _raw()
+        rules = raw["providers"]["anthropic"]["rules"]
+        raw["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] == "^claude-"]
+
+        assert not ShippedTable(raw).is_claude_alias("claude-sonnet-4-5")
+
+    def test_a_table_without_an_anthropic_provider_names_no_alias(self):
+        raw = _raw()
+        del raw["providers"]["anthropic"]
+
+        assert not ShippedTable(raw).is_claude_alias("claude-sonnet-4-5")

@@ -2537,7 +2537,15 @@ step; each entry says what to use instead.
   tier picks and the "not available" message show what they showed. Without
   a listing, a dated Claude id is described as its alias is
   (`claude-sonnet-5-5-20261001` cannot turn thinking off and takes no
-  sampling parameters, like `claude-sonnet-5-5`).
+  sampling parameters, like `claude-sonnet-5-5`). A dated Claude id is shown
+  as its undated alias only for a family the shipped table names (Sonnet,
+  Opus, Haiku and Fable: `claude-sonnet-4-5`); a 3.x id such as
+  `claude-3-5-haiku-20241022` is shown and accepted as itself, since
+  Anthropic serves no `claude-3-5-haiku` (its alias is `-latest`; 3 Haiku has
+  none), which 0.6 offered by stripping the date. Google's `-latest` aliases
+  (`gemini-flash-latest`, `-flash-lite-latest`, `-pro-latest`) are described
+  as the Gemini 3 family they point at (tier, thinking levels), so a pinned
+  one thinks.
 - **On ADK, an OpenRouter model's reasoning details go back to it with the
   tool results, as on Deep Agents.** Beside its reasoning text OpenRouter
   sends `reasoning_details` (Claude's signed thinking, Gemini's thought

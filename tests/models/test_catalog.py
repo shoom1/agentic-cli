@@ -144,6 +144,44 @@ class TestGoogle:
         assert record.display_name == "Gemini 2.0 Flash"
 
 
+class TestGoogleLatestAliases:
+    """A pinned ``-latest`` alias is served (the list does not show it) and described as
+    the family it points at: its listing says it thinks, and thinking is not silently off."""
+
+    async def test_a_pinned_alias_thinks_as_its_family(self):
+        catalog = await loaded(google=KEYS["google"])
+
+        record = catalog.record(ModelRef("google", "gemini-flash-latest"))
+
+        assert record.thinking.mechanism is ThinkingMechanism.GEMINI_LEVEL
+        assert (record.tier, record.sources["thinking"]) == ("default", "table")
+        assert record.context_window == 1048576 and record.sources["context_window"] == "listing"
+
+    async def test_an_alias_the_listing_says_does_not_think_has_no_knob(self):
+        payload = recorded("google")
+        for model in payload["models"]:
+            if model["name"] == "models/gemini-flash-latest":
+                model["thinking"] = False
+        catalog = await loaded(ProviderAPI(google=payload), google=KEYS["google"])
+
+        record = catalog.record(ModelRef("google", "gemini-flash-latest"))
+
+        assert record.thinking == ThinkingRule()
+        assert record.sources["thinking"] == "listing"
+
+    async def test_a_default_model_pinned_to_an_alias_resolves_with_its_thinking_level(self):
+        catalog = await loaded(google=KEYS["google"])
+
+        resolved = resolve_model(
+            agent=None, spec="google:gemini-flash-latest", generation=None,
+            thinking_effort="high", roles=RoleMap(default_model=None, model_roles={}),
+            catalog=catalog, providers=providers(google=KEYS["google"]),
+        )
+
+        assert resolved.thinking is not None
+        assert resolved.thinking.mechanism is ThinkingMechanism.GEMINI_LEVEL
+
+
 class TestAnthropic:
     async def test_the_thinking_types_decide_the_mechanism(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
@@ -161,7 +199,7 @@ class TestAnthropic:
         assert sonnet.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET
         assert (sonnet.budgets, sonnet.budget_range) == ((4096, 10000, 32000), (1024, 128000))
         # The listing says it does not think.
-        assert thinking("claude-3-5-haiku") == ThinkingRule()
+        assert thinking("claude-3-5-haiku-20241022") == ThinkingRule()
         record = catalog.record(ModelRef("anthropic", "claude-opus-4-7"))
         assert record.sources["thinking"] == "listing"
         assert (record.context_window, record.max_output) == (1000000, 128000)
@@ -261,7 +299,7 @@ class TestAnthropic:
     async def test_without_capabilities_the_version_decides(self):
         catalog = await loaded(anthropic=KEYS["anthropic"])
 
-        record = catalog.record(ModelRef("anthropic", "claude-3-haiku"))
+        record = catalog.record(ModelRef("anthropic", "claude-3-haiku-20240307"))
 
         assert record.thinking.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET
         assert record.sources["thinking"] == "table"
@@ -596,7 +634,7 @@ async def test_what_is_shown_does_not_change():
         ],
         "anthropic": [
             "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
-            "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+            "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
         ],
         "openai": [
             "gpt-5.5", "gpt-5.5-2026-03-05", "gpt-5.5-pro", "gpt-5.4-mini", "gpt-5-codex", "o3",
@@ -625,7 +663,7 @@ async def test_what_is_shown_does_not_change():
         catalog.record(ModelRef("anthropic", "claude-sonnet-9-9"))
     assert str(caught.value).endswith(
         "Available anthropic models: claude-sonnet-5-5, claude-opus-4-7, claude-sonnet-4-6, "
-        "claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-haiku, claude-3-haiku"
+        "claude-sonnet-4-5, claude-haiku-4-5, claude-3-5-haiku-20241022, claude-3-haiku-20240307"
     )
 
 
@@ -637,6 +675,46 @@ async def test_search_finds_an_id_its_provider_serves_but_does_not_show():
 
     assert [str(record.ref) for record in dated] == ["anthropic:claude-sonnet-4-5-20250929"]
     assert [str(record.ref) for record in alias] == ["google:gemini-flash-latest"]
+
+
+#: The date-stripped ids of the recorded listing's 3.x models: Anthropic's alias for 3.5
+#: Haiku is ``claude-3-5-haiku-latest`` and 3 Haiku has none, so a request for these fails.
+NOT_SERVED = (
+    ModelRef("anthropic", "claude-3-5-haiku"),
+    ModelRef("anthropic", "claude-3-haiku"),
+)
+
+
+async def test_an_id_the_provider_does_not_serve_is_not_accepted_shown_or_found():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for ref in NOT_SERVED:
+        with pytest.raises(ModelResolutionError, match=f"{ref} is not available"):
+            catalog.record(ref)
+    assert not {ref.model for ref in NOT_SERVED} & set(ids(catalog.records("anthropic")))
+    found = await catalog.search("haiku")
+    assert [str(record.ref) for record in found] == [
+        "anthropic:claude-3-5-haiku-20241022",
+        "anthropic:claude-3-haiku-20240307",
+        "anthropic:claude-haiku-4-5",
+        "anthropic:claude-haiku-4-5-20251001",
+    ]
+
+
+async def test_a_dated_id_of_a_family_with_no_alias_is_accepted_and_shown_as_it_is():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for model in ("claude-3-5-haiku-20241022", "claude-3-haiku-20240307"):
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in ids(catalog.records("anthropic"))
+
+
+async def test_the_families_the_table_names_keep_their_aliases():
+    catalog = await loaded(anthropic=KEYS["anthropic"])
+
+    for model in ("claude-sonnet-4-5", "claude-haiku-4-5"):
+        assert catalog.record(ModelRef("anthropic", model)).model == model
+        assert model in ids(catalog.records("anthropic"))
 
 
 async def test_a_listed_dated_claude_id_is_described_as_its_alias_is():

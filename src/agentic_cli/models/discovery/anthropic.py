@@ -10,8 +10,10 @@ disabled is a 400 from that model), and whether it takes image input.
 
 Every model is listed under its own id, once (the first one listed wins), so
 each id is accepted. A dated id (``claude-sonnet-4-5-20250929``, or the
-``@2025-09-29`` form) is shown as its alias (``claude-sonnet-4-5``), not
-under its own id: 0.6 listed only the alias.
+``@2025-09-29`` form) is marked with its date-stripped id
+(``claude-sonnet-4-5``) and not shown under its own id; whether that id is an
+alias Anthropic serves (it is for the families the table names, not for
+``claude-3-5-haiku``) is for ``listing_records`` to say, with the table.
 """
 
 from __future__ import annotations

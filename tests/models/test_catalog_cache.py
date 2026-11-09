@@ -160,7 +160,7 @@ async def test_what_a_listing_serves_and_what_it_shows_survive_the_cache(cache):
     ]
     assert [r.model for r in catalog.records("anthropic")] == [
         "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
-        "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+        "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
     ]
 
 
@@ -935,6 +935,27 @@ async def test_a_confirmed_absence_is_trusted_at_the_next_start(cache):
 
     assert calls == [["anthropic"], [], []]
     assert read(cache)["providers"]["anthropic"]["absent"] == [RETIRED.model]
+
+
+async def test_an_entry_naming_an_alias_the_provider_does_not_serve_is_trusted_as_absent(cache):
+    """``claude-3-haiku`` is the date-stripped id of a model Anthropic lists
+    (``claude-3-haiku-20240307``), not an alias it serves: the entry is left out,
+    and the listing that found it missing says so in the cache, so the next
+    starts do not list again for it."""
+    clock = Clock()
+    not_an_alias = ModelRef("anthropic", "claude-3-haiku")
+    entries = {not_an_alias: ModelEntry(), ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}
+    calls = []
+    for _ in range(3):
+        api = ProviderAPI()
+        catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+        await catalog.load()
+        calls.append(api.calls)
+        assert catalog.not_offered() == {str(not_an_alias): "not served by anthropic"}
+        clock.now += 600
+
+    assert calls == [["anthropic"], [], []]
+    assert read(cache)["providers"]["anthropic"]["absent"] == [not_an_alias.model]
 
 
 async def test_a_new_entry_is_still_confirmed_once(cache):

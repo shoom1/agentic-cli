@@ -35,11 +35,15 @@ an entry is left out, and ``load`` warns, once per process, of an entry whose
 provider is not defined or whose listing lacks its model.
 
 **Served and shown.** A listing holds every model the provider serves, and
-the catalog accepts each of their ids (``record()``, ``search``). A provider
-shows fewer (``records()``, the tier picks above, the models an "is not
-available" message names, the status count): Google its text models, without
-aliases, snapshots or variants; Anthropic each dated id as its alias, which
-takes the first one listed's facts; OpenAI its curated and reasoning models.
+the catalog accepts each id it lists (``record()``, ``search``), and for
+Anthropic the undated alias of a dated id of a family the table names
+(``claude-sonnet-4-5`` for ``claude-sonnet-4-5-20250929``; the 3.x line has no
+alias of that shape, so ``claude-3-5-haiku`` is accepted by no listing). A
+provider shows fewer (``records()``, the tier picks above, the models an "is
+not available" message names, the status count ``ProviderStatus.model_count``):
+Google its text models, without aliases, snapshots or variants; Anthropic each
+dated id as its alias where it has one, which takes the first one listed's
+facts, else as itself; OpenAI its curated and reasoning models.
 ``listing_records.records_for`` makes both maps, each record with its entry.
 
 **Validation.** An unknown id is rejected only when its provider's listing is
@@ -656,7 +660,12 @@ class ModelCatalog:
         latest = state.listing or state.failure
         if latest is not None:
             self._cache.put(
-                name, state.provider, latest, state.absent, after_failure=state.failure is not None
+                name,
+                state.provider,
+                latest,
+                state.absent,
+                after_failure=state.failure is not None,
+                served=state.accepted,
             )
 
     def _adopt(self, state: _ProviderState, entry: CacheEntry) -> None:

@@ -95,6 +95,48 @@
           "source": "Gemini 3 Flash. Gemini 3 and later take a discrete thinking_level and cannot turn thinking off (none = the lowest level); agentic-cli 0.6.x thinking-level mapping; ladders from the langchain-google-genai 4.4.2 bundled profiles (models.dev, MIT), 2026-10"
         },
         {
+          "match": "^gemini-flash-lite-latest$",
+          "tier": "fast",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["minimal", "low", "medium", "high"],
+            "can_disable": false
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "gemini-flash-lite-latest: Google's alias for its newest Flash-Lite model, a Gemini 3 or later model (the fallback list below, from Google's listing of 2026-11-04, names 3.5 Flash-Lite), so it takes that family's rule; the listing gives its numbers, and turns thinking off when it says the model does not think. If Google moves the alias to a model that thinks another way, this rule is wrong for it: pin that model's own id; rule as for Gemini 3 Flash-Lite"
+        },
+        {
+          "match": "^gemini-flash-latest$",
+          "tier": "default",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["minimal", "low", "medium", "high"],
+            "can_disable": false
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "gemini-flash-latest: Google's alias for its newest Flash model, a Gemini 3 or later model (the fallback list below, from Google's listing of 2026-11-04, names 3.8 Flash), so it takes that family's rule; the listing gives its numbers, and turns thinking off when it says the model does not think. If Google moves the alias to a model that thinks another way, this rule is wrong for it: pin that model's own id; rule as for Gemini 3 Flash"
+        },
+        {
+          "match": "^gemini-pro-latest$",
+          "tier": "strong",
+          "thinking": {
+            "mechanism": "gemini_level",
+            "levels": ["low", "high"],
+            "can_disable": false,
+            "generic_map": {
+              "medium": "high"
+            }
+          },
+          "cache": "gemini",
+          "reasoning_text": true,
+          "sampling": "always",
+          "source": "gemini-pro-latest: Google's alias for its newest Pro model, a Gemini 3 or later model (the fallback list below, from Google's listing of 2026-11-04, names 3.1 Pro), so it takes that family's rule; the listing gives its numbers, and turns thinking off when it says the model does not think. If Google moves the alias to a model that thinks another way, this rule is wrong for it: pin that model's own id; rule as for Gemini 3 Pro: levels low and high, medium becomes high"
+        },
+        {
           "match": "^gemini-[3-9]",
           "thinking": {
             "mechanism": "gemini_level",

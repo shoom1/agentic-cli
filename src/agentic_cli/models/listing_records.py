@@ -10,9 +10,12 @@ Two maps come out. The provider's listing holds every model it **serves**, and
 the catalog accepts each of their ids; the provider **shows** fewer, the
 models its list offers (``ModelCatalog.records``). Where "shown" is decided
 depends on the provider: Google's lister marks the text models; Anthropic's
-marks a dated id as its alias, which this module adds as a record (it takes
-the first dated id listed's facts); OpenAI's curated list and its reasoning
-models are picked here. Every value in a record keeps its source
+marks a dated id with its date-stripped id, which this module takes as the
+dated id's alias, serves and shows (it takes the first dated id listed's
+facts) only for a family the table names (``ShippedTable.is_claude_alias``),
+since Anthropic serves no ``claude-3-5-haiku`` for ``claude-3-5-haiku-20241022``,
+and otherwise shows the dated id itself; OpenAI's curated list and its
+reasoning models are picked here. Every value in a record keeps its source
 (``ModelRecord.sources``), highest precedence first: the ``models`` entry
 (``config``, ``with_entry``), the listing (``listing``), the shipped table
 (``table``).
@@ -128,8 +131,10 @@ def _records_for(
     for listed in listing.models:
         if listed.id not in accepted:
             accepted[listed.id] = _listed_record(name, kind, listed, table)
-        if listed.alias is None:
-            if listed.shown:
+        if listed.alias is None or not table.is_claude_alias(listed.alias):
+            # A dated id whose alias Anthropic does not serve (the 3.x line's)
+            # is shown as it is, and its date-stripped id is no id at all.
+            if listed.shown or listed.alias is not None:
                 shown.setdefault(listed.id, accepted[listed.id])
             continue
         # Anthropic: a dated id is shown as its alias, which takes the

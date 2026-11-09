@@ -320,6 +320,20 @@ class ShippedTable:
         )
         return ModelRecord(provider=provider, kind=kind, model=model, sources=sources, **values)
 
+    def is_claude_alias(self, model_id: str) -> bool:
+        """Whether ``model_id`` is an undated alias Anthropic serves for its dated ids.
+
+        ``claude-sonnet-4-5`` is the alias of ``claude-sonnet-4-5-20250929``. The 3.x
+        line puts the version first and has no alias of that shape (3.5 Haiku's is
+        ``claude-3-5-haiku-latest``, and 3 Haiku has none), so a date-stripped id is
+        an alias only for a family the table names: one of its Anthropic rules other
+        than the catch-all matches it.
+        """
+        return any(
+            compiled.rule.match != _CLAUDE_CATCH_ALL and compiled.matches(model_id)
+            for compiled in self._rules.get(ProviderKind.ANTHROPIC, ())
+        )
+
     def generic_claude_thinking(self, mechanism: ThinkingMechanism) -> ThinkingRule:
         """The thinking rule of a Claude model of no known family that thinks as
         ``mechanism`` does.
