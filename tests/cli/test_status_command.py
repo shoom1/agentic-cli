@@ -172,3 +172,72 @@ async def test_a_manager_without_context_budget_still_shows_the_rest():
 
     assert ("Services", "Initialized") in rows
     assert context_rows(rows) == [("Last Prompt", "45k")]
+
+
+# --- a workflow that did not start -------------------------------------------------
+
+
+async def failed_app(monkeypatch, error: Exception):
+    """A real app whose workflow failed to start with ``error``."""
+    from agentic_cli.cli import AppInfo
+    from agentic_cli.cli import app as app_module
+    from agentic_cli.cli.app import BaseCLIApp
+
+    def cannot_start(**kwargs):
+        raise error
+
+    monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
+    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(
+        "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+        cannot_start,
+    )
+    app = BaseCLIApp(
+        app_info=AppInfo(name="Status test", version="0"),
+        agent_configs=team(),
+        settings=BaseSettings(session_store="memory", default_model=SONNET),
+    )
+    app.session = autospec_session()
+    await app._workflow_controller.start_background_init()
+    assert not await app._workflow_controller.ensure_initialized()
+    return app
+
+
+async def app_status_rows(app) -> list[tuple[str, str]]:
+    await StatusCommand().execute("", app)
+    (panel,) = app.session.add_rich.call_args.args
+    labels, values = (list(column.cells) for column in panel.renderable.columns)
+    return [(str(label), str(value)) for label, value in zip(labels, values)]
+
+
+async def test_the_app_names_why_its_workflow_did_not_start(monkeypatch):
+    error = RuntimeError("GOOGLE_API_KEY is not set")
+    app = await failed_app(monkeypatch, error)
+
+    assert app.workflow_error is error
+    await app._workflow_controller.close()
+
+
+async def test_status_shows_why_the_workflow_did_not_start(monkeypatch):
+    app = await failed_app(monkeypatch, RuntimeError("GOOGLE_API_KEY is not set [env]"))
+
+    rows = await app_status_rows(app)
+
+    assert ("Workflow", "Not available (failed to start)") in rows
+    assert ("Error", "GOOGLE_API_KEY is not set [env]") in rows
+    await app._workflow_controller.close()
+
+
+async def test_a_running_workflow_has_no_error(monkeypatch):
+    monkeypatch.setattr("agentic_cli.cli.app.configure_logging", lambda *a, **k: None)
+    monkeypatch.setattr("agentic_cli.cli.app._install_adk_notice_hook", lambda: None)
+    from agentic_cli.cli import AppInfo
+    from agentic_cli.cli.app import BaseCLIApp
+
+    app = BaseCLIApp(
+        app_info=AppInfo(name="Status test", version="0"),
+        agent_configs=team(),
+        settings=BaseSettings(session_store="memory", default_model=SONNET),
+    )
+
+    assert app.workflow_error is None

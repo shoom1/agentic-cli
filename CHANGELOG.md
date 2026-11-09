@@ -2215,6 +2215,14 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`/status` says why the workflow did not start.** It looked for the
+  start's error on the app under two names the app never had, so a workflow
+  that failed to start showed only "Not available (initializing...)". The
+  new `BaseCLIApp.workflow_error` property is the error the workflow's
+  start, or its last rebuild, failed with (the controller's `init_error`;
+  None while it runs or is starting), and `/status` shows "Not available
+  (failed to start)" and an Error row with it.
+
 - **An app's hooks run on a built app, and a command registered later
   completes.** `register_commands()` ran before the usage tracker, the
   workflow controller and the session existed, so a hook that read

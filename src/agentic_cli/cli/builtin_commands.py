@@ -184,10 +184,15 @@ class StatusCommand(Command):
             for label, value in _context_rows(workflow, getattr(app, "usage_tracker", None)):
                 table.add_row(label, value)
         except (RuntimeError, AttributeError):
-            table.add_row("Workflow", "[yellow]Not available (initializing...)[/yellow]")
-            init_error = getattr(app, "_init_error", None) or getattr(app, "workflow_error", None)
-            if init_error:
-                table.add_row("Error", f"[red]{init_error}[/red]")
+            # Why it did not start (or its last rebuild failed), when it did
+            # not: BaseCLIApp.workflow_error. An app object without it is
+            # taken as still starting.
+            error = getattr(app, "workflow_error", None)
+            state = "failed to start" if error is not None else "initializing..."
+            table.add_row("Workflow", Text(f"Not available ({state})", style="yellow"))
+            if error is not None:
+                # As text, not markup: an error may hold brackets.
+                table.add_row("Error", Text(str(error) or type(error).__name__, style="red"))
 
         # Persistent session info
         sid = app.session_id

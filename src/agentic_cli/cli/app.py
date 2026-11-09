@@ -903,6 +903,13 @@ class BaseCLIApp:
         return self._workflow_controller.workflow
 
     @property
+    def workflow_error(self) -> Exception | None:
+        """Why the workflow is not running: the error its start, or its last
+        rebuild, failed with (``/status`` shows it). None while it runs, while
+        it is still starting, and before it was ever started."""
+        return self._workflow_controller.init_error
+
+    @property
     def agent_configs(self) -> tuple["AgentConfig", ...]:
         """The agents the workflow is built from, ready or not (``/models``
         and the model pickers offer their models)."""
