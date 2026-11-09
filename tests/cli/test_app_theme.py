@@ -26,6 +26,7 @@ from thinking_prompt import ThinkingPromptStyles
 
 from agentic_cli.cli import app as app_module
 from agentic_cli.cli.app import BaseCLIApp, SlashCommandCompleter
+from agentic_cli.cli.workflow_controller import WorkflowState
 from agentic_cli.config import BaseSettings
 from tests.cli.dialog_fakes import autospec_session
 
@@ -236,6 +237,7 @@ async def test_a_change_rolled_back_by_a_failed_restart_leaves_the_theme_alone()
     app = _switching_app()
     app._workflow_controller = SimpleNamespace(
         is_ready=True,
+        state=WorkflowState.READY,
         workflow=SimpleNamespace(model="google:gemini-2.5-flash", agent_models={}),
         reinitialize=AsyncMock(side_effect=RuntimeError("no such model")),
     )

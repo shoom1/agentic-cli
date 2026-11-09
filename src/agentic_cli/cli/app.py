@@ -47,7 +47,7 @@ from agentic_cli.cli.session_resume import (
     show_replay,
 )
 from agentic_cli.cli.usage_tracker import UsageTracker
-from agentic_cli.cli.workflow_controller import WorkflowController
+from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
 from agentic_cli.settings_persistence import (
@@ -981,7 +981,13 @@ class BaseCLIApp:
            dedicated setters and trigger workflow reinitialization
         2. All other settings are applied directly to the settings object
 
-        A reinitialization keeps the sessions, as a model switch does. A
+        A reinitialization keeps the sessions, as a model switch does. One
+        asked for while the workflow is still starting waits for that start
+        first, as a turn does ("Waiting for initialization...": the start
+        resolved its models from the settings before the change); Ctrl+C
+        stops the wait, re-raised, and changes nothing. When that start
+        fails, the change is applied as for any workflow that is not
+        running: nothing is rebuilt, and the next start uses it. A
         switch to the deprecated LangGraph orchestrator ends with its
         deprecation warning. A change of ``ui_theme`` switches the session to
         ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
@@ -997,12 +1003,6 @@ class BaseCLIApp:
             self.session.add_message("system", "No changes made.")
             return True
 
-        needs_reinit = False
-        new_model = changes.get("model")
-        snapshot = _snapshot_settings(self._settings)
-        was_langgraph = _runs_langgraph(self._settings)
-        theme_before = self._settings.ui_theme
-
         # `orchestrator` triggers a reinit too: the controller swaps the backend
         # when it changes (otherwise the change only took effect on restart).
         # So does a role's model ("model_role:<role>"): agents resolve their
@@ -1013,12 +1013,28 @@ class BaseCLIApp:
             "model", "thinking_effort", "orchestrator",
             "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
         }
+        needs_reinit = any(
+            key in reinit_settings or key.startswith(MODEL_ROLE_KEY_PREFIX) for key in changes
+        )
+
+        controller = self._workflow_controller
+        if needs_reinit and controller.state is WorkflowState.INITIALIZING:
+            # The start in progress resolved its models from the settings as
+            # they are: wait for it, as a turn does, then rebuild on the new
+            # values below. Ctrl+C stops the wait before anything changed. A
+            # start that fails leaves the workflow down, and the change is
+            # applied for the next start, as for any failed workflow.
+            with _says_so_when_stopped(self.session):
+                await controller.ensure_initialized(self.session)
+
+        new_model = changes.get("model")
+        snapshot = _snapshot_settings(self._settings)
+        was_langgraph = _runs_langgraph(self._settings)
+        theme_before = self._settings.ui_theme
 
         for key, value in changes.items():
             try:
                 self._settings.update_setting(key, value)
-                if key in reinit_settings or key.startswith(MODEL_ROLE_KEY_PREFIX):
-                    needs_reinit = True
             except ValueError as e:
                 _restore_settings(self._settings, snapshot)
                 label = _setting_label(key, self._settings)
@@ -1026,7 +1042,6 @@ class BaseCLIApp:
                 return False
 
         # Reinitialize workflow if needed
-        controller = self._workflow_controller
         switched: list[str] = []
         swap_note: str | None = None
         interrupted: asyncio.CancelledError | None = None

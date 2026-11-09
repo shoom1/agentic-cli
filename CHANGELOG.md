@@ -2215,6 +2215,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`/settings` while the workflow is still starting runs the change it
+  saves.** A start resolves its models from the settings before it builds
+  the rest, so a change of model (or of anything else the agents are built
+  from) made while it ran was reported and saved but not run: the workflow
+  went on with the model it had resolved, and an orchestrator change was
+  left for some later rebuild to make. `apply_settings` now waits for the
+  start in progress, as a turn does ("Waiting for initialization...";
+  Ctrl+C stops the wait and changes nothing), then rebuilds as usual. When
+  that start fails, the change is applied as for any workflow that is not
+  running: nothing is rebuilt, and the next start uses it.
+
 - **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
   a job the cancel could not reach (another CLI of the app runs it and its
   backend cannot stop it from there, or its record could not be read or
