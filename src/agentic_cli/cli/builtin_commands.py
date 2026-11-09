@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.message_processor import _says_so_when_stopped
 from agentic_cli.cli.session_resume import NO_PROMPT
 
 if TYPE_CHECKING:
@@ -316,10 +317,11 @@ class JobsCommand(Command):
     async def execute(self, args: str, app: Any) -> None:
         """List running jobs, show one job, cancel, clean completed jobs, or resume finished ones.
 
-        Each call to the job manager runs on a worker thread: it takes the
-        jobs directory's lock, which another CLI of the app may hold, and a
-        cancel waits for the job's processes to exit. Ctrl+C stops waiting
-        for it, not the call: a cancel or a clean under way finishes.
+        Each call to the job manager runs on a worker thread (``_ask``): it
+        takes the jobs directory's lock, which another CLI of the app may
+        hold, and a cancel waits for the job's processes to exit. Ctrl+C
+        stops waiting for it, not the call (a cancel or a clean under way
+        finishes), and says the request was stopped.
         """
         try:
             manager = getattr(app.workflow, "job_manager", None)
@@ -341,7 +343,7 @@ class JobsCommand(Command):
                 return
             from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 
-            rec = await asyncio.to_thread(manager.cancel, parts[1])
+            rec = await self._ask(app, manager.cancel, parts[1])
             if rec is None:
                 app.session.add_warning(f"No such job: {parts[1]}")
                 return
@@ -374,7 +376,7 @@ class JobsCommand(Command):
             return
 
         if parts and parts[0] == "clean":
-            n = await asyncio.to_thread(manager.clean)
+            n = await self._ask(app, manager.clean)
             app.session.add_success(f"Removed {n} completed job(s).")
             return
 
@@ -389,17 +391,17 @@ class JobsCommand(Command):
 
         # A bare id → details + recent logs for that one job.
         if parts and parts[0] != "all":
-            rec = await asyncio.to_thread(manager.get, parts[0])
+            rec = await self._ask(app, manager.get, parts[0])
             if rec is None:
                 app.session.add_warning(f"No such job: {parts[0]}")
                 return
-            tail = await asyncio.to_thread(manager.tail, rec.job_id, 15, "stdout")
+            tail = await self._ask(app, manager.tail, rec.job_id, 15, "stdout")
             self._render_detail(app, rec, tail)
             return
 
         # Otherwise list: running+queued by default, everything with "all".
-        jobs = await asyncio.to_thread(
-            manager.list, active_only=not (parts and parts[0] == "all")
+        jobs = await self._ask(
+            app, manager.list, active_only=not (parts and parts[0] == "all")
         )
         if not jobs:
             scope = "" if (parts and parts[0] == "all") else "running "
@@ -423,6 +425,16 @@ class JobsCommand(Command):
                 "" if r.exit_code is None else str(r.exit_code),
             )
         app.session.add_rich(table)
+
+    @staticmethod
+    async def _ask(app: Any, call: Any, *args: Any, **kwargs: Any) -> Any:
+        """``call(*args, **kwargs)`` on a worker thread.
+
+        A Ctrl+C that stops the wait says "Operation cancelled...", once:
+        the wait opens no box for thinking-prompt to end and say it.
+        """
+        async with _says_so_when_stopped(app.session):
+            return await asyncio.to_thread(call, *args, **kwargs)
 
     def _render_detail(self, app: Any, rec: Any, tail: list[str]) -> None:
         lines = [

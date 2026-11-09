@@ -2262,12 +2262,15 @@ step; each entry says what to use instead.
 - **The prompt no longer freezes while another CLI of the app holds the
   jobs directory.** The CLI called the job manager on the event loop's
   thread: the status bar's poll every 2 seconds, each `/jobs` subcommand,
-  and the resume of finished jobs at a turn's end and by `/jobs resume`.
-  Each call takes the jobs directory's lock, which every CLI of the app
-  shares, so while another held it (a `/jobs clean`, a cancel waiting for a
-  job's processes to exit) the prompt, its redraws and Ctrl+C waited too.
-  Every call the CLI makes to the job manager now runs on a worker thread;
-  Ctrl+C stops waiting for one, and a cancel or a clean under way finishes.
+  and the resume coordinator (listing, claiming and closing the deliveries
+  of finished jobs, at a turn's end and by `/jobs resume`). Each call takes
+  the jobs directory's lock, which every CLI of the app shares, so while
+  another held it (its `/jobs clean` over large job folders, say) the
+  prompt, its redraws and Ctrl+C waited too. Those calls now run on a
+  worker thread; Ctrl+C stops waiting for one and says "Operation
+  cancelled...", and a cancel or a clean under way finishes. A resume turn
+  still reads the job's result on the event loop (the backends'
+  `resume_with_job_result`).
 
 - **A turn closes its event stream before it returns.** When a turn
   stopped reading the workflow's events early (an event handler that

@@ -1405,7 +1405,10 @@ class BaseCLIApp:
             return 0
 
         attempted = 0
-        for record in await asyncio.to_thread(jm.awaiting_resume):
+        # Ctrl+C stops these waits with no box open: they say so themselves.
+        async with _says_so_when_stopped(self.session):
+            records = await asyncio.to_thread(jm.awaiting_resume)
+        for record in records:
             if not await self._told_here(record):
                 continue  # told when its conversation is opened
             if await self._deliver_resume(jm, record) is not None:
@@ -1417,9 +1420,15 @@ class BaseCLIApp:
         return getattr(self._settings, "default_user", None), self._session_id
 
     async def _told_here(self, record: Any) -> bool:
-        """Whether ``record``, a job waiting for delivery, is told in this conversation."""
+        """Whether ``record``, a job waiting for delivery, is told in this conversation.
+
+        A Ctrl+C during the conversation's lookup says the request stopped.
+        """
         workflow = self._workflow_controller.workflow
-        return await told_here(record, self._here(), getattr(workflow, "can_resume", None))
+        async with _says_so_when_stopped(self.session):
+            return await told_here(
+                record, self._here(), getattr(workflow, "can_resume", None)
+            )
 
     async def _deliver_resume(self, jm, record) -> bool | None:
         """Claim one job and run its resume turn, and close out its transition.
