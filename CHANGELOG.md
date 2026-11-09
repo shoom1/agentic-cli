@@ -1995,6 +1995,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`load_agents_from_yaml` raises `ValueError` for a file it cannot use, as
+  documented.** An `instruction_file` that was missing or a directory, or YAML
+  that did not parse, raised `FileNotFoundError`, `IsADirectoryError` or
+  `yaml.YAMLError`, so an app that caught `ValueError` crashed. Each is now a
+  `ValueError` naming the file, and for an `instruction_file`, the agent too.
+  A missing YAML file itself is still `FileNotFoundError`.
+
 - **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
   tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,
   so every call was denied ("tool is not registered"); they now register them

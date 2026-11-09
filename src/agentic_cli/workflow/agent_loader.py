@@ -70,13 +70,23 @@ class AgentsFile(BaseModel):
     agents: list[AgentSpec] = Field(min_length=1)
 
 
+def _reason(error: OSError | UnicodeDecodeError) -> str:
+    """Why a file could not be read, as a sentence fragment (``No such file or directory``)."""
+    return getattr(error, "strerror", None) or str(error)
+
+
 def _resolve_prompt(spec: AgentSpec, base_dir: Path) -> str:
     """Resolve an agent's prompt from inline text or an instruction file."""
     if spec.instruction_file:
         path = Path(spec.instruction_file)
         if not path.is_absolute():
             path = base_dir / path
-        return path.read_text(encoding="utf-8")
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"Agent {spec.name!r}: cannot read instruction_file {path}: {_reason(exc)}"
+            ) from exc
     if spec.prompt is not None:
         return spec.prompt
     raise ValueError(
@@ -95,14 +105,21 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If the YAML is invalid or a prompt cannot be resolved.
+        ValueError: If the file cannot be read or is not valid YAML, or a prompt
+            cannot be resolved (none set, or an ``instruction_file`` that cannot
+            be read).
         pydantic.ValidationError: If the schema does not validate.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Agent config file not found: {path}")
 
-    data: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        data: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Agent config file {path}: cannot read it: {_reason(exc)}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Agent config file {path} is not valid YAML: {exc}") from exc
     if data is None:
         raise ValueError(f"Agent config file is empty: {path}")
     # Allow a top-level bare list of agents.
