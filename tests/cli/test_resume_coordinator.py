@@ -335,6 +335,21 @@ class TestClaimIsAlwaysClosed:
         assert jm.open_claims == set(), "cancellation left the job RESUMING"
         assert jm.completed == [("a", False, "resume cancelled")]
 
+    async def test_a_resume_cancelled_while_it_waits_for_the_turn_claimed_nothing(self):
+        """The claim is made once the turn lock is held, so a cancel while
+        waiting for it leaves the job pending, not ``RESUMING``."""
+        app, jm = _strict_app([SimpleNamespace(job_id="a", name="build")])
+
+        async with app._turn_lock:
+            task = asyncio.create_task(app.resume_finished_jobs())
+            await asyncio.sleep(0.05)  # it waits for the lock
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert jm.claimed == [] and jm.completed == []
+        assert [r.job_id for r in jm.awaiting_resume()] == ["a"]
+
     async def test_normal_delivery_closes_the_claim(self):
         app, jm = _strict_app([SimpleNamespace(job_id="a", name="build")])
         assert await app.resume_finished_jobs() == 1
