@@ -3,7 +3,7 @@
 ``BaseCLIApp.pick_session`` asks which conversation to open and
 ``BaseCLIApp.resume_session`` opens it; this module holds what they show:
 
-- ``picker(rows, now)``: the dialog listing the conversations, newest first,
+- ``picker(rows, now, placement=)``: the dialog listing the conversations, newest first,
   one option each: how long ago, its turns, its title and its id. The parts
   that tell rows apart come first, since a terminal narrower than a row
   clips its end; the id last keeps every option unique;
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from thinking_prompt import ChoiceField, Dialog
 
 if TYPE_CHECKING:
-    from thinking_prompt import ThinkingPromptSession
+    from thinking_prompt import Placement, ThinkingPromptSession
 
     from agentic_cli.workflow.sessions import SessionInfo
 
@@ -133,11 +133,15 @@ def show_replay(session: "ThinkingPromptSession", lines: list[tuple[str, str]]) 
             session.add_message(role, text)
 
 
-def picker(rows: list["SessionInfo"], now: datetime) -> tuple[Dialog, dict[str, str]]:
+def picker(
+    rows: list["SessionInfo"], now: datetime, *, placement: "Placement | None" = None
+) -> tuple[Dialog, dict[str, str]]:
     """The dialog that lists ``rows``, and the id each of its options stands for.
 
     Its only field is a choice list, so Enter on an option closes it with
-    that option, and Esc with None.
+    that option, and Esc with None. ``placement`` is where it is drawn
+    (the ``dialog_placement`` setting now: the session's own is the one it
+    started with); None for the session's.
     """
     ids: dict[str, str] = {}
     for info in rows:
@@ -148,5 +152,6 @@ def picker(rows: list["SessionInfo"], now: datetime) -> tuple[Dialog, dict[str, 
     dialog = Dialog(
         "Resume a conversation",
         fields=[ChoiceField("session", "", options=list(ids))],
+        placement=placement,
     )
     return dialog, ids

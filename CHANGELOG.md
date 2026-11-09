@@ -919,10 +919,11 @@ the start of the entry's title.
     the new colors, while Rich panels and tables keep the colors they were
     printed in.
   - A new placement applies from the next dialog agentic-cli opens:
-    `/settings` and the tools' questions (permission prompts included) pass
-    `placement=` from the settings each time, since thinking-prompt's session
-    placement is fixed when it starts. An app's own dialogs keep that startup
-    placement unless they pass `placement=` themselves.
+    `/settings`, the `/resume` picker and the tools' questions (permission
+    prompts included) pass `placement=` from the settings each time, since
+    thinking-prompt's session placement is fixed when it starts. An app's
+    own dialogs keep that startup placement unless they pass `placement=`
+    themselves.
 - **ADK summarizes the main agent's conversation before it outgrows the
   model, as Deep Agents does.** ADK sent the whole session with every model
   call, so a conversation that outgrew the window failed every later turn
@@ -1182,7 +1183,8 @@ the start of the entry's title.
   keeps the current one ("No other conversations to resume." when there are
   none). `/resume <id>` opens that one. Under the turn lock it reads the
   conversation first, so one that is not stored ("No conversation '<id>'
-  found."), already open ("Already in this conversation.") or unreadable
+  found.", also when another process deletes it while it opens), already
+  open ("Already in this conversation.") or unreadable
   ("Could not open '<id>': <error>") changes nothing; then, as `/new` does,
   memories are proposed from the conversation left (when that is on), the
   id is adopted once the workflow has taken it, and the task box and the
@@ -2214,6 +2216,17 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **A run whose workflow did not start says how to go on.** Starting a new
+  conversation, it warned "Cannot adopt session — workflow not
+  initialized."; it now says "The workflow did not start. Fix it with
+  /settings; your next message starts it again.", as `--continue` and
+  `--resume` already said how to resume once it is fixed.
+
+- **A slash command that fails is logged.** The user saw "Error executing
+  command: <error>" (for a `KeyError`, only the key) and nothing reached
+  the log. The failure is now logged as `command_failed` at warning, with
+  the command and the error's type, and its traceback at debug.
 
 - **`/status` says why the workflow did not start.** It looked for the
   start's error on the app under two names the app never had, so a workflow

@@ -1260,6 +1260,13 @@ class BaseCLIApp:
                 await command.execute(args, self)
                 logger.debug("command_completed", command=command.name)
             except Exception as e:
+                # A command that raises is a bug: the line says what, the log
+                # which command and its type, and its traceback at debug.
+                logger.warning(
+                    "command_failed", command=command.name,
+                    error_type=type(e).__name__, error=str(e),
+                )
+                logger.debug("command_failed", command=command.name, exc_info=e)
                 self.session.add_error(f"Error executing command: {e}")
         else:
             # Echo unknown command before error
@@ -1546,7 +1553,8 @@ class BaseCLIApp:
             True once ``session_id`` is the current conversation. False, with
             nothing changed, when it is already ("Already in this
             conversation."), is not stored ("No conversation '<id>'
-            found."), or could not be read ("Could not open '<id>': ...").
+            found.", also when it is deleted while it opens), or could not
+            be read ("Could not open '<id>': ...").
         """
         with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(session_id)
@@ -1639,11 +1647,19 @@ class BaseCLIApp:
                     await self._saving_facts(old)
                     self._turned = False  # proposed: a switch that fails now proposes none again
                 try:
-                    await workflow.load_session(session_id)
+                    stored = await workflow.load_session(session_id)
+                    # Not stored now: deleted since it was read (another
+                    # process's /sessions --delete), unless it is still
+                    # listed, holding no message yet.
+                    gone = not stored and await workflow.session_info(session_id) is None
                 except Exception as error:  # noqa: BLE001 - the id is not adopted
                     logger.debug("session_open_failed", session_id=session_id, exc_info=True)
                     reason = str(error) or type(error).__name__
                     self.session.add_error(f"Could not open '{session_id}': {reason}")
+                    return False
+                if gone:
+                    await self._readopt(workflow, old)
+                    self.session.add_error(f"No conversation '{session_id}' found.")
                     return False
                 adopted = True
             finally:
@@ -1660,6 +1676,16 @@ class BaseCLIApp:
             self.session.add_message("system", line)
             show_replay(self.session, replay)
             return True
+
+    @staticmethod
+    async def _readopt(workflow: Any, session_id: str) -> None:
+        """Give ``session_id`` back to the workflow, after a load that adopted
+        another conversation and found it gone. Never raises: the turns name
+        their conversation anyway."""
+        try:
+            await workflow.load_session(session_id)
+        except Exception:  # noqa: BLE001 - a lookup, the next turn goes on
+            logger.debug("session_readopt_failed", session_id=session_id, exc_info=True)
 
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
@@ -1684,7 +1710,11 @@ class BaseCLIApp:
             note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
             self.session.add_message("system", f"No other conversations to resume.{note}")
             return None
-        dialog, ids = picker(rows, datetime.now(timezone.utc))
+        # Drawn where the settings say now: /settings may have changed the
+        # placement since the session started with its own.
+        dialog, ids = picker(
+            rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement
+        )
         picked = await self.session.show_dialog(dialog)
         return None if picked is None else ids.get(picked)
 
@@ -1791,7 +1821,11 @@ class BaseCLIApp:
                           f"Fix it with /settings, then /resume {target}.",
                 "continue": "Could not continue: the workflow did not start. "
                             "Fix it with /settings, then /resume.",
-            }.get(mode, "Cannot adopt session — workflow not initialized."))
+            }.get(
+                mode,
+                "The workflow did not start. Fix it with /settings; "
+                "your next message starts it again.",
+            ))
             return True
 
         workflow = self._workflow_controller.workflow
