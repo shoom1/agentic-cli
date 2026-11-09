@@ -1129,6 +1129,7 @@ class BaseCLIApp:
             NewCommand,
             ModelsCommand,
         )
+        from agentic_cli.cli.memory_command import MemoryCommand
         from agentic_cli.cli.settings_command import SettingsCommand
 
         self.command_registry.register(HelpCommand())
@@ -1144,6 +1145,7 @@ class BaseCLIApp:
         self.command_registry.register(CompactCommand())
         self.command_registry.register(NewCommand())
         self.command_registry.register(ModelsCommand())
+        self.command_registry.register(MemoryCommand())
 
     async def process_input(self, user_input: str) -> None:
         """Process user input.
