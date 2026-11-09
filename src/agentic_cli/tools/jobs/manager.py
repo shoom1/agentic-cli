@@ -112,7 +112,9 @@ class ClaimLockUnavailable(RuntimeError):
     another process has just recorded. So without it no record is written: a
     launch or a delivery is not claimed, startup recovery does nothing, a
     cancel or a refresh leaves the record as it is (a read answers with the
-    record as this manager has it), and recording a completed delivery
+    record as this manager has it; a cancel whose request was recorded
+    before the wait leaves it requested, and whoever polls the job next
+    records how it ended: CANCELLED), and recording a completed delivery
     records nothing, so the claim stays ``RESUMING`` until startup recovery
     fails it once its process is gone. Only a new job's first write goes
     ahead: there is nothing on disk yet for it to lose.
@@ -701,7 +703,7 @@ class JobManager:
 
         Brings the record up to date first, as every read does (the durable
         record, then the backend's poll, in the transaction that records the
-        cancel: ``_mutate``), and returns it as it is
+        request: ``_mutate``), and returns it as it is
         when that shows the job has ended: a job that has already finished
         stays finished, also when nobody had polled it since (terminal
         transitions are monotonic — neither a stale view nor a cancel that
@@ -715,6 +717,18 @@ class JobManager:
         ``cancel_requested``, holding its slot, and is recorded CANCELLED when
         it ends; the next queued job starts then, not now.
 
+        A running job's cancel takes three steps, so the backend's wait for
+        the job to stop (the subprocess backend's, up to ``_CANCEL_WAIT_S``)
+        holds no lock another CLI of the app waits on (``_request_cancel``,
+        then ``JobBackend.cancel`` outside the cross-process lock, then
+        ``_record_cancelled``). The request is recorded before the backend is
+        asked, so a manager that sees the job end meanwhile records it
+        CANCELLED; a terminal state recorded meanwhile is how it ended. A
+        queued job is cancelled in one transaction, as it has nothing to
+        wait for and another manager could launch it meanwhile. This
+        manager's own other calls still wait for the cancel (``_lock``), so
+        its backends are never called concurrently.
+
         Returns:
             The record — check ``state`` for what actually happened — or None
             if the job is unknown.
@@ -726,36 +740,89 @@ class JobManager:
             try:
                 with self._claim_transaction():
                     with self._mutate(rec) as status:
-                        if status is DurableRead.MISSING:
-                            return None
-                        if status is DurableRead.UNREADABLE:
-                            logger.warning("job_cancel_unreadable", job_id=job_id)
-                            return rec
-                        self._poll(rec)
-                        if rec.state not in TERMINAL_STATES:
-                            backend = self._backend_of(rec, asked=True)
-                            if backend is None:
-                                return rec
-                            foreign = self._execution_is_foreign(rec)
-                            if foreign and not self._can_cancel_foreign(rec):
-                                logger.warning(
-                                    "job_cancel_not_reachable",
-                                    job_id=job_id,
-                                    owner=rec.exec_owner,
-                                )
-                                return rec
-                            if backend.cancel(rec, self._job_dir(job_id)) is False:
-                                rec.cancel_requested = True  # not stopped yet
-                                return rec
-                            rec.state = JobState.CANCELLED
-                            rec.finished_at = _now()
-                    self._maybe_start_queued()  # it has ended: its slot is free
-                    return rec
+                        backend = self._request_cancel(rec, status)
+                    if status is DurableRead.MISSING:
+                        return None
+                    if backend is None:
+                        if status is DurableRead.PRESENT and rec.state in TERMINAL_STATES:
+                            self._maybe_start_queued()  # it has ended: its slot is free
+                        return rec
+                    if rec.state == JobState.QUEUED:
+                        # Nothing to wait for, and unlocked another manager
+                        # could launch it meanwhile.
+                        stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
+                        return self._record_cancelled(rec, stopped)
             except ClaimLockUnavailable as exc:
                 logger.warning(
                     "job_cancel_skipped_unlocked", job_id=job_id, error=str(exc)
                 )
                 return rec
+            # Outside the cross-process lock: the backend may wait for the job.
+            stopped = backend.cancel(rec, self._job_dir(job_id)) is not False
+            if not stopped:
+                return rec  # RUNNING, with the request recorded: it ends CANCELLED
+            try:
+                return self._record_cancelled(rec, stopped)
+            except ClaimLockUnavailable as exc:
+                # The request is on disk: whoever polls the job next records
+                # it CANCELLED.
+                logger.warning(
+                    "job_cancel_unrecorded_unlocked", job_id=job_id, error=str(exc)
+                )
+                return rec
+
+    def _request_cancel(self, rec: JobRecord, status: DurableRead) -> JobBackend | None:
+        """Decide a cancel on ``rec`` as ``_mutate`` read it back (``status``).
+
+        Polls the job first: one that has ended is left as it ended. One
+        this manager can reach is marked ``cancel_requested``, which the
+        caller's transaction writes, and its backend returned for the
+        caller to cancel it; anything else returns None, the record left as
+        it is (unknown, unreadable, without its backend here, or another
+        live manager's job this one cannot reach).
+        """
+        if status is DurableRead.UNREADABLE:
+            logger.warning("job_cancel_unreadable", job_id=rec.job_id)
+            return None
+        if status is not DurableRead.PRESENT:
+            return None
+        self._poll(rec)
+        if rec.state in TERMINAL_STATES:
+            return None
+        backend = self._backend_of(rec, asked=True)
+        if backend is None:
+            return None
+        if self._execution_is_foreign(rec) and not self._can_cancel_foreign(rec):
+            logger.warning(
+                "job_cancel_not_reachable", job_id=rec.job_id, owner=rec.exec_owner
+            )
+            return None
+        rec.cancel_requested = True
+        return backend
+
+    def _record_cancelled(self, rec: JobRecord, stopped: bool) -> JobRecord:
+        """Record a job the backend ``stopped`` CANCELLED, and fill its slot.
+
+        Under the cross-process lock, on the record read back: a terminal
+        state recorded meanwhile (its own manager saw it end, after the
+        request: CANCELLED) is kept. One not ``stopped`` stays as it is,
+        with its request recorded.
+
+        Raises:
+            ClaimLockUnavailable: nothing was read or written.
+        """
+        with self._claim_transaction():
+            with self._mutate(rec) as status:
+                if (
+                    stopped
+                    and status is DurableRead.PRESENT
+                    and rec.state not in TERMINAL_STATES
+                ):
+                    rec.state = JobState.CANCELLED
+                    rec.finished_at = _now()
+            if rec.state in TERMINAL_STATES:
+                self._maybe_start_queued()  # it has ended: its slot is free
+        return rec
 
     def reconcile(self) -> None:
         """Refresh non-terminal jobs from durable state and their backends.

@@ -3017,7 +3017,11 @@ step; each entry says what to use instead.
   backend's `cancel` now returns whether the job stopped (None, from a
   backend written before, counts as stopped): the subprocess backend waits
   up to 2 seconds for the job's process group to exit, and the in-process
-  one stops only a job that has not started. A job still running stays
+  one stops only a job that has not started. That wait holds no lock other
+  CLIs of the app wait on: the request is recorded under the jobs
+  directory's lock, the backend waits outside it, and how the job ended is
+  recorded under it again (a terminal state recorded meanwhile, by the
+  manager that saw the job end, is kept). A job still running stays
   RUNNING with `cancel_requested`, holding its slot, and is recorded
   CANCELLED when it ends, as any cancelled job is; the next one starts then.
   A cancel another CLI sharing the jobs directory requests is read by the

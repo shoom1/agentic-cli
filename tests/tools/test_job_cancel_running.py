@@ -340,3 +340,92 @@ class TestTheToolSaysWhatHappened:
         gate.release.set()
 
         assert result == {"success": True, "state": "cancelled"}
+
+
+class _Watched(backends_mod.SubprocessBackend):
+    """The subprocess backend, saying when a cancel starts waiting for the job."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+
+    def cancel(self, record, job_dir):
+        self.waiting.set()
+        return super().cancel(record, job_dir)
+
+
+class TestTheWaitHoldsNoLock:
+    """A cancel waits for the job's processes outside the jobs directory's lock.
+
+    The subprocess backend waits up to ``_CANCEL_WAIT_S`` for a job's process
+    group to exit, and ``cancel`` waited inside the cross-process lock: every
+    other CLI of the app (its status bar's tick, its ``/jobs``) waited with
+    it, and the manager running the job could not record the job's end
+    meanwhile. The request is now recorded under the lock, the backend waits
+    without it, and how the job ended is recorded under it again, a terminal
+    state recorded meanwhile winning.
+    """
+
+    @pytest.fixture
+    def stubborn(self, jobs, tmp_path):
+        """A job that ignores SIGTERM and runs until its gate opens."""
+        gate = tmp_path / "gate"
+        command = (
+            f"trap '' TERM; echo ready; "
+            f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.02; done"
+        )
+        job = jobs.submit(tool="run_shell_job", backend="subprocess", spec={"command": command})
+        _until(lambda: jobs.tail(job.job_id) == ["ready"])
+        yield job, gate
+        gate.write_text("go")
+
+    def _cancelling(self, tmp_path, job_id: str):
+        """Another CLI's manager cancelling ``job_id`` on a thread of its own."""
+        watched = _Watched()
+        other = JobManager(base_dir=tmp_path / "jobs", backends={"subprocess": watched})
+        returned: list = []
+        thread = threading.Thread(target=lambda: returned.append(other.cancel(job_id)))
+        thread.start()
+        assert watched.waiting.wait(5), "the cancel never reached the backend"
+        return other, thread, returned
+
+    def test_another_managers_list_is_not_held_for_the_wait(
+        self, jobs, stubborn, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(backends_mod, "_CANCEL_WAIT_S", 1.5)
+        job, gate = stubborn
+        other, thread, returned = self._cancelling(tmp_path, job.job_id)
+        try:
+            started = time.monotonic()
+            jobs.list()
+            took = time.monotonic() - started
+        finally:
+            thread.join(10)
+            other.close()
+
+        assert took < 0.5, f"list() waited {took:.2f} s for the cancel's wait"
+        (cancelled,) = returned
+        assert (cancelled.state, cancelled.cancel_requested) == (JobState.RUNNING, True)
+
+    def test_a_job_that_ends_during_the_wait_is_recorded_cancelled(
+        self, jobs, stubborn, tmp_path, monkeypatch
+    ):
+        """Its manager records how it ended while the cancel waits: cancelled,
+        since the cancel was requested first; the cancel returns that."""
+        monkeypatch.setattr(backends_mod, "_CANCEL_WAIT_S", 3.0)
+        job, gate = stubborn
+        other, thread, returned = self._cancelling(tmp_path, job.job_id)
+        try:
+            gate.write_text("go")  # the job ends while the cancel waits
+            _until(lambda: (jobs.reconcile(), jobs.get(job.job_id).state)[1] in (
+                JobState.CANCELLED, JobState.FAILED, JobState.SUCCEEDED,
+            ))
+        finally:
+            thread.join(10)
+            other.close()
+
+        (cancelled,) = returned
+        assert cancelled.state is JobState.CANCELLED
+        on_disk = json.loads((jobs.base_dir / job.job_id / "meta.json").read_text())
+        assert (on_disk["state"], on_disk["cancel_requested"]) == ("cancelled", True)
+        assert jobs.get(job.job_id).state is JobState.CANCELLED

@@ -154,6 +154,10 @@ class JobBackend(ABC):
     def cancel(self, record: "JobRecord", job_dir: Path) -> bool | None:
         """Stop a job.
 
+        For a running job the manager calls it outside the jobs directory's
+        lock, the cancel already recorded as requested, so it may wait a
+        while for the job to stop without holding up any other CLI of the app.
+
         Returns:
             True once it has stopped (or will never start); False when it is
             still running, and will stop on its own (it cannot be
