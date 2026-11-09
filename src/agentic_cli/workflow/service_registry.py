@@ -30,7 +30,7 @@ EMBEDDING_SERVICE = "_embedding_service"
 # Service keys a tool may declare via ``register_tool(requires=...)``.
 #
 # Every entry must be something a manager can actually construct on demand
-# (see ``BaseWorkflowManager._ensure_managers_initialized``). Keys that are
+# (see ``BaseWorkflowManager._build_services_into``). Keys that are
 # always present (PERMISSION_ENGINE, WORKFLOW) say nothing when declared.
 KNOWN_SERVICE_KEYS = frozenset({
     ARXIV_SOURCE,

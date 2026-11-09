@@ -651,8 +651,8 @@ class BaseWorkflowManager(ABC):
         initializing: no initialization path calls it, so stubbing it changes
         nothing there (``initialize_services`` builds them through
         :meth:`_construct_services`, off the event loop and transactionally).
-        It is synchronous and blocks on the constructors, so it is no way to
-        build services on the event loop.
+        It is synchronous and blocks on the constructors, so it must not be
+        called on the event loop.
         """
         self._publish_services(self._build_services(frozenset(self._services)))
 
