@@ -513,16 +513,16 @@ class TestItsFinishedJobs:
             SimpleNamespace(job_id="j1", name="build", session_id="abc", user_id=me),
             SimpleNamespace(job_id="j2", name="other", session_id="xyz", user_id=me),
         )
-        seen: list[tuple[str, str]] = []
+        seen: list[str] = []
 
-        async def process_resume(*, record, current_session_id=None, **_):
-            seen.append((record.job_id, current_session_id))
+        async def process_resume(*, record, **_):
+            seen.append(record.job_id)
             return TurnResult(TurnStatus.COMPLETED)
 
         app._message_processor.process_resume = process_resume
 
         assert await app.resume_session("abc")
-        assert seen == [(job, "abc") for job in told]
+        assert seen == told
 
 
 class TestPickSession:

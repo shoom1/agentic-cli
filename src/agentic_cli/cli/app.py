@@ -1313,7 +1313,6 @@ class BaseCLIApp:
                     ui=self.session,
                     settings=self._settings,
                     usage_tracker=self._usage_tracker,
-                    current_session_id=self._session_id,
                 )
         except asyncio.CancelledError:
             jm.complete_resume(
@@ -1389,9 +1388,8 @@ class BaseCLIApp:
         once, and nothing has changed. What belongs to the process stays: the
         model and the settings, "Allow for this session" grants, sandbox
         kernels, and background jobs, each of which still reports to the
-        conversation that started it (a job's resume runs in its record's
-        session, and leaves the current conversation's ``ctx`` and tasks
-        alone).
+        conversation that started it (a finished job waits until that
+        conversation is opened).
 
         Returns:
             The new session id (12 hex characters).

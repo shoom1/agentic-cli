@@ -48,7 +48,6 @@ class _FakeMessageProcessor:
 
     async def process_resume(
         self, *, record, workflow_controller, ui, settings, usage_tracker,
-        current_session_id=None,
     ):
         self.resumed.append(record.job_id)
         return self._result
