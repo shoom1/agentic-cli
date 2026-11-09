@@ -136,8 +136,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         Args:
             agent_configs: The agents; the root is the one nobody delegates to.
             settings: Application settings (``get_settings()`` if not provided).
-            app_name: Application name for sessions (``settings.app_name`` if
-                not provided).
+            app_name: Application name for sessions, and what an OpenRouter
+                provider is told (``settings.app_name`` if not provided).
             model: This manager's default model, a ``provider:model`` reference
                 or a model id (see ``BaseWorkflowManager``).
             on_event: Optional hook to transform or drop events before they

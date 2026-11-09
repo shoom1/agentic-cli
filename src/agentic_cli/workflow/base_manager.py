@@ -258,10 +258,11 @@ class BaseWorkflowManager(ABC):
             app_name: The name conversations are kept under: ``app_name``
                 returns it and ``session_ref`` puts it in every conversation's
                 identity (the backends' session stores and checkpoints key by
-                it). Defaults to ``settings.app_name``. What the app keeps on
-                disk and builds for the tools (the jobs folder, tool outputs,
-                the permission context) is named by ``settings.app_name``,
-                whatever this is.
+                it), and an OpenRouter provider is told it (its HTTP-Referer
+                and X-Title headers). Defaults to ``settings.app_name``. What
+                the app keeps on disk and builds for the tools (the jobs
+                folder, tool outputs, the permission context) is named by
+                ``settings.app_name``, whatever this is.
             model: This manager's default model, as a ``provider:model``
                 reference or a model id (never a role). It takes the
                 ``default`` role for this manager only; without it, the
