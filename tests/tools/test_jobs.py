@@ -1357,7 +1357,13 @@ class TestAJobWhoseBackendIsNotRegistered:
         finally:
             other.close()
 
-    def test_it_is_logged_once_per_job_at_warning(self, tmp_path: Path, monkeypatch):
+    def test_it_is_logged_at_warning_only_when_asked_for(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """An app registers its backends after the constructor has reconciled,
+        so every start and orchestrator switch passes such a job: those
+        passes log at debug. A cancel, tail or result asks for the job by
+        name, and the first of them warns."""
         from agentic_cli.tools.jobs import manager as jobs_manager
 
         logged: list[tuple[str, str, dict]] = []
@@ -1366,28 +1372,41 @@ class TestAJobWhoseBackendIsNotRegistered:
             def __getattr__(self, level):
                 return lambda event, **fields: logged.append((level, event, fields))
 
+        def levels() -> list[str]:
+            return [
+                level
+                for level, event, fields in logged
+                if event == "job_backend_not_registered"
+                and fields == {"job_id": rec.job_id, "backend": "remote"}
+            ]
+
         base = tmp_path / "jobs"
-        owner, _ = self._owner(base)
+        owner, _ = self._owner(base, max_concurrent=1)
         try:
             rec = owner.submit(tool="t", backend="remote", spec={})
+            queued = owner.submit(tool="t", backend="remote", spec={})
             monkeypatch.setattr(jobs_manager, "logger", _Recorder())
             other = JobManager(base_dir=base)
             try:
                 other.reconcile()
                 other.get(rec.job_id)
+                other.get(queued.job_id)
+                assert levels() and set(levels()) == {"debug"}
+                assert all(
+                    level == "debug"
+                    for level, event, _ in logged
+                    if event == "job_backend_not_registered"
+                ), "the queued job's scheduling warned"
+
+                passive = len(levels())
+                other.cancel(rec.job_id)
+                other.tail(rec.job_id)
+                assert levels()[passive:].count("warning") == 1
+                assert levels()[-1] == "debug"  # the tail: warned once already
             finally:
                 other.close()
         finally:
             owner.close()
-
-        levels = [
-            level
-            for level, event, fields in logged
-            if event == "job_backend_not_registered"
-            and fields == {"job_id": rec.job_id, "backend": "remote"}
-        ]
-        assert levels[:1] == ["warning"]
-        assert len(levels) > 1 and set(levels[1:]) == {"debug"}
 
 
 class _GatedInProcessBackend(JobBackend):

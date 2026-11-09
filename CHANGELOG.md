@@ -2260,10 +2260,11 @@ step; each entry says what to use instead.
   finished. A queued one was claimed and its launch raised `KeyError`, out
   of the constructor, and `cancel`, `tail` and `result` raised it too. Such
   a job is now left as it is until a manager that has its backend looks at
-  it (`job_backend_not_registered` is logged once per job): it is not
-  polled, claimed, launched or cancelled, `cancel` returns it unchanged,
-  `tail` returns no lines and `result` None, and a running one holds no slot
-  of the manager's concurrency cap. The new `JobManager.has_backend(name)`
+  it (`job_backend_not_registered`, at debug, and at warning the first time
+  a cancel, `tail` or `result` asks for the job): it is not polled,
+  claimed, launched or cancelled, `cancel` returns it unchanged, `tail`
+  returns no lines and `result` None, and a running one holds no slot of
+  the manager's concurrency cap. The new `JobManager.has_backend(name)`
   says whether a backend is registered. So a job on a backend the app no
   longer registers stays as it was, RUNNING or queued, until its folder under
   `~/.<app>/jobs/` is removed: `/jobs clean` removes finished jobs only.

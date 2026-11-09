@@ -368,9 +368,9 @@ class JobManager:
         # and is now missing was *deleted* by another manager; one that was
         # never persisted is simply new. Writing must tell them apart.
         self._persisted: set[str] = set()
-        # Jobs already logged at warning for a backend this manager has not
-        # registered; later notices are debug.
-        self._backendless_noted: set[str] = set()
+        # Jobs whose unregistered backend has been logged at warning, which
+        # happens once per job, when a caller asks for it (``_backend_of``).
+        self._backendless_warned: set[str] = set()
         self._load_existing()
 
     # ------------------------------------------------------------------
@@ -552,7 +552,7 @@ class JobManager:
             rec = self._records.get(job_id)
             if rec is None:
                 return []
-            backend = self._backend_of(rec)
+            backend = self._backend_of(rec, asked=True)
             if backend is None:
                 return []
             return backend.logs(rec, self._job_dir(job_id), n, stream)
@@ -565,7 +565,7 @@ class JobManager:
             self._refresh(rec)
             if rec.state not in TERMINAL_STATES:
                 return None
-            backend = self._backend_of(rec)
+            backend = self._backend_of(rec, asked=True)
             if backend is None:
                 return None
             return backend.result(rec, self._job_dir(job_id))
@@ -608,7 +608,7 @@ class JobManager:
                     if rec.state in TERMINAL_STATES:
                         self._maybe_start_queued()  # its end may free a slot
                         return rec
-                    backend = self._backend_of(rec)
+                    backend = self._backend_of(rec, asked=True)
                     if backend is None:
                         return rec
                     if self._execution_is_foreign(rec) and not self._can_cancel_foreign(
@@ -1204,7 +1204,9 @@ class JobManager:
             logger.warning("job_recovery_skipped_unreadable", job_id=rec.job_id)
         return False
 
-    def _backend_of(self, rec: JobRecord) -> JobBackend | None:
+    def _backend_of(
+        self, rec: JobRecord, *, asked: bool = False
+    ) -> JobBackend | None:
         """The job's backend, or None when this manager has not registered it.
 
         Such a job is left exactly as it is: neither polled, judged, launched
@@ -1212,14 +1214,19 @@ class JobManager:
         written. Without the backend this manager cannot tell a running job
         from an ended one, and an app registers its own backends after the
         constructor has reconciled (``register_backend``): writing a verdict
-        then ended a live job, and handed it to a resume as finished. Logged
-        at warning the first time for each job, at debug afterwards.
+        then ended a live job, and handed it to a resume as finished.
+
+        Logged at debug on the passes every start and orchestrator switch
+        makes (refresh, scheduling), which meet such a job before the app has
+        registered its backend; at warning, once per job, when a caller
+        ``asked`` for it by name (cancel, tail, result).
         """
         backend = self._backends.get(rec.backend)
         if backend is None:
-            first = rec.job_id not in self._backendless_noted
-            self._backendless_noted.add(rec.job_id)
-            log = logger.warning if first else logger.debug
+            warn = asked and rec.job_id not in self._backendless_warned
+            if warn:
+                self._backendless_warned.add(rec.job_id)
+            log = logger.warning if warn else logger.debug
             log("job_backend_not_registered", job_id=rec.job_id, backend=rec.backend)
         return backend
 
