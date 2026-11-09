@@ -1122,8 +1122,9 @@ class JobManager:
         read.
 
         A terminal state on disk is never replaced: how a job ended, once
-        recorded, is how it ended. A block that changed it is undone (the
-        record read back again, nothing written), and logged.
+        recorded, is how it ended. A block that changed it is undone whole
+        (every field as it was before the block, nothing written), and logged:
+        what else it changed was decided on a view the disk contradicts.
 
         Raises:
             ClaimLockUnavailable: from ``_claim_transaction``; nothing was
@@ -1145,7 +1146,8 @@ class JobManager:
                 return
             durable = data.get("state")
             if durable in _TERMINAL_VALUES and durable != rec.state.value:
-                _reload_fields(rec, data)
+                for name, value in zip(_CHANGING_FIELDS, before):
+                    setattr(rec, name, value)
                 logger.info(
                     "job_terminal_state_preserved", job_id=rec.job_id, state=durable
                 )

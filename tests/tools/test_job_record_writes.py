@@ -401,6 +401,33 @@ class TestKeysThisVersionDoesNotDeclare:
         assert "resumed" not in on_disk
 
 
+class TestATerminalStateOnDiskIsKept:
+    """A block that changes how a job ended, as recorded on disk, is undone
+    whole: nothing is written, and the record is as it was before the block."""
+
+    def test_the_block_is_undone(self, tmp_path: Path):
+        base = tmp_path / "jobs"
+        job_id = _seed(base, state=JobState.SUCCEEDED, exit_code=0, finished_at=1.0)
+        data = _read(base, job_id)
+        del data["error"]  # written by a version without the field
+        _meta(base, job_id).write_text(json.dumps(data))
+        written = _meta(base, job_id).read_bytes()
+        jm = _manager(base, _Scripted())
+        try:
+            rec = jm._records[job_id]
+            with jm._mutate(rec):
+                rec.cancel_requested = True  # a stale decision: a cancel,
+                rec.error = "cancelled"
+                rec.state = JobState.CANCELLED  # over how the job ended
+
+            assert (rec.state, rec.cancel_requested, rec.error) == (
+                JobState.SUCCEEDED, False, None,
+            )
+            assert _meta(base, job_id).read_bytes() == written
+        finally:
+            jm.close()
+
+
 class TestResultDecidesUnderTheLock:
     """A cancel another manager requests while ``result()`` reads the job is
     acted on: the job ends CANCELLED, as ``job_cancel`` told the model."""
