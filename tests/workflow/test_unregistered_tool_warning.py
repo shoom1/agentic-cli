@@ -133,6 +133,65 @@ class TestTheAssemblyNamesAnUnregisteredTool:
 
         assert logs.unregistered() == []
 
+    def test_an_adk_function_tool_is_judged_by_the_function_it_runs(self, logs):
+        pytest.importorskip("google.adk")
+        from google.adk.tools import FunctionTool, LongRunningFunctionTool
+
+        manager, config = _stub_manager([
+            FunctionTool(func=plain_tool),
+            LongRunningFunctionTool(func=plain_tool),
+            FunctionTool(func=job_list),
+        ])
+
+        manager._build_tools(config, service_map={})
+
+        assert logs.unregistered() == [("assistant", "plain_tool")]
+
+    def test_a_langchain_tool_is_judged_by_the_function_it_runs(self, logs):
+        pytest.importorskip("langchain_core")
+        from langchain_core.tools import StructuredTool, tool
+
+        @tool
+        def decorated(text: str) -> dict:
+            """A LangChain tool an app forgot to register."""
+            return {"success": True}
+
+        manager, config = _stub_manager([decorated, StructuredTool.from_function(func=job_list)])
+
+        manager._build_tools(config, service_map={})
+
+        assert logs.unregistered() == [("assistant", "decorated")]
+
+    def test_an_apps_own_tool_class_is_named(self, logs):
+        pytest.importorskip("google.adk")
+        from google.adk.tools.base_tool import BaseTool
+
+        class LookupTool(BaseTool):
+            def __init__(self):
+                super().__init__(name="lookup", description="Looks something up.")
+
+        manager, config = _stub_manager([LookupTool()])
+
+        manager._build_tools(config, service_map={})
+
+        assert logs.unregistered() == [("assistant", "lookup")]
+
+    def test_a_strange_callable_never_stops_the_build(self, logs):
+        class _Odd:
+            def __call__(self):
+                return {"success": True}
+
+            def __getattr__(self, name):
+                raise RuntimeError("no attributes here")
+
+        _Odd.__module__ = None
+        manager, config = _stub_manager([_Odd(), plain_tool])
+
+        built = manager._build_tools(config, service_map={})
+
+        assert len(built) == 2
+        assert ("assistant", "plain_tool") in logs.unregistered()
+
     def test_it_is_named_once_however_often_the_agent_is_built(self, logs):
         manager, config = _stub_manager([plain_tool])
 

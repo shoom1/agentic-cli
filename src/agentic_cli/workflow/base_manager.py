@@ -79,27 +79,73 @@ MEMORY_INDEX_BUDGET_SHARE = 0.1
 #: The least the memory index is given, whatever the budget.
 MEMORY_INDEX_MIN_BYTES = 1_000
 
-#: Where the backends' tool classes live: an object of one is the backend's
-#: to judge, not a plain callable the registry should have issued.
+#: Where the backends' tool classes live.
 _TOOL_CLASS_MODULES = ("google.adk.tools", "langchain_core.tools")
 
 
-def _is_plain_callable(tool: Any) -> bool:
-    """Whether ``tool`` is a function, method, partial or other callable object
-    rather than a backend's tool object (an ADK built-in such as
-    ``GoogleSearchTool`` runs inside the model and never reaches the gate)."""
-    if not callable(tool) or isinstance(tool, type):
-        return False
-    return not any(
-        (klass.__module__ or "").startswith(_TOOL_CLASS_MODULES)
-        for klass in type(tool).__mro__
-    )
+def _module_of(klass: type) -> str:
+    module = getattr(klass, "__module__", None)
+    return module if isinstance(module, str) else ""
+
+
+def _wrapped_callable(tool: Any) -> Callable | None:
+    """The function a backend's function-tool object runs, unwrapped as the
+    permission gates unwrap it (exact ADK ``FunctionTool`` and
+    ``LongRunningFunctionTool``, exact LangChain ``StructuredTool``), or None."""
+    kind = type(tool)
+    try:
+        from google.adk.tools import FunctionTool, LongRunningFunctionTool
+    except ImportError:
+        pass
+    else:
+        if kind is FunctionTool or kind is LongRunningFunctionTool:
+            return tool.func
+    try:
+        from langchain_core.tools import StructuredTool
+    except ImportError:
+        pass
+    else:
+        if kind is StructuredTool:
+            return tool.coroutine or tool.func
+    return None
 
 
 def _tool_name(tool: Any) -> str:
-    """The name a model would see for a plain callable."""
-    inner = tool.func if isinstance(tool, functools.partial) else tool
-    return getattr(inner, "__name__", None) or type(inner).__name__
+    """The name a model would see for ``tool``."""
+    try:
+        inner = tool.func if isinstance(tool, functools.partial) else tool
+        for attribute in ("name", "__name__"):
+            value = getattr(inner, attribute, None)
+            if isinstance(value, str) and value:
+                return value
+    except Exception:  # a __getattr__ that raises
+        pass
+    return type(tool).__name__
+
+
+def _unregistered_name(tool: Any) -> str | None:
+    """The name of ``tool``, which the registry did not issue, when the gate
+    will deny every call to it; None when the gate never sees it.
+
+    A function-tool object is judged by the function it runs. ADK's own tool
+    objects are left to ADK: a built-in such as ``GoogleSearchTool`` runs
+    inside the model and never reaches the gate. Anything else callable, and an
+    app's own tool class (either backend's), is denied.
+    """
+    from agentic_cli.tools.registry import identify_tool
+
+    if isinstance(tool, (str, type)):
+        return None
+    inner = _wrapped_callable(tool)
+    if inner is not None:
+        return None if identify_tool(inner) is not None else _tool_name(tool)
+    kind = type(tool)
+    if _module_of(kind).startswith("google.adk."):
+        return None
+    is_tool_object = any(
+        _module_of(klass).startswith(_TOOL_CLASS_MODULES) for klass in kind.__mro__
+    )
+    return _tool_name(tool) if callable(tool) or is_tool_object else None
 
 
 class BaseWorkflowManager(ABC):
@@ -385,19 +431,24 @@ class BaseWorkflowManager(ABC):
         return result
 
     def _name_unregistered(self, agent: str, tool: Any) -> None:
-        """Warn that the gate will deny every call to ``tool``: a plain callable
-        the registry did not issue. Once per agent and tool, however often the
-        agent is built (a model switch builds it again)."""
-        if not _is_plain_callable(tool):
+        """Warn that the gate will deny every call to ``tool``, which the
+        registry did not issue (``_unregistered_name``). Once per agent and
+        tool, however often the agent is built (a model switch builds it
+        again); an object no check can read is let through unnamed."""
+        try:
+            name = _unregistered_name(tool)
+        except Exception as e:
+            logger.debug(
+                "tool_registration_unchecked", agent=agent, error=f"{type(e).__name__}: {e}"
+            )
             return
-        key = (agent, _tool_name(tool))
-        if key in self._unregistered_named:
+        if name is None or (agent, name) in self._unregistered_named:
             return
-        self._unregistered_named.add(key)
+        self._unregistered_named.add((agent, name))
         logger.warning(
             "tool_not_registered",
             agent=agent,
-            tool=key[1],
+            tool=name,
             hint="register it with @register_tool; every call to it is denied",
         )
 
