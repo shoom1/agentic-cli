@@ -538,6 +538,22 @@ the start of the entry's title.
 
 ### Added
 
+- **A manager's services can move to a manager of the other backend.**
+  `loan = old.lend_services()`, then `await
+  new.initialize_services(services=loan)` (the new manager publishes them and
+  builds only what they lack), then `await old.give_services(loan)`: the new
+  manager owns them from then on, and `old.cleanup()` closes none of them.
+  The permission engine with the run's session grants, the sandbox kernels,
+  the job manager and its in-process jobs, the knowledge bases, the embedding
+  model and the memory store stay the same objects; the engine's prompts and
+  per-call say (`PermissionEngine.set_workflow`) and the knowledge base's
+  summarizer (`KnowledgeBaseManager.summarizer`, now settable) move to the new
+  manager. Until they are given the old manager owns them: a new manager that
+  fails to initialize, is cancelled while it does, or is cleaned up closes
+  none of them, and the old one keeps working with them. `ServiceLoan` is in
+  `agentic_cli.workflow.services`. The CLI does not use it yet: an
+  orchestrator change still builds new services.
+
 - **`JobManager.snapshot()`, `JobManager.release_resume(job_id)` and
   `JobRecord.awaiting_resume`.** `snapshot()` returns the jobs a manager
   holds as it last read them, taking no lock, so a caller on the event loop
@@ -1265,6 +1281,16 @@ the start of the entry's title.
 
 ### Changed
 
+- **The services a manager builds are one table,
+  `agentic_cli.workflow.services.SERVICES`.** Each service is one
+  `ServiceSpec`: its key, how it is built and closed, the tools it gives, and
+  whether a tool may declare it. `service_registry.KNOWN_SERVICE_KEYS` and
+  `BaseWorkflowManager._SYNC_SERVICE_CLOSERS` are read from it, and the
+  registry keys are defined there (`service_registry` still exports them). A
+  backend that adds a service of its own still overrides
+  `_build_services_into`, `_get_service_tool_map` and
+  `_SYNC_SERVICE_CLOSERS`.
+
 - **Importing the ADK backend changes no logger, and a manager no longer
   re-registers Claude with ADK.** Importing `agentic_cli.workflow.adk.manager`
   set the `google_genai.types` logger to ERROR for the whole process;
@@ -1321,23 +1347,24 @@ the start of the entry's title.
   model catalog, takes what the backend holds through two hooks,
   `_detach_backend()` (what each initialization builds: agents, a runner, MCP
   sessions) and `_detach_store()` (the store the conversations live in),
-  closes the services, then closes the rest in one task of its own, in that
-  order, each close isolated, awaited under a shield: a Ctrl+C during a model
-  switch stops only the wait, and nothing is left open. Each hook is
-  synchronous, detaches its handles and returns `(name, close)` pairs; both
-  default to nothing, and one that returns an awaitable (`async def` by
-  mistake) fails the release with a `TypeError` once the rest is released. A
-  model switch (`reinitialize(preserve_sessions=True)`) keeps the store and
-  the services with one mechanism, `_keeping(preserve)` (`_carrying_services`
-  is its other name), also through a switch that fails. A backend now
-  implements `backend_type`, `_get_state_tools`, `_do_initialize`, `process`
-  and the hooks for what it holds, as the class docstring's example does; one
-  that overrides `cleanup` or `reinitialize` keeps its own (the LangGraph
-  backend does). The base also computes each agent's context numbers, once
-  the models are resolved and before any service is built; a backend that
-  summarizes by them says so in `_manages_context()` and reads `_budgets` in
-  `_do_initialize` (ADK for an app built from agent configs, and Deep Agents,
-  do; LangGraph and a native ADK YAML app have none).
+  closes the services on a worker thread, then the rest in one task of its
+  own, in that order, each close isolated, awaited under a shield: a Ctrl+C
+  during a model switch stops only the wait, and nothing is left open. Each
+  hook is synchronous, detaches its handles and returns `(name, close)`
+  pairs; both default to nothing, and one that returns an awaitable (`async
+  def` by mistake) fails the release with a `TypeError` once the rest is
+  released. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
+  store and the services with one mechanism, `_keeping(preserve)`
+  (`_carrying_services` is its other name), also through a switch that fails.
+  A backend now implements `backend_type`, `_get_state_tools`,
+  `_do_initialize`, `process` and the hooks for what it holds, as the class
+  docstring's example does; one that overrides `cleanup` or `reinitialize`
+  keeps its own (the LangGraph backend does). The base also computes each
+  agent's context numbers, once the models are resolved and before any service
+  is built; a backend that summarizes by them says so in `_manages_context()`
+  and reads `_budgets` in `_do_initialize` (ADK for an app built from agent
+  configs, and Deep Agents, do; LangGraph and a native ADK YAML app have
+  none).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -2377,6 +2404,16 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **A cleanup no longer freezes the app while the services close.** A
+  sandbox's cleanup (`docker rm -f`, a kernel shutdown) and the job
+  manager's close (it takes the jobs directory's lock) ran on the event
+  loop, so the app's exit, the old manager of an
+  orchestrator change, a model switch that started afresh or a failed start's
+  rollback stopped the app, Ctrl+C included, while they ran. They run on a
+  worker thread now, before the rest of the release closes, and a cancel
+  still stops only the wait; so do the services a cancelled start finishes
+  building after the cancel.
 
 - **`write_file` and `edit_file` of an existing file work on Windows with
   Python 3.12.** Keeping the file's permission bits called `os.fchmod`,
