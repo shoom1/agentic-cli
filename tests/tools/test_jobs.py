@@ -1162,6 +1162,36 @@ class TestExecutionOwnership:
         finally:
             jm.close()
 
+    def test_the_claim_is_on_disk_before_the_backend_starts(self, tmp_path: Path):
+        """A launcher that dies inside ``start`` leaves a claim that startup
+        recovery fails, never an unowned queued record that another CLI
+        launches a second time."""
+        seen: list[dict] = []
+
+        class _Peek(JobBackend):
+            name = "peek"
+            survives_restart = True  # claimed at launch, not at submit
+
+            def start(self, record, job_dir):
+                seen.append(json.loads((job_dir / "meta.json").read_text()))
+
+            def poll(self, record, job_dir):
+                return JobState.RUNNING
+
+            def cancel(self, record, job_dir):  # pragma: no cover
+                return True
+
+        jm = self._manager(tmp_path / "jobs", _Peek())
+        try:
+            rec = jm.submit(tool="t", backend="peek", spec={})
+
+            assert rec.state is JobState.RUNNING
+            assert [(d["state"], d["exec_owner"]) for d in seen] == [
+                (JobState.QUEUED.value, jm._exec_owner_token())
+            ]
+        finally:
+            jm.close()
+
     def test_interrupted_launch_is_failed_not_replayed(self, tmp_path: Path):
         base = tmp_path / "jobs"
         starts: list[str] = []

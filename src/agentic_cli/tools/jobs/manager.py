@@ -1355,8 +1355,11 @@ class JobManager:
                     claimed = self._claim_execution(rec, status)
                 if not claimed:
                     return
+                # The claim is on disk; start the job only as claimed.
+                claim = (JobState.QUEUED, self._exec_owner_token())
                 with self._mutate(rec) as status:
-                    if status is DurableRead.PRESENT:
+                    as_claimed = (rec.state, rec.exec_owner) == claim
+                    if status is DurableRead.PRESENT and as_claimed:
                         self._launch(rec, backend)
         except ClaimLockUnavailable as exc:
             logger.warning(
