@@ -9,8 +9,9 @@ Every key ``/settings`` may show (``PROJECT_SETTABLE_KEYS`` and
   workflow, keeping its sessions, and its line is the plain "<Label>: <value>".
 - ``RESTART_KEYS``: read only as the app or its session store starts. A
   change is saved and its line says "(takes effect at the next start)";
-  nothing is rebuilt. Like a rebuild, it waits for a start in progress, which
-  may read it.
+  nothing is rebuilt. A change of ``session_store`` waits for a start in
+  progress, which reads it, as a rebuild does; ``log_level`` and
+  ``log_format``, read by the app's constructor only, do not.
 - ``LIVE_KEYS``: read each time they are used. A change applies at once.
 
 A key placed in none fails the first test, so a new settable key is placed
@@ -161,9 +162,8 @@ class TestARestartKey:
             "Max Retry Attempts: 4", f"Log Level: info {AT_THE_NEXT_START}",
         ]
 
-    async def test_waits_for_a_start_in_progress(self, settings, monkeypatch):
-        """The start may read it (the session store): once it is over, the
-        line is true."""
+    async def test_the_session_store_waits_for_a_start_in_progress(self, settings, monkeypatch):
+        """The start reads it: once it is over, the line is true."""
         starts = Starts()
         app = starting_app(settings, monkeypatch, starts)
 
@@ -174,6 +174,24 @@ class TestARestartKey:
 
         assert waited(app)
         assert successes(app) == [f"Session Store: memory {AT_THE_NEXT_START}"]
+        await app._workflow_controller.close()
+
+
+    @pytest.mark.parametrize("key, value", [("log_level", "debug"), ("log_format", "json")])
+    async def test_logging_does_not_wait_for_a_start_in_progress(
+        self, settings, monkeypatch, key, value
+    ):
+        """Read by the app's constructor only: the start does not read it."""
+        starts = Starts()
+        app = starting_app(settings, monkeypatch, starts)
+
+        applying = await apply_while_starting(app, starts, {key: value})
+        assert await asyncio.wait_for(applying, timeout=2) is True
+
+        assert not waited(app)
+        (line,) = successes(app)
+        assert line.endswith(AT_THE_NEXT_START)
+        starts.release()
         await app._workflow_controller.close()
 
 

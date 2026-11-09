@@ -2269,8 +2269,9 @@ step; each entry says what to use instead.
   show takes effect, and `apply_settings` follows it: `REBUILD_KEYS` rebuild
   the workflow (the retry and timeout keys now among them), `RESTART_KEYS`
   are saved and their line says "(takes effect at the next start)", and
-  `LIVE_KEYS` apply at once. A restart-only change made while the workflow
-  is starting waits for that start, as a rebuild does.
+  `LIVE_KEYS` apply at once. A change of `session_store` made while the
+  workflow is starting waits for that start, which reads it, as a rebuild
+  does.
 
 - **`/settings` while the workflow is still starting runs the change it
   saves.** A start resolves its models from the settings before it builds

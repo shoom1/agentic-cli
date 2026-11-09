@@ -374,6 +374,14 @@ _SWAP_NOTE = (
 #: (``settings_persistence.RESTART_KEYS``).
 _AT_NEXT_START = "(takes effect at the next start)"
 
+#: The restart-only keys the workflow's start reads: a change of one made
+#: while a start runs waits for it, as a rebuild does, or the start could take
+#: the new value and "(takes effect at the next start)" would be false. The
+#: session store is built as the workflow starts; ``log_level`` and
+#: ``log_format`` are read by the app's constructor only, so a change of them
+#: does not wait.
+_READ_BY_THE_START = frozenset({"session_store"})
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -1056,7 +1064,7 @@ class BaseCLIApp:
         asked for while the workflow is still starting waits for that start
         first, as a turn does ("Waiting for initialization...": the start
         resolved its models from the settings before the change), and so
-        does a restart-only change, which that start may read; Ctrl+C
+        does a change of ``session_store``, which that start reads; Ctrl+C
         stops the wait, re-raised, and changes nothing. When that start
         fails, the change is applied as for any workflow that is not
         running: nothing is rebuilt, and the next start uses it. A
@@ -1083,12 +1091,16 @@ class BaseCLIApp:
         needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
         at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
 
+        read_by_the_start = needs_reinit or any(
+            _ui_key_target_field(key) in _READ_BY_THE_START for key in changes
+        )
+
         controller = self._workflow_controller
-        if (needs_reinit or at_next_start) and controller.state is WorkflowState.INITIALIZING:
+        if read_by_the_start and controller.state is WorkflowState.INITIALIZING:
             # The start in progress read the settings as they are (its models
             # first, its session store too): wait for it, as a turn does, so
-            # the rebuild below runs on the new values and a restart-only
-            # change is not half taken. Ctrl+C stops the wait before anything
+            # the rebuild below runs on the new values and the session store
+            # is not taken half way. Ctrl+C stops the wait before anything
             # changed. A start that fails leaves the workflow down, and the
             # change is applied for the next start, as for any failed workflow.
             with _says_so_when_stopped(self.session):
