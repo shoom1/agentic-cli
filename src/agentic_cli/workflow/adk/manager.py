@@ -502,10 +502,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return root_agent
 
     def _init_plugins(self) -> list:
-        """Create ADK plugins and store references for later access.
+        """The head of the app's plugin chain, not the whole of it.
+
+        The permission gate, the tool-error answer, task progress and, with
+        ``raw_llm_logging``, the raw LLM log, in that order; the task
+        progress and logging plugins are kept, since the manager drains
+        their buffers. ``_do_initialize`` adds the rest: for an app built
+        from agent configs, ``MainAgentPlugin`` before them, and after them
+        the foreign reasoning filter, the interrupted calls, the result cap,
+        the memory index, the overflow handler, the fit guard and the raw
+        log as sent; for any app that caches, ``ContextCachePlugin``. The
+        whole order is pinned by ``tests/workflow/adk/test_plugin_chain.py``.
 
         Returns:
-            List of BasePlugin instances for the runner's App(plugins=...).
+            Those plugins, in chain order.
         """
         from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin

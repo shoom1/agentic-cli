@@ -83,6 +83,17 @@ async def ic_fast(topic: str) -> dict:
     return {"success": True, "fact": f"{topic} is 42"}
 
 
+#: What ``ic_long`` answers with: longer than the cap the tests set.
+LONG_FACT = "x" * 5_000
+
+
+@register_tool(capabilities=EXEMPT, description="Answers at once, at length (a test tool).")
+async def ic_long(topic: str) -> dict:
+    """Look a topic up at once, at length."""
+    SIGNALS["finished"].set()
+    return {"success": True, "fact": f"{topic} is 42 {LONG_FACT}"}
+
+
 @register_tool(
     capabilities=[Capability("filesystem.read", target_arg="path")],
     description="Reads a file (a test tool that needs permission).",
@@ -338,6 +349,41 @@ async def test_a_call_that_finished_beside_it_keeps_its_result(hermetic, monkeyp
     sent = results(claude.last("Answer"))
     assert claude.refused == []
     assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER not in sent["toolu_f"]
+    assert INTERRUPTED_BY_USER in sent["toolu_w"]
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
+    hermetic, monkeypatch, backend
+):
+    """A finished result the tool result cap cuts is still the call's result.
+
+    On ADK the plugin that records each finished result runs before the
+    cap, which returns its cut and so ends ADK's after-tool callbacks: after
+    the cap, it would never see a result the cap cut.
+    """
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_long", {"topic": "tea"}, "toolu_f"), ("ic_wait", {}, "toolu_w")),
+        say("Back again."),
+    ]), backend)
+    manager = solo(backend, ic_long, ic_wait, tool_result_max_chars=2_000)
+    try:
+        running = asyncio.create_task(turn(manager, "Both, please."))
+        await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
+        await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
+        await asyncio.sleep(0.05)  # the long call's result is recorded
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    sent = results(claude.last("Answer"))
+    assert claude.refused == []
+    assert "tea is 42" in sent["toolu_f"] and INTERRUPTED_BY_USER not in sent["toolu_f"]
+    assert LONG_FACT not in sent["toolu_f"]
+    assert "Full output: ./.agentic_cli/tool-output/ic_long-" in sent["toolu_f"]
     assert INTERRUPTED_BY_USER in sent["toolu_w"]
 
 
