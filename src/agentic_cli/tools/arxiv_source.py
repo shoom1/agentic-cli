@@ -655,9 +655,12 @@ class ArxivSearchSource(SearchSource):
                 SearchSourceResult(
                     title=paper["title"],
                     url=paper["abs_url"],
+                    # The preview a SearchSource gives; the whole abstract
+                    # is in the metadata, for search_arxiv to return.
                     snippet=paper["abstract"][:500],
                     source_name=self.name,
                     metadata={
+                        "abstract": paper["abstract"],
                         "authors": paper["authors"],
                         "published": paper["published_date"],
                         "categories": paper["categories"],

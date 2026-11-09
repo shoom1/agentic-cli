@@ -357,6 +357,31 @@ class TestArxivParseEntry:
         assert paper["src_url"] == "https://arxiv.org/e-print/1706.03762"
 
 
+class TestSearchArxivAbstracts:
+    """search_arxiv gives the model each paper's whole abstract: it cut every
+    one to its first 500 characters, the SearchSource preview."""
+
+    _LONG = " ".join(f"Sentence {n} of a long abstract about transformers." for n in range(20))
+
+    async def test_a_long_abstract_comes_back_whole(self, arxiv_api, arxiv_source_ctx):
+        from agentic_cli.tools.arxiv_tools import search_arxiv
+
+        assert len(self._LONG) > 900
+        arxiv_api.papers.append(Paper("1706.03762", title="Attention", abstract=self._LONG))
+
+        result = await search_arxiv("attention")
+
+        assert result["papers"][0]["abstract"] == self._LONG
+
+    async def test_the_search_source_keeps_its_preview_and_carries_the_whole(self, arxiv_api):
+        arxiv_api.papers.append(Paper("1706.03762", title="Attention", abstract=self._LONG))
+
+        (found,) = await _source(arxiv_api).asearch("attention", max_results=1)
+
+        assert found.snippet == self._LONG[:500]
+        assert found.metadata["abstract"] == self._LONG
+
+
 # ---------------------------------------------------------------------------
 # Id-indexed entry cache tests
 # ---------------------------------------------------------------------------
