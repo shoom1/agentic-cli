@@ -26,6 +26,7 @@ def model(
     reference: bool = False,
     tier: str | None = None,
     described: bool = True,
+    served: bool = False,
     not_served: bool = False,
 ) -> NamedModel:
     provider, _, model_id = spec.partition(":")
@@ -35,6 +36,7 @@ def model(
         reference=reference,
         tier=tier,
         described=described,
+        served=served,
         not_served=not_served,
     )
 
@@ -85,28 +87,58 @@ CASES = {
         ],
         keys=ALL_KEYS, in_use=("anthropic", "openrouter"), to_list=(),
     ),
-    "described entries fill the computed roles: no listing": dict(
+    "entries a listing in hand serves fill the computed roles: no listing": dict(
         named=[
-            entry("anthropic:claude-sonnet-4-6", tier="default"),
-            entry("anthropic:claude-haiku-4-5", tier="fast"),
+            entry("anthropic:claude-sonnet-4-6", tier="default", served=True),
+            entry("anthropic:claude-haiku-4-5", tier="fast", served=True),
         ],
-        roles=("default", "fast"), keys=ALL_KEYS, in_use=("anthropic",), to_list=(),
+        roles=("default", "fast"), keys=ALL_KEYS, known={"anthropic": LISTING},
+        in_use=("anthropic",), to_list=(),
     ),
     "described references beside the entries: no listing": dict(
         named=[
-            entry("anthropic:claude-sonnet-4-6", tier="default"),
+            entry("anthropic:claude-sonnet-4-6", tier="default", served=True),
             ref("openai:gpt-6.2-terra", tier="default"),
             ref("google:gemini-3.8-flash", tier="default"),
         ],
-        roles=("default",), keys=ALL_KEYS,
+        roles=("default",), keys=ALL_KEYS, known={"anthropic": LISTING},
         in_use=("google", "anthropic", "openai"), to_list=(),
     ),
-    # (b) a computed role no entry that can run fills.
+    # (b) a computed role: a model only a listing can vouch for.
     "a computed role no entry is of: the keyed built-ins nothing is known of": dict(
-        named=[entry("anthropic:claude-sonnet-4-6", tier="default")],
+        named=[entry("anthropic:claude-sonnet-4-6", tier="default", served=True)],
         roles=("default", "strong"), keys=dict(google="g", anthropic="a"),
         known={"anthropic": LISTING},
         in_use=("google", "anthropic"), to_list=("google",),
+    ),
+    "a computed role an entry no listing serves would take: its provider": dict(
+        named=[entry("anthropic:claude-sonnet-4-7", tier="default")],
+        roles=("default",), keys=dict(google="g", anthropic="a"),
+        in_use=("anthropic",), to_list=("anthropic",),
+    ),
+    "a computed role's entry a cached listing lacks: its provider, listed again": dict(
+        named=[entry("anthropic:claude-sonnet-4-7", tier="default")],
+        roles=("default",), keys=dict(google="g", anthropic="a"), known={"anthropic": LISTING},
+        in_use=("anthropic",), to_list=("anthropic",),
+    ),
+    "a computed role's entry whose provider's cached listing failed: not waited on": dict(
+        named=[entry("anthropic:claude-sonnet-4-7", tier="default")],
+        roles=("default",), keys=dict(google="g", anthropic="a"), known={"anthropic": FAILED},
+        in_use=("anthropic",), to_list=(),
+    ),
+    "a computed role's entry this start listed and could not check: taken as named": dict(
+        named=[entry("anthropic:claude-sonnet-4-7", tier="default")],
+        roles=("default",), keys=dict(google="g", anthropic="a"),
+        known={"anthropic": LISTED_AND_FAILED},
+        in_use=("anthropic",), to_list=(),
+    ),
+    "an entry of no computed role's tier is not waited on": dict(
+        named=[
+            entry("anthropic:claude-sonnet-4-6", tier="default", served=True),
+            entry("anthropic:claude-opus-9", tier="strong"),
+        ],
+        roles=("default",), keys=dict(google="g", anthropic="a"), known={"anthropic": LISTING},
+        in_use=("anthropic",), to_list=(),
     ),
     "a computed role only a configured provider's entry is on": dict(
         named=[entry("openrouter:qwen/qwen3-235b-a22b")],
@@ -215,7 +247,7 @@ def test_the_order_is_the_providers_not_the_models():
     named = [
         ref("openrouter:vendor/model", described=False),
         ref("local-vllm:Qwen/Qwen3-32B", described=False),
-        entry("openai:gpt-5.5", tier="default"),
+        entry("openai:gpt-5.5", tier="default", served=True),
     ]
     keyed = providers(specs={"local-vllm": VLLM}, openai="o", openrouter="r")
 

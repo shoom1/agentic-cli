@@ -409,8 +409,9 @@ class TestManagerModel:
     async def test_without_a_default_model_the_list_s_newest_default_tier_model(
         self, providers, monkeypatch
     ):
-        """Before and after the start, which waits on no listing (the table describes
-        the list's models); only the list's provider is listed, in the background."""
+        """Before and after the start, and only the list's provider is listed: the role
+        has no model of its own, so the start lists the provider of the entries it
+        takes from, to know the provider serves them."""
         keys(monkeypatch, "google", "anthropic")
         s = settings(models={"anthropic:claude-sonnet-4-5": {}, "anthropic:claude-sonnet-4-6": {}})
         manager = adk(team(), s)
@@ -419,9 +420,29 @@ class TestManagerModel:
         await manager.initialize_services()
         try:
             assert manager.model == "anthropic:claude-sonnet-4-6"
-            assert providers.calls == []
+            assert providers.calls == ["anthropic"]
             await asyncio.gather(*refreshing())
             assert providers.calls == ["anthropic"]
+        finally:
+            await manager.cleanup()
+
+    async def test_a_computed_default_never_starts_on_an_entry_its_provider_does_not_serve(
+        self, providers, monkeypatch
+    ):
+        """The review's start: the list's one default-tier model is one Anthropic does
+        not serve. The start lists Anthropic, finds it absent, and every agent runs on
+        the newest model Google serves."""
+        keys(monkeypatch, "google", "anthropic")
+        manager = adk(team(), settings(models={"anthropic:claude-sonnet-4-7": {}}))
+
+        await manager.initialize_services()
+        try:
+            assert manager.model == "google:gemini-3-flash-preview"
+            assert {name: str(m.ref) for name, m in manager.agent_models.items()} == {
+                "coordinator": "google:gemini-3-flash-preview",
+                "writer": "google:gemini-3-flash-preview",
+            }
+            assert providers.calls == ["anthropic", "google"]
         finally:
             await manager.cleanup()
 

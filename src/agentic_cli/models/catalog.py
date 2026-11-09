@@ -28,12 +28,14 @@ first time it is searched, and any whose listing is not fresh.
 **Startup: the settings first.** The settings name the models, and ``load``
 uses them at once. It waits on a listing only to fill a gap they leave
 (``startup``): no entry can run (the list's tier models come from the
-built-in providers' listings), a computed role has no entry of its tier, or
-nothing describes a model they name (no ``models`` entry sets a fact of it, no
-table rule or entry matches it, and no listing in hand serves it). Those
-listings run concurrently, each within the timeout, and a second round lists
-the built-in providers the first one's results put in use; there is no
-third. ``start_background_refresh`` lists every other provider in use: one
+built-in providers' listings), a role is computed (it has no model of its
+own: it waits on the provider of the entry of its tier it would take, unless
+a listing in hand serves that entry, and with none on the built-in
+providers), or nothing describes a model they name (no ``models`` entry sets
+a fact of it, no table rule or entry matches it, and no listing in hand
+serves it). Those listings run concurrently, each within the timeout, and a
+second round lists the built-in providers the first one's results put in use;
+there is no third. ``start_background_refresh`` lists every other provider in use: one
 nothing is known of, one whose cached listing is not fresh or failed, and one
 whose cached listing lacks a model the settings name (it may predate the
 model). That is how the models the settings name are checked.
@@ -304,6 +306,9 @@ class ModelCatalog:
             self._rebuild(state)
         self._computed_roles = tuple(computed_roles)
         self._in_use = self._plan().in_use
+        # The entry each computed role took when the start loaded, for the
+        # warning that its provider does not serve it after all.
+        self._taken_by_roles: dict[ModelRef, str] = {}
         # Providers a search listed (or read from the cache), beside those in use.
         self._searched: set[str] = set()
         self._refresh_task: asyncio.Task[None] | None = None
@@ -325,17 +330,18 @@ class ModelCatalog:
 
         Each provider in use takes its cache entry for its address and kind,
         when there is one. Then ``startup.plan`` says which providers to list
-        now (no entry can run, a computed role has none of its tier, or
-        nothing describes a model the settings name), and they are listed
-        concurrently, each within the timeout; when those listings put a
-        built-in provider in use (they found absent the entries that could
-        run), it is planned in a second round. Every model the settings name
-        is used as they name it: each provider in use that was not listed
-        now, nothing being known of it or its cached listing lacking a model
-        the settings name, is listed by ``start_background_refresh``. Then
-        each model the settings name that the list leaves out is warned of,
-        once per process, unless only its key is missing (``not_offered``
-        says that). Never raises for a network or cache problem.
+        now (no entry can run, a computed role has no entry of its tier a
+        listing serves, or nothing describes a model the settings name), and
+        they are listed concurrently, each within the timeout; when those
+        listings put a built-in provider in use (they found absent the entries
+        that could run, or a computed role's), it is planned in a second
+        round. Every other model the settings name is used as they name it:
+        each provider in use that was not listed now, nothing being known of
+        it or its cached listing lacking a model the settings name, is listed
+        by ``start_background_refresh``. Then each model the settings name
+        that the list leaves out is warned of, once per process, unless only
+        its key is missing (``not_offered`` says that). Never raises for a
+        network or cache problem.
         """
         cached = self._cache.read()
         read: set[str] = set()
@@ -358,6 +364,7 @@ class ModelCatalog:
             await self._list_now(startup.to_list)
             listed.update(startup.to_list)
         self._check_later(listed)
+        self._taken_by_roles = self._entries_roles_take()
         self._warn_of_models_left_out()
 
     def start_background_refresh(self) -> "asyncio.Task[None] | None":
@@ -581,6 +588,7 @@ class ModelCatalog:
                 reference=ref in self._references,
                 tier=self._tier(ref) if ref.provider in self._states else None,
                 described=ref.provider in self._states and self._described(ref),
+                served=ref.provider in self._states and self._served(ref),
                 not_served=ref.provider in self._states and self._not_served(ref),
             )
             for ref in self._named
@@ -600,6 +608,11 @@ class ModelCatalog:
         """A model's tier, from the table's family rules: a built-in model's only."""
         kind = self._states[ref.provider].provider.kind
         return self._table.record_for(ref.provider, kind, ref.model).tier
+
+    def _served(self, ref: ModelRef) -> bool:
+        """Whether the listing in hand (fresh or stale) serves ``ref``."""
+        state = self._states[ref.provider]
+        return state.listing is not None and ref.model in state.accepted
 
     def _described(self, ref: ModelRef) -> bool:
         """Whether something describes ``ref`` without a new listing: the listing
@@ -624,6 +637,20 @@ class ModelCatalog:
             unknown = state.listing is None and state.failure is None
             if unknown or any(self._unconfirmed(ref) for ref in self._named if ref.provider == name):
                 state.due = True
+
+    def _entries_roles_take(self) -> dict[ModelRef, str]:
+        """The entry each computed role takes now, by role: as ``RoleMap``
+        computes it from the list, the newest of the role's tier among the
+        entries it offers, of the provider it names first among those with one."""
+        listed = self.entry_records()
+        taken: dict[ModelRef, str] = {}
+        for role in self._computed_roles:
+            for name in dict.fromkeys(record.provider for record in listed):
+                candidates = [r for r in listed if r.provider == name and r.tier == role]
+                if candidates:
+                    taken[newest(candidates).ref] = role
+                    break
+        return taken
 
     def _unconfirmed(self, ref: ModelRef) -> bool:
         """Whether a listing read from the cache lacks ``ref``, a model the
@@ -714,11 +741,21 @@ class ModelCatalog:
 
     def _not_served_message(self, ref: ModelRef) -> str:
         """What to say of a model the settings name that its provider does not
-        serve: an entry only leaves the list; a model a setting, a role, an agent
-        or the manager names runs (a turn on it fails at the provider), and when
-        nothing describes it, on the conservative record."""
+        serve: an entry only leaves the list, unless a computed role took it at
+        the start; a model a setting, a role, an agent or the manager names runs
+        (a turn on it fails at the provider), and when nothing describes it, on
+        the conservative record."""
         provider = ref.provider
         find = f"/models {provider}: lists what it serves"
+        role = self._taken_by_roles.get(ref)
+        if ref not in self._references and role is not None:
+            setting = "default_model" if role == "default" else f"model_roles[{role!r}]"
+            return (
+                f"Model {ref} in models is not served by {provider}: its listing lacks it, "
+                f"yet the {role} role, which nothing maps, runs on it (the list's newest "
+                f"{role}-tier model), so a turn on it will fail at the provider. Set "
+                f"{setting}, or restart to take another ({find})."
+            )
         if ref not in self._references:
             return (
                 f"Model {ref} in models is not offered: not served by {provider}. "

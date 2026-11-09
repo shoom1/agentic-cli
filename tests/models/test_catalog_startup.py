@@ -10,6 +10,8 @@ takes ``DELAY`` seconds, as in the review's probe of the start before this
 from __future__ import annotations
 
 import asyncio
+import copy
+import logging
 import time
 
 from agentic_cli.models import (
@@ -17,9 +19,10 @@ from agentic_cli.models import (
     ModelEntry,
     ModelRef,
     ProviderState,
+    RoleMap,
     ThinkingMechanism,
 )
-from tests.models.fakes import Clock, ProviderAPI, providers
+from tests.models.fakes import Clock, ProviderAPI, providers, recorded
 
 DELAY = 0.3
 KEYS = {"google": "g-test-key", "anthropic": "a-test-key", "openai": "o-test-key",
@@ -70,15 +73,16 @@ def states(catalog: ModelCatalog) -> dict[str, ProviderState]:
 
 async def test_settings_that_name_described_models_wait_on_no_listing():
     """Every model is named and something describes each (a table rule, or a models
-    entry's facts): the start lists nothing, and the background refresh then lists
-    each provider in use, whose listing reaches the records."""
+    entry's facts), and the default role is mapped (a computed one has no model of
+    its own: see below): the start lists nothing, and the background refresh then
+    lists each provider in use, whose listing reaches the records."""
     api = Slow()
     entries = {
         ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(),
         QWEN: ModelEntry(context_window=131072),
     }
     references = (ModelRef("openai", "gpt-5.5"), ModelRef("google", "gemini-2.5-flash"))
-    catalog = make(api, entries=entries, references=references, computed_roles=("default",))
+    catalog = make(api, entries=entries, references=references)
 
     elapsed = await timed(catalog)
 
@@ -115,12 +119,13 @@ async def test_the_listings_a_start_needs_run_at_once():
     assert catalog.start_background_refresh() is None  # nothing left to check
 
 
-async def test_the_probe_s_start_waits_on_the_one_listing_it_needs(tmp_path):
+async def test_the_probe_s_start_waits_on_what_it_needs_at_once(tmp_path):
     """The probe's start: an OpenRouter entry nothing describes, an Anthropic entry
     and an OpenAI reference a listing cached an hour ago lacks (each described by a
-    table rule), and a computed default role the Anthropic entry fills. It took four
-    rounds; now it lists OpenRouter alone, and the background refresh confirms the
-    other two against new listings."""
+    table rule), and a computed default role the Anthropic entry would fill. It took
+    four rounds. Now the first lists OpenRouter, for its entry, and Anthropic, for the
+    role's entry, at once; Anthropic does not serve that model, so a second round
+    lists Google for the role. The background refresh confirms the OpenAI reference."""
     cache, clock = tmp_path / "model_cache.json", Clock()
     seed = ModelCatalog(
         providers=providers(anthropic=KEYS["anthropic"], openai=KEYS["openai"]),
@@ -137,16 +142,20 @@ async def test_the_probe_s_start_waits_on_the_one_listing_it_needs(tmp_path):
 
     elapsed = await timed(catalog)
 
-    assert api.calls == ["openrouter"]
-    assert elapsed < 2 * DELAY
-    assert catalog.record(sonnet).model == sonnet.model
+    assert sorted(api.calls[:2]) == ["anthropic", "openrouter"] and api.calls[2:] == ["google"]
+    assert api.peak == 2
+    assert elapsed < 3 * DELAY  # two rounds, not four
+    roles = RoleMap(default_model=None, model_roles={})
+    assert str(roles.resolve("default", catalog=catalog, providers=providers(**KEYS))) == (
+        "google:gemini-3-flash-preview"
+    )
     assert catalog.record(terra).model == terra.model
-    assert catalog.offered() == [str(QWEN), str(sonnet), str(terra)]
+    assert catalog.offered() == [str(QWEN), str(terra)]
     assert await catalog.confirm_rejections() is False
 
     await catalog.start_background_refresh()
 
-    assert sorted(api.calls) == ["anthropic", "openai", "openrouter"]
+    assert sorted(api.calls) == ["anthropic", "google", "openai", "openrouter"]
     # The recorded listings serve neither: the list leaves both out, and says why.
     assert catalog.offered() == [str(QWEN)]
     assert catalog.not_offered() == {
@@ -195,3 +204,109 @@ async def test_a_provider_in_use_nothing_waits_for_is_still_listed_once():
 
     assert api.calls == ["anthropic"]
     assert states(catalog) == {"anthropic": ProviderState.FRESH}
+
+
+# --- a computed role has no model of its own --------------------------------------------
+#
+# ``default`` without ``default_model``: the role takes the list's newest model of its
+# tier. A models entry is only the settings' word that the model exists, so before a
+# role runs on one, a listing must serve it: the start lists the entry's provider unless
+# a listing in hand (fresh or stale) serves it.
+
+SONNET_47 = ModelRef("anthropic", "claude-sonnet-4-7")  # a typo: Anthropic serves no such model
+TWO_KEYS = {"google": KEYS["google"], "anthropic": KEYS["anthropic"]}
+
+
+def computed(api, entries, *, cache=None, clock=None) -> ModelCatalog:
+    return ModelCatalog(
+        providers=providers(**TWO_KEYS), entries=entries, computed_roles=("default",),
+        cache_path=cache, transport=api.transport, clock=clock or Clock(),
+    )
+
+
+def default_role(catalog: ModelCatalog) -> str:
+    roles = RoleMap(default_model=None, model_roles={})
+    return str(roles.resolve("default", catalog=catalog, providers=providers(**TWO_KEYS)))
+
+
+async def _cached(cache, clock, api=None) -> None:
+    """An earlier start, which named no model of Anthropic's, cached its listing."""
+    seed = ModelCatalog(
+        providers=providers(anthropic=KEYS["anthropic"]), cache_path=cache,
+        transport=(api or ProviderAPI()).transport, clock=clock,
+    )
+    await seed.load()
+
+
+async def test_a_computed_role_waits_on_the_listing_of_the_entry_it_would_take():
+    """The list's one default-tier model is one Anthropic does not serve: the start
+    lists Anthropic, finds it absent, and the role takes the newest model the
+    built-ins serve, listed in a second round, not the unserved entry."""
+    api = ProviderAPI()
+    catalog = computed(api, {SONNET_47: ModelEntry()})
+
+    await catalog.load()
+
+    assert api.calls == ["anthropic", "google"]
+    assert default_role(catalog) == "google:gemini-3-flash-preview"
+    assert catalog.not_offered() == {str(SONNET_47): "not served by anthropic"}
+
+
+async def test_a_warm_start_whose_cache_serves_the_role_s_entry_waits_on_nothing(tmp_path):
+    cache, clock = tmp_path / "model_cache.json", Clock()
+    await _cached(cache, clock)
+    clock.now += 3600
+    api = ProviderAPI()
+    catalog = computed(
+        api, {ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}, cache=cache, clock=clock
+    )
+
+    await catalog.load()
+
+    assert api.calls == []
+    assert default_role(catalog) == "anthropic:claude-sonnet-4-6"
+    assert catalog.start_background_refresh() is None
+
+
+async def test_a_cache_that_lacks_the_role_s_entry_is_listed_again(tmp_path):
+    """A listing cached an hour ago by a start that did not name the model may
+    predate it: the start lists Anthropic again, and takes a served model."""
+    cache, clock = tmp_path / "model_cache.json", Clock()
+    await _cached(cache, clock)
+    clock.now += 3600
+    api = ProviderAPI()
+    catalog = computed(api, {SONNET_47: ModelEntry()}, cache=cache, clock=clock)
+
+    await catalog.load()
+
+    assert api.calls == ["anthropic", "google"]
+    assert default_role(catalog) == "google:gemini-3-flash-preview"
+
+
+async def test_a_role_that_runs_on_an_entry_its_provider_dropped_is_named_in_the_warning(
+    tmp_path, caplog
+):
+    """A stale cached listing served the entry, so the start took it at once; the
+    background refresh finds that Anthropic no longer serves it. The warning says
+    that the default role runs on it, and what to do."""
+    cache, clock = tmp_path / "model_cache.json", Clock()
+    then = copy.deepcopy(recorded("anthropic"))
+    then["data"].insert(0, dict(then["data"][0], id=SONNET_47.model, display_name="Sonnet 4.7"))
+    await _cached(cache, clock, ProviderAPI(anthropic=then))
+    clock.now += 2 * 86400  # stale
+    api = ProviderAPI()
+    catalog = computed(api, {SONNET_47: ModelEntry()}, cache=cache, clock=clock)
+
+    with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+        await catalog.load()
+        assert api.calls == []
+        assert default_role(catalog) == str(SONNET_47)
+        await catalog.start_background_refresh()
+
+    warned = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
+    assert warned == [
+        "Model anthropic:claude-sonnet-4-7 in models is not served by anthropic: its listing "
+        "lacks it, yet the default role, which nothing maps, runs on it (the list's newest "
+        "default-tier model), so a turn on it will fail at the provider. Set default_model, "
+        "or restart to take another (/models anthropic: lists what it serves)."
+    ]
