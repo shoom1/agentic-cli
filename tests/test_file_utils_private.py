@@ -111,3 +111,19 @@ def test_a_file_this_process_may_not_change_is_left_as_it_is(tmp_path, monkeypat
     make_private_file(path)
 
     assert _mode(path) == 0o644
+
+
+def test_without_tightening_an_existing_file_is_left_and_a_missing_one_made_private(
+    tmp_path,
+):
+    """For a file at a location the user names, which may be shared on purpose."""
+    shared = tmp_path / "shared.db"
+    shared.write_bytes(b"x")
+    shared.chmod(0o660)
+    new = tmp_path / "new" / "app.db"
+
+    make_private_file(shared, tighten=False)
+    make_private_file(new, tighten=False)
+
+    assert _mode(shared) == 0o660
+    assert (_mode(new), _mode(new.parent)) == (0o600, 0o700)

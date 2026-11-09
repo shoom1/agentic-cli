@@ -216,7 +216,7 @@ def _fchmod(fd: int, mode: int) -> None:
         fchmod(fd, mode)
 
 
-def make_private_file(path: Path) -> None:
+def make_private_file(path: Path, *, tighten: bool = True) -> None:
     """Make ``path`` an owner-only file (0600) before a library opens it.
 
     For a file that holds what the user said, such as a session database,
@@ -225,16 +225,19 @@ def make_private_file(path: Path) -> None:
     empty database. A missing directory is created owner-only (0700); one
     that exists is left as it is, since it may be the user's own. An
     existing file is tightened, dropping its group and other bits (one an
-    older version created 0644). A symlink, and what it points at, are left
-    alone, as is a file this process may not change (and every file where
-    the platform has no ``fchmod``: Windows' Python before 3.13).
+    older version created 0644), unless ``tighten`` is False: a file at a
+    location the user names may be shared on purpose. A symlink, and what
+    it points at, are left alone, as is a file this process may not change
+    (and every file where the platform has no ``fchmod``: Windows' Python
+    before 3.13).
     """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
     except FileExistsError:
-        pass
+        if not tighten:
+            return
     else:
         os.close(fd)
         return

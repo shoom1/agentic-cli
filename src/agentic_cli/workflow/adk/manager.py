@@ -567,7 +567,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
         → native ``DatabaseSessionService`` (durable across restarts, full event
         fidelity). The sqlite file is made owner-only before the engine opens
-        it, its directory created if missing (``private_sqlite_file``).
+        it, its directory created if missing (``private_sqlite_file``; one
+        ``sqlite_uri`` names, and that exists, is left as it is).
         """
         db_url = self._settings.session_db_url()
         if db_url is None:
@@ -578,7 +579,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # sqlite+aiosqlite:///<path>
             from agentic_cli.workflow.checkpointers import private_sqlite_file
 
-            private_sqlite_file(db_url.split(":///", 1)[-1])
+            private_sqlite_file(
+                db_url.split(":///", 1)[-1],
+                tighten_existing=not getattr(self._settings, "sqlite_uri", None),
+            )
 
         from google.adk.sessions import DatabaseSessionService
 

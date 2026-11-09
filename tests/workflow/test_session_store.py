@@ -146,6 +146,32 @@ class TestAdkSessionServiceSelection:
 
         assert oct(_mode(db)) == oct(0o600)
 
+    async def test_an_existing_database_the_user_names_is_left_as_it_is(
+        self, tmp_path: Path, umask_022
+    ):
+        """``sqlite_uri`` may name a file shared on purpose (0660 in a team
+        folder): tightening it at every start would lock the others out."""
+        team = tmp_path / "team"
+        team.mkdir()
+        db = team / "agent.db"
+        db.write_bytes(b"")
+        db.chmod(0o660)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite", sqlite_uri=str(db)))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o660)
+
+    async def test_a_missing_database_the_user_names_is_created_owner_only(
+        self, tmp_path: Path, umask_022
+    ):
+        db = tmp_path / "team" / "agent.db"
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite", sqlite_uri=str(db)))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o600)
+
 
 class TestAdkNativeSessions:
     """Native session query/manage against a real sqlite DatabaseSessionService."""

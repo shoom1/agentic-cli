@@ -276,19 +276,26 @@ def sqlite_file(value: str) -> str:
     return os.path.expanduser(value)
 
 
-def private_sqlite_file(path: str | Path) -> None:
+def private_sqlite_file(path: str | Path, *, tighten_existing: bool = True) -> None:
     """Make the sqlite database file ``path`` names owner-only before it is opened.
 
     The conversation store holds every word of every conversation, as the
     raw LLM log does, so it is 0600 in a directory created 0700
     (``file_utils.make_private_file``): its library would create it with the
-    process's umask. A file from an older version is tightened as it is
-    opened. ADK's ``sessions.db`` and Deep Agents' ``checkpoints.db`` both
-    come through here. ``:memory:`` names no file.
+    process's umask. ADK's ``sessions.db`` and Deep Agents' ``checkpoints.db``
+    both come through here. ``:memory:`` names no file.
+
+    Args:
+        path: The database file.
+        tighten_existing: Tighten a file that exists (one an older version
+            made 0644): the backends' own location, ``sqlite_uri`` unset. A
+            file at a location the user names (``sqlite_uri``) may be shared
+            on purpose (0660 in a team folder), so there a missing file is
+            created 0600 and an existing one is left as it is.
     """
     if str(path) in ("", ":memory:"):
         return
-    make_private_file(Path(path))
+    make_private_file(Path(path), tighten=tighten_existing)
 
 
 def deepagents_sqlite_path(settings: Any) -> Path:
@@ -296,10 +303,11 @@ def deepagents_sqlite_path(settings: Any) -> Path:
 
     ``sqlite_uri``'s file when it is set (the file ADK uses too), else
     ``{workspace}/sessions/checkpoints.db``, next to ADK's ``sessions.db``.
-    The file is made owner-only (``private_sqlite_file``), its directory
-    created if missing.
+    The file is made owner-only (``private_sqlite_file``; one ``sqlite_uri``
+    names, and that exists, is left as it is), its directory created if
+    missing.
     """
     uri = getattr(settings, "sqlite_uri", None)
     path = Path(sqlite_file(uri)) if uri else settings.sessions_dir / "checkpoints.db"
-    private_sqlite_file(path)
+    private_sqlite_file(path, tighten_existing=not uri)
     return path

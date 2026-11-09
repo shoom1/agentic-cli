@@ -2382,11 +2382,13 @@ step; each entry says what to use instead.
   0755 folder under the usual 022, so another account on the machine could
   read every conversation, though the raw LLM log of the same words is
   0600. The file is now created 0600 before the database opens it, in a
-  folder created 0700 (a folder that exists, which `sqlite_uri` may name,
-  is left as it is), and a file from an earlier version is tightened to
-  0600 when it is opened (`workflow.checkpointers.private_sqlite_file`, over
-  `file_utils.make_private_file`; a symlink is left alone). Deep Agents'
-  `checkpoints.db` is made the same way.
+  folder created 0700 (a folder that exists is left as it is), and at the
+  default location a file from an earlier version is tightened to 0600 when
+  it is opened (`workflow.checkpointers.private_sqlite_file`, over
+  `file_utils.make_private_file`; a symlink is left alone). A file that
+  `sqlite_uri` names and that exists keeps its permissions: it may be
+  shared on purpose (0660 in a team folder). Deep Agents' `checkpoints.db`
+  is made the same way.
 
 - **On ADK, an MCP tool's error result is a failed tool call.** A result
   the server marks `isError` was a `TOOL_RESULT` with `success=True`, shown

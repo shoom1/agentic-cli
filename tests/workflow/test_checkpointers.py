@@ -425,6 +425,31 @@ class TestDeepAgentsSqlitePath:
 
         assert oct(_mode(path)) == oct(0o600)
 
+    def test_an_existing_file_the_user_names_is_left_as_it_is(self, isolated):
+        """``sqlite_uri`` may name a file shared on purpose (0660 in a team
+        folder): tightening it at every start would lock the others out."""
+        team = isolated / "team"
+        team.mkdir()
+        shared = team / "agent.db"
+        shared.write_bytes(b"")
+        shared.chmod(0o660)
+
+        path = deepagents_sqlite_path(_settings(isolated, sqlite_uri=str(shared)))
+
+        assert path == shared
+        assert oct(_mode(path)) == oct(0o660)
+
+    def test_a_missing_file_the_user_names_is_created_owner_only(self, isolated):
+        old = os.umask(0o022)
+        try:
+            path = deepagents_sqlite_path(
+                _settings(isolated, sqlite_uri=str(isolated / "team" / "agent.db"))
+            )
+        finally:
+            os.umask(old)
+
+        assert oct(_mode(path)) == oct(0o600)
+
     def test_an_in_memory_database_names_no_file(self, isolated):
         path = deepagents_sqlite_path(_settings(isolated, sqlite_uri="sqlite:///:memory:"))
 
