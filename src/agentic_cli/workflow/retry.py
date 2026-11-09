@@ -1,7 +1,10 @@
 """Rate-limit detection.
 
-These helpers are backend-agnostic and used by both the ADK event
-processor and the CLI message processor.
+``is_rate_limit_error`` tells a provider's 429 from any other failure: the CLI
+message processor uses it to report a turn that failed on one. It retries
+nothing and works for every backend. The retries are the provider clients'
+(``retry_max_attempts``, ``retry_initial_delay``), before a failure reaches
+the turn.
 """
 
 from __future__ import annotations

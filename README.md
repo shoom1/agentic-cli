@@ -1672,6 +1672,25 @@ write in `~/.{app_name}/settings.json` still does: that is your policy). The
 settings are read at each call, so a change applies at once. Every prompt for
 code shows all of it.
 
+### Long-running jobs
+
+A long-running tool starts work in a `JobManager` and returns a job id at once;
+the framework ships the tools that read a job, not the ones that start it,
+since a starter decides what runs and how (`examples/jobs_demo.py` has one).
+`agentic_cli.tools.JOB_TOOLS` is `[job_status]`: a job's state, a stdout tail
+and, once it has finished, its result, the one companion most agents need to a
+starter. `JOB_MANAGEMENT_TOOLS` is `[job_status, job_result, job_logs,
+job_cancel, job_list]`, for an app that also lets the model read logs, list and
+cancel jobs (the user does that with `/jobs`).
+
+`JobManager.register_backend(backend)` takes a `JobBackend` instance and keeps
+it under its `name` (one of the same name is replaced), beside the two a
+manager starts with, `subprocess` and `inprocess`; a starter then submits to
+it with `submit(backend="<name>")`. The manager is `workflow.job_manager`, or
+`get_service("job_manager")` in a tool that declares `requires="job_manager"`.
+A backend implements `start`, `poll` and `cancel`, and may override `logs`,
+`result`, `pin` and `close`.
+
 ## Context management
 
 ### Summarizing
@@ -2024,7 +2043,7 @@ agentic-cli/
 │   │   ├── events.py             # WorkflowEvent, EventType
 │   │   ├── config.py             # AgentConfig
 │   │   ├── settings.py           # WorkflowSettingsMixin
-│   │   ├── retry.py              # Exponential-backoff retry
+│   │   ├── retry.py              # is_rate_limit_error: a provider's 429 (the provider clients retry)
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
 │   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
 │   │   ├── model_services.py     # Settings → agentic_cli.models arguments: keys, providers, entries; build_catalog
