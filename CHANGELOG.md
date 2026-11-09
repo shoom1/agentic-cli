@@ -1040,6 +1040,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`/models` shows `reasoning_text`.** A `models` entry's `reasoning_text`
+  (and the shipped table's, and the one an OpenRouter listing gives a model
+  that reasons) said whether a model sends its reasoning as text, and nothing
+  read it. The Thinking column now adds `· reasoning text` for such a model
+  (`effort low/medium/high · reasoning text`, or `— · reasoning text` with no
+  thinking rule). It still changes nothing else: the adapters keep reasoning
+  text whenever a server sends it.
+
 - **Memories are markdown files, in a user scope and a project scope.** The
   memory store kept one `memories.json` per app and OS user, searched it by
   embeddings, rewrote it on every search to count accesses, and showed nothing

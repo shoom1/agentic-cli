@@ -753,7 +753,7 @@ Each key is a model the model pickers offer; every field is optional:
 | `tools`, `image_input` | Any model | Whether it takes tools, and images |
 | `thinking` | A configured provider's model | `none`, `chat_template` (vLLM's `chat_template_kwargs.enable_thinking`) or `effort` (`reasoning_effort`, or OpenRouter's `reasoning.effort`); on an `openrouter` provider, `none` or `effort` |
 | `effort_levels` | A configured provider's model | Its effort levels, lowest first, as lowercase names: by default `low`, `medium`, `high`, or the levels OpenRouter's listing gives a reasoning model |
-| `reasoning_text` | A configured provider's model | Whether it sends its reasoning as text |
+| `reasoning_text` | A configured provider's model | Whether it sends its reasoning as text. `/models` shows it (`· reasoning text` in the Thinking column) and it changes nothing else: reasoning text is kept whenever a server sends it |
 
 - A field that is set wins over the provider's listing and the shipped
   table; one left out keeps theirs. An empty entry, `{}`, adds the model to

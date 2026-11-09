@@ -795,7 +795,7 @@ def _add_model_row(
         ref,
         _tokens(record.context_window),
         _tokens(record.max_output),
-        _thinking(record.thinking),
+        _thinking(record.thinking, record.reasoning_text),
         "yes" if record.tools else "no",
         "—" if record.cache.value == "none" else record.cache.value,
         _sources(record),
@@ -843,17 +843,21 @@ def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
     return table
 
 
-def _thinking(rule: "ThinkingRule") -> str:
-    """``budget 4096/12288/24576``, ``adaptive low/medium/high/max``, ``—``."""
+def _thinking(rule: "ThinkingRule", reasoning_text: bool = False) -> str:
+    """``budget 4096/12288/24576``, ``adaptive low/medium/high/max``, ``—``,
+    then ``· reasoning text`` for a model that sends its reasoning as text."""
     name = _THINKING_NAMES.get(rule.mechanism.value)
     if name is None:
-        return "—"
-    if rule.budgets:
-        detail = "/".join(str(budget) for budget in rule.budgets)
+        text = "—"
     else:
-        detail = "/".join(rule.levels)
-    text = f"{name} {detail}".rstrip()
-    return text if rule.can_disable else f"{text} (always on)"
+        if rule.budgets:
+            detail = "/".join(str(budget) for budget in rule.budgets)
+        else:
+            detail = "/".join(rule.levels)
+        text = f"{name} {detail}".rstrip()
+        if not rule.can_disable:
+            text += " (always on)"
+    return f"{text} · reasoning text" if reasoning_text else text
 
 
 def _sources(record: "ModelRecord") -> str:

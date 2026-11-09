@@ -331,6 +331,45 @@ async def test_a_configured_provider_s_models_show_their_entries(api, monkeypatc
     assert "│ key " in _row(screen, "lab")
 
 
+async def test_a_model_that_sends_its_reasoning_as_text_says_so(api, monkeypatch):
+    """The Thinking cell: the mechanism, then ``reasoning text`` for a record
+    that has it (``reasoning_text``). It changes nothing else: the adapters
+    keep reasoning text whenever a server sends it."""
+    monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
+    settings = BaseSettings(
+        model_providers={"lab": {**LAB["lab"], "list_models": False}},  # any id is accepted
+        models={
+            "lab:Qwen/Qwen3-32B": {"thinking": "chat_template", "reasoning_text": True},
+            "lab:quiet": {"thinking": "chat_template", "reasoning_text": False},
+            "lab:bare": {"reasoning_text": True},
+            "lab:plain": {},
+        },
+        default_model="lab:Qwen/Qwen3-32B",
+    )
+    workflow = await _ready(settings, api, "lab:Qwen/Qwen3-32B")
+
+    screen = await models(App(settings, workflow))
+
+    assert "on/off · reasoning text" in _row(screen, "lab:Qwen/Qwen3-32B")
+    assert "reasoning text" not in _row(screen, "lab:quiet")
+    assert "on/off" in _row(screen, "lab:quiet")
+    assert "— · reasoning text" in _row(screen, "lab:bare")
+    assert "reasoning text" not in _row(screen, "lab:plain")
+
+
+async def test_a_search_row_says_it_too(api, monkeypatch):
+    """OpenRouter's listing says a model reasons: its record has reasoning text."""
+    keys(monkeypatch, "openrouter")
+    settings = BaseSettings(model_providers=OPENROUTER)
+
+    screen = await models(App(settings), "qwen3-235b-a22b")
+
+    row = _row(screen, "openrouter:qwen/qwen3-235b-a22b")
+    assert "effort none/minimal/low/medium/high/xhigh · reasoning text" in row
+    screen = await models(App(settings), "llama-3.3")
+    assert "reasoning text" not in _row(screen, "openrouter:meta-llama/llama-3.3-70b-instruct")
+
+
 async def test_a_configured_provider_s_credentials(api, monkeypatch):
     """A key, no key (its variable is unset), or none needed (it names none)."""
     keys(monkeypatch, "google")
