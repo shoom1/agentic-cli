@@ -281,6 +281,28 @@ class TestSingleRoot:
 class TestValidationHappensBeforeAllocation:
     """A static graph error must not cost discovery or service construction."""
 
+    @staticmethod
+    def _watch(mgr: GoogleADKWorkflowManager, allocated: list[str]) -> None:
+        """Record what initialization calls to allocate, and let it run.
+
+        ``_build_services`` is what initialization calls to construct the
+        services (on a worker thread, from ``_construct_services``), and
+        ``_make_session_service`` makes ADK's session service: an allocation
+        before validation reaches one of them.
+        """
+        build, session = mgr._build_services, mgr._make_session_service
+
+        def build_services(*args, **kwargs):
+            allocated.append("services")
+            return build(*args, **kwargs)
+
+        def make_session_service():
+            allocated.append("session")
+            return session()
+
+        mgr._build_services = build_services
+        mgr._make_session_service = make_session_service
+
     async def test_bad_graph_fails_before_discovery_and_services(self, monkeypatch):
         from agentic_cli.workflow import model_services
 
@@ -295,13 +317,29 @@ class TestValidationHappensBeforeAllocation:
                 ],
                 settings=ctx.settings,
             )
-            created: list[str] = []
-            mgr._ensure_managers_initialized = lambda: created.append("services")
-            mgr._make_session_service = lambda: created.append("session") or object()
+            allocated: list[str] = []
+            self._watch(mgr, allocated)
 
             with pytest.raises(AgentGraphError, match="ghost"):
                 await mgr.initialize_services()
 
             assert catalogs == [], "models were listed before validation"
-            assert created == [], "resources were allocated before validation"
+            assert allocated == [], "resources were allocated before validation"
             assert mgr.is_initialized is False
+
+    async def test_a_good_graph_allocates_what_the_watch_sees(self):
+        """The control: the same watch sees a valid graph's allocations, so the
+        test above fails if validation ever runs after them."""
+        with MockContext(google_api_key="test-key") as ctx:
+            mgr = GoogleADKWorkflowManager(
+                agent_configs=[AgentConfig(name="coord", prompt="p")],
+                settings=ctx.settings,
+            )
+            allocated: list[str] = []
+            self._watch(mgr, allocated)
+
+            await mgr.initialize_services()
+            try:
+                assert allocated == ["services", "session"]
+            finally:
+                await mgr.cleanup()

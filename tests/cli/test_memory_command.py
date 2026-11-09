@@ -15,8 +15,12 @@ from tests.memory.memory_files import T0, Clock, memory_text, write_memory
 
 
 class _App:
-    def __init__(self, store, ready: bool = True, required: frozenset[str] | None = None) -> None:
+    def __init__(
+        self, store, ready: bool = True, required: frozenset[str] | None = None,
+        placement: str = "box",
+    ) -> None:
         self.session = autospec_session()
+        self.settings = SimpleNamespace(dialog_placement=placement)
         self._store, self._ready, self._required = store, ready, required
 
     @property
@@ -105,6 +109,18 @@ async def test_the_list_newest_first_with_counts(store, clock):
     assert isinstance(field, ChoiceField)
     assert field.options[0] == f"2026-11-08 · project · project · agent · KB on SQLite · {newer.id}"
     assert len(field.options) == 2
+
+
+async def test_its_dialogs_are_drawn_where_the_user_chose_since_the_start(store):
+    """A ``/settings`` change of dialog_placement: the session keeps the
+    placement it started with, so each dialog passes the live one."""
+    store.save("Prefers tabs", "Tabs.", "feedback", scope="user")
+    app = _App(store, placement="inline")
+    app.session.show_dialog.side_effect = picking(lambda options: options[0], None)
+
+    await MemoryCommand().execute("", app)
+
+    assert [dialog.placement for dialog in shown(app)] == ["inline", "inline"]
 
 
 async def test_choosing_a_memory_shows_it_and_delete_deletes(store):

@@ -10,6 +10,8 @@ worker thread.
 
 Enter must never be a destructive press: the button a dialog opens on is the
 harmless one (Close, Skip), and Delete acts only on the memory as it was shown.
+Each dialog is drawn where the ``dialog_placement`` setting says now: the
+session keeps the placement it started with.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from thinking_prompt import ButtonConfig, ChoiceField, Dialog
 from agentic_cli.cli.commands import Command, CommandCategory
 
 if TYPE_CHECKING:
+    from thinking_prompt import Placement
+
     from agentic_cli.memory import Memory, MemoryStore, Problem, Proposal, Version
 
 STALE_DAYS = 90
@@ -53,6 +57,12 @@ def proposals_line(count: int) -> str | None:
     return f"{count} memory proposal{'s' if count != 1 else ''}: /memory inbox"
 
 
+def _placement(app: Any) -> "Placement":
+    """Where ``/memory``'s dialogs are drawn: the ``dialog_placement`` setting
+    now, which ``/settings`` may have changed since the session started."""
+    return app.settings.dialog_placement
+
+
 def memory_store(app: Any) -> "MemoryStore | None":
     """The app's memory store; None (and the user told why) when there is none.
 
@@ -79,10 +89,12 @@ def _row(memory: "Memory") -> str:
 
 
 def memory_picker(
-    memories: list["Memory"], problems: list["Problem"], waiting: int, title: str
+    memories: list["Memory"], problems: list["Problem"], waiting: int, title: str,
+    *, placement: "Placement | None" = None,
 ) -> tuple[Dialog, dict[str, str]]:
     """The list: one option a memory (the id last, so rows stay unique on a
-    narrow terminal), then ``Problems (N)``; and what each option stands for."""
+    narrow terminal), then ``Problems (N)``; and what each option stands for.
+    ``placement`` is where it is drawn (None: the session's)."""
     rows = {_row(memory): memory.id for memory in memories}
     if problems:
         rows[f"Problems ({len(problems)})"] = _PROBLEMS
@@ -92,11 +104,15 @@ def memory_picker(
     line = proposals_line(waiting)
     if line:
         heading += f" · {line}"
-    return Dialog(heading, fields=[ChoiceField("memory", "", options=list(rows))]), rows
+    fields = [ChoiceField("memory", "", options=list(rows))]
+    return Dialog(heading, fields=fields, placement=placement), rows
 
 
-def memory_view(memory: "Memory", has_history: bool) -> Dialog:
-    """One memory: its fields, its file, its text; Delete, History, Close."""
+def memory_view(
+    memory: "Memory", has_history: bool, *, placement: "Placement | None" = None
+) -> Dialog:
+    """One memory: its fields, its file, its text; Delete, History, Close.
+    ``placement`` is where it is drawn (None: the session's)."""
     body = "\n".join([
         memory.description,
         "",
@@ -111,7 +127,7 @@ def memory_view(memory: "Memory", has_history: bool) -> Dialog:
     if has_history:
         buttons.append(ButtonConfig("History", result="history"))
     buttons.append(ButtonConfig("Close", result=None, focused=True))
-    return Dialog(f"Memory {memory.id}", body=body, buttons=buttons)
+    return Dialog(f"Memory {memory.id}", body=body, buttons=buttons, placement=placement)
 
 
 def _find(store: "MemoryStore", memory_id: str) -> "Memory | None":
@@ -223,7 +239,10 @@ class MemoryCommand(Command):
             line = proposals_line(waiting)
             app.session.add_message("system", "No memories saved yet." + (f" {line}" if line else ""))
             return
-        dialog, rows = memory_picker(memories, problems, waiting, "Stale memories" if stale else "Memory")
+        dialog, rows = memory_picker(
+            memories, problems, waiting, "Stale memories" if stale else "Memory",
+            placement=_placement(app),
+        )
         picked = await app.session.show_dialog(dialog)
         key = rows.get(picked) if picked is not None else None
         if key == _PROBLEMS:
@@ -235,6 +254,7 @@ class MemoryCommand(Command):
         body = "\n".join(f"{p.path}\n  {p.kind}: {p.detail}" for p in problems)
         await app.session.show_dialog(Dialog(
             "Memory files that cannot be used", body=body, buttons=[ButtonConfig("Close", result=None)],
+            placement=_placement(app),
         ))
 
     async def _show(self, app: Any, store: "MemoryStore", memory_id: str) -> None:
@@ -243,7 +263,9 @@ class MemoryCommand(Command):
             await self._missing(app, store, memory_id, shown=False)
             return
         versions = await asyncio.to_thread(store.history, memory.id)
-        choice = await app.session.show_dialog(memory_view(memory, bool(versions)))
+        choice = await app.session.show_dialog(
+            memory_view(memory, bool(versions), placement=_placement(app))
+        )
         if choice == "delete":
             await self._delete(app, store, memory)
         elif choice == "history":
@@ -306,9 +328,10 @@ class MemoryCommand(Command):
                 label += " ·"
             rows[label] = version
         title = "Memory history" + (f" of {memory_id}" if memory_id else "")
-        picked = await app.session.show_dialog(
-            Dialog(title, fields=[ChoiceField("version", "", options=list(rows))])
-        )
+        picked = await app.session.show_dialog(Dialog(
+            title, fields=[ChoiceField("version", "", options=list(rows))],
+            placement=_placement(app),
+        ))
         version = rows.get(picked) if picked is not None else None
         if version is None:
             return
@@ -318,6 +341,7 @@ class MemoryCommand(Command):
             f"Version of {version.memory_id}",
             body=version_body(version, current, unusable),
             buttons=[ButtonConfig("Restore", result="restore"), ButtonConfig("Close", result=None, focused=True)],
+            placement=_placement(app),
         ))
         if choice != "restore":
             return
@@ -350,6 +374,7 @@ class MemoryCommand(Command):
                     ButtonConfig("Discard", result="discard"),
                     ButtonConfig("Skip", result="skip", focused=True),
                 ],
+                placement=_placement(app),
             ))
             if choice is None:  # Esc stops; what is left waits
                 break

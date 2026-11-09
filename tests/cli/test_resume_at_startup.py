@@ -319,6 +319,23 @@ class TestWhenItCannot:
             "Fix it with /settings, then /resume abc."
         ) in session.said("warning")
 
+    async def test_a_new_conversation_whose_workflow_cannot_start_says_how_to_go_on(
+        self, manager, tmp_path, monkeypatch
+    ):
+        (tmp_path / "init-fails").touch()
+        (tmp_path / "ready").touch()  # a later retry would start
+        monkeypatch.setattr(ScriptedManager, "initializations", 0)
+        session = Session()
+        app = app_with(session)
+
+        await app.run()
+
+        assert session.prompted and app.exit_status == 0
+        assert session.said("warning") == [
+            "The workflow did not start. Fix it with /settings; "
+            "your next message starts it again."
+        ]
+
     @pytest.mark.parametrize("start", [
         SessionStart("continue"), SessionStart("resume", "abc"),
     ])
