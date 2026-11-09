@@ -107,9 +107,25 @@ class TestRegisterCommands:
                 if self.verbose:
                     self.command_registry.register(Files())
 
-        app = Verbose(verbose=True)
+        with patch.object(app_module, "ThinkingPromptSession") as session_cls:
+            app = Verbose(verbose=True)
 
+        assert session_cls.call_args.kwargs["theme"] == "light"
         assert app.command_registry.get("files") is not None
+
+    def test_an_override_of_register_builtin_commands_still_works(self):
+        """README's older way to add a command: super() first, then its own."""
+
+        class OldStyle(BaseCLIApp):
+            def _register_builtin_commands(self) -> None:
+                super()._register_builtin_commands()
+                self.command_registry.register(Files())
+
+        app, completer = built_with_completer(OldStyle)
+
+        assert isinstance(app.command_registry.get("files"), Files)
+        assert isinstance(app.command_registry.get("help"), HelpCommand)
+        assert completions(completer, "/fi") == ["/files"]
 
 
 class TestTheCompleter:
