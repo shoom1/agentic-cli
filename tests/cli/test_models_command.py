@@ -2,8 +2,9 @@
 
 ``/models`` shows the list the model pickers offer (``ModelCatalog.offered``):
 each model's context window, max output, thinking, tools, cache, where the
-values came from, and the roles that use it; then each ``models`` entry the
-list leaves out, its Status saying why. Below, each provider in use: its
+values came from, and the roles that use it; then each model the settings name
+(an entry, ``default_model``, a role or an agent's model) that the list leaves
+out, its Status saying why. Below, each provider in use: its
 credentials, listing state, when it was fetched, how many models it lists and
 the last error. ``/models <text>`` searches the full listings of every
 provider with a key, ignoring case (a provider not in use is listed the first
@@ -275,6 +276,32 @@ async def test_an_entry_the_list_leaves_out_says_why(api, monkeypatch):
     assert _tables(screen)[0] == "Models (3 offered, 3 not)"
 
 
+async def test_a_model_a_setting_names_that_the_list_leaves_out_says_why(api, monkeypatch, home):
+    """Another project's list names a model its provider has retired; the cached listing,
+    a day old by now, records it absent. Here it is ``default_model``: still accepted, so
+    the workflow runs on it, but not offered, and /models has its row with the roles and
+    the reason, not a gap."""
+    keys(monkeypatch, "anthropic")
+    retired, good = "anthropic:claude-sonnet-3-7", "anthropic:claude-sonnet-4-6"
+    other = BaseSettings(models={retired: {}, good: {}})
+    await _ready(other, api, good)  # lists, finds the retired model absent, caches
+    cache = home / "home" / f".{other.app_name}" / "model_cache.json"
+    document = json.loads(cache.read_text(encoding="utf-8"))
+    document["providers"]["anthropic"]["fetched_at"] -= 2 * 86400  # now stale
+    cache.write_text(json.dumps(document), encoding="utf-8")
+    api.calls.clear()
+    settings = BaseSettings(models={good: {}}, default_model=retired)
+    workflow = await _ready(settings, api, retired)
+
+    screen = await models(App(settings, workflow))
+
+    assert api.calls == []  # a stale listing is used while a refresh would run
+    row = _row(screen, retired)
+    assert "not served by anthropic" in row and "default" in row
+    assert "not served" not in _row(screen, good)
+    assert _tables(screen)[0] == "Models (3 offered, 1 not)"  # the entry, the fast and strong roles'
+
+
 async def test_below_the_list_the_providers_in_use(api, monkeypatch):
     keys(monkeypatch, "google", "anthropic")
     settings = BaseSettings(
@@ -308,12 +335,14 @@ async def test_each_provider_s_status(api, monkeypatch):
 
     screen = await models(App(settings, workflow))
 
-    google = _row(screen, "google")
+    google = _provider_row(screen, "google")
     assert "fresh" in google and "just now" in google and " 6 " in f" {google} "
-    openai = _row(screen, "openai")
+    openai = _provider_row(screen, "openai")
     assert "failed" in openai and "HTTP 401" in openai
-    assert "no key" in _row(screen, "anthropic")
-    assert "no key" in _row(screen, "openrouter")
+    assert "no key" in _provider_row(screen, "anthropic")
+    assert "no key" in _provider_row(screen, "openrouter")
+    # The roles' models on those providers are in the list's account too, with the reason.
+    assert "no key: set ANTHROPIC_API_KEY" in _row(screen, "anthropic:claude-opus-4-7")
     assert not any("not initialized" in message for message in screen.of("message"))
 
 
@@ -401,9 +430,9 @@ async def test_a_configured_provider_s_credentials(api, monkeypatch):
 
     screen = await models(App(settings, workflow))
 
-    assert "│ no key " in _row(screen, "lab")
-    assert "│ no key " in _row(screen, "openrouter")
-    assert "│ none needed " in _row(screen, "local")
+    assert "│ no key " in _provider_row(screen, "lab")
+    assert "│ no key " in _provider_row(screen, "openrouter")
+    assert "│ none needed " in _provider_row(screen, "local")
 
 
 # --- /models <text>: a search of the full listings ----------------------------------------

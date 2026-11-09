@@ -1026,7 +1026,8 @@ async def test_a_model_is_never_both_offered_and_not_offered(cache):
 async def test_a_reference_the_listing_in_use_recorded_as_absent_is_left_out_too(cache):
     """Another project's list recorded the model absent; here it is named by a
     setting, not by an entry. It is accepted (a stale listing proves nothing) but
-    the list, which a role may be computed from, does not offer it."""
+    the list, which a role may be computed from, does not offer it, and
+    ``not_offered`` says why."""
     clock = Clock()
     await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
     clock.now += DAY + 600
@@ -1039,6 +1040,8 @@ async def test_a_reference_the_listing_in_use_recorded_as_absent_is_left_out_too
     assert states(catalog)["anthropic"] is ProviderState.STALE
     assert str(RETIRED) not in catalog.offered()
     assert catalog.record(RETIRED).model == RETIRED.model
+    # And it says why, as for an entry: /models has a row for it, not a gap.
+    assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
 
 
 async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache):

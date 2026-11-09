@@ -28,11 +28,13 @@ fresh.
 
 **The list** (``offered``) is what the model pickers offer: the entries that
 can run, then the models the references and the caller name that can run (one
-rule for all of them: ``not_offered`` gives its reasons), each once; when
-no entry can run, each built-in provider's newest fast, default and strong
-models, of those it shows. Listings never add to it. ``not_offered`` says why
-an entry is left out, and ``load`` warns, once per process, of an entry whose
-provider is not defined or whose listing lacks its model.
+rule for all of them), each once; when no entry can run, each built-in
+provider's newest fast, default and strong models, of those it shows.
+Listings never add to it. ``not_offered`` says why a model the settings name
+(an entry or a reference) is left out, and ``load`` warns, once per process,
+of an entry (not a reference: startup fails on one a fresh listing lacks, and
+``/models`` shows the others with their reason) whose provider is not defined
+or whose listing lacks its model.
 
 **Served and shown.** A listing holds every model the provider serves, and
 the catalog accepts each id it lists (``record()``, ``search``), and for
@@ -479,10 +481,13 @@ class ModelCatalog:
         return [str(ref) for ref in dict.fromkeys(chosen)]
 
     def not_offered(self) -> dict[str, str]:
-        """The ``models`` entries the list leaves out, each with why: its
-        provider is not defined, has no key, or does not serve it (a fresh
-        listing lacks it, or the listing in use recorded it as absent)."""
-        left_out = ((ref, self._left_out(ref)) for ref in self._entries)
+        """The models the settings name that the list leaves out, each with why:
+        the ``models`` entries, then the references (``default_model``, a role,
+        an agent, the manager's own model), each once. Its provider is not
+        defined, has no key, or does not serve it (a fresh listing lacks it, or
+        the listing in use recorded it as absent)."""
+        named = dict.fromkeys((*self._entries, *self._references))
+        left_out = ((ref, self._left_out(ref)) for ref in named)
         return {str(ref): reason for ref, reason in left_out if reason is not None}
 
     def entry_records(self) -> list[ModelRecord]:
@@ -578,10 +583,11 @@ class ModelCatalog:
 
     def _known_absent(self, ref: ModelRef) -> bool:
         """Whether the listing in use, though not fresh (a stale one, or one
-        kept through a failed refresh), recorded the entry ``ref`` as absent.
+        kept through a failed refresh), recorded the model ``ref`` as absent: an
+        entry's, or any model a catalog sharing the cache file named.
 
         It cannot reject an id (``record()`` still accepts it), but the list
-        leaves the entry out: a role computed from the list must not run on a
+        leaves the model out: a role computed from the list must not run on a
         model the provider has retired while a refresh is under way.
         """
         state = self._states[ref.provider]

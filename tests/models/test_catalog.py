@@ -1198,6 +1198,49 @@ class TestNotOffered:
         }
         assert catalog.offered() == ["google:gemini-2.5-flash"]
 
+    async def test_why_a_model_a_setting_names_is_not_offered(self):
+        """The references (``default_model``, a role, an agent, the manager's model) are
+        left out of the list by the entries' rule, so ``not_offered`` says why for them
+        too; one that is also an entry is one row."""
+        unserved = ModelRef("google", "gemini-9-ultra")
+        catalog = await loaded(
+            entries={
+                ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(),
+                unserved: ModelEntry(),
+                GEMINI: ModelEntry(),
+            },
+            references=[
+                ModelRef("together", "deepseek-ai/DeepSeek-V3.1"), QWEN, unserved, GEMINI,
+                ModelRef("anthropic", "claude-sonnet-4-6"),
+            ],
+            google=KEYS["google"], openrouter=None,
+        )
+
+        assert catalog.not_offered() == {
+            "anthropic:claude-sonnet-4-6": "no key: set ANTHROPIC_API_KEY",
+            "google:gemini-9-ultra": "not served by google",
+            "together:deepseek-ai/DeepSeek-V3.1": (
+                "provider 'together' is not defined in model_providers"
+            ),
+            "openrouter:qwen/qwen3-235b-a22b": "no key: set OPENROUTER_API_KEY",
+        }
+        assert catalog.offered() == ["google:gemini-2.5-flash"]
+
+    async def test_a_model_a_setting_names_is_left_out_without_a_warning(self, caplog):
+        """A reference that a fresh listing lacks fails startup, and any other is
+        accepted and shown by /models with its reason: only an entry, which would
+        otherwise vanish from the list, is warned of."""
+        catalog = catalog_for(
+            references=[ModelRef("google", "gemini-9-ultra"), ModelRef("together", "x")],
+            google=KEYS["google"],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        assert catalog.not_offered() != {}
+        assert [r for r in caplog.records if r.name == "agentic_cli.models.catalog"] == []
+
     async def test_the_offered_entries_records_in_list_order(self):
         catalog = await loaded(
             entries={

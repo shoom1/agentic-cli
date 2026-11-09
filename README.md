@@ -910,19 +910,21 @@ lacks fails with one error that names each agent concerned.
 
 A model can run when its provider can be called: a built-in provider with
 its key, or a configured provider whose `api_key_env` is set (or that names
-none). An entry is not offered when its provider is not defined, cannot be
+none). A model a setting names (an entry, `default_model`, a role's model or
+an agent's) is not offered when its provider is not defined, cannot be
 called, or does not serve it (its fresh listing lacks the model, or the older
-listing in use recorded it as absent); the first and the last are warned of
-once at startup. The same rule leaves out a model a setting names. Listings
-never add to the list. Each model appears once. Picking writes
+listing in use recorded it as absent), and `/models` says why for each; an
+entry whose provider is not defined or does not serve it is also warned of
+once at startup. Listings never add to the list. Each model appears once. Picking writes
 `default_model`, or the role's `model_roles` entry, to the project settings
 file and restarts the workflow on it, keeping the conversation. Before the
 workflow is ready, the pickers offer the list from the entries and the
 shipped table. An app adds a picker for a role of its own with the key
 `model_role:<role>` in `get_ui_setting_keys()`.
 
-- **`/models`** shows the list, then each entry it leaves out with why ("no
-  key: set TOGETHER_API_KEY", "provider 'together' is not defined in
+- **`/models`** shows the list, then each model the settings name that it
+  leaves out (an entry, or `default_model`, a role or an agent's model) with
+  why ("no key: set TOGETHER_API_KEY", "provider 'together' is not defined in
   model_providers", "not served by together"). Per model: the context window,
   max output, thinking, tools, cache, where each value came from (`config`,
   `listing`, `table`, `default`) and the roles that use it. Below, each
@@ -942,7 +944,8 @@ shipped table. An app adds a picker for a role of its own with the key
   account with other models.
 - In code, an initialized manager's `manager.catalog` gives
   `catalog.offered()` (the entries and the models the settings and the
-  agents name), `catalog.not_offered()`, `catalog.records("google")`,
+  agents name), `catalog.not_offered()` (those it leaves out, with why),
+  `catalog.records("google")`,
   `catalog.status()`, `await catalog.search(text)` and
   `await catalog.refresh()`, and `manager.model` is the default model's
   reference. The pickers' list adds the roles' models:

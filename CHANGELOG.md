@@ -720,8 +720,9 @@ the start of the entry's title.
 - **`/models`** shows the list the model pickers offer: per model, the
   context window, max output, thinking mechanism and levels, tools, cache
   mechanism, where each value came from (`config`, `listing`, `table`,
-  `default`), and the roles that use it; then each `models` entry the list
-  leaves out, with why ("no key: set TOGETHER_API_KEY", "provider 'together'
+  `default`), and the roles that use it; then each model the settings name that
+  the list leaves out (a `models` entry, or the model of `default_model`, a role
+  or an agent), with why ("no key: set TOGETHER_API_KEY", "provider 'together'
   is not defined in model_providers", "not served by together"); then a row
   per provider in use: whether it has a key (or needs none), whether its
   listing is fresh, stale, failed or not tried, when it was fetched, how many
