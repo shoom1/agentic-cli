@@ -3,8 +3,10 @@
 import time
 from typing import TYPE_CHECKING, Any
 
+from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.session_resume import NO_PROMPT
@@ -28,20 +30,57 @@ class HelpCommand(Command):
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Display help information."""
-        commands = app.command_registry.all_commands()
+        """The commands by category, or, with a name, that command's help."""
+        registry = app.command_registry
+        name = args.strip().lstrip("/")
+        if not name:
+            app.session.add_rich(_command_list(registry.all_commands()))
+            return
+        command = registry.get(name)
+        if command is None:
+            app.session.add_warning(f"No command /{name}. Type /help for the list.")
+            return
+        app.session.add_rich(_command_help(command))
 
-        table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
-        table.add_column("Command", style="bold cyan", no_wrap=True)
-        table.add_column("Aliases", style="dim", no_wrap=True)
-        table.add_column("Description")
 
-        for cmd in sorted(commands, key=lambda c: c.name):
-            aliases = ", ".join(f"/{a}" for a in cmd.aliases) if cmd.aliases else ""
-            table.add_row(f"/{cmd.name}", aliases, cmd.description)
+def _command_list(commands: list[Command]) -> Panel:
+    """Every command under its category, the categories in their declared order,
+    then any command of another category (an app's) under "Other"; nothing is
+    read as markup."""
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_column("Command", style="bold cyan", no_wrap=True)
+    table.add_column("Aliases", style="dim", no_wrap=True)
+    table.add_column("Description")
+    by_category: dict[Any, list[Command]] = {}
+    for command in commands:
+        by_category.setdefault(command.category, []).append(command)
+    groups = [(category.value.capitalize(), by_category.pop(category, [])) for category in CommandCategory]
+    groups.append(("Other", [command for rest in by_category.values() for command in rest]))
+    for heading, group in groups:
+        if not group:
+            continue
+        if table.row_count:
+            table.add_row("", "", "")
+        table.add_row(Text(heading, style="bold"), "", "")
+        for command in sorted(group, key=lambda c: c.name):
+            aliases = ", ".join(f"/{alias}" for alias in command.aliases)
+            table.add_row(Text(f"/{command.name}"), Text(aliases), Text(command.description))
+    body = Group(table, Text(""), Text("/help <command> shows its usage and examples.", style="dim"))
+    return Panel(body, title="[bold]Available Commands[/bold]", border_style="cyan")
 
-        panel = Panel(table, title="[bold]Available Commands[/bold]", border_style="cyan")
-        app.session.add_rich(panel)
+
+def _command_help(command: Command) -> Panel:
+    """One command: what it does, its aliases, usage and examples (never read as markup)."""
+    details = Table.grid(padding=(0, 2))
+    details.add_column(style="dim", no_wrap=True)
+    details.add_column()
+    details.add_row("Usage", Text(command.usage))
+    if command.aliases:
+        details.add_row("Aliases", Text(", ".join(f"/{alias}" for alias in command.aliases)))
+    if command.examples:
+        details.add_row("Examples", Text("\n".join(command.examples)))
+    title = Text(f"/{command.name}", style="bold")
+    return Panel(Group(Text(command.description), Text(""), details), title=title, border_style="cyan")
 
 
 class ClearCommand(Command):

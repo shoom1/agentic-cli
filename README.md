@@ -1912,7 +1912,7 @@ Built-in slash commands available in all apps:
 
 | Command | Aliases | Description |
 |---------|---------|-------------|
-| `/help` | | Show available commands and usage information |
+| `/help [command]` | | The commands by category; with a name or alias, that command's usage and examples |
 | `/status` | | Show current session, workflow, and context-window status |
 | `/clear` | | Clear the screen |
 | `/exit` | `/quit` | Exit the application |

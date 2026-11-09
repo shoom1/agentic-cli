@@ -1059,6 +1059,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so only the exception is noted. It still changes nothing else: the adapters
   keep reasoning text whenever a server sends it.
 
+- **`/help` lists the commands by category, and `/help <command>` shows one.**
+  `/help` ignored its argument and printed one table, so the usage line and
+  examples every command declares were shown nowhere. The list is now grouped
+  by category (General, Session, Settings, Search, Workflow, Debug), and
+  `/help settings`, `/help /settings` or an alias (`/help set`) shows that
+  command's description, aliases, usage and examples; an unknown name says so.
+
 - **Memories are markdown files, in a user scope and a project scope.** The
   memory store kept one `memories.json` per app and OS user, searched it by
   embeddings, rewrote it on every search to count accesses, and showed nothing
