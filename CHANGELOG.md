@@ -348,6 +348,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/memory`, to review what memory holds.** `/memory` lists both scopes,
+  newest first (date, scope, type, source, description, id), with the
+  proposals waiting and a row for any file the store cannot use; choosing one
+  shows it, with its file to edit, Delete (restorable for 30 days) and
+  History. `/memory <id>` opens one directly. `/memory history` lists the last
+  30 days of changes and deletions and restores any version (the current one
+  is kept, so a restore can be undone). `/memory inbox` steps through the
+  proposals the end of a conversation filed: Accept, Discard or Skip, an
+  update shown beside the memory it changes, and a warning when its
+  conversation read outside content. `/memory stale` lists memories not
+  updated for 90 days. The app says how many proposals wait at startup and
+  after `/new` or `/resume`, and prints a line for each memory the model
+  saves, updates or deletes. An app's own `memory` command still replaces the
+  built-in.
+
 - **The main agent gets an index of saved memories at the start of each
   conversation.** Memory reached the model only when it thought to search, and
   it rarely did. Each conversation's main agent now gets a short index, one
@@ -1712,6 +1727,8 @@ The APIs that 0.6.1, 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
 further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
+
+- **research_demo's own `/memory`.** The built-in replaces it.
 
 - **The 0.6 memory store API.** `MemoryItem` (now `Memory`),
   `ForgettingPolicy` (never applied), `MemoryStore(base_dir,

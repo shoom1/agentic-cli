@@ -218,6 +218,15 @@ class TestCommandsBeforeReadiness:
         assert not any("Unknown command" in e for e in demo_app.session.errors())
 
 
+class TestMemoryCommandIsTheBuiltIn:
+    def test_the_demo_has_no_memory_command_of_its_own(self, demo_app):
+        from agentic_cli.cli.memory_command import MemoryCommand
+        from examples.research_demo.commands import DEMO_COMMANDS
+
+        assert type(demo_app.command_registry.get("memory")) is MemoryCommand
+        assert [command().name for command in DEMO_COMMANDS] == ["files", "kb-backfill"]
+
+
 class TestSettingsDialog:
     def test_the_demo_keeps_every_framework_picker(self, demo_app):
         """The demo adds verbose_thinking and the user's two preferences; it
@@ -613,28 +622,3 @@ class TestKbBackfillCommand:
         assert call_count[0] == 1, f"backfill_sidecars should be called once, was called {call_count[0]} times"
         successes = app.session.of("success")
         assert len(successes) == 1, "Should report success once"
-
-
-class TestMemoryCommandColors:
-    async def test_memory_content_draws_in_the_terminal_s_own_color(self):
-        """A fixed white is a light grey on a light terminal: the demo offers
-        the light theme, so /memory's content takes the terminal's color."""
-        from types import SimpleNamespace
-
-        from rich.table import Table
-
-        from examples.research_demo.commands import MemoryCommand
-        from tests.cli.dialog_fakes import autospec_session
-
-        item = SimpleNamespace(id="m1234567", description="likes teal", type="user", scope="user")
-        store = SimpleNamespace(memories=lambda: [item])
-        app = SimpleNamespace(
-            workflow=SimpleNamespace(memory_store=store), session=autospec_session()
-        )
-
-        await MemoryCommand().execute("", app)
-
-        (table,) = app.session.add_rich.call_args.args
-        assert isinstance(table, Table)
-        content = next(column for column in table.columns if column.header == "Description")
-        assert "white" not in str(content.style)

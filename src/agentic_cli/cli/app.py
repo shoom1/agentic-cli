@@ -1586,7 +1586,8 @@ class BaseCLIApp:
         return None if picked is None else ids.get(picked)
 
     async def _saving_facts(self, session_id: str) -> None:
-        """Extract ``session_id``'s facts (if enabled) under a status line saying so."""
+        """Extract ``session_id``'s facts (if enabled) under a status line saying so,
+        then name the memory proposals waiting (``/new`` and ``/resume``)."""
         if not (
             getattr(self._settings, "auto_extract_session_facts", False)
             and self._workflow_controller.is_ready
@@ -1598,6 +1599,25 @@ class BaseCLIApp:
         finally:
             # Out of the transcript, like a turn's events box, a cancel included.
             box.finish(add_to_history=False, echo_to_console=False)
+        await self._name_waiting_proposals()
+
+    async def _name_waiting_proposals(self) -> None:
+        """Say how many memory proposals wait for review, if any (``/memory inbox``)."""
+        from agentic_cli.cli.memory_command import proposals_line
+
+        if not self._workflow_controller.is_ready:
+            return
+        store = getattr(self._workflow_controller.workflow, "memory_store", None)
+        if store is None:
+            return
+        try:
+            count = len(await asyncio.to_thread(store.proposals))
+        except Exception:  # a line, never a failure
+            logger.debug("memory_proposals_unreadable", exc_info=True)
+            return
+        line = proposals_line(count)
+        if line:
+            self.session.add_message("system", line)
 
     @staticmethod
     async def _is_stored(workflow: Any, session_id: str) -> bool:
@@ -1764,7 +1784,8 @@ class BaseCLIApp:
         return None, passed_over
 
     async def _open_on_startup(self) -> None:
-        """Once the prompt is up: resume what ``--continue``/``--resume <id>`` chose.
+        """Once the prompt is up: name the memory proposals waiting, then resume
+        what ``--continue``/``--resume <id>`` chose.
 
         A replay reads best under the welcome banner, so this waits until the
         session runs. It runs outside
@@ -1772,10 +1793,11 @@ class BaseCLIApp:
         (its resume, cancelled on the way out, says nothing of a cancel). A
         failure is said and logged: the new conversation goes on.
         """
-        if self._pending_resume is None:
-            return
         while not self.session.app.is_running:
             await asyncio.sleep(0.02)
+        await self._name_waiting_proposals()
+        if self._pending_resume is None:
+            return
         target = self._pending_resume
         try:
             if not await self._resume(target):

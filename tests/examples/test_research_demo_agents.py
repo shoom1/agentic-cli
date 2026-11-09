@@ -74,3 +74,14 @@ def test_a_specialist_answers_its_coordinator_not_the_user():
     # The report writer's skill is part of what it reads.
     skill = Path(agents.__file__).parent / "skills" / "report-writer" / "SKILL.md"
     assert "tell the user" not in skill.read_text()
+
+
+def test_the_coordinator_reads_the_memory_index_and_has_the_memory_tools():
+    from research_demo.agents import AGENT_CONFIGS
+
+    coord = next(a for a in AGENT_CONFIGS if a.name == "research_coordinator")
+    tool_names = {t.__name__ for t in coord.tools}
+    assert {"save_memory", "read_memory", "search_memory"} <= tool_names
+    prompt = coord.get_prompt()
+    assert "memory index at the top of the conversation" in prompt
+    assert "Check memory with" not in prompt

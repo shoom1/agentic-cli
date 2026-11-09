@@ -408,3 +408,42 @@ class TestSubAgentText:
         ])
 
         assert ui.responses() == ["The researcher says X is 42."]
+
+
+class TestMemoryWriteLine:
+    """Each memory write the model makes is shown as a success line (spec §9.3)."""
+
+    @pytest.mark.parametrize("tool, message", [
+        ("save_memory", "Saved to user memory: Prefers tabs"),
+        ("update_memory", "Updated memory: Prefers tabs"),
+        ("delete_memory", "Deleted memory: Prefers tabs"),
+    ])
+    async def test_a_memory_write_is_shown_as_it_happens(self, tool, message):
+        ui, _, _ = await _render([WorkflowEvent.tool_result(
+            tool, {"success": True, "item_id": "a1", "scope": "user", "message": message},
+            success=True,
+        )])
+        assert [c[1] for c in ui.of("success")] == [message]
+
+    async def test_a_failed_memory_write_shows_no_success(self):
+        ui, _, _ = await _render([WorkflowEvent.tool_result(
+            "save_memory", {"success": False, "error": "duplicate"}, success=False, error="duplicate",
+        )])
+        assert ui.of("success") == []
+
+    async def test_a_result_without_a_message_shows_no_success(self):
+        ui, _, _ = await _render([WorkflowEvent.tool_result(
+            "save_memory", {"success": True, "item_id": "a1"}, success=True,
+        )])
+        assert ui.of("success") == []
+
+    async def test_a_memory_read_or_another_tool_shows_no_success(self):
+        ui, _, _ = await _render([
+            WorkflowEvent.tool_result(
+                "read_memory", {"success": True, "message": "Read memory: Prefers tabs"}, success=True,
+            ),
+            WorkflowEvent.tool_result(
+                "save_plan", {"success": True, "message": "Plan saved"}, success=True,
+            ),
+        ])
+        assert ui.of("success") == []

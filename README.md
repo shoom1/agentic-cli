@@ -1618,7 +1618,7 @@ The main agent does not have to search to know what was saved: each conversation
 
 Once a conversation has read outside content (a fetched page, a search result, a document, a program's output, an MCP answer), every `save_memory`, `update_memory` and `delete_memory` in it asks you, call by call, with the memory shown in full (see the permission engine below); a person's own settings can allow them. The memory folders are denied to `write_file` and `edit_file`, and code `execute_python` runs inside the OS sandbox can neither read nor write them, even where `workspace_dir` sits in a folder the sandbox may write; code that runs outside the sandbox (turned off, or `sandbox_execute`'s local kernel) runs with your privileges and is approved call by call.
 
-With `auto_extract_session_facts` on, the end of a conversation (`/new`, `/resume`, exit) asks the default model for at most five memories worth keeping and files them as proposals in the scope's `.inbox/`, never as memories: a candidate already known, waiting, or discarded before is dropped. The first start of 0.7.0 imports 0.6's `memories.json` into the user scope once (what the model saved as memories, what the extractor wrote as proposals) and moves the old files into `memory/pre-0.7.0/`; extracted items past the inbox's 100 stay only in that old file (the log counts them), and what a 0.6 session still running writes later is imported at the next start, new ids only. A memory folder that cannot open (a link, which is refused, or one that cannot be written) never stops the app: a project scope that fails is left out, and a user scope that fails leaves the memory tools answering that the store is not available.
+With `auto_extract_session_facts` on, the end of a conversation (`/new`, `/resume`, exit) asks the default model for at most five memories worth keeping and files them as proposals in the scope's `.inbox/`, never as memories: a candidate already known, waiting, or discarded before is dropped. `/memory inbox` reviews them (Accept, Discard or Skip), and the app says how many wait at startup and after `/new` or `/resume`. The first start of 0.7.0 imports 0.6's `memories.json` into the user scope once (what the model saved as memories, what the extractor wrote as proposals) and moves the old files into `memory/pre-0.7.0/`; extracted items past the inbox's 100 stay only in that old file (the log counts them), and what a 0.6 session still running writes later is imported at the next start, new ids only. A memory folder that cannot open (a link, which is refused, or one that cannot be written) never stops the app: a project scope that fails is left out, and a user scope that fails leaves the memory tools answering that the store is not available.
 
 The store itself is `agentic_cli.memory.MemoryStore` (provisional), part of the memory package that depends on nothing else in agentic-cli:
 
@@ -1821,9 +1821,10 @@ Built-in slash commands available in all apps:
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new` | | Start a new conversation; the current one stays in `/sessions` |
 | `/resume` | | Reopen a saved conversation: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
+| `/memory` | | Review saved memories: the list of both scopes, one memory (Delete, History), `/memory <id>`, `/memory history` (restore a version), `/memory inbox` (Accept, Discard or Skip the proposals the extractor filed), `/memory stale` (not updated for 90 days) |
 
 Apps can add more of their own. `research_demo`, for instance, registers
-`/memory`, `/files` and `/kb-backfill` on top of the built-ins above.
+`/files` and `/kb-backfill` on top of the built-ins above.
 
 ### Adding Custom Commands
 
@@ -1963,7 +1964,7 @@ Sessions are durable by default: every run gets a session id, named at exit
 when it is stored; `--continue` and `--resume` reopen one, `/resume` switches
 to another without a restart, and `/sessions` lists or deletes them (see
 [Resuming a conversation](#resuming-a-conversation)). The demo adds
-`/memory`, `/files` and `/kb-backfill` to the built-in commands.
+`/files` and `/kb-backfill` to the built-in commands.
 
 ## Development
 
@@ -1993,6 +1994,7 @@ agentic-cli/
 │   │   ├── app.py                # BaseCLIApp
 │   │   ├── commands.py           # Command, CommandRegistry
 │   │   ├── builtin_commands.py   # help/status/clear/exit/sandbox/jobs/resume/papers/sessions/models
+│   │   ├── memory_command.py     # /memory
 │   │   ├── settings_command.py   # /settings
 │   │   ├── settings_introspection.py
 │   │   ├── workflow_controller.py
