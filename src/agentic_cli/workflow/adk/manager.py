@@ -24,6 +24,7 @@ from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
 
@@ -1084,12 +1085,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         What ``can_resume`` and a job's resume ask (the base's templates).
         The session service is durable by default (``session_store='sqlite'``),
         so a session normally survives a CLI restart; it is gone once deleted,
-        or with ``session_store='memory'`` once the process restarted.
+        or with ``session_store='memory'`` once the process restarted. It reads
+        none of the session's events (``num_recent_events=0``): a long
+        session read whole costs tens of milliseconds, and the status bar
+        asks again every 30 seconds.
         """
         if self._session_service is None:
             return False
         session = await self._session_service.get_session(
             app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+            config=GetSessionConfig(num_recent_events=0),
         )
         return session is not None
 
