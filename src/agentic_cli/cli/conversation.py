@@ -185,10 +185,10 @@ class ConversationCore:
             None once it is held; else the process id of the one holding it
             (0 when unknown), and the conversation held before stays held.
         """
-        hold = self.acquire(session_id, place)
-        if isinstance(hold, int):
-            return hold
-        self.commit(hold)
+        taken = self.acquire(session_id, place)
+        if isinstance(taken, int):
+            return taken
+        self.commit(taken)
         return None
 
     def release(self) -> None:
@@ -309,10 +309,10 @@ class ConversationCore:
             self.session_id, self.turned = None, False
             _start_over(parts, swapped=False)
         else:
-            hold = self.acquire(to)
-            if isinstance(hold, int):
-                return hold
-            self._make(hold, parts, swapped=False)
+            taken = self.acquire(to)
+            if isinstance(taken, int):
+                return taken
+            self._make(taken, parts, swapped=False)
         parts.status(False)
         return None
 
@@ -324,7 +324,6 @@ class ConversationCore:
         self.session_id = hold.session_id
         self.turned = False
         _start_over(parts, swapped=swapped)
-
 
     def _at(self, place: Place | None) -> Place:
         place = place or self.place

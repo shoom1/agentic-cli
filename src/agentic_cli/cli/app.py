@@ -1352,7 +1352,8 @@ class BaseCLIApp:
                 await self._conversation.switch(new, parts, place=place, propose=False)
             except Exception as error:  # noqa: BLE001 - said; the next turn retries the store
                 logger.debug("swap_adopt_failed", session_id=new, exc_info=True)
-                return f"{held}, and a new one could not start: {str(error) or type(error).__name__}."
+                reason = str(error) or type(error).__name__
+                return f"{held}, and a new one could not start: {reason}."
             return (
                 f"{held}: a new one starts here, {new}. Its history stays with the "
                 "previous backend: switch back to continue it."
