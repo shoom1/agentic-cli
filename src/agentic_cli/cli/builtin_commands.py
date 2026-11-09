@@ -843,21 +843,21 @@ def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
     return table
 
 
-def _thinking(rule: "ThinkingRule", reasoning_text: bool = False) -> str:
+def _thinking(rule: "ThinkingRule", reasoning_text: bool) -> str:
     """``budget 4096/12288/24576``, ``adaptive low/medium/high/max``, ``—``,
-    then ``· reasoning text`` for a model that sends its reasoning as text."""
+    then ``· no reasoning text`` for a model that thinks but does not send its
+    reasoning as text. Most thinking models do, so only the exception is said."""
     name = _THINKING_NAMES.get(rule.mechanism.value)
     if name is None:
-        text = "—"
+        return "—"
+    if rule.budgets:
+        detail = "/".join(str(budget) for budget in rule.budgets)
     else:
-        if rule.budgets:
-            detail = "/".join(str(budget) for budget in rule.budgets)
-        else:
-            detail = "/".join(rule.levels)
-        text = f"{name} {detail}".rstrip()
-        if not rule.can_disable:
-            text += " (always on)"
-    return f"{text} · reasoning text" if reasoning_text else text
+        detail = "/".join(rule.levels)
+    text = f"{name} {detail}".rstrip()
+    if not rule.can_disable:
+        text += " (always on)"
+    return text if reasoning_text else f"{text} · no reasoning text"
 
 
 def _sources(record: "ModelRecord") -> str:

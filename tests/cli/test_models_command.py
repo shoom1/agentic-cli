@@ -331,10 +331,12 @@ async def test_a_configured_provider_s_models_show_their_entries(api, monkeypatc
     assert "│ key " in _row(screen, "lab")
 
 
-async def test_a_model_that_sends_its_reasoning_as_text_says_so(api, monkeypatch):
-    """The Thinking cell: the mechanism, then ``reasoning text`` for a record
-    that has it (``reasoning_text``). It changes nothing else: the adapters
-    keep reasoning text whenever a server sends it."""
+async def test_a_thinking_model_that_sends_no_reasoning_text_says_so(api, monkeypatch):
+    """The Thinking cell notes the exception: a model that thinks but does not
+    send its reasoning as text (``reasoning_text`` false), ``· no reasoning
+    text``. The shipped table marks almost every thinking model as sending it,
+    so a note on those would sit on every row. It changes nothing else: the
+    adapters keep reasoning text whenever a server sends it."""
     monkeypatch.setenv("LAB_KEY", ENDPOINT_KEY)
     settings = BaseSettings(
         model_providers={"lab": {**LAB["lab"], "list_models": False}},  # any id is accepted
@@ -350,24 +352,39 @@ async def test_a_model_that_sends_its_reasoning_as_text_says_so(api, monkeypatch
 
     screen = await models(App(settings, workflow))
 
-    assert "on/off · reasoning text" in _row(screen, "lab:Qwen/Qwen3-32B")
-    assert "reasoning text" not in _row(screen, "lab:quiet")
-    assert "on/off" in _row(screen, "lab:quiet")
-    assert "— · reasoning text" in _row(screen, "lab:bare")
+    assert "on/off · no reasoning text" in _row(screen, "lab:quiet")
+    qwen = _row(screen, "lab:Qwen/Qwen3-32B")  # thinks, and sends it: nothing to note
+    assert "on/off" in qwen and "reasoning text" not in qwen
+    assert "reasoning text" not in _row(screen, "lab:bare")  # no thinking rule
     assert "reasoning text" not in _row(screen, "lab:plain")
 
 
-async def test_a_search_row_says_it_too(api, monkeypatch):
-    """OpenRouter's listing says a model reasons: its record has reasoning text."""
+async def test_a_model_from_the_table_or_a_listing_has_no_note(api, monkeypatch):
+    keys(monkeypatch, "google", "openrouter")
+    settings = BaseSettings(
+        model_providers=OPENROUTER,
+        models={"google:gemini-2.5-flash": {}, "openrouter:qwen/qwen3-235b-a22b": {}},
+    )
+    workflow = await _ready(settings, api, "google:gemini-2.5-flash")
+
+    screen = await models(App(settings, workflow))
+
+    assert "budget 4096/12288/24576" in _row(screen, "google:gemini-2.5-flash")
+    assert "effort none/minimal/low/medium/high/xhigh" in _row(
+        screen, "openrouter:qwen/qwen3-235b-a22b"
+    )
+    assert "reasoning text" not in screen.text
+
+
+async def test_a_search_row_has_no_note_for_a_model_that_sends_reasoning_text(api, monkeypatch):
+    """OpenRouter's listing says a model reasons: its record sends reasoning text."""
     keys(monkeypatch, "openrouter")
     settings = BaseSettings(model_providers=OPENROUTER)
 
     screen = await models(App(settings), "qwen3-235b-a22b")
 
     row = _row(screen, "openrouter:qwen/qwen3-235b-a22b")
-    assert "effort none/minimal/low/medium/high/xhigh · reasoning text" in row
-    screen = await models(App(settings), "llama-3.3")
-    assert "reasoning text" not in _row(screen, "openrouter:meta-llama/llama-3.3-70b-instruct")
+    assert "effort none/minimal/low/medium/high/xhigh" in row and "reasoning text" not in row
 
 
 async def test_a_configured_provider_s_credentials(api, monkeypatch):
