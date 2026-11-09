@@ -16,7 +16,7 @@ A sub-agent's long-running tools are not wrapped as ADK's
 long-running call, inside a delegation too, so the parent would never be
 re-entered. A sub-agent's job starter is an ordinary call that returns the
 job's id, and the finished job is told to the root agent
-(``GoogleADKWorkflowManager.resume_with_job_result``), as on Deep Agents.
+(``BaseWorkflowManager.resume_with_job_result``), as on Deep Agents.
 
 The parent chooses a sub-agent by its tool's description, ADK's
 ``agent.description``: one without a description is offered as

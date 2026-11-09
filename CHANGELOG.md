@@ -2338,10 +2338,8 @@ step; each entry says what to use instead.
 - **The prompt no longer freezes while another CLI of the app holds the
   jobs directory.** The CLI called the job manager on the event loop's
   thread: the status bar's poll every 2 seconds, each `/jobs` subcommand,
-  the resume coordinator (listing, claiming and closing the deliveries of
-  finished jobs, at a turn's end and by `/jobs resume`), and the workflow
-  reading a finished job's result for its resume turn
-  (`resume_with_job_result`). Each call takes
+  and the resume coordinator (listing, claiming and closing the deliveries
+  of finished jobs, at a turn's end and by `/jobs resume`). Each call takes
   the jobs directory's lock, which every CLI of the app shares, so while
   another held it (its `/jobs clean` over large job folders, say) the
   prompt, its redraws and Ctrl+C waited too. Those calls now run on a
