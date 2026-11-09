@@ -928,8 +928,9 @@ shipped table. An app adds a picker for a role of its own with the key
   `listing`, `table`, `default`) and the roles that use it. Below, each
   provider in use: whether it has a key (or needs none), whether its listing
   is fresh, stale, failed or not listed, when it was fetched, how many models
-  it lists, and the last error. Before the workflow is initialized it reads
-  the model cache, and lists a provider in use the cache holds nothing for.
+  it shows (its listing holds more, which `/models <text>` finds), and the
+  last error. Before the workflow is initialized it reads the model cache,
+  and lists a provider in use the cache holds nothing for.
 - **`/models <text>`** searches the full listing of each provider that can be
   called (and is listed), ignoring case, by reference, and marks the models
   already in the list: how to find an exact id to copy into `models`

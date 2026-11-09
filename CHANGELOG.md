@@ -725,14 +725,14 @@ the start of the entry's title.
   is not defined in model_providers", "not served by together"); then a row
   per provider in use: whether it has a key (or needs none), whether its
   listing is fresh, stale, failed or not tried, when it was fetched, how many
-  models it lists, and the last error. `/models <text>` searches the full
-  listing of every provider that can be called, ignoring case, by reference,
-  and marks the models already in the list: how to find an exact id to add
-  to `models` (a provider not in use is listed the first time it is
-  searched). `/models refresh` lists every provider in use or searched again
-  now and reports whose models changed and which listings failed. Before
-  the workflow is initialized it reads the model cache, and lists a provider
-  in use the cache holds nothing for. It never shows a key.
+  models it shows (its listing holds more), and the last error. `/models
+  <text>` searches the full listing of every provider that can be called,
+  ignoring case, by reference, and marks the models already in the list: how
+  to find an exact id to add to `models` (a provider not in use is listed the
+  first time it is searched). `/models refresh` lists every provider in use
+  or searched again now and reports whose models changed and which listings
+  failed. Before the workflow is initialized it reads the model cache, and
+  lists a provider in use the cache holds nothing for. It never shows a key.
 - **A Deep Agents orchestrator: `orchestrator="deepagents"`**, installed by
   the new `deepagents` extra (`pip install 'agentic-cli[deepagents]'`; it
   installs beside `langgraph`, and its LangChain packages are the

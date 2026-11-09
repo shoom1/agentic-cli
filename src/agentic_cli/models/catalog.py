@@ -153,7 +153,9 @@ class ProviderStatus:
         state: How much is known (see ``ProviderState``).
         fetched_at: When the listing in use was fetched, else when the last
             attempt failed; None when never listed.
-        model_count: How many models the catalog offers for it.
+        model_count: How many models the catalog shows for it: the records
+            ``ModelCatalog.records`` returns, not every id it accepts, and
+            not the models the list offers.
         error: Why the last listing failed, if it did.
     """
 
@@ -166,8 +168,9 @@ class ProviderStatus:
 
 
 @dataclass
-class _ProviderState:
-    """What the catalog knows of one provider's models."""
+class _ProviderKnowledge:
+    """What the catalog knows of one provider's models: the facts its state
+    (``ProviderState``) is derived from, and the records built from them."""
 
     provider: Provider
     #: The last successful listing; kept through a failed refresh.
@@ -183,9 +186,9 @@ class _ProviderState:
     #: listing that lacks one of these is not listed again for it.
     absent: frozenset[str] = frozenset()
     #: Every id the provider serves, which ``record()`` accepts and ``search``
-    #: finds; and the records it shows, which ``records()`` offers.
+    #: finds; and the records it shows, which ``records()`` returns.
     accepted: Mapping[str, ModelRecord] = field(default_factory=dict)
-    offered: tuple[ModelRecord, ...] = ()
+    shown: tuple[ModelRecord, ...] = ()
 
     @property
     def listable(self) -> bool:
@@ -239,7 +242,7 @@ class ModelCatalog:
         self._clock = clock
         self._entries: Mapping[ModelRef, ModelEntry] = MappingProxyType(dict(entries or {}))
         self._references = tuple(dict.fromkeys(references))
-        self._states = {name: _ProviderState(provider) for name, provider in providers.items()}
+        self._states = {name: _ProviderKnowledge(provider) for name, provider in providers.items()}
         for state in self._states.values():
             self._rebuild(state)
         self._computed_roles = tuple(computed_roles)
@@ -425,7 +428,7 @@ class ModelCatalog:
         if self._state_of(state) is ProviderState.FRESH:
             if state.from_cache:
                 self._cached_rejections.add(ref.provider)
-            models = [record.model for record in state.offered]
+            models = [record.model for record in state.shown]
             shown = ", ".join(models[:_MESSAGE_MODELS]) or "none"
             if len(models) > _MESSAGE_MODELS:
                 shown += f", and {len(models) - _MESSAGE_MODELS} more"
@@ -436,10 +439,11 @@ class ModelCatalog:
         return with_entry(record, self._entries.get(ref))
 
     def records(self, provider: str) -> list[ModelRecord]:
-        """The models offered for ``provider``: those its listing shows, else
-        the fallbacks."""
+        """The models shown for ``provider``: those its listing shows, else the
+        fallbacks. Not every id ``record()`` accepts (a provider serves more
+        than it shows), and not the list the pickers offer (``offered``)."""
         found = self._states.get(provider)
-        return list(found.offered) if found is not None else []
+        return list(found.shown) if found is not None else []
 
     def is_authoritative(self, provider: str) -> bool:
         """Whether ``provider``'s listing can reject an unknown id (FRESH only)."""
@@ -591,7 +595,7 @@ class ModelCatalog:
         for name in BUILTIN_PROVIDERS:
             if self._can_run(name):
                 for tier in _TIERS:
-                    candidates = [r for r in self._states[name].offered if r.tier == tier]
+                    candidates = [r for r in self._states[name].shown if r.tier == tier]
                     if candidates:
                         models.append(newest(candidates).ref)
         return models
@@ -668,7 +672,7 @@ class ModelCatalog:
                 served=state.accepted,
             )
 
-    def _adopt(self, state: _ProviderState, entry: CacheEntry) -> None:
+    def _adopt(self, state: _ProviderKnowledge, entry: CacheEntry) -> None:
         """Use a cache entry: fresh, stale, or a cached failure."""
         listing = entry.to_listing(state.provider.name)
         if listing.ok:
@@ -681,7 +685,7 @@ class ModelCatalog:
             state.due = True
         self._rebuild(state)
 
-    def _state_of(self, state: _ProviderState) -> ProviderState:
+    def _state_of(self, state: _ProviderKnowledge) -> ProviderState:
         """What the catalog knows of the provider now, from its listing, its last
         failure and the clock: a listing that ages past the TTL is stale
         whether the cache or this process made it."""
@@ -703,19 +707,19 @@ class ModelCatalog:
             has_credentials=state.provider.has_credentials,
             state=self._state_of(state),
             fetched_at=latest.fetched_at if latest is not None else None,
-            model_count=len(state.offered),
+            model_count=len(state.shown),
             error=state.failure.error if state.failure is not None else None,
         )
 
     # --- records ---------------------------------------------------------------
 
-    def _rebuild(self, state: _ProviderState) -> None:
+    def _rebuild(self, state: _ProviderKnowledge) -> None:
         """Recompute a provider's records from what it now knows; swapped in whole.
 
         Each record takes its model's entry (``records_for``), so ``records()``
         and ``record()`` give the same record.
         """
-        state.accepted, state.offered = records_for(
+        state.accepted, state.shown = records_for(
             state.provider, state.listing, self._table, self._entries
         )
 

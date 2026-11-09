@@ -8,7 +8,7 @@ entry) and swaps in the result.
 
 Two maps come out. The provider's listing holds every model it **serves**, and
 the catalog accepts each of their ids; the provider **shows** fewer, the
-models its list offers (``ModelCatalog.records``). Where "shown" is decided
+models it shows (``ModelCatalog.records``). Where "shown" is decided
 depends on the provider: Google's lister marks the text models; Anthropic's
 marks a dated id with its date-stripped id, which this module takes as the
 dated id's alias, serves and shows (it takes the first dated id listed's
@@ -70,8 +70,8 @@ def records_for(
 
     Returns:
         The records of every model the provider serves, by id (the ids
-        ``ModelCatalog.record`` accepts), and those it shows, in the order its
-        list offers them. A shown record is the served one.
+        ``ModelCatalog.record`` accepts), and those it shows, in the order it shows
+        them. A shown record is the served one.
     """
     served, shown = _records_for(provider, listing, table)
     given = entries or {}
@@ -125,7 +125,7 @@ def _records_for(
     if listing is None:
         fallback = [table.record_for(name, kind, model) for model in table.fallback_models(kind)]
         return {record.model: record for record in fallback}, fallback
-    # Every id the provider serves is accepted; only the shown ones are offered.
+    # Every id the provider serves is accepted; only the shown ones are shown.
     accepted: dict[str, ModelRecord] = {}
     shown: dict[str, ModelRecord] = {}
     for listed in listing.models:
@@ -147,15 +147,15 @@ def _records_for(
         return accepted, list(shown.values())
     # R15: the curated ids the account has, then any other reasoning
     # model it lists. Other ids (embeddings, TTS, gpt-4.1) are accepted by
-    # record() but never offered.
+    # record() but never shown.
     curated = table.curated_openai()
-    offered = [accepted[model] for model in curated if model in accepted]
-    offered += [
+    chosen = [accepted[model] for model in curated if model in accepted]
+    chosen += [
         record
         for model, record in accepted.items()
         if model not in curated and record.thinking.mechanism is ThinkingMechanism.EFFORT
     ]
-    return accepted, offered
+    return accepted, chosen
 
 
 def _listed_record(
