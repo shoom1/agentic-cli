@@ -257,6 +257,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
+        index_wanted = self._memory_index_wanted(graph.root_name)
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -276,6 +277,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             summarizers=summarizers,
             open_calls=self._open_calls,
             marks=self._outside_marks,
+            memory_index=self._memory_index_now if index_wanted else None,
+            memory_index_cached=self._memory_index_cached if index_wanted else None,
+            memory_index_forget=self._forget_memory_index if index_wanted else None,
         )
         self._root_name = graph.root_name
         self._root_summarization = summarizers.get(graph.root_name)
@@ -412,6 +416,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root_name = None
         self._root_summarization = None
         self._budgets = {}
+        self._index_snapshots.clear()
         self._initialized = False
         self._pending_notices = []
 
@@ -713,6 +718,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 await self._root.aupdate_state(
                     config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
                 )
+                # The prompt prefix changes here anyway: the conversation's
+                # next request takes a new memory index.
+                self._forget_memory_index(session)
                 await asyncio.shield(self._recording(session))
                 result = CompactResult(
                     messages_summarized=cut,

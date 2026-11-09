@@ -16,6 +16,8 @@ gets these; sub-agents are gated as strictly as the root.
 - :class:`ContextOverflowMiddleware`, on the model side inside the
   summarization, gives it every provider's overflow as LangChain's
   ``ContextOverflowError``, so it summarizes and retries.
+- :class:`MemoryIndexMiddleware`, on the model side inside the summarization,
+  puts the main agent's memory index first in each request.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
@@ -23,6 +25,7 @@ and the result dict as JSON content: the model reads it and carries on.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from collections.abc import Awaitable, Callable
@@ -678,6 +681,56 @@ class ContextOverflowMiddleware(AgentMiddleware):
             if is_context_overflow(error):
                 raise ContextOverflowError(str(error)) from error
             raise
+
+
+class MemoryIndexMiddleware(AgentMiddleware):
+    """Puts the memory index first in the main agent's requests (spec §11.3).
+
+    The index (a snapshot per conversation) becomes the first text block of
+    the first human message of the request passed on; the state keeps its
+    messages as they were. Inside the summarization and the overflow handling,
+    before the prompt caching, so a summary message gets it first and the
+    cached prefix holds it.
+
+    Args:
+        index_for: The turn's conversation's index (``""`` for none); it reads
+            files on its first call, so the async path runs it on a worker thread.
+    """
+
+    def __init__(self, index_for: Callable[[], str]) -> None:
+        super().__init__()
+        self._index_for = index_for
+
+    @staticmethod
+    def _with_index(request: ModelRequest, text: str) -> ModelRequest:
+        if not text:
+            return request
+        messages = list(request.messages)
+        for position, message in enumerate(messages):
+            if isinstance(message, HumanMessage):
+                content = message.content
+                blocks = (
+                    [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+                )
+                messages[position] = message.model_copy(
+                    update={"content": [{"type": "text", "text": text}, *blocks]}
+                )
+                return request.override(messages=messages)
+        return request
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        return await handler(self._with_index(request, await asyncio.to_thread(self._index_for)))
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> Any:
+        return handler(self._with_index(request, self._index_for()))
 
 
 class ForeignReasoningMiddleware(AgentMiddleware):

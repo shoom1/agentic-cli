@@ -6,6 +6,7 @@ the model is shown, ``extract`` the extraction prompt, ``_import_06`` 0.6's
 ``memories.json`` imported once.
 """
 
+from agentic_cli.memory.store._index import INDEX_OPEN
 from agentic_cli.memory.store.extract import MAX_CANDIDATES, extraction_prompt, parse_candidates
 from agentic_cli.memory.store.models import (
     ALL_MEMORY_TOOLS,
@@ -28,8 +29,8 @@ from agentic_cli.memory.store.models import (
 from agentic_cli.memory.store.store import MemoryStore
 
 __all__ = [
-    "ALL_MEMORY_TOOLS", "MAX_CANDIDATES", "MEMORY_TYPES", "SCOPES", "Candidate", "DuplicateMemory",
-    "FileInTheWay", "InvalidMemory", "Memory", "MemoryBusy", "MemoryStore", "MemoryStoreError",
-    "MemoryStoreFull", "NoProjectScope", "Problem", "Proposal", "UnsafeMemoryStore", "Version",
-    "extraction_prompt", "parse_candidates",
+    "ALL_MEMORY_TOOLS", "INDEX_OPEN", "MAX_CANDIDATES", "MEMORY_TYPES", "SCOPES", "Candidate",
+    "DuplicateMemory", "FileInTheWay", "InvalidMemory", "Memory", "MemoryBusy", "MemoryStore",
+    "MemoryStoreError", "MemoryStoreFull", "NoProjectScope", "Problem", "Proposal",
+    "UnsafeMemoryStore", "Version", "extraction_prompt", "parse_candidates",
 ]

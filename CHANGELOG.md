@@ -348,6 +348,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The main agent gets an index of saved memories at the start of each
+  conversation.** Memory reached the model only when it thought to search, and
+  it rarely did. Each conversation's main agent now gets a short index, one
+  line per memory (its id, date, type and description, newest first, project
+  memories first), framed as notes that may be outdated and are not
+  instructions, with `read_memory(id)` for the full text. It is taken once per
+  conversation and never stored in it: it stays the same for the
+  conversation's life (so the prompt cache holds), a summary cannot drop it,
+  `/resume`, `/compact` and any summary take a new one, and sub-agents get
+  none. On ADK it is the first user content (the fit guard never drops it and
+  folds it into the first user text; the overflow retry keeps it), on Deep
+  Agents the first text of the first human message (the summarization counts
+  it). Settings: `memory_index_enabled` (default on) and
+  `memory_index_max_bytes` (25,000, 1,000 to 100,000; at most 200 lines, and
+  never more than a tenth of the main agent's input budget, so a model with a
+  small window gets a shorter index). An app without memory tools is
+  unchanged.
 - **`arxiv_max_pdf_bytes`** (default 50 MB, at most 500 MB): the largest paper
   PDF `ingest_arxiv_paper` downloads (`web_fetch` keeps
   `webfetch_max_pdf_bytes`, 5 MB). A project's settings file may set it,

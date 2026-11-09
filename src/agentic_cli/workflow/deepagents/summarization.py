@@ -14,7 +14,8 @@ ADK: summarize at the smaller of ``context_summarize_at`` of B and the
 ``context_max_tokens`` ceiling, and keep the newest 12% of that word for
 word. A model whose window is unknown counts as 128,000 tokens, not Deep
 Agents' fixed 170,000 tokens or 6 messages, which never fire on a small
-model.
+model. The memory index the main agent's requests carry counts toward their
+size (``ReportingSummarizationMiddleware._count_tokens``).
 
 **No archive.** Deep Agents writes the summarized messages to its virtual
 filesystem and gives the model the file's path; with its file tools off the
@@ -249,14 +250,34 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     on the strength of a count reported before it, and one that wrote no text
     is not tried again in its turn over the same range (``_should_summarize``).
 
+    Its count of a request includes the memory index the agent's requests
+    carry, which ``MemoryIndexMiddleware`` adds after this middleware. A
+    summary written changes the prompt prefix, so ``on_written`` runs once
+    it is, before the request goes on: the request that carries the new
+    summary carries a new memory index too.
+
     Args:
         agent: The agent whose stack this is.
+        index: The memory index the agent's requests carry (``""`` for none);
+            it must read no file (the manager's ``_memory_index_cached``).
+        on_written: Called once a summary is written, before the model is
+            called with it (the manager drops the conversation's memory index
+            snapshot).
         **kwargs: ``SummarizationMiddleware``'s arguments.
     """
 
-    def __init__(self, *, agent: str | None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        agent: str | None,
+        index: Callable[[], str] | None = None,
+        on_written: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
+        self._index = index
+        self._on_written = on_written
         helper = self._lc_helper
         # Inside the retry: a mapped overflow is never retried as it was sent.
         helper._summary_model = OverflowMapped(helper._summary_chat_model).with_retry(
@@ -266,6 +287,17 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         self._trigger_tokens: int | None = int(value) if kind == "tokens" else None
         # The ranges whose summary wrote no text this turn.
         self._failures = FailedSummaries(self._trigger_tokens or 0)
+
+    def _count_tokens(
+        self, messages: list["AnyMessage"], system_message: Any, tools: Any
+    ) -> int:
+        """The base count, plus the memory index this agent's requests carry
+        (added after this middleware, by ``MemoryIndexMiddleware``)."""
+        total = super()._count_tokens(messages, system_message, tools)
+        text = self._index() if self._index is not None else ""
+        if text:
+            total += self.token_counter([HumanMessage(content=text)])
+        return total
 
     def _should_summarize(self, messages: list["AnyMessage"], total_tokens: int) -> bool:
         """Whether to summarize the request, which holds ``messages``.
@@ -399,11 +431,21 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         does. After the provider refused the request as too long, that is a
         context overflow.
         """
-        return _written(super()._create_summary(messages_to_summarize))
+        summary = _written(super()._create_summary(messages_to_summarize))
+        self._written()
+        return summary
 
     async def _acreate_summary(self, messages_to_summarize: list[Any]) -> str:
         """``_create_summary``, async."""
-        return _written(await super()._acreate_summary(messages_to_summarize))
+        summary = _written(await super()._acreate_summary(messages_to_summarize))
+        self._written()
+        return summary
+
+    def _written(self) -> None:
+        # Before the request that carries the summary is built, so it is
+        # sent with a new memory index, not the next one.
+        if self._on_written is not None:
+            self._on_written()
 
     async def _anot_summarized(self) -> None:
         logger.debug("deepagents_summary_not_written", agent=self.agent)
@@ -445,7 +487,12 @@ def _refused_unsummarized(error: NoSummaryWritten) -> Exception:
 
 
 def build_summarization(
-    model: "BaseChatModel", resolved: "ResolvedModel", settings: "BaseSettings"
+    model: "BaseChatModel",
+    resolved: "ResolvedModel",
+    settings: "BaseSettings",
+    *,
+    index: Callable[[], str] | None = None,
+    on_written: Callable[[], None] | None = None,
 ) -> SummarizationMiddleware:
     """An agent's summarization middleware, on its own model.
 
@@ -454,6 +501,13 @@ def build_summarization(
         resolved: The agent's resolved model (thresholds; ``agent`` names it).
         settings: The manager's settings (``context_summarize_at``,
             ``context_max_tokens``).
+        index: The memory index the agent's requests carry, counted in its
+            requests' size: the manager's ``_memory_index_cached``, which
+            never reads a file. Before a conversation's first request it
+            counts nothing, and the provider-reported count, which the base
+            class also reads, covers it after.
+        on_written: Called once a summary is written, before the request
+            that carries it is sent: the manager's ``_forget_memory_index``.
 
     Raises:
         ContextBudgetError: The model's input budget is too small to work in.
@@ -462,6 +516,8 @@ def build_summarization(
     trigger, keep = summarization_thresholds(resolved, settings)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
+        index=index,
+        on_written=on_written,
         model=model,
         backend=NoArchiveBackend(),
         trigger=trigger,

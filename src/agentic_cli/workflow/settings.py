@@ -371,9 +371,26 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
     )
     auto_extract_session_facts: bool = Field(
         default=False,
-        title="Auto-Extract Session Facts",
-        description="At session end, extract key facts into memory via LLM",
+        title="Propose Memories",
+        description="At the end of a conversation, propose memories for review in /memory inbox",
         json_schema_extra={"ui_order": 154},
+    )
+    memory_index_enabled: bool = Field(
+        default=True,
+        title="Memory Index",
+        description="Send the main agent an index of saved memories at the start of each conversation",
+        json_schema_extra={"ui_order": 155},
+    )
+    memory_index_max_bytes: int = Field(
+        default=25_000,
+        ge=1_000,
+        le=100_000,
+        title="Memory Index Size",
+        description=(
+            "The memory index's size cap in bytes (1,000 to 100,000; at most 200 lines, "
+            "and a tenth of the main agent's input budget)"
+        ),
+        json_schema_extra={"ui_order": 156},
     )
 
     # User identity (needed by workflow.process())

@@ -33,7 +33,9 @@ other), then the model side and the tool side.
   summarization counts
   exactly what will be sent (``summarization.py``), every provider's context
   overflow reaches it as one it summarizes on (``ContextOverflowMiddleware``),
-  and on Claude with ``prompt_caching_enabled`` the cache marks land on the
+  the memory index, for the main agent with a memory tool
+  (``MemoryIndexMiddleware``), goes first in the request, and on Claude
+  with ``prompt_caching_enabled`` the cache marks land on the
   final request (``AnthropicPromptCachingMiddleware``: the system prompt, the
   last tool and the conversation, for 5 minutes, as on ADK).
 - Tool side, outermost first: the permission gate, the tool result cap
@@ -74,6 +76,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     ContextOverflowMiddleware,
     ForeignReasoningMiddleware,
     InterruptedCallsMiddleware,
+    MemoryIndexMiddleware,
     PermissionMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
@@ -116,6 +119,9 @@ def build_agent_tree(
     summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
     open_calls: OpenCalls | None = None,
     marks: OutsideContentMarks | None = None,
+    memory_index: Callable[[], str] | None = None,
+    memory_index_cached: Callable[[], str] | None = None,
+    memory_index_forget: Callable[[], None] | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -152,6 +158,15 @@ def build_agent_tree(
         marks: The manager's record of each conversation's mark, which every
             agent's permission gate marks when it allows a call that brings
             outside content (``workflow/outside_content.py``).
+        memory_index: The root's memory index for its conversation (``""``
+            for none): given, the root's stack has ``MemoryIndexMiddleware``
+            (the manager passes it only for a root with a memory tool). No
+            other agent gets one.
+        memory_index_cached: The same index, which reads no file: the root's
+            summarization counts it in its requests' size.
+        memory_index_forget: Drops the conversation's index snapshot: the
+            root's summarization calls it when it writes a summary, before
+            the request that carries the summary is sent.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -167,7 +182,12 @@ def build_agent_tree(
             _subagent(config_map[sub], build(sub)) for sub in config.sub_agents
         ]
         model = chat_models[name]
-        model_side = _model_side(model, resolved.get(name), settings)
+        model_side = _model_side(
+            model, resolved.get(name), settings,
+            memory_index=memory_index if name == root else None,
+            memory_index_cached=memory_index_cached if name == root else None,
+            memory_index_forget=memory_index_forget if name == root else None,
+        )
         if summarizers is not None:
             summarizers.update(
                 (name, middleware) for middleware in model_side
@@ -254,16 +274,25 @@ def _model_side(
     model: "BaseChatModel",
     resolved: "ResolvedModel | None",
     settings: "BaseSettings | None",
+    *,
+    memory_index: Callable[[], str] | None = None,
+    memory_index_cached: Callable[[], str] | None = None,
+    memory_index_forget: Callable[[], None] | None = None,
 ) -> list["AgentMiddleware"]:
     """What shapes each of the agent's model requests, outermost first."""
     if resolved is None or settings is None:
         return []
     stack: list[AgentMiddleware] = [
         ForeignReasoningMiddleware(resolved.record.kind, agent=resolved.agent),
-        build_summarization(model, resolved, settings),
+        build_summarization(
+            model, resolved, settings, index=memory_index_cached, on_written=memory_index_forget
+        ),
         # Inside the summarization: it summarizes on the overflows it raises.
         ContextOverflowMiddleware(),
     ]
+    if memory_index is not None:
+        # Inside the summarization, which counts it, and before the caching.
+        stack.append(MemoryIndexMiddleware(memory_index))
     if resolved.record.cache is CacheMechanism.ANTHROPIC and settings.prompt_caching_enabled:
         # The system prompt is a plain string: the middleware marks it.
         stack.append(

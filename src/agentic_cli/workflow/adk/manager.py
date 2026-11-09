@@ -322,6 +322,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         runner, self._runner = self._runner, None
         self._root_agent = None
         self._budgets = {}
+        self._index_snapshots.clear()
         self._initialized = False
 
         # Clear LLM logging plugin
@@ -756,6 +757,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # result, for the calls a cancel leaves open.
             plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
             plugins.append(cap)
+            if self._memory_index_wanted(self._root_agent.name):
+                from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
+
+                # Before the overflow handler and the fit guard, which keep it.
+                plugins.append(MemoryIndexPlugin(
+                    root=self._root_agent.name, index_for=self._memory_index_now
+                ))
             kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
             fit_guard = FitGuardPlugin(self._budgets, kinds)
             # A call refused as too long: summarize (the root) or trim, retry
@@ -825,6 +833,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             budget=self._budgets[root],
             settings=self._settings,
             app_name=self.app_name,
+            on_written=self._forget_memory_index,
             **options,
         )
 
