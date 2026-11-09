@@ -179,15 +179,19 @@ class BaseWorkflowManager(ABC):
         ContextVar, so it stays correct for nested and task-spawned work.
 
     Example:
-        A minimal backend. ``initialize_services`` is the base's: it validates
-        the agent graph, resolves the models, builds the services the tools
-        declare and then calls ``_do_initialize``. The backend takes both
-        locks to tear down, and resets what it set up in ``_release_resources``
-        (the base closes the catalog and the services only)::
+        A minimal backend. ``initialize_services`` is the base's: it calls the
+        backend's ``_validate_agent_graph`` (the base's validates nothing and
+        leaves ``root_agent_name`` None), resolves the models, builds the
+        services the tools declare and then calls ``_do_initialize``. A turn
+        passes each event through ``_apply_event_hook``, which is the
+        constructor's ``on_event``. The backend takes both locks to tear down,
+        and resets what it set up in ``_release_resources`` (the base closes
+        the catalog and the services only)::
 
             from typing import Callable
 
             from agentic_cli import BaseWorkflowManager, WorkflowEvent
+            from agentic_cli.workflow.config import AgentGraph, validate_agent_graph
 
             class CustomWorkflowManager(BaseWorkflowManager):
                 @property
@@ -197,13 +201,19 @@ class BaseWorkflowManager(ABC):
                 def _get_state_tools(self) -> list[Callable]:
                     return []  # the backend's plan and task tools
 
+                def _validate_agent_graph(self) -> AgentGraph:
+                    return validate_agent_graph(self._agent_configs, backend=self.backend_type)
+
                 async def _do_initialize(self) -> None:
                     ...  # build the backend's agents or graph
 
                 async def process(self, message, user_id, session_id=None):
                     async with self._turn_admission():
                         with self._workflow_context(session_id=session_id, user_id=user_id):
-                            yield WorkflowEvent.text(f"echo: {message}", session_id)
+                            event = WorkflowEvent.text(f"echo: {message}", session_id)
+                            event = self._apply_event_hook(event)  # None: dropped
+                            if event is not None:
+                                yield event
 
                 async def reinitialize(self, model=None, preserve_sessions=True):
                     async with self._lifecycle_lock:

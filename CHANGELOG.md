@@ -2238,9 +2238,11 @@ step; each entry says what to use instead.
   It left out five abstract members (`backend_type`, `_get_state_tools`,
   `_do_initialize`, `reinitialize`, `cleanup`), replaced `initialize_services`
   with a no-op and called a `_process_internal` that does not exist, so the
-  class could not be instantiated. It is now a complete minimal backend, and a
-  test builds the class from the docstring and runs it through a turn,
-  `cleanup` and `reinitialize`.
+  class could not be instantiated, and a backend copied from it would have
+  dropped the constructor's `on_event` hook. It is now a complete minimal
+  backend (it validates the agent graph and passes its events through the
+  hook), and a test builds the class from the docstring and runs it through a
+  turn, `cleanup`, `reinitialize` and a hook that drops events.
 
 - **A backend of your own adopts the conversation's id.** `load_session`
   adopted the id only when the subclass had set `session_id` itself (the three

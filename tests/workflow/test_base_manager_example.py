@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.config import AgentConfig, AgentGraphError
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 from tests.conftest import MockContext
 
@@ -90,5 +91,60 @@ async def test_reinitialize_keeps_the_services_it_carries(example):
         assert manager.is_initialized
         assert manager.services[PERMISSION_ENGINE] is engine
         assert await _reply(manager, "again") == ["echo: again"]
+
+        await manager.cleanup()
+
+
+async def test_the_on_event_hook_sees_every_event_and_can_drop_it(example):
+    seen: list[str] = []
+
+    def drop(event: WorkflowEvent) -> None:
+        seen.append(event.content)
+
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example(
+            [AgentConfig(name="a", prompt="p")], settings=ctx.settings, on_event=drop
+        )
+
+        assert await _reply(manager, "hello") == []
+        assert seen == ["echo: hello"]
+
+        await manager.cleanup()
+
+
+async def test_the_on_event_hook_can_change_an_event(example):
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example(
+            [AgentConfig(name="a", prompt="p")],
+            settings=ctx.settings,
+            on_event=lambda event: WorkflowEvent.text(event.content.upper()),
+        )
+
+        assert await _reply(manager, "hello") == ["ECHO: HELLO"]
+
+        await manager.cleanup()
+
+
+async def test_it_validates_the_agent_graph_before_it_builds_anything(example):
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example(
+            [AgentConfig(name="coord", prompt="p", sub_agents=["ghost"])],
+            settings=ctx.settings,
+        )
+
+        with pytest.raises(AgentGraphError, match="ghost"):
+            await manager.initialize_services()
+
+        assert not manager.is_initialized
+        assert manager.services == {}
+        assert manager.catalog is None
+
+
+async def test_it_knows_its_root_agent(example):
+    with MockContext(google_api_key="test-key") as ctx:
+        manager = example([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
+        await manager.initialize_services()
+
+        assert manager.root_agent_name == "a"
 
         await manager.cleanup()
