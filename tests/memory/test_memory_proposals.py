@@ -8,7 +8,7 @@ import pytest
 
 from agentic_cli.memory.store import _inbox
 from agentic_cli.memory.store.extract import extraction_prompt, parse_candidates
-from agentic_cli.memory.store.models import Candidate, DuplicateMemory, InvalidMemory
+from agentic_cli.memory.store.models import Candidate, DuplicateMemory, FileInTheWay, InvalidMemory
 from agentic_cli.memory.store.store import MemoryStore
 from tests.memory.kb_storage import LogRecorder
 from tests.memory.memory_files import T0, Clock
@@ -115,6 +115,15 @@ class TestReview:
             store.accept(proposal.id)
         assert store.proposals() == [proposal]
 
+    def test_accepting_an_update_whose_memory_file_a_person_broke_names_the_file(self, store):
+        memory = store.save("Prefers spaces", "Spaces.", "feedback", scope="user")
+        proposal = store.propose(Candidate("update", memory.id, "Prefers tabs", "Tabs.", "feedback", "user"))
+        broken = memory.path.read_text().replace("type: feedback", "type: preference")
+        memory.path.write_text(broken)
+        with pytest.raises(FileInTheWay, match=memory.path.name):
+            store.accept(proposal.id)
+        assert store.proposals() == [proposal] and memory.path.read_text() == broken
+
     def test_accepting_a_proposal_that_is_now_a_duplicate(self, store):
         proposal = store.propose(new())
         store.save("Prefers tabs", "Saved by hand.", "feedback")
@@ -152,6 +161,32 @@ class TestReview:
     def test_accept_of_an_unknown_proposal(self, store):
         with pytest.raises(InvalidMemory, match="no proposal deadbeef"):
             store.accept("deadbeef")
+
+
+class TestBrokenProposals:
+    """A proposal file the store cannot use is a problem, like a memory file (spec §5.3)."""
+
+    def test_a_broken_proposal_is_a_problem_and_not_a_proposal(self, store, tmp_path):
+        good = store.propose(new())
+        broken = tmp_path / "user" / ".inbox" / "nonsense.md"
+        broken.write_text("no frontmatter\n")
+        assert store.proposals() == [good]
+        [problem] = store.problems()
+        assert (problem.path, problem.kind) == (broken, "bad_proposal")
+        assert broken.read_text() == "no frontmatter\n"
+
+    def test_files_the_inbox_keeps_for_itself_are_no_problem(self, store, tmp_path):
+        store.propose(new())
+        store.discard(store.proposals()[0].id)
+        (tmp_path / "user" / ".inbox" / ".hidden.md").write_text("x\n")
+        assert (tmp_path / "user" / ".inbox" / "discarded.jsonl").is_file()
+        assert store.problems() == []
+
+    def test_a_broken_proposal_in_the_project_scope_is_a_problem_too(self, store, tmp_path):
+        inbox = tmp_path / "proj" / "memory" / ".inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "x1.md").write_text("---\nid: x1\n---\n")
+        assert [(p.path.name, p.kind) for p in store.problems()] == [("x1.md", "bad_proposal")]
 
 
 class TestExtraction:

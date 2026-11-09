@@ -38,7 +38,7 @@ def _create_app_info() -> AppInfo:
     text.append("  - Human-in-the-loop (approvals)\n", style="dim")
     text.append("\n")
     text.append("Commands:\n", style="bold")
-    text.append("  /memory   - Show saved memories\n", style="cyan")
+    text.append("  /memory   - Review saved memories (and /memory inbox)\n", style="cyan")
     text.append("  /files    - List workspace files\n", style="cyan")
     text.append("  /help     - All commands\n", style="cyan")
 

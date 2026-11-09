@@ -1,6 +1,6 @@
 """Status commands for the Research Demo application.
 
-Provides commands for inspecting memory and workspace files.
+Provides commands for inspecting workspace files and backfilling the knowledge base.
 """
 
 from typing import TYPE_CHECKING
@@ -28,45 +28,6 @@ def _ready_workflow(app: "ResearchDemoApp") -> "BaseWorkflowManager | None":
         return app.workflow
     except (RuntimeError, AttributeError):
         return None
-
-
-class MemoryCommand(Command):
-    """Show persistent memory contents."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="memory",
-            description="Show persistent memory contents",
-            aliases=[],
-            usage="/memory",
-            examples=["/memory"],
-            category=CommandCategory.GENERAL,
-        )
-
-    async def execute(self, args: str, app: "ResearchDemoApp") -> None:
-        workflow = _ready_workflow(app)
-        if workflow is None:
-            app.session.add_warning(
-                "Memory is not available yet — the workflow is still "
-                "initializing. Try /memory again in a moment."
-            )
-            return
-
-        memory_store = workflow.memory_store
-
-        table = Table(title="Persistent Memory", show_header=True)
-        table.add_column("ID", style="dim", width=8)
-        table.add_column("Description")  # the terminal's own color: readable on every theme
-        table.add_column("Kind", style="dim")
-
-        if memory_store:
-            for memory in memory_store.memories()[:20]:
-                table.add_row(memory.id[:8], memory.description, f"{memory.scope} {memory.type}")
-
-        if table.row_count == 0:
-            table.add_row("(empty)", "", "")
-
-        app.session.add_rich(table)
 
 
 class FilesCommand(Command):
@@ -195,7 +156,6 @@ class KbBackfillCommand(Command):
 
 
 DEMO_COMMANDS = [
-    MemoryCommand,
     FilesCommand,
     KbBackfillCommand,
 ]

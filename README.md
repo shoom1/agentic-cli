@@ -1610,7 +1610,7 @@ from agentic_cli.tools import memory_tools
 # save_memory, read_memory, search_memory, update_memory, delete_memory
 ```
 
-Each memory is one file with a frontmatter (`id`, a one-line `description`, `type`: `user`, `feedback`, `project` or `reference`, `source`, `conversation`, `created`, `updated`) and its text. User memories (true across projects) live in `<workspace_dir>/memory/`; project memories in `<workspace_dir>/projects/<name>-<hash>/memory/`, keyed by the working directory (there is no project scope when the app starts at home, `/` or above home). You can read and edit the files: the store sees an edit at its next call, keeps keys you add, and never rewrites, moves or deletes a file it cannot parse (it lists it as a problem). A change keeps the previous version in the scope's `.history/` for 30 days (at most 20 versions a memory). Search is by keyword (BM25, the knowledge base's word rules, Chinese, Japanese and Korean included), computed when asked; it writes nothing.
+Each memory is one file with a frontmatter (`id`, a one-line `description`, `type`: `user`, `feedback`, `project` or `reference`, `source`, `conversation`, `created`, `updated`) and its text. User memories (true across projects) live in `<workspace_dir>/memory/`; project memories in `<workspace_dir>/projects/<name>-<hash>/memory/`, keyed by the working directory (there is no project scope when the app starts at home, `/` or above home). You can read and edit the files: the store sees an edit at its next call, keeps keys you add, and never rewrites, moves or deletes a file it cannot parse (it lists it as a problem, a proposal file too). A change keeps the previous version in the scope's `.history/` for 30 days (at most 20 versions a memory). Search is by keyword (BM25, the knowledge base's word rules, Chinese, Japanese and Korean included), computed when asked; it writes nothing.
 
 `save_memory(description, content, type, scope="project", user_requested=False)` refuses a description over 150 characters or on two lines, a text over 4,000 characters, a description another memory has, text that looks like a credential, and a scope over 1,000 memories, each with a result saying why. `read_memory(item_id)` returns one memory; `update_memory` keeps its id and its previous version; `delete_memory` can be undone for 30 days.
 
@@ -1618,7 +1618,7 @@ The main agent does not have to search to know what was saved: each conversation
 
 Once a conversation has read outside content (a fetched page, a search result, a document, a program's output, an MCP answer), every `save_memory`, `update_memory` and `delete_memory` in it asks you, call by call, with the memory shown in full (see the permission engine below); a person's own settings can allow them. The memory folders are denied to `write_file` and `edit_file`, and code `execute_python` runs inside the OS sandbox can neither read nor write them, even where `workspace_dir` sits in a folder the sandbox may write; code that runs outside the sandbox (turned off, or `sandbox_execute`'s local kernel) runs with your privileges and is approved call by call.
 
-With `auto_extract_session_facts` on, the end of a conversation (`/new`, `/resume`, exit) asks the default model for at most five memories worth keeping and files them as proposals in the scope's `.inbox/`, never as memories: a candidate already known, waiting, or discarded before is dropped. The first start of 0.7.0 imports 0.6's `memories.json` into the user scope once (what the model saved as memories, what the extractor wrote as proposals) and moves the old files into `memory/pre-0.7.0/`; extracted items past the inbox's 100 stay only in that old file (the log counts them), and what a 0.6 session still running writes later is imported at the next start, new ids only. A memory folder that cannot open (a link, which is refused, or one that cannot be written) never stops the app: a project scope that fails is left out, and a user scope that fails leaves the memory tools answering that the store is not available.
+With `auto_extract_session_facts` on, the end of a conversation (`/new`, `/resume`, exit) asks the default model for at most five memories worth keeping and files them as proposals in the scope's `.inbox/`, never as memories: a candidate already known, waiting, or discarded before is dropped. `/memory inbox` reviews them (Accept, Discard or Skip), and the app says how many wait at startup and after `/new` or `/resume`. The first start of 0.7.0 imports 0.6's `memories.json` into the user scope once (what the model saved as memories, what the extractor wrote as proposals) and moves the old files into `memory/pre-0.7.0/`; extracted items past the inbox's 100 stay only in that old file (the log counts them), and what a 0.6 session still running writes later is imported at the next start, new ids only. A memory folder that cannot open (a link, which is refused, or one that cannot be written) never stops the app: a project scope that fails is left out, and a user scope that fails leaves the memory tools answering that the store is not available.
 
 The store itself is `agentic_cli.memory.MemoryStore` (provisional), part of the memory package that depends on nothing else in agentic-cli:
 
@@ -1795,8 +1795,8 @@ model and its `max_tokens`.
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with
   `auto_extract_session_facts` on, memories proposed for review from the
-  conversation being left first when a turn ran in it, as at exit ("Saving facts from the
-  conversation…" while it runs). Its line names the conversation left when `/sessions` lists it
+  conversation being left first when a turn ran in it, as at exit ("Looking for memories to
+  propose…" while it runs). Its line names the conversation left when `/sessions` lists it
   (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
   jobs carry on, and a job reports to the conversation that started it,
@@ -1821,9 +1821,10 @@ Built-in slash commands available in all apps:
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new` | | Start a new conversation; the current one stays in `/sessions` |
 | `/resume` | | Reopen a saved conversation: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
+| `/memory` | | Review saved memories: the list of both scopes, one memory (Delete, History), `/memory <id>`, `/memory history` (restore a version), `/memory inbox` (Accept, Discard or Skip the proposals the extractor filed), `/memory stale` (not updated for 90 days) |
 
 Apps can add more of their own. `research_demo`, for instance, registers
-`/memory`, `/files` and `/kb-backfill` on top of the built-ins above.
+`/files` and `/kb-backfill` on top of the built-ins above.
 
 ### Adding Custom Commands
 
@@ -1963,7 +1964,7 @@ Sessions are durable by default: every run gets a session id, named at exit
 when it is stored; `--continue` and `--resume` reopen one, `/resume` switches
 to another without a restart, and `/sessions` lists or deletes them (see
 [Resuming a conversation](#resuming-a-conversation)). The demo adds
-`/memory`, `/files` and `/kb-backfill` to the built-in commands.
+`/files` and `/kb-backfill` to the built-in commands.
 
 ## Development
 
@@ -1993,6 +1994,7 @@ agentic-cli/
 │   │   ├── app.py                # BaseCLIApp
 │   │   ├── commands.py           # Command, CommandRegistry
 │   │   ├── builtin_commands.py   # help/status/clear/exit/sandbox/jobs/resume/papers/sessions/models
+│   │   ├── memory_command.py     # /memory
 │   │   ├── settings_command.py   # /settings
 │   │   ├── settings_introspection.py
 │   │   ├── workflow_controller.py

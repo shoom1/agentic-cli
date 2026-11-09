@@ -50,6 +50,9 @@ ANSWER_HINT = "Press Enter to type your answer, Enter again to keep it"
 # How much of a sub-agent's text its status line shows.
 _SUBAGENT_LINE = 80
 
+# The memory tools that change what memory holds: each success is shown.
+_MEMORY_WRITES = frozenset({"save_memory", "update_memory", "delete_memory"})
+
 # What /compact says when there is nothing to summarize, and on a backend
 # without it.
 NOTHING_TO_SUMMARIZE = "Nothing to summarize yet."
@@ -1087,6 +1090,11 @@ class MessageProcessor:
         if len(lines) > 1:
             display += "\n" + escape("\n".join(lines[1:]))
         ui.add_rich(display)
+        if tool_name in _MEMORY_WRITES and success:
+            # A memory is read in every later conversation: each write is shown.
+            result = event.metadata.get("result")
+            if isinstance(result, dict) and result.get("success") and isinstance(result.get("message"), str):
+                ui.add_success(result["message"])
 
     async def _handle_code_execution(
         self,

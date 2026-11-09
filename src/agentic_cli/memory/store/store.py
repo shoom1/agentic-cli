@@ -35,6 +35,7 @@ from agentic_cli.memory.store.models import (
     InvalidMemory,
     Memory,
     MemoryBusy,
+    MemoryStoreError,
     MemoryStoreFull,
     NoProjectScope,
     Problem,
@@ -421,9 +422,11 @@ class MemoryStore:
         )
 
     def problems(self) -> list[Problem]:
-        """The files the store cannot use (it never changes them)."""
+        """The files the store cannot use (it never changes them): memory files
+        and proposal files (kind ``bad_proposal``)."""
         with self._lock:
-            return self._entries()[1] + list(self._import_problems)
+            unusable = [p for folder in self._folders.values() for p in Inbox(folder).proposals()[1]]
+            return self._entries()[1] + unusable + list(self._import_problems)
 
     # -- history -------------------------------------------------------------
 
@@ -660,9 +663,17 @@ class MemoryStore:
                 else:
                     memory = self._update_locked(folder, proposal.target or "", description, content, proposal.type)
                     if memory is None:
-                        raise InvalidMemory("its memory was deleted; discard it")
+                        raise self._target_gone(proposal.target or "")
                 Inbox(folder).remove(proposal)
                 return memory
+
+    def _target_gone(self, memory_id: str) -> MemoryStoreError:
+        """Why an update's memory is not there: a file a person broke still
+        holds its id (never to be discarded for that), or it was deleted."""
+        for problem in self._entries()[1]:
+            if problem.memory_id and problem.memory_id.casefold() == memory_id.casefold():
+                return FileInTheWay(f"{problem.path} still holds the id {memory_id}: fix or remove it first")
+        return InvalidMemory("its memory was deleted; discard it")
 
     def discard(self, proposal_id: str) -> bool:
         """Remove a proposal and remember its description. False: no such proposal."""

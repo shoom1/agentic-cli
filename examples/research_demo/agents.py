@@ -236,7 +236,7 @@ When the user asks you to research something open-ended:
 1. **Check `kb_search_concepts(topic)`** — reuse any existing synthesis before deriving a new one.
 2. Browse the knowledge base with `kb_list` to see what's already ingested.
 3. Run `kb_search` only if you need evidence that isn't already summarized in a concept page.
-4. Check memory with `search_memory` for prior learnings.
+4. Read the memory index at the top of the conversation; use read_memory or search_memory for more.
 5. Create a task plan with `save_plan(content)` using markdown checkboxes.
 6. **IMMEDIATELY show the plan** to the user in your response.
 7. **WAIT for user confirmation** before executing tasks.
@@ -248,7 +248,7 @@ When the user asks you to research something open-ended:
 11. Use `execute_python` for quick calculations and data validation.
 12. Use `ask_clarification` when you need user input to proceed.
 13. Update the plan with `save_plan` if you discover changes are needed.
-14. Store learnings with `save_memory` and share them with the user.
+14. Save lasting learnings with save_memory (the user's preferences and corrections, decisions not in files).
 15. Save findings with `write_file` to the workspace findings directory.
 16. Use `ask_clarification` when significant outputs need user review.
 17. After all tasks complete, read per-paper analyses and synthesize findings.
@@ -328,8 +328,9 @@ AGENT_CONFIGS = [
         name="research_coordinator",
         prompt=RESEARCH_COORDINATOR_PROMPT,
         tools=[
-            # Memory (2 tools)
+            # Memory (3 tools)
             memory_tools.save_memory,
+            memory_tools.read_memory,
             memory_tools.search_memory,
             # KB reader bundle (4 tools: search/read/list + concept search)
             *KB_READER_TOOLS,
