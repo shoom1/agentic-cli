@@ -48,6 +48,7 @@ from agentic_cli.cli.session_resume import (
     show_replay,
 )
 from agentic_cli.cli.usage_tracker import UsageTracker
+from agentic_cli.cli.waiting_jobs import Here, told_here, waiting_here
 from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
@@ -1369,10 +1370,13 @@ class BaseCLIApp:
     async def resume_finished_jobs(self) -> int:
         """Resume the agent for each finished, resume-flagged background job.
 
-        Only the current conversation's jobs (and any without a conversation,
-        which are told it is unavailable): another conversation's job waits
-        until that conversation is opened (``resume_session``, or at startup),
-        instead of answering in this one's transcript. Each resume is a
+        Only the jobs that wait for the current conversation
+        (``cli/waiting_jobs.py``: its own, and those with no conversation or
+        whose conversation is gone, which are told it is unavailable), as the
+        status bar's ``↻N`` and the line an opened conversation says count
+        them: another conversation's job waits until that conversation is
+        opened (``resume_session``, or at startup), instead of answering in
+        this one's transcript. Each resume is a
         serialized turn (via the turn lock) so it never overlaps a user turn
         or another resume. Used at turn boundaries (auto, gated), when a
         conversation is opened (gated) and by ``/jobs resume`` (explicit,
@@ -1399,46 +1403,21 @@ class BaseCLIApp:
             return 0
 
         attempted = 0
-        workflow = self._workflow_controller.workflow
         for record in await asyncio.to_thread(jm.awaiting_resume):
-            if await self._waits_for_its_conversation(workflow, record):
+            if not await self._told_here(record):
                 continue  # told when its conversation is opened
             if await self._deliver_resume(jm, record) is not None:
                 attempted += 1
         return attempted
 
-    async def _waits_for_its_conversation(self, workflow: Any, record: Any) -> bool:
-        """Whether ``record`` is another conversation's job, told when that one is opened.
+    def _here(self) -> Here:
+        """The current conversation, as ``cli/waiting_jobs.py`` names it: (user, session)."""
+        return getattr(self._settings, "default_user", None), self._session_id
 
-        Not the current conversation's, and its conversation can be opened
-        (``_can_be_opened``): a job whose conversation is gone is told here.
-        """
-        return not self._job_belongs_here(record) and await self._can_be_opened(
-            workflow, record
-        )
-
-    @staticmethod
-    async def _can_be_opened(workflow: Any, record: Any) -> bool:
-        """Whether ``record``'s conversation can still be opened, to be told there.
-
-        One deleted, or kept in memory by an earlier run, cannot: its job is
-        told here instead, as unavailable, rather than never.
-        """
-        try:
-            return bool(await workflow.can_resume(record))
-        except Exception:  # noqa: BLE001 - unknown: it waits for its conversation
-            logger.debug("job_conversation_check_failed", job_id=record.job_id, exc_info=True)
-            return True
-
-    def _job_belongs_here(self, record: Any) -> bool:
-        """Whether ``record`` is the current conversation's job (or no conversation's)."""
-        session_id = getattr(record, "session_id", None)
-        if session_id is None:
-            return True
-        user_id = getattr(record, "user_id", None)
-        return session_id == self._session_id and user_id in (
-            None, getattr(self._settings, "default_user", None)
-        )
+    async def _told_here(self, record: Any) -> bool:
+        """Whether ``record``, a job waiting for delivery, is told in this conversation."""
+        workflow = self._workflow_controller.workflow
+        return await told_here(record, self._here(), getattr(workflow, "can_resume", None))
 
     async def _deliver_resume(self, jm, record) -> bool | None:
         """Claim one job and run its resume turn, and close out its transition.
@@ -1475,9 +1454,7 @@ class BaseCLIApp:
         claimed = False
         try:
             async with self._turn_lock:
-                if await self._waits_for_its_conversation(
-                    self._workflow_controller.workflow, record
-                ):
+                if not await self._told_here(record):
                     return None
                 if not await _claim_delivery(jm, record.job_id):
                     return None
@@ -1651,16 +1628,19 @@ class BaseCLIApp:
     async def _name_its_waiting_jobs(self) -> None:
         """Say how many finished jobs wait for this conversation, and how to tell them.
 
-        The job manager is asked on a worker thread: it takes the jobs
-        directory's lock, which another CLI of the app may hold.
+        Counted as the status bar's ``↻N`` and ``/jobs resume`` count them
+        (``cli/waiting_jobs.py``). The job manager is asked on a worker
+        thread: it takes the jobs directory's lock, which another CLI of the
+        app may hold.
         """
-        jm = getattr(self._workflow_controller.workflow, "job_manager", None)
+        workflow = self._workflow_controller.workflow
+        jm = getattr(workflow, "job_manager", None)
         if jm is None:
             return
-        waiting = [
-            r for r in await asyncio.to_thread(jm.awaiting_resume)
-            if getattr(r, "session_id", None) == self._session_id and self._job_belongs_here(r)
-        ]
+        waiting = await waiting_here(
+            await asyncio.to_thread(jm.awaiting_resume), self._here(),
+            getattr(workflow, "can_resume", None),
+        )
         if len(waiting) == 1:
             self.session.add_message(
                 "system", "A finished job waits for this conversation: /jobs resume tells it now."

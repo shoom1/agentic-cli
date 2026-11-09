@@ -268,6 +268,20 @@ class JobRecord:
             ResumeState.FAILED.value,
         )
 
+    @property
+    def awaiting_resume(self) -> bool:
+        """Whether its result waits to be delivered: what ``JobManager.awaiting_resume`` returns.
+
+        Finished, flagged ``resume_on_complete``, and still ``PENDING``: one
+        being delivered (``RESUMING``) waits no more, nor does one whose
+        delivery ended.
+        """
+        return (
+            self.resume_on_complete
+            and self.resume_state == ResumeState.PENDING.value
+            and self.state in TERMINAL_STATES
+        )
+
     def elapsed_s(self) -> float:
         start = self.started_at or self.submitted_at
         end = self.finished_at or _now()
@@ -901,13 +915,7 @@ class JobManager:
         """
         with self._lock:
             self.reconcile()
-            recs = [
-                r
-                for r in self._records.values()
-                if r.resume_on_complete
-                and r.resume_state == ResumeState.PENDING.value
-                and r.state in TERMINAL_STATES
-            ]
+            recs = [r for r in self._records.values() if r.awaiting_resume]
         return sorted(recs, key=lambda r: r.finished_at or r.submitted_at)
 
     def begin_resume(self, job_id: str) -> bool:

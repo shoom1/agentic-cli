@@ -2226,6 +2226,13 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **The status bar's `↻N` no longer counts a job whose result is being
+  delivered.** It counted every finished resume job not yet delivered, so
+  the job a resume turn was telling stayed counted while that turn ran. It
+  now counts the jobs `/jobs resume` would tell, whose delivery has not
+  started (`JobRecord.awaiting_resume`, what `JobManager.awaiting_resume`
+  returns).
+
 - **The prompt no longer freezes while another CLI of the app holds the
   jobs directory.** The CLI called the job manager on the event loop's
   thread: the status bar's poll every 2 seconds, each `/jobs` subcommand,
@@ -2894,15 +2901,17 @@ step; each entry says what to use instead.
   nothing) is answered first, since Claude and OpenAI refuse it. `/jobs
   resume` and the turn-boundary resume showed every waiting job's resume
   here, another conversation's too; they now tell the current
-  conversation's jobs, and those of a conversation that can be opened no
-  more (deleted, or kept in memory by an earlier run), as unavailable.
+  conversation's jobs, and, as unavailable, those with no conversation or
+  whose conversation can be opened no more (deleted, or kept in memory by
+  an earlier run).
   `/resume` tells the finished jobs of the conversation it opens when
   `job_auto_resume` is on; at startup (`--continue`, `--resume <id>`),
   outside the input handler, where Ctrl+C could not stop a turn, a line
   names them ("A finished job waits for this conversation: /jobs resume
   tells it now.") and the first turn boundary tells them. The status bar's
-  `↻N` counts the current conversation's waiting jobs whatever the setting,
-  `↻N: /jobs resume` when it is off (it showed nothing then). The notice
+  `↻N` counts them whatever the setting, `↻N: /jobs resume` when it is off
+  (it showed nothing then). That line, `↻N` and `/jobs resume` count the
+  same jobs, by one rule (`cli/waiting_jobs.py`). The notice
   now asks the agent, on a line after its header, to tell the user what the
   job's result means: without it Gemini 2.5 Flash, live, said nothing in
   about one resume in five.

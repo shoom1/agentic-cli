@@ -21,9 +21,11 @@ reads the segment the monitor publishes via ``jobs_status_segment``.
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
+from agentic_cli.cli.waiting_jobs import waiting_here
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -45,6 +47,9 @@ _DONE_GLYPH = {
 
 _DEFAULT_INTERVAL = 2.0  # seconds between reconcile/render ticks
 _DEFAULT_NOTE_TICKS = 5  # how many ticks a finished-job note lingers
+# How long the answer to "can this job's conversation be opened" is kept: a
+# lookup may read the whole stored conversation, and the tick runs every 2 s.
+_CONVERSATION_RECHECK_S = 30.0
 
 
 class JobMonitor:
@@ -58,9 +63,11 @@ class JobMonitor:
         interval: Seconds between ticks.
         note_ticks: How many ticks a finished-job note stays in the segment.
         conversation: The current conversation's ``(user, session)``: the
-            resume cue counts only its finished jobs (another's are told when
-            it is opened). The cue shows whatever ``job_auto_resume`` says,
-            naming ``/jobs resume`` when nothing resumes them on its own.
+            resume cue counts the finished jobs that wait for it, as
+            ``/jobs resume`` tells them (``cli/waiting_jobs.py``; another
+            conversation's are told when it is opened). The cue shows
+            whatever ``job_auto_resume`` says, naming ``/jobs resume`` when
+            nothing resumes them on its own.
     """
 
     def __init__(
@@ -88,6 +95,9 @@ class JobMonitor:
         self._notes: list[list[Any]] = []
         # Last segment we published, to avoid redundant status-bar redraws.
         self._last_segment: str | None = None
+        # Per job id: whether its conversation can be opened, and when that
+        # was asked (``_conversation_opens``).
+        self._opens: dict[str, tuple[bool, float]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -156,26 +166,55 @@ class JobMonitor:
             return self._last_segment
         # ``list()`` reconciles non-terminal jobs and returns all records.
         recs = await asyncio.to_thread(jm.list)
-        segment = self._build_segment(recs)
+        segment = self._build_segment(recs, len(await self._waiting(recs)))
         self._controller.jobs_status_segment = segment
         if segment != self._last_segment:
             self._last_segment = segment
             self._controller.update_status_bar(self._ui)
         return segment
 
+    async def _waiting(self, recs: list[Any]) -> list[Any]:
+        """The finished jobs among ``recs`` that wait for the current conversation."""
+        here = self._conversation() if self._conversation is not None else None
+        awaiting = [rec for rec in recs if rec.awaiting_resume]
+        seen = {rec.job_id for rec in awaiting}
+        for job_id in [j for j in self._opens if j not in seen]:
+            del self._opens[job_id]
+        return await waiting_here(awaiting, here, self._conversation_opens)
+
+    async def _conversation_opens(self, record: Any) -> bool:
+        """``workflow.can_resume(record)``, its answer kept ``_CONVERSATION_RECHECK_S``.
+
+        A failed lookup is not kept: the rule takes it as "it can be
+        opened", and the next tick asks again.
+        """
+        kept = self._opens.get(record.job_id)
+        now = time.monotonic()
+        if kept is not None and now - kept[1] < _CONVERSATION_RECHECK_S:
+            return kept[0]
+        can_resume = getattr(self._controller.workflow, "can_resume", None)
+        if can_resume is None:
+            return True  # it cannot say: the job waits for its conversation
+        opens = bool(await can_resume(record))
+        self._opens[record.job_id] = (opens, now)
+        return opens
+
     # ------------------------------------------------------------------
     # Segment construction
     # ------------------------------------------------------------------
 
-    def _build_segment(self, recs: list[Any]) -> str | None:
-        """Build the status-bar jobs segment from the current job records."""
+    def _build_segment(self, recs: list[Any], waiting: int = 0) -> str | None:
+        """Build the status-bar jobs segment from the current job records.
+
+        ``waiting``: how many finished jobs wait for the current
+        conversation (``_waiting``), the ``↻N`` cue.
+        """
         from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 
         terminal_vals = {s.value for s in TERMINAL_STATES}
-        running = queued = pending_resume = 0
+        running = queued = 0
         seen: set[str] = set()
         auto_resume = bool(getattr(self._settings, "job_auto_resume", False))
-        here = self._conversation() if self._conversation is not None else None
 
         for rec in recs:
             seen.add(rec.job_id)
@@ -184,13 +223,6 @@ class JobMonitor:
                 running += 1
             elif state == "queued":
                 queued += 1
-            if (
-                getattr(rec, "resume_on_complete", False)
-                and not getattr(rec, "resumed", False)
-                and state in terminal_vals
-                and _belongs(rec, here)
-            ):
-                pending_resume += 1
             prev = self._states.get(rec.job_id)
             # Announce a job that we previously saw active and is now terminal.
             if state in terminal_vals and prev is not None and prev not in terminal_vals:
@@ -216,11 +248,10 @@ class JobMonitor:
         if active:
             parts.append("jobs: " + ", ".join(active))
         parts.extend(label for label, _ in self._notes)
-        if pending_resume:
+        if waiting:
             # Off, nothing resumes them on its own: the cue says how to.
             parts.append(
-                f"↻{pending_resume} to resume" if auto_resume
-                else f"↻{pending_resume}: /jobs resume"
+                f"↻{waiting} to resume" if auto_resume else f"↻{waiting}: /jobs resume"
             )
         return " · ".join(parts) if parts else None
 
@@ -229,14 +260,3 @@ class JobMonitor:
         name = (name or "").strip() or "job"
         return name if len(name) <= limit else name[: limit - 1] + "…"
 
-
-def _belongs(record: Any, here: "tuple[str | None, str | None] | None") -> bool:
-    """Whether ``record`` waits for the conversation ``here`` (user, session).
-
-    As the resume coordinator picks them: a job with no conversation counts
-    everywhere (it is told it is unavailable).
-    """
-    if here is None or getattr(record, "session_id", None) is None:
-        return True
-    user, session = here
-    return record.session_id == session and getattr(record, "user_id", None) in (None, user)
