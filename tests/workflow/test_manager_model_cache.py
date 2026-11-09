@@ -1,12 +1,14 @@
 """Startup against a cached model list that predates a model.
 
 A fresh cache entry spares startup the network, but it can predate a model the
-provider now serves. The manager lists such a provider again, once, before a
-cached listing stops it from starting; a live listing still decides.
+provider now serves. The settings decide what runs: the manager starts on the
+model at once, and the background refresh lists the provider again, once, so the
+list says whether it serves it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import time
@@ -17,6 +19,7 @@ import pytest
 pytest.importorskip("google.adk")
 
 from agentic_cli.config import BaseSettings, SettingsValidationError  # noqa: E402
+from agentic_cli.models import ModelRef  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings  # noqa: E402
@@ -24,6 +27,12 @@ from tests.conftest import patch_catalogs  # noqa: E402
 from tests.models.fakes import ProviderAPI, recorded  # noqa: E402
 
 NEW = "gemini-3.5-flash"
+REFRESH_TASK = "model-catalog-refresh"
+
+
+async def refreshed() -> None:
+    """Wait for the background refresh a start leaves."""
+    await asyncio.gather(*(t for t in asyncio.all_tasks() if t.get_name() == REFRESH_TASK))
 
 
 @pytest.fixture
@@ -72,19 +81,29 @@ async def test_a_model_released_after_the_cache_was_written_starts(home, monkeyp
     await started.initialize_services()
     try:
         assert str(started._resolved_models["writer"].ref) == f"google:{NEW}"
+        assert api.calls == []  # the table describes it: the start waits on nothing
+        await refreshed()
         assert api.calls == ["google"]
+        assert f"google:{NEW}" in started.catalog.offered()
     finally:
         await started.cleanup()
 
 
-async def test_a_model_the_provider_still_lacks_fails_after_one_listing(home, monkeypatch):
+async def test_a_model_the_provider_still_lacks_starts_and_is_left_out_after_one_listing(
+    home, monkeypatch
+):
     api = ProviderAPI()
     serve(monkeypatch, api)
 
-    with pytest.raises(SettingsValidationError, match="Available google models"):
-        await manager(NEW).initialize_services()
-
-    assert api.calls == ["google"]
+    started = manager(NEW)
+    await started.initialize_services()
+    try:
+        assert started._resolved_models["writer"].ref == ModelRef("google", NEW)
+        await refreshed()
+        assert api.calls == ["google"]
+        assert started.catalog.not_offered() == {f"google:{NEW}": "not served by google"}
+    finally:
+        await started.cleanup()
 
 
 async def test_another_startup_problem_lists_nothing(home, monkeypatch):

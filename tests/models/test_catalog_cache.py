@@ -66,6 +66,16 @@ def make(
     )
 
 
+async def checked(catalog: ModelCatalog) -> ModelCatalog:
+    """``catalog`` loaded, then checked: its background refresh, which lists each
+    provider in use the start did not wait on, has run."""
+    await catalog.load()
+    task = catalog.start_background_refresh()
+    if task is not None:
+        await task
+    return catalog
+
+
 @pytest.fixture
 def cache(tmp_path):
     return tmp_path / "agentic_cli" / "model_cache.json"
@@ -559,13 +569,14 @@ async def _shared_file(cache, clock) -> dict:
 
 
 async def _listing_only_google(cache, clock, api=None) -> tuple[ModelCatalog, ProviderAPI]:
-    """A catalog whose one entry is a Google model: Google is the one provider in use."""
+    """A catalog whose one entry is a Google model: Google is the one provider in use,
+    listed by the background refresh."""
     api = api or ProviderAPI()
     catalog = make(
         cache, api, entries={GEMINI_PRO: ModelEntry()}, google=KEYS["google"],
         anthropic=KEYS["anthropic"], openrouter=KEYS["openrouter"], clock=clock,
     )
-    await catalog.load()
+    await checked(catalog)
     return catalog, api
 
 
@@ -673,9 +684,9 @@ async def test_a_newer_file_is_not_used_by_this_version(cache):
 
 async def test_two_projects_with_different_retired_entries_list_once_each(cache):
     """Two projects of one app share the file, and each names a model the
-    provider has retired. Each is confirmed by one listing, and no start then
-    lists for it while the listing is fresh: neither project's record of what
-    is absent replaces the other's."""
+    provider has retired. Each is confirmed by one listing (the background
+    refresh's), and no start then lists for it while the listing is fresh:
+    neither project's record of what is absent replaces the other's."""
     clock = Clock()
     good = ModelRef("anthropic", "claude-sonnet-4-6")
     retired_here, retired_there = RETIRED, ModelRef("anthropic", "claude-opus-3")
@@ -686,7 +697,7 @@ async def test_two_projects_with_different_retired_entries_list_once_each(cache)
     for entries in (project_a, project_a, project_b, project_a, project_b, project_a):
         api = ProviderAPI()
         catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
-        await catalog.load()
+        await checked(catalog)
         listings.append(len(api.calls))
         clock.now += 600  # still fresh
 
@@ -701,7 +712,7 @@ async def test_a_model_the_provider_serves_leaves_the_recorded_absent(cache):
     that may predate a model: a new listing that serves it drops it from the record."""
     clock = Clock()
     served = "claude-sonnet-4-6"
-    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    await checked(make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock))
     document = read(cache)
     document["providers"]["anthropic"]["absent"] = ["claude-opus-3", served, RETIRED.model]
     cache.write_text(json.dumps(document))
@@ -892,15 +903,17 @@ async def test_a_rejection_by_a_listing_from_this_start_is_not_listed_again(cach
     assert api.calls == ["anthropic"]
 
 
-# The same holds for a models entry: before a cached listing keeps it out of
-# the list, with a warning, the provider is listed again, once, while loading.
+# A model the settings name is another matter: the settings decide what runs, so
+# a cached listing that lacks it neither stops the start nor keeps it out of the
+# list. The start does not wait: the background refresh lists the provider again,
+# once, and its listing decides.
 
 
 def _catalog_warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
 
 
-async def test_an_entry_a_cached_listing_lacks_is_listed_again_once(cache, caplog):
+async def test_an_entry_a_cached_listing_lacks_is_used_and_listed_again_once(cache, caplog):
     clock = Clock()
     await _cached_an_hour_ago(cache, clock)
     api = ProviderAPI(anthropic=_serving(NEW.model))
@@ -908,6 +921,10 @@ async def test_an_entry_a_cached_listing_lacks_is_listed_again_once(cache, caplo
 
     with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
         await catalog.load()
+        assert api.calls == []
+        assert catalog.offered() == [str(NEW)]
+        assert catalog.record(NEW).model == NEW.model
+        await catalog.start_background_refresh()
 
     assert api.calls == ["anthropic"]
     assert catalog.offered() == [str(NEW)]
@@ -928,7 +945,7 @@ async def test_a_confirmed_absence_is_trusted_at_the_next_start(cache):
     for _ in range(3):
         api = ProviderAPI()
         catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
-        await catalog.load()
+        await checked(catalog)
         calls.append(api.calls)
         assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
         clock.now += 600
@@ -949,7 +966,7 @@ async def test_an_entry_naming_an_alias_the_provider_does_not_serve_is_trusted_a
     for _ in range(3):
         api = ProviderAPI()
         catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
-        await catalog.load()
+        await checked(catalog)
         calls.append(api.calls)
         assert catalog.not_offered() == {str(not_an_alias): "not served by anthropic"}
         clock.now += 600
@@ -962,14 +979,14 @@ async def test_a_new_entry_is_still_confirmed_once(cache):
     """A model added to the list after the cached listing may be one released
     since: its provider is listed once more, and then trusted."""
     clock = Clock()
-    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    await checked(make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock))
     entries = {RETIRED: ModelEntry(), NEW: ModelEntry()}
     calls = []
     for _ in range(2):
         clock.now += 600
         api = ProviderAPI(anthropic=_serving(NEW.model))
         catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
-        await catalog.load()
+        await checked(catalog)
         calls.append(api.calls)
         assert catalog.offered() == [str(NEW)]
 
@@ -983,7 +1000,7 @@ async def test_a_stale_listing_keeps_out_an_entry_it_recorded_as_absent(cache):
     clock = Clock()
     retired = ModelRef("anthropic", "claude-sonnet-9-9")  # the list's newest Sonnet
     entries = {retired: ModelEntry(), ModelRef("anthropic", "claude-haiku-4-5"): ModelEntry()}
-    await make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock).load()
+    await checked(make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock))
     clock.now += DAY + 600
 
     catalog = make(cache, NoNetwork(), entries=entries, anthropic=KEYS["anthropic"], clock=clock)
@@ -1006,9 +1023,9 @@ async def test_a_model_is_never_both_offered_and_not_offered(cache):
     clock = Clock()
     good = ModelRef("anthropic", "claude-sonnet-4-6")
     entries = {RETIRED: ModelEntry(), good: ModelEntry()}
-    await make(
+    await checked(make(
         cache, entries=entries, references=(RETIRED,), anthropic=KEYS["anthropic"], clock=clock
-    ).load()
+    ))
     clock.now += DAY + 600
 
     catalog = make(
@@ -1029,7 +1046,7 @@ async def test_a_reference_the_listing_in_use_recorded_as_absent_is_left_out_too
     the list, which a role may be computed from, does not offer it, and
     ``not_offered`` says why."""
     clock = Clock()
-    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    await checked(make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock))
     clock.now += DAY + 600
 
     catalog = make(
@@ -1049,7 +1066,7 @@ async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache)
     retired model, so the fresh cached listing still rejects a typo."""
     clock = Clock()
     entries = {RETIRED: ModelEntry(), ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}
-    await make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock).load()
+    await checked(make(cache, entries=entries, anthropic=KEYS["anthropic"], clock=clock))
     clock.now += 600
     api = ProviderAPI(anthropic=refuse)
 
@@ -1064,6 +1081,8 @@ async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache)
 
 
 async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, caplog):
+    """The background refresh's listing lacks it too: the list leaves it out, and
+    one warning says so."""
     clock = Clock()
     await _cached_an_hour_ago(cache, clock)
     api = ProviderAPI()
@@ -1071,6 +1090,8 @@ async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, 
 
     with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
         await catalog.load()
+        assert _catalog_warnings(caplog) == []
+        await catalog.start_background_refresh()
 
     assert api.calls == ["anthropic"]
     assert catalog.not_offered() == {str(NEW): "not served by anthropic"}
@@ -1128,20 +1149,20 @@ async def test_a_listing_this_process_made_goes_stale_after_the_ttl_too():
 
 
 async def test_a_listing_that_aged_stops_leaving_a_model_out_of_the_list(cache):
-    """A model a setting names that a fresh listing lacks is left out of the
-    list; once the listing is stale it cannot prove the model is missing."""
+    """A model the caller adds to the list (``extra``: a role's model, say) that a
+    fresh listing lacks is left out of it; once the listing is stale it cannot
+    prove the model is missing. (A model the settings name is left out by a
+    listing's recorded absence, at any age.)"""
     clock = Clock()
     await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
     clock.now += 3600
-    catalog = make(
-        cache, NoNetwork(), references=(NEW,), anthropic=KEYS["anthropic"], clock=clock
-    )
+    catalog = make(cache, NoNetwork(), anthropic=KEYS["anthropic"], clock=clock)
     await catalog.load()
-    assert str(NEW) not in catalog.offered()
+    assert str(NEW) not in catalog.offered(extra=[str(NEW)])
 
     clock.now += DAY
 
-    assert str(NEW) in catalog.offered()
+    assert str(NEW) in catalog.offered(extra=[str(NEW)])
 
 
 async def test_a_failed_or_untried_provider_is_not_made_stale_by_time(cache):

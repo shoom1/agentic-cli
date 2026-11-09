@@ -78,6 +78,16 @@ async def loaded(api: ProviderAPI | None = None, **kwargs) -> ModelCatalog:
     return catalog
 
 
+async def checked(api: ProviderAPI | None = None, **kwargs) -> ModelCatalog:
+    """A catalog loaded, then checked: its background refresh, which lists each
+    provider in use the start did not wait on, has run."""
+    catalog = await loaded(api, **kwargs)
+    task = catalog.start_background_refresh()
+    if task is not None:
+        await task
+    return catalog
+
+
 def ids(records) -> list[str]:
     return [record.model for record in records]
 
@@ -403,7 +413,7 @@ class TestOpenRouter:
 
 class TestEntries:
     async def test_an_endpoint_s_entries_and_listed_models(self):
-        catalog = await loaded(specs={"local-vllm": VLLM}, entries=ENTRIES)
+        catalog = await checked(specs={"local-vllm": VLLM}, entries=ENTRIES)
 
         def record(model: str):
             return catalog.record(ModelRef("local-vllm", model))
@@ -431,15 +441,17 @@ class TestEntries:
         assert record.sources["context_window"] == "listing"
         assert "config" not in record.sources.values()
 
-    async def test_a_fresh_listing_rejects_an_id_it_lacks_entry_or_not(self):
+    async def test_a_fresh_listing_rejects_an_id_it_lacks_but_not_an_entry(self):
         """On any provider: a server whose listing leaves out models it serves
-        sets ``list_models: false`` instead."""
-        catalog = await loaded(specs={"local-vllm": VLLM}, entries=ENTRIES)
+        sets ``list_models: false`` instead. An entry is the settings' word, so
+        it is accepted with what it says, and left out of the list."""
+        catalog = await checked(specs={"local-vllm": VLLM}, entries=ENTRIES)
 
         with pytest.raises(ModelResolutionError, match="local-vllm:other is not available"):
             catalog.record(ModelRef("local-vllm", "other"))
-        with pytest.raises(ModelResolutionError, match="local-vllm:entry-only is not available"):
-            catalog.record(ModelRef("local-vllm", "entry-only"))
+        entry_only = catalog.record(ModelRef("local-vllm", "entry-only"))
+        assert entry_only.thinking.levels == ("low", "high")
+        assert catalog.not_offered() == {"local-vllm:entry-only": "not served by local-vllm"}
 
     async def test_a_server_that_is_down_still_takes_its_entries(self):
         catalog = await loaded(
@@ -451,18 +463,19 @@ class TestEntries:
         assert (qwen.context_window, qwen.sources["context_window"]) == (16384, "config")
         assert catalog.record(ModelRef("local-vllm", "anything")).tools is True
 
-    async def test_an_entry_vouches_for_no_model_its_fresh_listing_lacks(self):
+    async def test_an_entry_its_fresh_listing_lacks_is_accepted_but_not_offered(self):
         typo = ModelRef("anthropic", "claude-sonnet-9-9")
-        catalog = await loaded(entries={typo: ModelEntry()}, anthropic=KEYS["anthropic"])
+        catalog = await checked(entries={typo: ModelEntry()}, anthropic=KEYS["anthropic"])
 
-        with pytest.raises(ModelResolutionError, match=f"{typo} is not available"):
-            catalog.record(typo)
+        assert catalog.is_authoritative("anthropic")
+        assert catalog.record(typo).model == typo.model
         assert str(typo) not in catalog.offered()
+        assert catalog.not_offered() == {str(typo): "not served by anthropic"}
 
     async def test_an_entry_beats_the_listing_which_beats_the_table(self):
         sonnet = ModelRef("anthropic", "claude-sonnet-4-6")
         entries = {sonnet: ModelEntry(context_window=200_000, image_input=False)}
-        catalog = await loaded(entries=entries, anthropic=KEYS["anthropic"])
+        catalog = await checked(entries=entries, anthropic=KEYS["anthropic"])
 
         record = catalog.record(sonnet)
 
@@ -499,7 +512,7 @@ class TestEntries:
         """Saying what the listing says changes nothing: ``none`` stays the
         lowest effort (thinking off), and minimal and xhigh stay."""
         qwen = ModelRef("openrouter", "qwen/qwen3-235b-a22b")
-        catalog = await loaded(
+        catalog = await checked(
             entries={qwen: ModelEntry(thinking="effort")}, openrouter="r-test-key"
         )
 
@@ -528,7 +541,7 @@ class TestEntries:
 
     async def test_an_entry_s_thinking_none_turns_a_listed_knob_off(self):
         qwen = ModelRef("openrouter", "qwen/qwen3-235b-a22b")
-        catalog = await loaded(
+        catalog = await checked(
             entries={qwen: ModelEntry(thinking="none", reasoning_text=False)},
             openrouter="r-test-key",
         )
@@ -884,7 +897,9 @@ class TestRoles:
     async def test_the_list_s_entries_fill_the_roles_first(self):
         """Not the listing's newest: the list's own model of each tier, when it has one."""
         entries = {GEMINI: ModelEntry(), ModelRef("google", "gemini-2.5-pro"): ModelEntry()}
-        catalog = await loaded(entries=entries, google=KEYS["google"])
+        catalog = await loaded(
+            entries=entries, computed_roles=["default", "fast", "strong"], google=KEYS["google"]
+        )
         roles = RoleMap(default_model=None, model_roles={})
         keyed = providers(google=KEYS["google"])
 
@@ -977,18 +992,19 @@ class TestInUse:
     async def test_when_the_listings_leave_a_computed_role_no_entry_the_built_ins_are_listed(
         self,
     ):
-        """Rule 4 again, once the listings have spoken: the entry of the default
-        role's tier is retired, so the role falls back to the built-ins, which
-        are listed for it."""
+        """Rule 4 again, once the listings have spoken: Google is listed for an
+        entry nothing describes, and its listing lacks the entry of the default
+        role's tier, so the role falls back to the built-ins, which are listed for
+        it in a second round."""
         api = ProviderAPI()
-        retired, haiku = ModelRef("anthropic", "claude-sonnet-9-9"), ModelRef("anthropic", "claude-haiku-4-5")
+        retired, gemma = ModelRef("google", "gemini-9-flash"), ModelRef("google", "gemma-3-27b-it")
 
         catalog = await loaded(
-            api, entries={retired: ModelEntry(), haiku: ModelEntry()}, computed_roles=["default"],
+            api, entries={retired: ModelEntry(), gemma: ModelEntry()}, computed_roles=["default"],
             google=KEYS["google"], anthropic=KEYS["anthropic"],
         )
 
-        assert sorted(api.calls) == ["anthropic", "google"]
+        assert api.calls == ["google", "anthropic"]
         assert catalog.in_use == ("google", "anthropic")
         roles = RoleMap(default_model=None, model_roles={})
         keyed = providers(google=KEYS["google"], anthropic=KEYS["anthropic"])
@@ -1010,15 +1026,16 @@ class TestInUse:
 
     async def test_when_the_listings_leave_no_entry_the_keyed_built_ins_are_listed(self):
         """Rule 3 again, once the listings have spoken: the one entry that could
-        run is retired, so the list offers the tiers, from listed models."""
+        run, which nothing describes, is not in its provider's listing, so the list
+        offers the tiers, from listed models."""
         api = ProviderAPI()
 
         catalog = await loaded(
-            api, entries={ModelRef("anthropic", "claude-sonnet-9-9"): ModelEntry()},
+            api, entries={ModelRef("google", "gemini-2.0-pro-exp"): ModelEntry()},
             google=KEYS["google"], anthropic=KEYS["anthropic"],
         )
 
-        assert sorted(api.calls) == ["anthropic", "google"]
+        assert api.calls == ["google", "anthropic"]
         assert catalog.in_use == ("google", "anthropic")
         assert catalog.is_authoritative("google")
         assert catalog.offered() == [
@@ -1148,7 +1165,7 @@ class TestOffered:
         ]
 
     async def test_a_reference_is_offered_only_when_it_can_run(self):
-        catalog = await loaded(
+        catalog = await checked(
             entries={GEMINI: ModelEntry()},
             references=[
                 ModelRef("anthropic", "claude-sonnet-4-6"),  # no key
@@ -1162,7 +1179,7 @@ class TestOffered:
         assert catalog.offered() == ["google:gemini-2.5-flash", "google:gemini-2.5-pro"]
 
     async def test_an_entry_its_fresh_listing_lacks_is_not_offered_on_any_provider(self):
-        catalog = await loaded(
+        catalog = await checked(
             specs={"local-vllm": VLLM},
             entries={
                 ModelRef("local-vllm", "entry-only"): ModelEntry(),
@@ -1177,7 +1194,7 @@ class TestOffered:
 
 class TestNotOffered:
     async def test_why_an_entry_is_not_offered(self):
-        catalog = await loaded(
+        catalog = await checked(
             entries={
                 ModelRef("together", "deepseek-ai/DeepSeek-V3.1"): ModelEntry(),
                 QWEN: ModelEntry(),
@@ -1203,7 +1220,7 @@ class TestNotOffered:
         left out of the list by the entries' rule, so ``not_offered`` says why for them
         too; one that is also an entry is one row."""
         unserved = ModelRef("google", "gemini-9-ultra")
-        catalog = await loaded(
+        catalog = await checked(
             entries={
                 ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry(),
                 unserved: ModelEntry(),
@@ -1242,7 +1259,7 @@ class TestNotOffered:
         assert [r for r in caplog.records if r.name == "agentic_cli.models.catalog"] == []
 
     async def test_the_offered_entries_records_in_list_order(self):
-        catalog = await loaded(
+        catalog = await checked(
             entries={
                 QWEN: ModelEntry(context_window=100_000),
                 ModelRef("google", "gemini-9-ultra"): ModelEntry(),
@@ -1271,6 +1288,7 @@ class TestNotOffered:
 
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
             await catalog.load()
+            await catalog.start_background_refresh()  # Google's listing lacks gemini-9-ultra
             await catalog.load()  # once per catalog
 
         assert [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"] == [
@@ -1286,8 +1304,8 @@ class TestNotOffered:
 
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
             for _ in range(3):
-                await loaded(entries=entries, google=KEYS["google"])
-            await loaded(
+                await checked(entries=entries, google=KEYS["google"])
+            await checked(
                 entries={ModelRef("google", "gemini-9-ultra"): ModelEntry()}, google=KEYS["google"]
             )
 
@@ -1302,7 +1320,7 @@ class TestNotOffered:
 class TestSearch:
     async def test_a_provider_not_in_use_is_listed_the_first_time_it_is_searched(self):
         api = ProviderAPI()
-        catalog = await loaded(
+        catalog = await checked(
             api, entries={GEMINI: ModelEntry()},
             google=KEYS["google"], anthropic=KEYS["anthropic"], openrouter="r-test-key",
         )

@@ -1,9 +1,10 @@
 """A workflow manager's models: the catalog it loads, and every agent resolved at startup.
 
 The manager builds a ``ModelCatalog`` from settings (``workflow.model_services``)
-when it initializes, loads it (listing only what the cache cannot answer),
-resolves the default model and every agent in one all-or-nothing pass, and
-owns the catalog until cleanup. Each backend then builds every agent's model
+when it initializes, loads it (listing only what fills a gap the settings
+leave; the background refresh lists the other providers in use), resolves the
+default model and every agent in one all-or-nothing pass, and owns the catalog
+until cleanup. Each backend then builds every agent's model
 from its resolved model: ADK through its model factory, LangGraph through the
 LangChain adapter. Listings come from ``ProviderAPI``, a fake of every
 provider's model list, and model requests from the fakes in
@@ -202,6 +203,8 @@ class TestProvidersInUse:
         await manager.initialize_services()
         try:
             assert manager.catalog.in_use == ("google", "openrouter")
+            assert providers.calls == ["openrouter"]  # the one model nothing describes
+            await asyncio.gather(*refreshing())  # the rest are checked in the background
             assert sorted(providers.calls) == ["google", "openrouter"]  # not Anthropic
             assert manager.catalog.offered() == [
                 "google:gemini-2.5-flash", "openrouter:qwen/qwen3-235b-a22b",
@@ -255,7 +258,8 @@ class TestResolution:
         keys(monkeypatch, "google")
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b"],
-                        model="gemini-9-ultra"),
+                        model="gemini-2.5-flash",
+                        model_settings=ModelSettings(thinking=ThinkingSettings(mode="xhigh"))),
             AgentConfig(name="a", prompt="p", model="anthropic:claude-sonnet-4-5"),
             AgentConfig(name="b", prompt="p", model="google:gemini-2.5-pro"),
         ]
@@ -265,7 +269,7 @@ class TestResolution:
             await manager.initialize_services(validate=False)
 
         message = str(caught.value)
-        assert "Agent 'coordinator': Model google:gemini-9-ultra is not available." in message
+        assert "Agent 'coordinator': thinking mode 'xhigh' is not available" in message
         assert "Agent 'a': model 'anthropic:claude-sonnet-4-5' needs the anthropic" in message
         assert "Agent 'b'" not in message
         assert manager._resolved_models == {}
@@ -282,17 +286,24 @@ class TestResolution:
 
         assert providers.calls == []
 
-    async def test_an_unknown_id_is_rejected_only_by_its_own_fresh_listing(
+    async def test_a_model_its_provider_does_not_serve_still_starts(
         self, providers, monkeypatch
     ):
-        """An Anthropic outage neither stops Google rejecting an unknown Gemini
-        id nor makes Anthropic's fallback list reject a real model."""
+        """The settings decide what runs: Google's fresh listing lacks the writer's
+        model, and the manager starts on it (a turn on it fails at the provider),
+        while the list leaves it out with its reason. An Anthropic outage accepts
+        any id."""
         keys(monkeypatch, "google", "anthropic")
         providers.answers["anthropic"] = 500
 
-        rejected = adk(team("gemini-9-ultra"), settings())
-        with pytest.raises(SettingsValidationError, match="Available google models"):
-            await rejected.initialize_services()
+        unserved = adk(team("gemini-9-ultra"), settings())
+        await unserved.initialize_services()
+        try:
+            assert str(unserved._resolved_models["writer"].ref) == "google:gemini-9-ultra"
+            assert unserved.catalog.is_authoritative("google")
+            assert unserved.catalog.not_offered() == {"google:gemini-9-ultra": "not served by google"}
+        finally:
+            await unserved.cleanup()
 
         accepted = adk(team("claude-unknown-9"), settings())
         await accepted.initialize_services()
@@ -366,7 +377,8 @@ class TestManagerModel:
     async def test_without_a_default_model_the_list_s_newest_default_tier_model(
         self, providers, monkeypatch
     ):
-        """Before and after the start, and only the list's provider is listed."""
+        """Before and after the start, which waits on no listing (the table describes
+        the list's models); only the list's provider is listed, in the background."""
         keys(monkeypatch, "google", "anthropic")
         s = settings(models={"anthropic:claude-sonnet-4-5": {}, "anthropic:claude-sonnet-4-6": {}})
         manager = adk(team(), s)
@@ -375,6 +387,8 @@ class TestManagerModel:
         await manager.initialize_services()
         try:
             assert manager.model == "anthropic:claude-sonnet-4-6"
+            assert providers.calls == []
+            await asyncio.gather(*refreshing())
             assert providers.calls == ["anthropic"]
         finally:
             await manager.cleanup()
@@ -407,7 +421,11 @@ class TestManagerModel:
 
     async def test_an_override_is_checked_with_the_agents(self, providers, monkeypatch):
         keys(monkeypatch, "google")
-        manager = adk(team("gemini-9-ultra"), settings(), model="anthropic:claude-sonnet-4-5")
+        writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))  # Gemini 2.5 has no xhigh
+        manager = adk(
+            team("gemini-2.5-flash", model_settings=writer), settings(),
+            model="anthropic:claude-sonnet-4-5",
+        )
 
         with pytest.raises(SettingsValidationError) as caught:
             await manager.initialize_services(validate=False)
@@ -1040,10 +1058,10 @@ class TestCatalogLifecycle:
             return built[-1]
 
         monkeypatch.setattr(model_services, "build_catalog", recording)
-        manager = adk(team("gemini-9-ultra"), settings())
+        manager = adk(team("anthropic:claude-sonnet-4-5"), settings())  # no Anthropic key
 
         with pytest.raises(SettingsValidationError):
-            await manager.initialize_services()
+            await manager.initialize_services(validate=False)  # past the static check
 
         assert manager.catalog is None
         assert built[0].start_background_refresh() is None  # closed

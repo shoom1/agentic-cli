@@ -93,7 +93,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -105,7 +105,6 @@ from agentic_cli.models.discovery import DEFAULT_TIMEOUT, Listing, list_models
 from agentic_cli.models.entries import ModelEntry
 from agentic_cli.models.listing_cache import (  # noqa: F401 - CACHE_VERSION stays importable from here
     CACHE_VERSION,
-    CacheContents,
     CacheEntry,
     ListingCache,
 )
@@ -114,6 +113,7 @@ from agentic_cli.models.providers import Provider, ProviderKind
 from agentic_cli.models.records import ModelRecord
 from agentic_cli.models.refs import BUILTIN_PROVIDERS, ModelRef, ModelSpecError, parse_ref
 from agentic_cli.models.resolve import ModelResolutionError
+from agentic_cli.models.startup import Known, NamedModel, StartupPlan, plan
 from agentic_cli.models.table import ShippedTable, load_table, newest
 
 logger = logging.getLogger(__name__)
@@ -202,8 +202,10 @@ class _ProviderKnowledge:
     listing: Listing | None = None
     #: The last attempt, while it is a failure.
     failure: Listing | None = None
-    #: A listing the background refresh should replace: a cached one that is
-    #: not fresh or failed, or one that failed at startup.
+    #: A listing the background refresh should make: the provider is in use
+    #: and the start did not list it (nothing is known of it, or its cached
+    #: listing is not fresh, failed, or lacks a model the settings name), or
+    #: its listing failed at startup.
     due: bool = False
     #: The listing was read from the cache, not listed by this catalog.
     from_cache: bool = False
@@ -267,11 +269,13 @@ class ModelCatalog:
         self._clock = clock
         self._entries: Mapping[ModelRef, ModelEntry] = MappingProxyType(dict(entries or {}))
         self._references = tuple(dict.fromkeys(references))
+        # Every model the settings name: the entries, then the references, each once.
+        self._named = dict.fromkeys((*self._entries, *self._references))
         self._states = {name: _ProviderKnowledge(provider) for name, provider in providers.items()}
         for state in self._states.values():
             self._rebuild(state)
         self._computed_roles = tuple(computed_roles)
-        self._in_use = self._providers_in_use()
+        self._in_use = self._plan().in_use
         # Providers a search listed (or read from the cache), beside those in use.
         self._searched: set[str] = set()
         self._refresh_task: asyncio.Task[None] | None = None
@@ -288,50 +292,57 @@ class ModelCatalog:
     # --- loading and refreshing --------------------------------------------
 
     async def load(self) -> None:
-        """Read the cache, then list the providers in use it cannot answer for.
+        """Read the cache, then list only what fills a gap the settings leave.
 
-        Each provider in use that can be listed and has no cache entry for
-        its address and kind is listed now, concurrently, each within the
-        timeout: the first run still validates ids. A cached listing that
-        lacks an entry's model is listed again, once, unless it recorded
-        that model as absent. When the listings leave no entry that can run,
-        or none of a computed role's tier, the built-in providers with a key
-        are in use after all, and those not yet loaded are. Then each entry
-        left out of the list is warned of, once per process, unless only its
-        key is missing (``not_offered`` says that). Never raises for a
-        network or cache problem.
+        Each provider in use takes its cache entry for its address and kind,
+        when there is one. Then ``startup.plan`` says which providers to list
+        now (no entry can run, a computed role has none of its tier, or
+        nothing describes a model the settings name), and they are listed
+        concurrently, each within the timeout; when those listings put a
+        built-in provider in use (they found absent the entries that could
+        run), it is planned in a second round. Every model the settings name
+        is used as they name it: each provider in use that was not listed
+        now, nothing being known of it or its cached listing lacking a model
+        the settings name, is listed by ``start_background_refresh``. Then
+        each entry left out of the list is warned of, once per process,
+        unless only its key is missing (``not_offered`` says that). Never
+        raises for a network or cache problem.
         """
         cached = self._cache.read()
-        to_list: list[str] = []
-        for name, state in self._states.items():
-            if name not in self._in_use or not state.listable:
+        read: set[str] = set()
+        listed: set[str] = set()
+        while True:
+            startup = self._plan(listed)
+            self._in_use = tuple(n for n in self._states if n in self._in_use or n in startup.in_use)
+            # A provider newly in use takes its cache entry before it is planned.
+            unread = [name for name in self._in_use if name not in read]
+            if unread:
+                read.update(unread)
+                for name in unread:
+                    state = self._states[name]
+                    entry = cached.entry(name, state.provider) if state.listable else None
+                    if entry is not None:
+                        self._adopt(state, entry)
                 continue
-            entry = cached.entry(name, state.provider)
-            if entry is None:
-                to_list.append(name)
-            else:
-                self._adopt(state, entry)
-        await self._list_now(to_list)
-        # A listing read from the cache can predate a model an entry names,
-        # unless it was made knowing the entry and lacked it then.
-        await self._list_now(
-            ref.provider
-            for ref in self._entries
-            if self._rejected(ref)
-            and self._states[ref.provider].from_cache
-            and ref.model not in self._states[ref.provider].absent
-        )
-        await self._load_builtins_now_needed(cached)
+            if not startup.to_list:
+                break
+            await self._list_now(startup.to_list)
+            listed.update(startup.to_list)
+        self._check_later(listed)
         self._warn_of_entries_left_out()
 
     def start_background_refresh(self) -> "asyncio.Task[None] | None":
-        """List again, in a task, each provider in use or searched whose cached
-        listing is not fresh, or whose listing failed at startup.
+        """List, in a task, each provider in use that ``load`` left to it: one
+        the start did not list (nothing is known of it, or its cached listing is
+        not fresh, failed, or lacks a model the settings name), or whose listing
+        failed at startup.
 
-        Each provider is listed once: if that fails too, only the next start
-        tries again. Each result is swapped in as it arrives. Returns the
-        task, or None when nothing is due or the catalog is closed.
-        ``aclose()`` cancels it.
+        This is how the models the settings name are checked: once the
+        listings are in, each entry they leave out of the list is warned of.
+        Each provider is listed once: if that fails, only the next start tries
+        again. Each result is swapped in as it arrives. Returns the task, or
+        None when nothing is due or the catalog is closed. ``aclose()``
+        cancels it.
         """
         if self._closed:
             return None
@@ -436,10 +447,16 @@ class ModelCatalog:
     def record(self, ref: ModelRef) -> ModelRecord:
         """The model's record, with its ``models`` entry when it has one.
 
+        A model the settings name (an entry, or a reference) is never refused:
+        the settings decide what runs, and a provider that does not serve it
+        is said by the list (``not_offered``) and the warnings, not here. Its
+        record is then its entry's and the table's.
+
         Raises:
             ModelResolutionError: If the provider is neither built in nor
-                configured, or its fresh listing lacks the model (the message
-                lists the provider's models).
+                configured, or, for a model the settings do not name, its
+                fresh listing lacks the model (the message lists the
+                provider's models).
         """
         state = self._states.get(ref.provider)
         if state is None:
@@ -450,7 +467,7 @@ class ModelCatalog:
         found = state.accepted.get(ref.model)
         if found is not None:
             return found
-        if self._state_of(state) is ProviderState.FRESH:
+        if ref not in self._named and self._state_of(state) is ProviderState.FRESH:
             if state.from_cache:
                 self._cached_rejections.add(ref.provider)
             models = [record.model for record in state.shown]
@@ -487,9 +504,11 @@ class ModelCatalog:
         1. The ``models`` entries that can run, in their order (``not_offered``
            says why the others cannot).
         2. The references, then ``extra`` (the roles' models, say), that can
-           run, by the same rule: a provider with credentials, and a model
-           neither its fresh listing lacks nor the listing in use recorded as
-           absent. A string that is no reference is skipped.
+           run, by the same rule: a provider with credentials, and a model it
+           is not known not to serve (no listing recorded it as absent, and no
+           fresh listing lacks it; for a model the settings name, a fresh
+           listing this process made). A string that is no reference is
+           skipped.
         3. Only when no entry can run: each built-in provider with a key, in
            the order Google, Anthropic, OpenAI, its newest fast, default and
            strong model, from its listing or else the table's fallback models.
@@ -505,10 +524,9 @@ class ModelCatalog:
         """The models the settings name that the list leaves out, each with why:
         the ``models`` entries, then the references (``default_model``, a role,
         an agent, the manager's own model), each once. Its provider is not
-        defined, has no key, or does not serve it (a fresh listing lacks it, or
-        the listing in use recorded it as absent)."""
-        named = dict.fromkeys((*self._entries, *self._references))
-        left_out = ((ref, self._left_out(ref)) for ref in named)
+        defined, has no key, or does not serve it (a listing recorded it as
+        absent, or this process's fresh listing lacks it)."""
+        left_out = ((ref, self._left_out(ref)) for ref in self._named)
         return {str(ref): reason for ref, reason in left_out if reason is not None}
 
     def entry_records(self) -> list[ModelRecord]:
@@ -517,55 +535,70 @@ class ModelCatalog:
 
     # --- the providers in use and the list ------------------------------------
 
-    def _providers_in_use(self) -> tuple[str, ...]:
-        """The providers in use, from the settings alone (no listing)."""
-        can_run = [ref for ref in self._entries if self._runs(ref)]
-        used = {ref.provider for ref in can_run}
-        used.update(ref.provider for ref in self._references if ref.provider in self._states)
-        if self._needs_builtins(can_run):
-            used.update(self._keyed_builtins())
-        return tuple(name for name in self._states if name in used)
-
-    def _needs_builtins(self, entries: list[ModelRef]) -> bool:
-        """Whether the built-in providers with a key are in use, given the
-        entries that can run: none can, or a role is computed that none of
-        them can fill (none is of its tier)."""
-        tiers = {self._tier(ref) for ref in entries}
-        return not entries or any(role not in tiers for role in self._computed_roles)
+    def _plan(self, listed: Collection[str] = ()) -> StartupPlan:
+        """``startup.plan`` of what the catalog knows now; ``listed``: the
+        providers this start has listed already."""
+        named = [
+            NamedModel(
+                ref=ref,
+                entry=ref in self._entries,
+                reference=ref in self._references,
+                tier=self._tier(ref) if ref.provider in self._states else None,
+                described=ref.provider in self._states and self._described(ref),
+                not_served=ref.provider in self._states and self._not_served(ref),
+            )
+            for ref in self._named
+        ]
+        known = {
+            name: Known(
+                listing=state.listing is not None,
+                failed=state.failure is not None,
+                listed=name in listed,
+            )
+            for name, state in self._states.items()
+        }
+        providers = {name: state.provider for name, state in self._states.items()}
+        return plan(named, self._computed_roles, providers, known)
 
     def _tier(self, ref: ModelRef) -> str | None:
         """A model's tier, from the table's family rules: a built-in model's only."""
         kind = self._states[ref.provider].provider.kind
         return self._table.record_for(ref.provider, kind, ref.model).tier
 
-    def _keyed_builtins(self) -> list[str]:
-        return [
-            name
-            for name, state in self._states.items()
-            if state.provider.builtin and state.provider.has_credentials
-        ]
+    def _described(self, ref: ModelRef) -> bool:
+        """Whether something describes ``ref`` without a new listing: the listing
+        in hand serves it, or its ``models`` entry or the table gives a fact of it."""
+        state = self._states[ref.provider]
+        if state.listing is not None and ref.model in state.accepted:
+            return True
+        table = self._table.record_for(ref.provider, state.provider.kind, ref.model)
+        record = with_entry(table, self._entries.get(ref))
+        return any(source != "default" for source in record.sources.values())
 
-    async def _load_builtins_now_needed(self, cached: CacheContents) -> None:
-        """Ask the built-ins' rules again with the entries the listings left
-        offered, and load the built-ins they now need: from the cache when it
-        holds their listing, else listed once (a retired entry may have been
-        the only one that could run, or the one of a computed role's tier)."""
-        offered = [ref for ref in self._entries if self._runs(ref)]
-        if not self._needs_builtins(offered):
-            return
-        needed = [name for name in self._keyed_builtins() if name not in self._in_use]
-        if not needed:
-            return
-        self._in_use = tuple(n for n in self._states if n in self._in_use or n in needed)
-        to_list: list[str] = []
-        for name in needed:
+    def _check_later(self, listed: Collection[str]) -> None:
+        """Mark for the background refresh each provider in use this start did
+        not list whose listing could check a model the settings name: one
+        nothing is known of, or one whose cached listing lacks such a model
+        without having recorded it as absent (it may predate the model). A
+        stale or failed cached listing is marked already (``_adopt``)."""
+        for name in self._in_use:
             state = self._states[name]
-            entry = cached.entry(name, state.provider)
-            if entry is None:
-                to_list.append(name)
-            else:
-                self._adopt(state, entry)
-        await self._list_now(to_list)
+            if name in listed or not state.listable:
+                continue
+            unknown = state.listing is None and state.failure is None
+            if unknown or any(self._unconfirmed(ref) for ref in self._named if ref.provider == name):
+                state.due = True
+
+    def _unconfirmed(self, ref: ModelRef) -> bool:
+        """Whether a listing read from the cache lacks ``ref``, a model the
+        settings name, without having recorded it as absent."""
+        state = self._states[ref.provider]
+        return (
+            state.listing is not None
+            and state.from_cache
+            and ref.model not in state.accepted
+            and ref.model not in state.absent
+        )
 
     def _listed_names(self) -> list[str]:
         """The providers in use or searched, in catalog order."""
@@ -580,43 +613,35 @@ class ModelCatalog:
         the references and the roles' models alike (``_left_out`` says why not)."""
         return self._left_out(ref) is None
 
-    def _rejected(self, ref: ModelRef) -> bool:
-        """Whether a fresh listing of ``ref``'s provider lacks the model."""
-        state = self._states.get(ref.provider)
-        return (
-            state is not None
-            and self._state_of(state) is ProviderState.FRESH
-            and ref.model not in state.accepted
-        )
-
     def _left_out(self, ref: ModelRef) -> str | None:
         """Why the list leaves out ``ref``: its provider is not defined, has no
-        key, or does not serve the model (a fresh listing lacks it, or the
-        listing in use recorded it as absent); None when it can run."""
+        key, or does not serve the model (``_not_served``); None when it can run."""
         state = self._states.get(ref.provider)
         if state is None:
             return f"provider {ref.provider!r} is not defined in model_providers"
         if not state.provider.has_credentials:
             return f"no key: set {state.provider.key_env}"
-        if self._rejected(ref) or self._known_absent(ref):
+        if self._not_served(ref):
             return f"not served by {ref.provider}"
         return None
 
-    def _known_absent(self, ref: ModelRef) -> bool:
-        """Whether the listing in use, though not fresh (a stale one, or one
-        kept through a failed refresh), recorded the model ``ref`` as absent: an
-        entry's, or any model a catalog sharing the cache file named.
+    def _not_served(self, ref: ModelRef) -> bool:
+        """Whether ``ref``'s provider does not serve it, as far as the catalog knows.
 
-        It cannot reject an id (``record()`` still accepts it), but the list
-        leaves the model out: a role computed from the list must not run on a
-        model the provider has retired while a refresh is under way.
+        The listing in hand lacks the model, and either recorded it as absent
+        (at any age: an entry's, or any model a catalog sharing the cache file
+        named; a role computed from the list must not run on a model the
+        provider has retired while a refresh is under way), or is fresh. A
+        fresh listing read from the cache is not enough for a model the
+        settings name, since it may predate the model: the background refresh
+        lists that provider again (``_check_later``) and its listing decides.
         """
         state = self._states[ref.provider]
-        return (
-            self._state_of(state) is not ProviderState.FRESH
-            and state.listing is not None
-            and ref.model in state.absent
-        )
+        if state.listing is None or ref.model in state.accepted:
+            return False
+        if ref.model in state.absent:
+            return True
+        return self._is_fresh(state.listing) and not (state.from_cache and ref in self._named)
 
     def _tier_models(self) -> list[ModelRef]:
         """Each built-in provider's newest model of each tier, for a list with no entry."""
@@ -650,6 +675,8 @@ class ModelCatalog:
             await self.refresh(names)
         except Exception:  # noqa: BLE001 - a background refresh never surfaces
             logger.warning("Background model-list refresh failed", exc_info=True)
+        # The listings that check the models the settings name: say what they found.
+        self._warn_of_entries_left_out()
 
     async def _list_now(self, names: Iterable[str]) -> None:
         """List ``names`` concurrently, as startup does: a failure is a warning,
