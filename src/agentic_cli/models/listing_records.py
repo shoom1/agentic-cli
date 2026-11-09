@@ -20,9 +20,8 @@ models are picked here. Every value in a record keeps its source
 Claude's thinking is the listing's word where it gives one (its thinking types
 and effort levels, whether thinking can be turned off), else the table's rule.
 When the listing names a type the table's rule for the model does not expect,
-the ladder or the budgets come from the table's rules for a Claude model it
-knows nothing more of (its ``^claude-`` ones), so the table is their only
-source.
+the ladder or the budgets are the table's generic ones
+(``ShippedTable.generic_claude_thinking``), so the table is their only source.
 """
 
 from __future__ import annotations
@@ -46,10 +45,6 @@ _ENTRY_THINKING = {
     "chat_template": ThinkingMechanism.CHAT_TEMPLATE,
     "effort": ThinkingMechanism.EFFORT,
 }
-# Ids no table rule but the catch-all ``^claude-`` ones match: one past the
-# version from which Claude thinks adaptively, and one before it.
-_CLAUDE_ADAPTIVE_PROBE = "claude-unlisted-99"
-_CLAUDE_BUDGET_PROBE = "claude-unlisted-1"
 
 
 def records_for(
@@ -258,21 +253,15 @@ def _claude_thinking(
 def _claude_mechanism(
     rule: ThinkingRule, listed: ListedModel, table: ShippedTable
 ) -> ThinkingRule | None:
-    """The rule the listing's thinking types name; None when they name neither,
-    or the table has no rule of that mechanism for a Claude model of no known
-    family."""
+    """The rule the listing's thinking types name; None when they name neither."""
     if "adaptive" in listed.thinking_types:
         table_adaptive = rule.mechanism is ThinkingMechanism.ANTHROPIC_ADAPTIVE
-        if table_adaptive:
-            default_levels = rule.levels
-        else:
-            generic = _claude_generic(
-                table, _CLAUDE_ADAPTIVE_PROBE, ThinkingMechanism.ANTHROPIC_ADAPTIVE
-            )
-            default_levels = generic.levels if generic is not None else ()
+        default_levels = (
+            rule.levels
+            if table_adaptive
+            else table.generic_claude_thinking(ThinkingMechanism.ANTHROPIC_ADAPTIVE).levels
+        )
         levels = listed.effort_levels or default_levels
-        if not levels:
-            return None
         return ThinkingRule(
             ThinkingMechanism.ANTHROPIC_ADAPTIVE,
             levels=tuple(levels),
@@ -281,24 +270,13 @@ def _claude_mechanism(
     if "enabled" in listed.thinking_types:
         if rule.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET:
             return rule
-        generic = _claude_generic(table, _CLAUDE_BUDGET_PROBE, ThinkingMechanism.ANTHROPIC_BUDGET)
-        if generic is None:
-            return None
+        generic = table.generic_claude_thinking(ThinkingMechanism.ANTHROPIC_BUDGET)
         return ThinkingRule(
             ThinkingMechanism.ANTHROPIC_BUDGET,
             budgets=generic.budgets,
             budget_range=generic.budget_range,
         )
     return None
-
-
-def _claude_generic(
-    table: ShippedTable, probe: str, mechanism: ThinkingMechanism
-) -> ThinkingRule | None:
-    """The table's thinking rule for a Claude model of no known family, which
-    thinks as ``mechanism`` does; None when the table has none of it."""
-    rule = table.record_for("anthropic", ProviderKind.ANTHROPIC, probe).thinking
-    return rule if rule.mechanism is mechanism else None
 
 
 def _merge(record: ModelRecord, source: str, **values: Any) -> ModelRecord:

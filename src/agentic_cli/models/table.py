@@ -105,6 +105,25 @@ def claude_alias(model_id: str) -> str:
     return _CLAUDE_VERTEX_DATE_SUFFIX.sub("", _CLAUDE_DATE_SUFFIX.sub("", model_id))
 
 
+# The pattern of the table's catch-all Claude rules: a Claude model no family rule
+# above them matches. One per thinking mechanism (adaptive from Claude 4.6 on).
+_CLAUDE_CATCH_ALL = "^claude-"
+# The generic Claude rules of a table without catch-all rules (an app's own table
+# need not have them): what ``generic_claude_thinking`` answers then.
+_CLAUDE_GENERIC_DEFAULTS: Mapping[ThinkingMechanism, ThinkingRule] = MappingProxyType(
+    {
+        ThinkingMechanism.ANTHROPIC_ADAPTIVE: ThinkingRule(
+            ThinkingMechanism.ANTHROPIC_ADAPTIVE, levels=("low", "medium", "high", "max")
+        ),
+        ThinkingMechanism.ANTHROPIC_BUDGET: ThinkingRule(
+            ThinkingMechanism.ANTHROPIC_BUDGET,
+            budgets=(4096, 10000, 32000),
+            budget_range=(1024, 128000),
+        ),
+    }
+)
+
+
 def newest(records: Iterable[ModelRecord]) -> ModelRecord:
     """The newest by version; a non-preview id wins a tie, then the first id in order.
 
@@ -300,6 +319,34 @@ class ShippedTable:
             {name: "table" if name in values else "default" for name in TRACKED_FIELDS}
         )
         return ModelRecord(provider=provider, kind=kind, model=model, sources=sources, **values)
+
+    def generic_claude_thinking(self, mechanism: ThinkingMechanism) -> ThinkingRule:
+        """The thinking rule of a Claude model of no known family that thinks as
+        ``mechanism`` does.
+
+        A live listing can name a thinking type the model's own rule does not
+        expect (``claude-sonnet-4-5`` listed as adaptive): the model then takes
+        this rule's ladder or budgets. It is the table's catch-all Claude rule
+        of that mechanism (``^claude-``), so the table is the one source of
+        those numbers; a table without one gives the defaults (adaptive levels
+        low to max, budgets 4096, 10000 and 32000 within 1024 to 128000).
+
+        Raises:
+            ValueError: If ``mechanism`` is neither ``ANTHROPIC_ADAPTIVE`` nor
+                ``ANTHROPIC_BUDGET``.
+        """
+        if mechanism not in _CLAUDE_GENERIC_DEFAULTS:
+            raise ValueError(f"{mechanism.value} is not a Claude thinking mechanism")
+        table = self._providers.get(ProviderKind.ANTHROPIC)
+        for rule in table.rules if table is not None else ():
+            thinking = rule.thinking
+            if (
+                rule.match == _CLAUDE_CATCH_ALL
+                and thinking is not None
+                and thinking.mechanism is mechanism
+            ):
+                return _thinking_rule(thinking, None)
+        return _CLAUDE_GENERIC_DEFAULTS[mechanism]
 
     def fallback_models(self, kind: ProviderKind) -> tuple[str, ...]:
         """The models assumed to exist before (or without) a listing.

@@ -14,6 +14,7 @@ from agentic_cli.models import (
     ProviderKind,
     ShippedTable,
     ThinkingMechanism,
+    ThinkingRule,
     load_table,
     version_key,
 )
@@ -339,6 +340,77 @@ def test_the_fallback_lists_fill_every_builtin_tier():
 
 def test_load_table_is_cached():
     assert load_table() is load_table()
+
+
+class TestGenericClaudeThinking:
+    """The thinking rule of a Claude model of no known family, per mechanism: what a
+    listing's thinking types fall back on when the model's own rule is another mechanism."""
+
+    ADAPTIVE = ThinkingMechanism.ANTHROPIC_ADAPTIVE
+    BUDGET = ThinkingMechanism.ANTHROPIC_BUDGET
+
+    def _without_catch_alls(self) -> dict:
+        raw = _raw()
+        rules = raw["providers"]["anthropic"]["rules"]
+        raw["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] != "^claude-"]
+        return raw
+
+    def test_the_shipped_table_gives_its_catch_all_rules(self):
+        table = load_table()
+
+        adaptive, budget = table.generic_claude_thinking(self.ADAPTIVE), table.generic_claude_thinking(self.BUDGET)
+
+        assert adaptive.mechanism is self.ADAPTIVE and adaptive.levels == ("low", "medium", "high", "max")
+        assert budget.mechanism is self.BUDGET
+        assert (budget.budgets, budget.budget_range) == ((4096, 10000, 32000), (1024, 128000))
+
+    def test_it_is_what_the_table_says_of_a_model_it_knows_nothing_more_of(self):
+        table = load_table()
+
+        assert table.generic_claude_thinking(self.ADAPTIVE) == _record(A, "claude-x-9").thinking
+        assert table.generic_claude_thinking(self.BUDGET) == _record(A, "claude-x-1").thinking
+
+    def test_a_table_with_other_numbers_gives_its_own(self):
+        raw = _raw()
+        for rule in raw["providers"]["anthropic"]["rules"]:
+            if rule["match"] == "^claude-" and rule["thinking"]["mechanism"] == "anthropic_budget":
+                rule["thinking"]["budgets"] = [1, 2, 3]
+                rule["thinking"]["budget_range"] = [1, 9]
+            elif rule["match"] == "^claude-":
+                rule["thinking"]["levels"] = ["low", "high"]
+
+        table = ShippedTable(raw)
+
+        assert table.generic_claude_thinking(self.ADAPTIVE).levels == ("low", "high")
+        budget = table.generic_claude_thinking(self.BUDGET)
+        assert (budget.budgets, budget.budget_range) == ((1, 2, 3), (1, 9))
+
+    def test_a_family_rule_is_not_the_generic_one(self):
+        raw = self._without_catch_alls()
+        for rule in raw["providers"]["anthropic"]["rules"]:
+            if rule["match"] == "^claude-opus-" and rule["thinking"]["mechanism"] == "anthropic_budget":
+                rule["thinking"]["budgets"] = [7, 8, 9]
+
+        assert ShippedTable(raw).generic_claude_thinking(self.BUDGET).budgets == (4096, 10000, 32000)
+
+    @pytest.mark.parametrize("drop", ["the catch-alls", "the provider"])
+    def test_without_one_the_defaults(self, drop):
+        raw = self._without_catch_alls()
+        if drop == "the provider":
+            del raw["providers"]["anthropic"]
+
+        table = ShippedTable(raw)
+
+        assert table.generic_claude_thinking(self.ADAPTIVE) == ThinkingRule(
+            self.ADAPTIVE, levels=("low", "medium", "high", "max")
+        )
+        assert table.generic_claude_thinking(self.BUDGET) == ThinkingRule(
+            self.BUDGET, budgets=(4096, 10000, 32000), budget_range=(1024, 128000)
+        )
+
+    def test_only_claude_s_mechanisms_have_one(self):
+        with pytest.raises(ValueError, match="gemini_budget"):
+            load_table().generic_claude_thinking(ThinkingMechanism.GEMINI_BUDGET)
 
 
 class TestTableFile:

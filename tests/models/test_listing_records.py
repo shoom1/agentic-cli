@@ -10,6 +10,8 @@ the list, the cache) is covered in ``test_catalog.py``.
 from __future__ import annotations
 
 import dataclasses
+import json
+from importlib import resources
 
 import pytest
 
@@ -18,6 +20,7 @@ from agentic_cli.models import (
     ModelRef,
     ProviderKind,
     ProviderSpec,
+    ShippedTable,
     ThinkingMechanism,
     ThinkingRule,
     load_table,
@@ -156,8 +159,9 @@ class TestAnthropic:
 
 class TestClaudeThinkingAnUnexpectedTypeNames:
     """A listing can name a type the table's rule for the model does not expect:
-    the rule is then the table's own for a Claude model it knows nothing more of
-    (its ``^claude-`` rules), so the table is the one source of those numbers."""
+    the rule is then the table's generic one for that mechanism
+    (``ShippedTable.generic_claude_thinking``), so the table is the one source of
+    those numbers."""
 
     def test_adaptive_where_the_table_has_a_budget_takes_the_tables_adaptive_ladder(self):
         served, _ = served_and_shown(
@@ -167,8 +171,7 @@ class TestClaudeThinkingAnUnexpectedTypeNames:
 
         thinking = served["claude-sonnet-4-5"].thinking
 
-        generic = TABLE.record_for("anthropic", ProviderKind.ANTHROPIC, "claude-unlisted-9").thinking
-        assert generic.mechanism is ADAPTIVE
+        generic = TABLE.generic_claude_thinking(ADAPTIVE)
         assert thinking == ThinkingRule(ADAPTIVE, levels=generic.levels, can_disable=True)
 
     def test_a_budget_where_the_table_has_adaptive_takes_the_tables_budget_range(self):
@@ -179,19 +182,73 @@ class TestClaudeThinkingAnUnexpectedTypeNames:
 
         thinking = served["claude-sonnet-4-6"].thinking
 
-        generic = TABLE.record_for("anthropic", ProviderKind.ANTHROPIC, "claude-unlisted-1").thinking
-        assert generic.mechanism is BUDGET
+        generic = TABLE.generic_claude_thinking(BUDGET)
         assert thinking == ThinkingRule(
             BUDGET, budgets=generic.budgets, budget_range=generic.budget_range
         )
 
     def test_the_numbers_are_the_ones_the_table_ships(self):
-        """What the catalog's own constants held before the table was the source."""
-        adaptive = TABLE.record_for("anthropic", ProviderKind.ANTHROPIC, "claude-unlisted-9").thinking
-        budget = TABLE.record_for("anthropic", ProviderKind.ANTHROPIC, "claude-unlisted-1").thinking
+        adaptive, budget = TABLE.generic_claude_thinking(ADAPTIVE), TABLE.generic_claude_thinking(BUDGET)
 
         assert adaptive.levels == ("low", "medium", "high", "max")
         assert (budget.budgets, budget.budget_range) == ((4096, 10000, 32000), (1024, 128000))
+
+
+def _table_without_catch_alls() -> ShippedTable:
+    """The shipped table with its two ``^claude-`` rules left out: an app's own table
+    need not have them."""
+    data = json.loads(
+        resources.files("agentic_cli.models").joinpath("data", "table.json").read_text("utf-8")
+    )
+    rules = data["providers"]["anthropic"]["rules"]
+    data["providers"]["anthropic"]["rules"] = [r for r in rules if r["match"] != "^claude-"]
+    return ShippedTable(data)
+
+
+class TestATableWithoutTheClaudeCatchAlls:
+    """What the listing says decides the mechanism whatever table the catalog has;
+    without a generic rule in the table the ladder and budgets are the defaults."""
+
+    def test_a_budget_where_the_table_has_adaptive_takes_the_default_budgets(self):
+        table = _table_without_catch_alls()
+
+        served, _ = records_for(
+            PROVIDERS["anthropic"],
+            listing("anthropic", ListedModel("claude-sonnet-4-6", reasoning=True,
+                                             thinking_types=("enabled",))),
+            table,
+        )
+
+        assert served["claude-sonnet-4-6"].thinking == ThinkingRule(
+            BUDGET, budgets=(4096, 10000, 32000), budget_range=(1024, 128000)
+        )
+
+    def test_adaptive_for_a_family_the_table_does_not_know_takes_the_default_ladder(self):
+        table = _table_without_catch_alls()
+
+        served, _ = records_for(
+            PROVIDERS["anthropic"],
+            listing("anthropic", ListedModel("claude-mystery-9", reasoning=True,
+                                             thinking_types=("adaptive",))),
+            table,
+        )
+
+        assert served["claude-mystery-9"].thinking == ThinkingRule(
+            ADAPTIVE, levels=("low", "medium", "high", "max"), can_disable=True
+        )
+
+    def test_the_listing_s_own_ladder_still_wins(self):
+        table = _table_without_catch_alls()
+
+        served, _ = records_for(
+            PROVIDERS["anthropic"],
+            listing("anthropic", ListedModel("claude-mystery-9", reasoning=True,
+                                             thinking_types=("adaptive",),
+                                             effort_levels=("low", "high"))),
+            table,
+        )
+
+        assert served["claude-mystery-9"].thinking.levels == ("low", "high")
 
 
 class TestOpenAI:
