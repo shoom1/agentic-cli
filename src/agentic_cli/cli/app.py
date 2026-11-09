@@ -463,8 +463,9 @@ async def _claim_delivery(jm: Any, job_id: str) -> bool:
     The claim takes the jobs directory's lock, which another CLI of the app
     may hold, so it runs off the event loop. A Ctrl+C while it is taken stops
     the wait, not the claim, which its thread may still take: a claim taken
-    then is closed as a cancelled delivery ("resume cancelled"), as one a
-    Ctrl+C lands right after is, and never left ``RESUMING``.
+    then is handed back (``JobManager.release_resume``), never left
+    ``RESUMING``, and the job waits for a later delivery, nothing having
+    reached the agent.
 
     Returns:
         True if this process now delivers the job.
@@ -473,23 +474,23 @@ async def _claim_delivery(jm: Any, job_id: str) -> bool:
     try:
         return await asyncio.shield(claim)
     except asyncio.CancelledError:
-        claim.add_done_callback(lambda done: _close_abandoned_claim(jm, job_id, done))
+        claim.add_done_callback(lambda done: _release_abandoned_claim(jm, job_id, done))
         raise
 
 
-def _close_abandoned_claim(jm: Any, job_id: str, claim: "asyncio.Future[bool]") -> None:
-    """Close, on a worker thread, a claim taken for a delivery Ctrl+C stopped."""
+def _release_abandoned_claim(jm: Any, job_id: str, claim: "asyncio.Future[bool]") -> None:
+    """Hand back, on a worker thread, a claim taken for a delivery Ctrl+C stopped."""
     if claim.cancelled() or claim.exception() is not None or not claim.result():
         return
-    logger.info("job_resume_cancelled", job_id=job_id)
+    logger.info("job_resume_claim_released", job_id=job_id)
 
-    def close() -> None:
+    def release() -> None:
         try:
-            jm.complete_resume(job_id, delivered=False, error="resume cancelled")
+            jm.release_resume(job_id)
         except Exception:  # noqa: BLE001 - startup recovery fails it once we are gone
-            logger.warning("job_resume_close_failed", job_id=job_id, exc_info=True)
+            logger.warning("job_resume_release_failed", job_id=job_id, exc_info=True)
 
-    asyncio.get_running_loop().run_in_executor(None, close)
+    asyncio.get_running_loop().run_in_executor(None, release)
 
 
 # === Slash Command Completer ===

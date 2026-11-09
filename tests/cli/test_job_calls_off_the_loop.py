@@ -228,43 +228,47 @@ class TestADKAnsweringAStoppedTurnsCalls:
 
 
 class TestAStopWhileTheClaimIsTaken:
-    async def test_the_claim_its_thread_takes_is_closed_not_left_resuming(self):
+    async def test_the_claim_its_thread_takes_is_handed_back(self, tmp_path):
         """Ctrl+C stops the wait for the claim, not the claim: its thread
-        takes it all the same, and it is closed as a cancelled delivery."""
-        taking, release = threading.Event(), threading.Event()
+        takes it all the same, and it is handed back (``release_resume``).
+        Nothing reached the agent, so the job waits for a later delivery."""
+        taking, release, taken = threading.Event(), threading.Event(), threading.Event()
 
-        class Jobs:
-            completed: list = []
-
+        class SlowToClaim(JobManager):
             def begin_resume(self, job_id: str) -> bool:
                 taking.set()
                 release.wait(5)  # another CLI holds the jobs directory's lock
-                return True
+                try:
+                    return super().begin_resume(job_id)
+                finally:
+                    taken.set()
 
-            def complete_resume(self, job_id: str, *, delivered: bool, error=None) -> None:
-                self.completed.append((job_id, delivered, error))
+        jobs = SlowToClaim(base_dir=tmp_path / "jobs")
+        try:
+            record = finished(jobs, "s", "u")
+            app = BaseCLIApp.__new__(BaseCLIApp)
+            app._workflow_controller = ReplayController(HangingWorkflow())
+            app._turn_lock = asyncio.Lock()
+            app._message_processor = MessageProcessor()
+            app.session = opening_boxes(autospec_session())
+            app._settings = SETTINGS
+            app._usage_tracker = None
+            app._session_id = "s"
 
-        jobs = Jobs()
-        app = BaseCLIApp.__new__(BaseCLIApp)
-        app._workflow_controller = ReplayController(HangingWorkflow())
-        app._turn_lock = asyncio.Lock()
-        app._message_processor = MessageProcessor()
-        app.session = opening_boxes(autospec_session())
-        app._settings = SETTINGS
-        app._usage_tracker = None
-        app._session_id = "s"
-        record = SimpleNamespace(job_id="j1", name="build", state=JobState.SUCCEEDED)
+            delivery = asyncio.create_task(app._deliver_resume(jobs, record))
+            assert await asyncio.to_thread(taking.wait, 5)
+            delivery.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await delivery
+            release.set()
+            assert await asyncio.to_thread(taken.wait, 5)
+            for _ in range(250):
+                if jobs.get(record.job_id).resume_state != "resuming":
+                    break
+                await asyncio.sleep(0.02)
 
-        delivery = asyncio.create_task(app._deliver_resume(jobs, record))
-        assert await asyncio.to_thread(taking.wait, 5)
-        delivery.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await delivery
-        assert jobs.completed == []  # the claim is still being taken
-        release.set()
-        for _ in range(250):
-            if jobs.completed:
-                break
-            await asyncio.sleep(0.02)
-
-        assert jobs.completed == [("j1", False, "resume cancelled")]
+            after = jobs.get(record.job_id)
+            assert (after.resume_state, after.resume_owner) == ("pending", None)
+            assert [r.job_id for r in jobs.awaiting_resume()] == [record.job_id]
+        finally:
+            jobs.close()
