@@ -239,33 +239,35 @@ class TestProvidersAreHandEdited:
     """No save writes ``model_providers``: it would copy the app's providers
     into the user's file."""
 
-    def test_a_full_save_leaves_the_user_file_s_providers_as_they_are(self, isolated):
+    def test_a_save_leaves_the_user_file_s_providers_as_they_are(self, isolated):
         user_providers = {"openrouter": {"api_key_env": "MY_OR_KEY"}}
         _write(_user_file(isolated), {"model_providers": user_providers})
         settings = _app_providers()(model_roles={"fast": "google:gemini-2.5-flash"})
 
-        SettingsPersistence(APP).save(settings)
+        SettingsPersistence(APP).save(settings, keys={"model_roles.fast"})
 
         assert _read(_user_file(isolated))["model_providers"] == user_providers
         assert "model_providers" not in _read(_project_file(isolated))
 
-    def test_a_full_save_drops_a_project_file_s_providers(self, isolated):
-        """The loader never reads them there, so a save heals them away (as a
-        keyed save does) and keeps the project's own models."""
+    def test_a_save_drops_a_project_file_s_providers(self, isolated):
+        """The loader never reads them there, so a save heals them away and
+        keeps the project's own models."""
         _write(
             _project_file(isolated),
             {"model_providers": PROVIDERS, "models": {"openai:gpt-5.5": {}}},
         )
 
-        SettingsPersistence(APP).save(BaseSettings())
+        SettingsPersistence(APP).save(BaseSettings(), keys={"log_level"})
 
         project = _read(_project_file(isolated))
         assert "model_providers" not in project
         assert project["models"] == {"openai:gpt-5.5": {}}
         assert set(project) <= PROJECT_SETTABLE_KEYS | PROJECT_PRESERVED_KEYS
 
-    def test_a_full_save_adds_providers_to_no_file(self, isolated):
-        SettingsPersistence(APP).save(_app_providers()(model_providers=PROVIDERS))
+    def test_a_save_naming_every_field_adds_providers_to_no_file(self, isolated):
+        settings = _app_providers()(model_providers=PROVIDERS)
+
+        SettingsPersistence(APP).save(settings, keys=set(type(settings).model_fields))
 
         assert "model_providers" not in _read(_project_file(isolated))
         assert "model_providers" not in _read(_user_file(isolated))
@@ -280,13 +282,6 @@ class TestProvidersAreHandEdited:
         assert result.project_keys == () and result.user_scoped_keys == ()
         assert "model_providers" not in _read(_project_file(isolated))
         assert "model_providers" not in _read(_user_file(isolated))
-
-    def test_an_explicit_path_dump_leaves_providers_out(self, isolated):
-        legacy = isolated / "legacy.json"
-
-        SettingsPersistence(APP).save(_app_providers()(), path=legacy)
-
-        assert "model_providers" not in json.loads(legacy.read_text())
 
 
 class TestRolesAndModelsAreProjectSettable:
@@ -304,15 +299,6 @@ class TestRolesAndModelsAreProjectSettable:
         assert settings.model_roles == {"fast": "google:gemini-3.5-flash"}
         assert _set(settings.models) == {"openrouter:x/y:free": {"context_window": 40960}}
 
-    def test_roles_save_to_the_project_file(self, isolated):
-        settings = BaseSettings(model_roles={"strong": "local-vllm:Qwen/Qwen3-32B"})
-
-        SettingsPersistence(APP).save(settings)
-
-        project = _read(_project_file(isolated))
-        assert project["model_roles"] == {"strong": "local-vllm:Qwen/Qwen3-32B"}
-        assert "model_roles" not in _read(_user_file(isolated))
-
     def test_a_keyed_save_writes_them_to_the_project_file(self, isolated):
         settings = BaseSettings(model_roles={"fast": "claude-haiku-4-5"})
 
@@ -320,6 +306,7 @@ class TestRolesAndModelsAreProjectSettable:
 
         assert result.project_keys == ("model_roles",)
         assert _read(_project_file(isolated))["model_roles"] == {"fast": "claude-haiku-4-5"}
+        assert "model_roles" not in _read(_user_file(isolated))
 
 
 class TestTheModelsList:
@@ -433,22 +420,24 @@ class TestModelsAreHandEdited:
     """No save writes ``models``: it would copy the app's entries, and the
     other files', into the file it writes."""
 
-    def test_a_full_save_leaves_each_file_s_models_as_it_is(self, isolated):
+    def test_a_save_leaves_each_file_s_models_as_it_is(self, isolated):
         user_models = {"google:gemini-2.5-flash": {"max_output": 1_000}}
         project_models = {"openai:gpt-5.5": {}}
         _write(_user_file(isolated), {"models": user_models})
         _write(_project_file(isolated), {"models": project_models})
         settings = _app_settings()(model_roles={"fast": "google:gemini-2.5-flash"})
 
-        SettingsPersistence(APP).save(settings)
+        SettingsPersistence(APP).save(settings, keys={"model_roles.fast"})
 
         project = _read(_project_file(isolated))
         assert project["models"] == project_models
         assert project["model_roles"] == {"fast": "google:gemini-2.5-flash"}
         assert _read(_user_file(isolated))["models"] == user_models
 
-    def test_a_full_save_adds_models_to_no_file(self, isolated):
-        SettingsPersistence(APP).save(_app_settings()())
+    def test_a_save_naming_every_field_adds_models_to_no_file(self, isolated):
+        settings = _app_settings()()
+
+        SettingsPersistence(APP).save(settings, keys=set(type(settings).model_fields))
 
         assert "models" not in _read(_project_file(isolated))
         assert "models" not in _read(_user_file(isolated))
@@ -476,13 +465,6 @@ class TestModelsAreHandEdited:
             "models": {"openai:gpt-5.5": {}},
             "model_roles": {"fast": "google:gemini-2.5-flash"},
         }
-
-    def test_an_explicit_path_dump_leaves_models_out(self, isolated):
-        legacy = isolated / "legacy.json"
-
-        SettingsPersistence(APP).save(_app_settings()(), path=legacy)
-
-        assert "models" not in json.loads(legacy.read_text())
 
 
 class TestValidation:
@@ -557,12 +539,10 @@ class TestTheOpenAIKey:
         )
         persistence = SettingsPersistence(APP)
 
-        persistence.save(settings)
+        persistence.save(settings, keys=set(BaseSettings.model_fields))
         persistence.save(settings, keys=["openai_api_key", "model_roles"])
-        legacy = isolated / "legacy.json"
-        persistence.save(settings, path=legacy)
 
-        for path in (_project_file(isolated), _user_file(isolated), legacy):
+        for path in (_project_file(isolated), _user_file(isolated)):
             text = path.read_text()
             assert "k-secret" not in text, path
             assert "openai_api_key" not in text, path

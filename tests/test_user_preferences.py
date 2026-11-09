@@ -6,8 +6,8 @@ user-scoped, like every key outside ``PROJECT_SETTABLE_KEYS``: the user file
 a cwd ``.env``, which a cloned repository can ship, is dropped with the P0-1
 warning. ``USER_PREFERENCE_KEYS`` names them, so that an app may show them in
 ``/settings`` (``tests/cli/test_settings_ui_scope.py``). A save writes them to
-the user file, and one set back to its default leaves it, so the next start
-follows the default again.
+the user file as picked, even a value equal to the default: what the app starts
+on is not the class default when the app sets its own, so no save removes a key.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import structlog
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.settings_persistence import (
@@ -157,12 +157,126 @@ def test_a_save_writes_them_to_the_user_file(isolated):
     assert _chosen(BaseSettings()) == CHOSEN
 
 
-def test_one_set_back_to_its_default_leaves_the_user_file(isolated):
+def test_one_set_to_its_default_is_written(isolated):
     _write(_user_file(isolated), {**CHOSEN, "other": 1})
     settings = BaseSettings()
     settings.update_setting("ui_theme", "dark")
 
     SettingsPersistence(APP).save(settings, keys={"ui_theme"})
 
-    assert _read(_user_file(isolated)) == {"dialog_placement": "inline", "other": 1}
+    assert _read(_user_file(isolated)) == {
+        "ui_theme": "dark", "dialog_placement": "inline", "other": 1,
+    }
     assert BaseSettings().ui_theme == "dark"
+
+
+# --- an app that starts on its own value -----------------------------------------------
+#
+# What the app starts on can come from its ``model_post_init``, a validator, its
+# ``__init__``, an env file below the user file, or the environment: a save
+# cannot tell which, so what the user picked is written, whatever it equals.
+
+
+class _LightApp(BaseSettings):
+    """An app that starts on its own theme, set in ``model_post_init`` when no
+    source gave one: the pattern ``examples/research_demo/settings.py`` teaches."""
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if "ui_theme" not in self.model_fields_set:
+            object.__setattr__(self, "ui_theme", "light")
+
+
+class _LightByValidator(BaseSettings):
+    """The same default, set by a validator, which a bare construction skips."""
+
+    @model_validator(mode="after")
+    def _own_default(self):
+        if "ui_theme" not in self.model_fields_set:
+            object.__setattr__(self, "ui_theme", "light")
+        return self
+
+
+class _InlineByName(BaseSettings):
+    """A default that reads a field ``__init__`` sets (the research demo sets
+    ``app_name`` and ``workspace_dir`` there, and derives defaults from them)."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("app_name", "inline_by_name")
+        super().__init__(**kwargs)
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if "dialog_placement" not in self.model_fields_set:
+            inline = self.app_name == "inline_by_name"
+            object.__setattr__(self, "dialog_placement", "inline" if inline else "box")
+
+
+def test_a_pick_of_the_class_default_survives_an_app_that_starts_elsewhere(isolated):
+    """The class default is ``dark``; this app starts on ``light``. A user who
+    picks ``dark`` chose something, and the next start must show it."""
+    settings = _LightApp()
+    assert settings.ui_theme == "light"
+    settings.update_setting("ui_theme", "dark")
+
+    result = SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "dark"}
+    assert result.user_scoped_keys == ("ui_theme",)
+    assert _LightApp().ui_theme == "dark"
+
+
+def test_a_pick_of_the_app_s_own_default_is_written_too(isolated):
+    _write(_user_file(isolated), {"ui_theme": "dark", "other": 1})
+    settings = _LightApp()
+    assert settings.ui_theme == "dark"
+    settings.update_setting("ui_theme", "light")  # what the app starts on
+
+    SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "light", "other": 1}
+    assert _LightApp().ui_theme == "light"
+
+
+def test_a_pick_survives_a_default_a_validator_sets(isolated):
+    settings = _LightByValidator()
+    assert settings.ui_theme == "light"
+    settings.update_setting("ui_theme", "dark")
+
+    SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "dark"}
+    assert _LightByValidator().ui_theme == "dark"
+
+
+def test_a_pick_survives_a_default_that_reads_what_init_sets(isolated):
+    settings = _InlineByName()
+    assert settings.dialog_placement == "inline"
+    settings.update_setting("dialog_placement", "box")  # the class default
+
+    SettingsPersistence("inline_by_name").save(settings, keys={"dialog_placement"})
+
+    user_file = isolated / "home" / ".inline_by_name" / "settings.json"
+    assert _read(user_file) == {"dialog_placement": "box"}
+    assert _InlineByName().dialog_placement == "box"
+
+
+def test_a_pick_survives_a_default_an_env_file_below_the_user_file_sets(isolated):
+    """An absolute ``env_file`` is trusted, and ranks below the user file (the
+    research demo's ``~/.research_demo/.env``): it is an app default too."""
+    env_file = isolated / "home" / ".env_app" / ".env"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("ENV_APP_UI_THEME=light\n")
+
+    class _EnvApp(BaseSettings):
+        model_config = {**BaseSettings.model_config, "env_file": str(env_file),
+                        "env_prefix": "ENV_APP_"}
+
+    settings = _EnvApp()
+    assert settings.ui_theme == "light"
+    settings.update_setting("ui_theme", "dark")
+
+    SettingsPersistence(APP).save(settings, keys={"ui_theme"})
+
+    assert _read(_user_file(isolated)) == {"ui_theme": "dark"}
+    assert _EnvApp().ui_theme == "dark"

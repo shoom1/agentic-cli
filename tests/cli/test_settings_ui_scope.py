@@ -235,7 +235,7 @@ class TestSavingAPreference:
 
         assert app.session.add_success.call_args_list[0] == call("UI Theme: light")
 
-    async def test_switching_back_to_dark_removes_it_so_the_next_start_is_dark(
+    async def test_switching_back_to_dark_is_written_so_the_next_start_is_dark(
         self, home, monkeypatch
     ):
         from agentic_cli.config import BaseSettings
@@ -246,6 +246,6 @@ class TestSavingAPreference:
 
         app = await self._save(monkeypatch, {"ui_theme": "dark"})
 
-        assert json.loads(user.read_text()) == {"other": 1}
+        assert json.loads(user.read_text()) == {"ui_theme": "dark", "other": 1}
         app.session.add_success.assert_called_with(f"user-scoped (ui_theme) saved to {user}")
         assert BaseSettings().ui_theme == "dark"

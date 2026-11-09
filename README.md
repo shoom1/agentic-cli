@@ -551,7 +551,25 @@ configured is reported (`settings_secrets_dir_ignored`).
 | `retry_max_attempts` | `AGENTIC_RETRY_MAX_ATTEMPTS` | 3 | Max retries on transient errors |
 | `retry_initial_delay` | `AGENTIC_RETRY_INITIAL_DELAY` | 2.0 | Initial retry backoff (seconds) |
 
-Settings are persisted by `SettingsPersistence` (atomic writes) and editable at runtime via the `/settings` command.
+Settings are **read** by constructing the settings class: `MySettings()`, or
+`get_settings()` / `reload_settings()` for the framework's own instance. The
+constructor, the environment, the project file's allowlisted keys, the user
+file and the env files (see [Precedence](#precedence-and-the-trust-boundary))
+are its sources. Two readers take only what they need from the same files: the
+permission engine reads the project file's deny rules, and a configured
+provider's key is looked up in the environment and the absolute env files.
+Settings are **written** one way:
+`/settings` calls `BaseCLIApp.save_settings(keys=...)`, which calls
+`SettingsPersistence(app_name).save(settings, keys=...)` (atomic writes). A save
+writes only the keys it names, as they stand, each into the file the loader
+reads it from: allowlisted keys into `./.{app_name}/settings.json`, the others
+into `~/.{app_name}/settings.json`; a credential is never written. Nothing
+saves the whole settings object, which would freeze values that came from the
+environment or the app's defaults.
+
+`config.set_settings(settings)` sets the settings a script uses when it calls
+tools outside a workflow manager (`get_settings()` returns them there); a
+manager's own turns use the settings it was built with.
 
 ### Theme and dialog placement
 
@@ -571,9 +589,11 @@ class MyApp(BaseCLIApp):
         return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]
 ```
 
-A Save writes them to the user file, and one set back to its default leaves
-it, so the next start follows the default again. `examples/research_demo`
-lists both.
+A Save writes the value picked to the user file, even one equal to the
+default: what an app starts on can be set by the app itself (`model_post_init`,
+a validator, an env file below the user file), so a save cannot tell it from
+the class default and never removes a key. To follow the app again, delete the
+key from the file. `examples/research_demo` lists both.
 
 - **The theme** switches at once, through `get_theme(name)`. thinking-prompt
   repaints: it clears the screen and the terminal's scrollback, shell output
@@ -736,7 +756,7 @@ Each key is a model the model pickers offer; every field is optional:
 | `tools`, `image_input` | Any model | Whether it takes tools, and images |
 | `thinking` | A configured provider's model | `none`, `chat_template` (vLLM's `chat_template_kwargs.enable_thinking`) or `effort` (`reasoning_effort`, or OpenRouter's `reasoning.effort`); on an `openrouter` provider, `none` or `effort` |
 | `effort_levels` | A configured provider's model | Its effort levels, lowest first, as lowercase names: by default `low`, `medium`, `high`, or the levels OpenRouter's listing gives a reasoning model |
-| `reasoning_text` | A configured provider's model | Whether it sends its reasoning as text |
+| `reasoning_text` | A configured provider's model | Whether it sends its reasoning as text. `/models` notes a thinking model that does not (`· no reasoning text` in the Thinking column); it changes nothing else: reasoning text is kept whenever a server sends it |
 
 - A field that is set wins over the provider's listing and the shipped
   table; one left out keeps theirs. An empty entry, `{}`, adds the model to
@@ -1718,6 +1738,27 @@ write in `~/.{app_name}/settings.json` still does: that is your policy). The
 settings are read at each call, so a change applies at once. Every prompt for
 code shows all of it.
 
+### Long-running jobs
+
+A long-running tool starts work in a `JobManager` and returns a job id at once;
+the framework ships the tools that read a job, not the ones that start it,
+since a starter decides what runs and how (`examples/jobs_demo.py` has one).
+`agentic_cli.tools.JOB_TOOLS` is `[job_status]`: a job's state, a stdout tail
+and, once it has finished, its result, the one companion most agents need to a
+starter. `JOB_MANAGEMENT_TOOLS` is `[job_status, job_result, job_logs,
+job_cancel, job_list]`, for an app that also lets the model read logs, list and
+cancel jobs (the user does that with `/jobs`).
+
+`JobManager.register_backend(backend)` takes a `JobBackend` instance and keeps
+it under its `name` (one of the same name is replaced), beside the two a
+manager starts with, `subprocess` and `inprocess`; a starter then submits to
+it with `submit(backend="<name>")`. The manager is `workflow.job_manager`, or
+`get_service("job_manager")` in a tool that declares `requires="job_manager"`.
+It exists only when some agent's tool declares that need (`job_status` and the
+other `job_*` tools do), and `workflow.job_manager` is `None` before then.
+A backend implements `start`, `poll` and `cancel`, and may override `logs`,
+`result`, `pin` and `close`.
+
 ## Context management
 
 ### Summarizing
@@ -2071,7 +2112,7 @@ agentic-cli/
 │   │   ├── events.py             # WorkflowEvent, EventType
 │   │   ├── config.py             # AgentConfig
 │   │   ├── settings.py           # WorkflowSettingsMixin
-│   │   ├── retry.py              # Exponential-backoff retry
+│   │   ├── retry.py              # is_rate_limit_error: a provider's 429 (the provider clients retry)
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
 │   │   ├── memory_services.py    # Settings → agentic_cli.memory arguments
 │   │   ├── model_services.py     # Settings → agentic_cli.models arguments: keys, providers, entries; build_catalog

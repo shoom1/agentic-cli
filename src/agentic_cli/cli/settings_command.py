@@ -6,7 +6,6 @@ customize which settings appear by overriding get_ui_setting_keys().
 """
 
 import asyncio
-import inspect
 from typing import TYPE_CHECKING, Any
 
 from thinking_prompt import ButtonConfig, Dialog
@@ -100,10 +99,7 @@ async def _save(app: "BaseCLIApp", before: dict[str, Any]) -> None:
         changed |= {f"{key}.{entry}" for entry, value in new.items() if old.get(entry) != value}
 
     try:
-        if _accepts_keyword(app.save_settings, "keys"):
-            saved = await app.save_settings(keys=changed)
-        else:  # an app override predating keys=: its own full save
-            saved = await app.save_settings()
+        saved = await app.save_settings(keys=changed)
         app.session.add_success(_saved_message(saved))
     except Exception as e:
         app.session.add_warning(f"Settings applied but not saved: {e}")
@@ -127,9 +123,3 @@ def _saved_message(saved) -> str:
         keys = ", ".join(saved.user_scoped_keys)
         parts.append(f"user-scoped ({keys}) saved to {saved.user_path}")
     return "; ".join(parts) or "Settings saved"
-
-
-def _accepts_keyword(func, name: str) -> bool:
-    """Whether ``func`` can be called with keyword ``name``."""
-    params = inspect.signature(func).parameters.values()
-    return any(p.name == name or p.kind is p.VAR_KEYWORD for p in params)

@@ -795,7 +795,7 @@ def _add_model_row(
         ref,
         _tokens(record.context_window),
         _tokens(record.max_output),
-        _thinking(record.thinking),
+        _thinking(record.thinking, record.reasoning_text),
         "yes" if record.tools else "no",
         "—" if record.cache.value == "none" else record.cache.value,
         _sources(record),
@@ -843,8 +843,10 @@ def _status_table(statuses: "list[ProviderStatus]", providers: Any) -> Table:
     return table
 
 
-def _thinking(rule: "ThinkingRule") -> str:
-    """``budget 4096/12288/24576``, ``adaptive low/medium/high/max``, ``—``."""
+def _thinking(rule: "ThinkingRule", reasoning_text: bool) -> str:
+    """``budget 4096/12288/24576``, ``adaptive low/medium/high/max``, ``—``,
+    then ``· no reasoning text`` for a model that thinks but does not send its
+    reasoning as text. Most thinking models do, so only the exception is said."""
     name = _THINKING_NAMES.get(rule.mechanism.value)
     if name is None:
         return "—"
@@ -853,7 +855,9 @@ def _thinking(rule: "ThinkingRule") -> str:
     else:
         detail = "/".join(rule.levels)
     text = f"{name} {detail}".rstrip()
-    return text if rule.can_disable else f"{text} (always on)"
+    if not rule.can_disable:
+        text += " (always on)"
+    return text if reasoning_text else f"{text} · no reasoning text"
 
 
 def _sources(record: "ModelRecord") -> str:

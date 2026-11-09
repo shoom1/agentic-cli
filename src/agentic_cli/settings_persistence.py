@@ -1,6 +1,8 @@
 """Settings persistence utilities.
 
-Provides functionality to save settings to JSON files for layered configuration.
+Saves the settings a user changed to JSON files for layered configuration.
+Settings are read by constructing the settings class (``settings_sources``),
+never here; ``SettingsPersistence`` is the one writer.
 
 Saving splits by trust (mirroring the P0-1 load-side allowlist in
 ``agentic_cli.settings_sources``): allowlisted keys go to the project
@@ -19,7 +21,6 @@ from typing import TYPE_CHECKING, Any, get_args
 
 if TYPE_CHECKING:
     from pydantic_settings import BaseSettings
-
 
 #: A settings field whose name matches this is a credential. It is never saved,
 #: whichever application defines it (see ``is_secret_field``). ``token`` counts
@@ -97,8 +98,7 @@ PROJECT_PRESERVED_KEYS = frozenset({"permissions"})
 # environment's and the constructor's too), so a save would copy the app's
 # shipped entries (and the other sources') into the file it writes. Every
 # save leaves each file's own section as it is (a project file's only where
-# something reads it: its models, and its permissions, PROJECT_PRESERVED_KEYS),
-# and a dump (path=) leaves them out.
+# something reads it: its models, and its permissions, PROJECT_PRESERVED_KEYS).
 HAND_EDITED_KEYS = frozenset({"models", "model_providers", "permissions"})
 
 # Identity fields set by the application, not the user. No save writes them;
@@ -144,17 +144,17 @@ def get_user_config_path(app_name: str) -> Path:
 class SettingsSaveResult:
     """Where a settings save landed.
 
-    ``project_path`` always receives the allowlisted keys (or, with an
-    explicit ``path=``, the full legacy dump). ``user_path`` is set only when
-    user-scoped (non-allowlisted) keys were written to the user config;
-    ``user_scoped_keys`` lists the keys added/updated/removed there.
+    ``project_path`` is where allowlisted keys go. ``user_path`` is set only
+    when user-scoped (non-allowlisted) keys changed the user config;
+    ``user_scoped_keys`` lists the keys written there.
     """
 
     project_path: Path
     user_path: Path | None = None
     user_scoped_keys: tuple[str, ...] = ()
-    #: For a ``keys=`` save: the keys written to the project file (empty when
-    #: the project file was not touched). ``None`` for a full save.
+    #: The keys written to the project file (empty when the project file was
+    #: not touched). ``None`` in a result that does not say, such as an app's
+    #: own ``save_settings``.
     project_keys: tuple[str, ...] | None = None
 
 
@@ -173,22 +173,16 @@ def get_user_project_grants_path(app_name: str) -> Path:
 
 
 class SettingsPersistence:
-    """Manages loading and saving settings to JSON files.
+    """The one writer of settings files: what the user changed in ``/settings``.
 
-    Settings are saved to project config (./.{app_name}/settings.json) by default.
-    User config (~/.{app_name}/settings.json) serves as a fallback for loading.
-
-    Loading priority (highest to lowest):
-        1. Environment variables
-        2. Project config (./.{app_name}/settings.json)
-        3. User config (~/.{app_name}/settings.json)
-        4. .env file
-        5. Default values
-
-    Saving: Always saves to project config (./.{app_name}/settings.json).
+    Each key goes to the file the loader reads it from: the project config
+    (./.{app_name}/settings.json) for the allowlisted keys, the user config
+    (~/.{app_name}/settings.json) for the rest. Reading is not done here:
+    the settings class's sources read the files, the environment and the
+    constructor's arguments (``settings_sources``).
     """
 
-    def __init__(self, app_name: str = "agentic"):
+    def __init__(self, app_name: str):
         """Initialize persistence manager.
 
         Args:
@@ -206,115 +200,64 @@ class SettingsPersistence:
         """Get path to user config file (~/.{app_name}/settings.json)."""
         return get_user_config_path(self.app_name)
 
-    def save(
-        self,
-        settings: "BaseSettings",
-        path: Path | None = None,
-        *,
-        keys: Iterable[str] | None = None,
-    ) -> SettingsSaveResult:
-        """Save settings, split by trust to match the load-side allowlist.
+    def save(self, settings: "BaseSettings", *, keys: Iterable[str]) -> SettingsSaveResult:
+        """Write ``keys`` of ``settings``, each into its file, and nothing else.
 
-        With ``keys``, only those fields are written, each merged into its
-        file (the ``/settings`` command passes the fields the user changed).
-        A key ``field.entry`` names one entry of a project-settable dict field
-        (``model_roles.fast``): that entry is merged into the project file's
-        own dict, and the rest of the live dict, which may hold entries from
-        the user file, the environment or the app's defaults, is left out.
-        Without it, the whole live settings object is written as described
-        below, which also persists values that came from the environment or
-        were derived at startup.
+        ``/settings`` passes the fields the user changed. A key written is
+        the value as the user picked it: a save of the whole live object
+        would also persist what came from the environment, the app's
+        defaults or the start-up.
 
-        Default save writes two files:
+        An allowlisted key (``PROJECT_SETTABLE_KEYS``) is merged into the
+        project config. The file's other allowlisted entries and its
+        ``PROJECT_PRESERVED_KEYS`` sections (the project's deny rules) and
+        ``models`` are kept as they are; stale entries the loader ignores
+        are dropped. A key ``field.entry`` names one entry of such a dict
+        field (``model_roles.fast``): that entry is merged into the project
+        file's own dict, and the rest of the live dict, which may hold
+        entries from the user file, the environment or the app's defaults,
+        is left out.
 
-        - Project config (./.{app_name}/settings.json) receives ONLY
-          allowlisted (``PROJECT_SETTABLE_KEYS``) fields, always all of them
-          but the ``HAND_EDITED_KEYS`` — regardless of whether they match the
-          schema default, because subclasses may have different effective
-          defaults. The file is fully rewritten, which also heals stale
-          pre-P0-1 files holding keys the loader now ignores; its
-          ``PROJECT_PRESERVED_KEYS`` sections (the project's deny rules) and
-          its own project-settable ``HAND_EDITED_KEYS`` sections (``models``)
-          are kept as they are, so a malformed project file raises rather
-          than being clobbered.
-        - User config (~/.{app_name}/settings.json) receives the remaining
-          user-scoped fields, but only those differing from the settings
-          class default (so code-default changes keep applying for untouched
-          fields, and the user file stays minimal). A user-scoped field back
-          at its default is REMOVED from the file. Keys this method does not
-          manage (hand-stored secrets, unknown/domain keys) are preserved
-          verbatim; a malformed user file raises rather than being clobbered.
+        Any other key is merged into the user config, which keeps every key
+        this method does not manage (hand-stored secrets, unknown or domain
+        keys). The pick is written, even a value equal to the class default,
+        and no save removes a key. What an app starts on without the user's
+        file can be set by its ``model_post_init``, a validator, its
+        ``__init__``, an env file below the user file or the environment, and
+        the settings class cannot tell which: a key removed on a guess would
+        bring the app's value back on the next start, though the user chose
+        another. A user who wants a key to follow the app again deletes it
+        from the file.
 
         Secrets and identity fields are never written anywhere: see
         ``is_secret_field``. Nor are ``HAND_EDITED_KEYS`` (``models``,
-        ``model_providers``): each file keeps its own section of them as it is.
-        With an explicit ``path=``, the legacy behavior is kept: one full
-        dump (minus secrets/identity and ``HAND_EDITED_KEYS``) to that file,
-        no split.
+        ``model_providers``, ``permissions``): each file keeps its own
+        section of them as it is. A malformed file raises rather than being
+        clobbered.
 
         Args:
-            settings: Settings instance to save
-            path: Optional custom path (single-file legacy dump)
+            settings: Settings instance to save from
+            keys: The fields to write (``field`` or ``field.entry``)
 
         Returns:
             SettingsSaveResult with the written path(s)
+
+        Raises:
+            TypeError: ``keys`` is None.
         """
         from agentic_cli.file_utils import atomic_write_text
+
+        if keys is None:
+            raise TypeError(
+                "save() needs the keys to write (the fields changed); a full save "
+                "of the live settings was removed in 0.7.0"
+            )
 
         fields = type(settings).model_fields
         secret = {name for name, f in fields.items() if is_secret_field(name, f)}
         secret |= SECRET_FIELDS
-
-        if keys is not None:
-            return self._save_keys(settings, set(keys) - secret - IDENTITY_FIELDS)
-
-        # Get settings as dict, excluding secrets, identity fields and the
-        # hand-edited ones
-        data = settings.model_dump(
-            exclude=secret | IDENTITY_FIELDS | HAND_EDITED_KEYS,
-            exclude_none=True,
-        )
-
-        # Convert Path objects to strings for JSON serialization
-        data = self._serialize_paths(data)
-
-        if path is not None:
-            # Explicit target: legacy single-file full dump.
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(path, json.dumps(data, indent=2, default=str))
-            return SettingsSaveResult(project_path=path)
-
-        project_data = {k: v for k, v in data.items() if k in PROJECT_SETTABLE_KEYS}
-        user_updates, user_removals = self._split_user_scoped(settings, data)
-
-        project_path = self.project_config_path
-        existing = self._read_object(project_path)
-        # The file's own sections something reads: its deny rules and models
-        # (a stray model_providers is healed away, as a keyed save does).
-        kept = PROJECT_PRESERVED_KEYS | (HAND_EDITED_KEYS & PROJECT_SETTABLE_KEYS)
-        project_data.update({k: existing[k] for k in sorted(kept) if k in existing})
-        project_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(
-            project_path, json.dumps(project_data, indent=2, default=str)
-        )
-
-        user_path, user_keys = self._merge_user(user_updates, user_removals)
-        return SettingsSaveResult(
-            project_path=project_path, user_path=user_path, user_scoped_keys=user_keys,
-        )
-
-    def _save_keys(self, settings: "BaseSettings", keys: set[str]) -> SettingsSaveResult:
-        """Write only ``keys``: project-settable ones merged into the project
-        file, the rest updated in (or, back at default, removed from) the
-        user file. Nothing else is touched (the project file's
-        ``PROJECT_PRESERVED_KEYS`` sections are kept), and ``HAND_EDITED_KEYS``
-        (and their ``field.entry`` keys) are never written."""
-        from pydantic_core import PydanticUndefined
-
-        from agentic_cli.file_utils import atomic_write_text
-
+        keys = set(keys) - secret - IDENTITY_FIELDS
         keys = {k for k in keys if k.partition(".")[0] not in HAND_EDITED_KEYS}
-        fields = type(settings).model_fields
         entries: dict[str, set[str]] = {}
         for key in keys:
             field, dot, entry = key.partition(".")
@@ -345,41 +288,28 @@ class SettingsPersistence:
             project_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(project_path, json.dumps(merged, indent=2, default=str))
 
-        user_updates: dict[str, Any] = {}
-        user_removals: set[str] = set()
-        for key in keys - PROJECT_SETTABLE_KEYS:
-            default = fields[key].get_default(call_default_factory=True)
-            if default is not PydanticUndefined and getattr(settings, key) == default:
-                user_removals.add(key)
-            else:
-                user_updates[key] = dump[key]
-        user_path, user_keys = self._merge_user(user_updates, user_removals)
+        user_updates = {k: dump[k] for k in sorted(keys - PROJECT_SETTABLE_KEYS)}
+        user_path, user_scoped = self._merge_user(user_updates) if user_updates else (None, ())
         return SettingsSaveResult(
             project_path=project_path,
             user_path=user_path,
-            user_scoped_keys=user_keys,
+            user_scoped_keys=user_scoped,
             project_keys=(*project_updates, *entry_fields),
         )
 
-    def _merge_user(
-        self, updates: dict[str, Any], removals: set[str]
-    ) -> tuple[Path | None, tuple[str, ...]]:
+    def _merge_user(self, updates: dict[str, Any]) -> tuple[Path | None, tuple[str, ...]]:
         """Merge-write the user file; never clobber keys it does not manage
         (e.g. hand-stored API keys). Returns (path written or None, keys)."""
         from agentic_cli.file_utils import atomic_write_text
 
         user_path = self.user_config_path
         existing = self._read_object(user_path)
-        merged = dict(existing)
-        removed = tuple(k for k in sorted(removals) if k in existing)
-        for key in removed:
-            del merged[key]
-        merged.update(updates)
+        merged = {**existing, **updates}
         if merged == existing:
             return None, ()
         user_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(user_path, json.dumps(merged, indent=2, default=str))
-        return user_path, tuple(sorted(updates)) + removed
+        return user_path, tuple(sorted(updates))
 
     @staticmethod
     def _read_object(path: Path) -> dict[str, Any]:
@@ -391,61 +321,6 @@ class SettingsPersistence:
         if not isinstance(data, dict):
             raise ValueError(f"Settings file is not a JSON object: {path}")
         return data
-
-    def _split_user_scoped(
-        self, settings: "BaseSettings", data: dict[str, Any]
-    ) -> tuple[dict[str, Any], set[str]]:
-        """Partition non-allowlisted dumped fields by deviation from default.
-
-        Returns (updates, removals): ``updates`` maps user-scoped keys whose
-        live value differs from the settings class default to their dumped
-        value; ``removals`` holds user-scoped keys back at their default,
-        whose stale entries should leave the user file. Comparison uses the
-        instance's own class fields, so subclass default overrides are
-        respected.
-        """
-        from pydantic_core import PydanticUndefined
-
-        updates: dict[str, Any] = {}
-        removals: set[str] = set()
-        fields = type(settings).model_fields
-        for key, value in data.items():
-            if key in PROJECT_SETTABLE_KEYS:
-                continue
-            field = fields.get(key)
-            if field is None:
-                continue
-            default = field.get_default(call_default_factory=True)
-            if default is not PydanticUndefined and getattr(settings, key) == default:
-                removals.add(key)
-            else:
-                updates[key] = value
-        return updates, removals
-
-    def load(self, path: Path | None = None) -> dict[str, Any]:
-        """Load settings from JSON config file.
-
-        If no path is specified, tries project config first, then user config.
-
-        Args:
-            path: Optional custom path (if not specified, uses fallback order)
-
-        Returns:
-            Dictionary of settings from file, or empty dict if no file exists
-        """
-        if path is not None:
-            if not path.exists():
-                return {}
-            with open(path) as f:
-                return json.load(f)
-
-        # Try project config first, then user config
-        for config_path in [self.project_config_path, self.user_config_path]:
-            if config_path.exists():
-                with open(config_path) as f:
-                    return json.load(f)
-
-        return {}
 
     def _serialize_paths(self, data: dict[str, Any]) -> dict[str, Any]:
         """Convert Path objects to strings recursively.

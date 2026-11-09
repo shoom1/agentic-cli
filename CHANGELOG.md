@@ -726,8 +726,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them; they are the only user-scoped keys `/settings` may show, and it shows
   them only when an app lists them in `get_ui_setting_keys()`
   (`return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]`;
-  `research_demo` does). A Save writes them to the user file, and one set back
-  to its default leaves it. Both switch while the app runs:
+  `research_demo` does). A Save writes the value picked to the user file. Both
+  switch while the app runs:
   - A new theme applies at once: `apply_settings` calls
     `session.set_theme(get_theme(ui_theme), repaint=True)` after its report
     lines, and not for a change it rolls back. The repaint clears the screen
@@ -1049,6 +1049,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **`/models` notes a thinking model that does not send its reasoning as
+  text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
+  or the one an OpenRouter listing gives a model that reasons) said whether it
+  sends its reasoning as text, and nothing read it. The Thinking column now
+  adds `· no reasoning text` to a model that thinks and does not (`on/off · no
+  reasoning text`); the shipped table says almost every thinking model does,
+  so only the exception is noted. It still changes nothing else: the adapters
+  keep reasoning text whenever a server sends it.
 
 - **Memories are markdown files, in a user scope and a project scope.** The
   memory store kept one `memories.json` per app and OS user, searched it by
@@ -1751,6 +1760,27 @@ further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
 
+- **`SettingsPersistence.save()` without `keys=`, its `path=` dump,
+  `SettingsPersistence.load()`, the default `app_name`, and
+  `BaseCLIApp.save_settings()` without `keys`.** Settings are read by
+  constructing the settings class and written by `save(settings, keys=...)`,
+  which `/settings` calls through `save_settings(keys=...)`: `keys` is now
+  required (and `SettingsPersistence(app_name)` needs its app name: the
+  default, `"agentic"`, was no app's). The keyless save wrote every
+  allowlisted field's live value, so a value from the environment or the
+  app's defaults was frozen into `./.{app_name}/settings.json`, and a
+  user-scoped field set to `None` never left the user file; the `path=` dump
+  wrote the whole object to any file; `load()` returned the project file if
+  there was one, else the user file, raw (no environment, no merge, no
+  allowlist), and nothing called it. Name the fields the app changed:
+  `keys=` of every field would freeze the environment's values and the whole
+  `model_roles` dict, the very thing the removal ends. `save_settings` runs the
+  file writes on a worker thread, off the event loop, and `/settings` no longer
+  falls back on `save_settings()` for an override that cannot take `keys`: it
+  reports "Settings applied but not saved: …". `save(settings, keys=None)`,
+  which an override with the old `keys=None` default passes on, is a
+  `TypeError` that says the keys to write are required.
+
 - **`WorkflowEvent.tool_result(duration_ms=)` and `ExecutionTimeoutError`.** No
   backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
   showed: the parameter, the `duration_ms` metadata key it set and the suffix
@@ -2008,6 +2038,19 @@ step; each entry says what to use instead.
   `yaml.YAMLError`, so an app that caught `ValueError` crashed. Each is now a
   `ValueError` naming the file, and for an `instruction_file`, the agent too.
   A missing YAML file itself is still `FileNotFoundError`.
+
+- **A pick of the class default in `/settings` survives an app that starts
+  elsewhere.** "Back at default" was judged against the settings class's
+  default, so for an app that sets its own default (in `model_post_init`, the
+  pattern `examples/research_demo` teaches, or in a validator, or by an env
+  file below the user file), `ui_theme="light"` say, a user who picked the
+  class default (`dark`) had the key removed from the user file: the dialog
+  said "Settings saved" and the next start showed `light` again. A save now
+  writes what the user picked, equal to the class default or not, and removes
+  no key (a settings class cannot tell what its app starts on without the user
+  file); to follow the app again, delete the key from `~/.{app_name}/settings.json`.
+  A save of project keys alone no longer reads the user file, so a malformed
+  one does not make the dialog report "not saved" for keys it saved.
 
 - **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
   tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,

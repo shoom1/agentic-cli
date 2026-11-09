@@ -825,28 +825,30 @@ class BaseCLIApp:
         meaning = resolved.thinking.label if resolved.thinking else "ignored (no thinking knob)"
         return f"{effort} → {resolved.ref}: {meaning}"
 
-    async def save_settings(
-        self, keys: "Iterable[str] | None" = None
-    ) -> "SettingsSaveResult":
-        """Save current settings, split by trust.
+    async def save_settings(self, keys: "Iterable[str]") -> "SettingsSaveResult":
+        """Save the settings ``keys`` name, split by trust.
 
-        ``keys`` restricts the save to those fields (``/settings`` passes the
-        fields the user changed). Without it the whole live settings object is
-        saved, including values that came from the environment.
+        ``/settings`` passes the fields the user changed: only those are
+        written, as picked (see ``SettingsPersistence.save``).
 
         Allowlisted keys go to the project config
-        (./.{app_name}/settings.json). User-scoped keys differing from their
-        defaults go to the user config (~/.{app_name}/settings.json), where
-        the loader trusts them — the project file may only carry allowlisted
-        keys since P0-1. Secrets (API keys) are never saved.
+        (./.{app_name}/settings.json). User-scoped keys go to the user config
+        (~/.{app_name}/settings.json), where the loader trusts them — the
+        project file may only carry allowlisted keys since P0-1. Secrets
+        (API keys) are never saved. The files are read and written on a
+        worker thread, off the event loop.
 
         Returns:
             SettingsSaveResult with the written path(s)
+
+        Raises:
+            TypeError: ``keys`` is None (an override that passes its own
+                ``keys=None`` default on has no keys to write).
         """
         from agentic_cli.settings_persistence import SettingsPersistence
 
         persistence = SettingsPersistence(self._settings.app_name)
-        return persistence.save(self._settings, keys=keys)
+        return await asyncio.to_thread(persistence.save, self._settings, keys=keys)
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
