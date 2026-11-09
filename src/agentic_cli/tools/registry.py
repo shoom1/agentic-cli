@@ -190,7 +190,7 @@ def _validate_requires(requires: Any, tool_name: str) -> tuple[str, ...]:
     A key the manager cannot construct would be a silent no-op: nothing would
     be created and the tool would fail at call time with a missing service. The
     declarable set is therefore exactly what
-    ``_ensure_managers_initialized`` knows how to build.
+    ``BaseWorkflowManager._build_services_into`` knows how to build.
     """
     if requires is None:
         return ()

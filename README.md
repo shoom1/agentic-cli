@@ -1341,12 +1341,14 @@ word counting to a researcher whose tool is named in its YAML.
 ### Turn and lifecycle contracts
 
 A workflow manager runs **one turn at a time**: `process()` and
-`resume_with_job_result()` serialize on a turn lock, and
-`initialize_services()`/`reinitialize()`/`cleanup()` take it too, so the backend
-is never torn down mid-stream. Admission also re-verifies the backend is live
-after acquiring the lock, so a turn queued behind a cleanup reinitializes (or
-fails cleanly) instead of running against released resources. Run separate
-managers for genuine parallelism.
+`resume_with_job_result()` serialize on a turn lock, and `reinitialize()` and
+`cleanup()` take it too (after the lifecycle lock they share with
+`initialize_services()`), so the backend is never torn down mid-stream.
+`initialize_services()` takes only the lifecycle lock: a turn initializes
+before it takes the turn lock, which keeps the two from deadlocking. Admission
+also re-verifies the backend is live after acquiring the turn lock, so a turn
+queued behind a cleanup reinitializes (or fails cleanly) instead of running
+against released resources. Run separate managers for genuine parallelism.
 
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
 `FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a

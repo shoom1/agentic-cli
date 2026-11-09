@@ -40,6 +40,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_content_note
 from agentic_cli.workflow.sessions import (
@@ -169,23 +170,77 @@ class BaseWorkflowManager(ABC):
         genuine parallelism. (The HITL input callback is context-local, so it
         does not depend on that serialization; see ``set_input_callback``.)
 
-        Lifecycle mutation (``initialize_services``/``reinitialize``/
-        ``cleanup``) additionally takes the turn lock, so the backend is never
-        torn down under a running generator. Both locks are released on
-        cancellation. The active session/user identity remains a ContextVar,
-        so it stays correct for nested and task-spawned work.
+        ``reinitialize`` and ``cleanup`` take the lifecycle lock and then the
+        turn lock, so the backend is never torn down under a running
+        generator. ``initialize_services`` takes only the lifecycle lock: a
+        turn initializes before it takes the turn lock (``_turn_admission``),
+        which is what keeps the two from deadlocking. Both locks are released
+        on cancellation. The active session/user identity remains a
+        ContextVar, so it stays correct for nested and task-spawned work.
 
     Example:
-        class CustomWorkflowManager(BaseWorkflowManager):
-            async def initialize_services(self) -> None:
-                # Setup custom backend
-                pass
+        A minimal backend. ``initialize_services`` is the base's: it calls the
+        backend's ``_validate_agent_graph`` (the base's validates nothing and
+        leaves ``root_agent_name`` None), resolves the models, builds the
+        services the tools declare and then calls ``_do_initialize``. A turn
+        passes each event through ``_apply_event_hook``, which is the
+        constructor's ``on_event``. The backend takes both locks to tear down,
+        and resets what it set up in ``_release_resources`` (the base closes
+        the catalog and the services only)::
 
-            async def process(self, message, user_id, session_id=None):
-                # Process through custom backend
-                async for event in self._process_internal():
-                    yield event
+            from typing import Callable
+
+            from agentic_cli import BaseWorkflowManager, WorkflowEvent
+            from agentic_cli.workflow.config import AgentGraph, validate_agent_graph
+
+            class CustomWorkflowManager(BaseWorkflowManager):
+                @property
+                def backend_type(self) -> str:
+                    return "custom"
+
+                def _get_state_tools(self) -> list[Callable]:
+                    return []  # the backend's plan and task tools
+
+                def _validate_agent_graph(self) -> AgentGraph:
+                    return validate_agent_graph(self._agent_configs, backend=self.backend_type)
+
+                async def _do_initialize(self) -> None:
+                    ...  # build the backend's agents or graph
+
+                async def process(self, message, user_id, session_id=None):
+                    async with self._turn_admission():
+                        with self._workflow_context(session_id=session_id, user_id=user_id):
+                            event = WorkflowEvent.text(f"echo: {message}", session_id)
+                            event = self._apply_event_hook(event)  # None: dropped
+                            if event is not None:
+                                yield event
+
+                async def reinitialize(self, model=None, preserve_sessions=True):
+                    async with self._lifecycle_lock:
+                        async with self._turn_lock:
+                            with self._carrying_services(preserve_sessions):
+                                await self._release_resources()
+                                self._reset_model(model)
+                                await self._initialize_locked()
+
+                async def cleanup(self) -> None:
+                    async with self._lifecycle_lock:
+                        async with self._turn_lock:
+                            await self._release_resources()
+
+                async def _release_resources(self) -> None:
+                    self._initialized = False
+                    self._budgets = {}
+                    self._index_snapshots.clear()
+                    await super()._release_resources()
     """
+
+    #: The conversation a call without a session id belongs to
+    #: (``session_ref``): ``load_session`` adopts the one a resume names (on
+    #: the instance), and the CLI's /status shows it. A class attribute, so a
+    #: backend that provides its own (set before or after the base constructor,
+    #: a class default or a property) is never overwritten by the base.
+    session_id: str = "default_session"
 
     def __init__(
         self,
@@ -200,7 +255,14 @@ class BaseWorkflowManager(ABC):
         Args:
             agent_configs: List of agent configurations defining the workflow.
             settings: Application settings (resolved via get_settings() if None).
-            app_name: Application name for services.
+            app_name: The name conversations are kept under: ``app_name``
+                returns it and ``session_ref`` puts it in every conversation's
+                identity (the backends' session stores and checkpoints key by
+                it), and an OpenRouter provider is told it (its HTTP-Referer
+                and X-Title headers). Defaults to ``settings.app_name``. What
+                the app keeps on disk and builds for the tools (the jobs
+                folder, tool outputs, the permission context) is named by
+                ``settings.app_name``, whatever this is.
             model: This manager's default model, as a ``provider:model``
                 reference or a model id (never a role). It takes the
                 ``default`` role for this manager only; without it, the
@@ -219,8 +281,9 @@ class BaseWorkflowManager(ABC):
         # _lifecycle_lock serializes initialize/reinitialize/cleanup: background
         # init and a first user message may call them concurrently, and the
         # _initialized guard alone is check-then-act.
-        # _turn_lock serializes turns, and is taken by lifecycle mutation so it
-        # cannot tear the backend down under a running generator.
+        # _turn_lock serializes turns, and is taken by reinitialize and cleanup
+        # (after the lifecycle lock) so they cannot tear the backend down under
+        # a running generator.
         # Lock order is lifecycle → turn: a turn releases the lifecycle lock
         # (inside _ensure_initialized) *before* taking the turn lock, so the
         # two can never deadlock.
@@ -265,6 +328,13 @@ class BaseWorkflowManager(ABC):
         self._carried_service_keys: frozenset[str] = frozenset()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
+        # What became of the turns' tool calls: a cancelled turn answers the
+        # ones it leaves open from it (workflow/interrupts.py). A question a
+        # tool asks marks its call as waiting at the prompt (request_user_input).
+        # A backend that made its own before this constructor (or provides one
+        # on its class) keeps it.
+        if "_open_calls" not in vars(self) and not hasattr(type(self), "_open_calls"):
+            self._open_calls = OpenCalls()
         # The memory index each conversation's main agent gets (spec §11.1):
         # taken once, so the prompt prefix stays cached.
         self._index_snapshots: dict[SessionRef, str] = {}
@@ -577,9 +647,12 @@ class BaseWorkflowManager(ABC):
     def _ensure_managers_initialized(self) -> None:
         """Create and publish the services detected from tool metadata.
 
-        Synchronous convenience wrapper around
-        :meth:`_build_services`/:meth:`_publish_services`; initialization uses
-        the transactional path in :meth:`_construct_services` instead.
+        A helper for tests and scripts that need the services without
+        initializing: no initialization path calls it, so stubbing it changes
+        nothing there (``initialize_services`` builds them through
+        :meth:`_construct_services`, off the event loop and transactionally).
+        It is synchronous and blocks on the constructors, so it must not be
+        called on the event loop.
         """
         self._publish_services(self._build_services(frozenset(self._services)))
 
@@ -744,8 +817,13 @@ class BaseWorkflowManager(ABC):
         text, the knowledge base's content), and this is the backstop.
 
         Args:
-            content: The content to summarize (included in prompt by caller).
-            prompt: The full summarization prompt.
+            content: The text being summarized. Not used here: ``prompt``
+                already holds it (every caller builds the prompt around it),
+                so sending both would send the text twice. It is part of the
+                summarizer protocol (the knowledge base's ``Summarizer``,
+                web_fetch's ``LLMSummarizer``) for implementations that need
+                the text apart from the prompt.
+            prompt: The full summarization prompt, which is what is sent.
         Returns:
             Summarized text response.
         """
@@ -1488,11 +1566,16 @@ class BaseWorkflowManager(ABC):
         )
 
     async def _release_resources(self) -> None:
-        """Release everything this manager owns. Idempotent, never raises.
+        """Close the model catalog and the services. Idempotent, never raises.
 
-        Backends override to add their own resources (ADK closes the session
-        service); the base releases the model catalog and the service
-        registry.
+        The base body releases only what the base built: the catalog (its
+        background refresh) and the services, except those a reinitialize is
+        carrying (:meth:`_carrying_services`). It leaves ``_initialized``,
+        ``_budgets`` and ``_index_snapshots`` as they are, and a backend's own
+        resources are its own: an override resets them (ADK's and Deep Agents'
+        do, and neither calls this body; the class docstring's example calls
+        it). ``_initialize_locked`` also calls it to roll back a failed
+        attempt.
         """
         await self._close_catalog()
         self._cleanup_managers()
@@ -1609,10 +1692,9 @@ class BaseWorkflowManager(ABC):
 
         # A call cancelled at its question was not run (workflow/interrupts.py).
         call = get_active_tool_call()
-        open_calls = getattr(self, "_open_calls", None)
-        if call is None or open_calls is None:
+        if call is None:
             return await callback(request)
-        with open_calls.asking(call.call_id):
+        with self._open_calls.asking(call.call_id):
             return await callback(request)
 
     # Async context manager support
@@ -1693,7 +1775,7 @@ class BaseWorkflowManager(ABC):
         return SessionRef(
             app_name=self.app_name,
             user_id=user_id or self._settings.default_user,
-            session_id=session_id or getattr(self, "session_id", "default_session"),
+            session_id=session_id or self.session_id,
         )
 
     async def save_session(
@@ -1734,8 +1816,7 @@ class BaseWorkflowManager(ABC):
                 ``settings.default_user``).
         """
         if not self.supports_sessions:
-            if hasattr(self, "session_id"):
-                self.session_id = session_id
+            self.session_id = session_id
             # A resumed conversation takes a new memory index (spec §11.1).
             self._forget_memory_index(self.session_ref(session_id, user_id))
             logger.info(
@@ -1747,8 +1828,7 @@ class BaseWorkflowManager(ABC):
             exists = await self.session_exists(session_id)
         else:
             exists = await self.session_exists(session_id, user_id=user_id)
-        if hasattr(self, "session_id"):
-            self.session_id = session_id
+        self.session_id = session_id
         self._forget_memory_index(self.session_ref(session_id, user_id))
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         return exists

@@ -77,7 +77,6 @@ from agentic_cli.workflow.deepagents.summarization import (
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
-from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
@@ -137,8 +136,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         Args:
             agent_configs: The agents; the root is the one nobody delegates to.
             settings: Application settings (``get_settings()`` if not provided).
-            app_name: Application name for sessions (``settings.app_name`` if
-                not provided).
+            app_name: Application name for sessions, and what an OpenRouter
+                provider is told (``settings.app_name`` if not provided).
             model: This manager's default model, a ``provider:model`` reference
                 or a model id (see ``BaseWorkflowManager``).
             on_event: Optional hook to transform or drop events before they
@@ -151,7 +150,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             model=model,
             on_event=on_event,
         )
-        self.session_id = "default_session"
 
         # The checkpointer, and what owns its connection and the session
         # index's (an exit stack; the index's store is the session hooks').
@@ -171,9 +169,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         # The raw LLM log, made on the first turn that logs (it creates the file).
         self._llm_log: LLMLogWriter | None = None
-        # What became of the turns' tool calls: the next turn answers those a
-        # cancel left open from it (workflow/interrupts.py).
-        self._open_calls = OpenCalls()
 
         # Notices for the next turn to open with, as recoverable ERROR events
         # (an MCP server that could not start, an MCP tool skipped).

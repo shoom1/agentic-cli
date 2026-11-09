@@ -79,7 +79,6 @@ class _AdmissionHarness:
         self.manager._do_initialize = _do_initialize
         self.manager._get_or_create_session = _get_or_create
         self.manager._run_and_stream = _stream
-        self.manager._ensure_managers_initialized = lambda: None
         self.manager._validate_agent_graph = lambda: None
 
     @staticmethod
@@ -125,7 +124,6 @@ class _DeepAgentsAdmissionHarness:
 
         self.manager._do_initialize = _do_initialize
         self.manager._run_turn = _run_turn
-        self.manager._ensure_managers_initialized = lambda: None
 
     @staticmethod
     async def _exists(ref) -> bool:

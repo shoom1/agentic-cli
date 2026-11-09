@@ -30,7 +30,6 @@ from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.context import CompactResult, context_budget
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
 from agentic_cli.workflow.adk.compaction import (
@@ -205,7 +204,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             agent_configs: List of agent configurations. First agent with sub_agents
                           is treated as the root/coordinator agent.
             settings: Application settings (uses get_settings() if not provided)
-            app_name: Application name for services (uses settings.app_name if not provided)
+            app_name: Application name for sessions: ADK's app name and the key
+                of every conversation, and what an OpenRouter provider is told
+                (``settings.app_name`` if not provided).
             model: This manager's default model, a ``provider:model`` reference
                 or a model id (see ``BaseWorkflowManager``)
             on_event: Optional hook to transform/filter events before yielding
@@ -222,7 +223,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
         _check_app_name(self.app_name)
-        self.session_id = "default_session"
         self._adk_config_path = adk_config_path
 
         self._session_service: BaseSessionService | None = None
@@ -242,9 +242,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # reference to exist before process() is called)
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
         self._task_progress_plugin: "TaskProgressPlugin | None" = None
-        # What became of the turns' tool calls: a cancelled turn answers the
-        # ones it leaves open from it (workflow/interrupts.py).
-        self._open_calls = OpenCalls()
 
         # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
         # configs) to the direct-API DirectAnthropicLlm instead of Vertex Claude.

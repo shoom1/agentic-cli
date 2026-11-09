@@ -2226,6 +2226,35 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **The documented lifecycle contract says what the code does.** The README's
+  "Turn and lifecycle contracts", `CLAUDE.md` and `BaseWorkflowManager`'s
+  docstring said `initialize_services()` takes the turn lock. It takes only the
+  lifecycle lock (a turn initializes before it takes the turn lock);
+  `reinitialize()` and `cleanup()` take both. The docstrings of the
+  constructor's `app_name` (it names the conversations; the services use
+  `settings.app_name`), `summarize` (`content` is not sent, the prompt holds
+  it) and `_release_resources` (it closes the catalog and the services, and
+  leaves a backend's own state to its override) are corrected too.
+
+- **The example in `BaseWorkflowManager`'s docstring is a backend that runs.**
+  It left out five abstract members (`backend_type`, `_get_state_tools`,
+  `_do_initialize`, `reinitialize`, `cleanup`), replaced `initialize_services`
+  with a no-op and called a `_process_internal` that does not exist, so the
+  class could not be instantiated, and a backend copied from it would have
+  dropped the constructor's `on_event` hook. It is now a complete minimal
+  backend (it validates the agent graph and passes its events through the
+  hook), and a test builds the class from the docstring and runs it through a
+  turn, `cleanup`, `reinitialize` and a hook that drops events.
+
+- **A backend of your own adopts the conversation's id.** `load_session`
+  adopted the id only when the subclass had set `session_id` itself (the three
+  shipped backends do). For a `BaseWorkflowManager` backend that had not, a
+  call that left out the session id stayed on `default_session` after
+  `/resume` (the CLI passes the id to every turn, so `/resume` itself worked),
+  and `/status` showed "Not available" in place of its Session ID, Services
+  and context rows. The base now declares `session_id` as a class default
+  (`"default_session"`), which a backend that sets or provides its own keeps.
+
 - **A turn closes its event stream before it returns.** When a turn
   stopped reading the workflow's events early (an event handler that
   raised, or Ctrl+C while one waited), the event generator was left to the
