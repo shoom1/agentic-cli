@@ -7,6 +7,8 @@ manager builds a DatabaseSessionService (durable) vs InMemory (ephemeral).
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,17 @@ from agentic_cli.config import BaseSettings
 
 def _settings(tmp_path: Path, **over) -> BaseSettings:
     return BaseSettings(workspace_dir=tmp_path, **over)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+@pytest.fixture
+def umask_022():
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
 
 
 @pytest.fixture
@@ -108,6 +121,30 @@ class TestAdkSessionServiceSelection:
         svc = mgr._make_session_service()
         assert isinstance(svc, DatabaseSessionService)
         assert (tmp_path / "sessions").is_dir()
+
+    async def test_the_database_is_owner_only_in_an_owner_only_folder(
+        self, tmp_path: Path, umask_022
+    ):
+        """It holds every word of a conversation, as the raw LLM log does (0600)."""
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        svc = mgr._make_session_service()
+        await svc.create_session(app_name="app", user_id="u", session_id="s")
+
+        db = tmp_path / "sessions" / "sessions.db"
+        assert (oct(_mode(db)), oct(_mode(db.parent))) == (oct(0o600), oct(0o700))
+
+    async def test_a_database_from_before_is_tightened_when_opened(
+        self, tmp_path: Path, umask_022
+    ):
+        (tmp_path / "sessions").mkdir()
+        db = tmp_path / "sessions" / "sessions.db"
+        db.write_bytes(b"")
+        db.chmod(0o644)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        mgr._make_session_service()
+
+        assert oct(_mode(db)) == oct(0o600)
 
 
 class TestAdkNativeSessions:

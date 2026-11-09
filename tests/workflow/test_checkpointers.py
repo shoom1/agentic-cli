@@ -12,7 +12,9 @@ ADK does.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import sys
 import types
 from pathlib import Path
@@ -47,6 +49,10 @@ def isolated(tmp_path, monkeypatch) -> Path:
 
 def _settings(root: Path, **kwargs) -> BaseSettings:
     return BaseSettings(workspace_dir=root / "ws", **kwargs)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(os.lstat(path).st_mode)
 
 
 def _tables(path: Path) -> set[str]:
@@ -393,6 +399,37 @@ class TestDeepAgentsSqlitePath:
 
         assert path == target
         assert path.parent.is_dir()
+
+    async def test_the_file_is_owner_only_in_an_owner_only_folder(self, isolated):
+        """It holds every word of a conversation, as ADK's ``sessions.db`` and
+        the raw LLM log do (0600)."""
+        old = os.umask(0o022)
+        try:
+            path = deepagents_sqlite_path(_settings(isolated))
+            saver, cm = await open_checkpointer("sqlite", sqlite_path=path)
+            await cm.__aexit__(None, None, None)
+        finally:
+            os.umask(old)
+
+        assert (oct(_mode(path)), oct(_mode(path.parent))) == (oct(0o600), oct(0o700))
+        assert "checkpoints" in _tables(path)
+
+    def test_a_file_from_before_is_tightened(self, isolated):
+        settings = _settings(isolated)
+        settings.sessions_dir.mkdir(parents=True)
+        old = settings.sessions_dir / "checkpoints.db"
+        old.write_bytes(b"")
+        old.chmod(0o644)
+
+        path = deepagents_sqlite_path(settings)
+
+        assert oct(_mode(path)) == oct(0o600)
+
+    def test_an_in_memory_database_names_no_file(self, isolated):
+        path = deepagents_sqlite_path(_settings(isolated, sqlite_uri="sqlite:///:memory:"))
+
+        assert str(path) == ":memory:"
+        assert not (isolated / ":memory:").exists()
 
 
 class TestLangGraphCreateCheckpointer:

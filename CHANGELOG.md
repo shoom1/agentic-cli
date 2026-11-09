@@ -797,13 +797,14 @@ the start of the entry's title.
     `(app_name, user_id, session_id)`, so two users, or two apps sharing a
     database, never share a conversation through one session id.
     `session_store` picks the checkpointer: sqlite (the default) in
-    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db`
-    (`sqlite_uri` may point ADK and Deep Agents at one file: their tables do
-    not collide), Postgres at `postgres_uri`, or memory. Every session hook
-    takes `user_id`. `list_sessions` gives each conversation's row
-    (`SessionInfo`, below) from its newest checkpoint, `delete_session` also
-    removes the sub-agents' checkpoints and returns False for an unknown id,
-    and `recent_messages` is the user's and the assistant's text.
+    `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db` and,
+    as it is, owner-only (`sqlite_uri` may point ADK and Deep Agents at one
+    file: their tables do not collide), Postgres at `postgres_uri`, or
+    memory. Every session hook takes `user_id`. `list_sessions` gives each
+    conversation's row (`SessionInfo`, below) from its newest checkpoint,
+    `delete_session` also removes the sub-agents' checkpoints and returns
+    False for an unknown id, and `recent_messages` is the user's and the
+    assistant's text.
   - **Lifecycle, as on ADK** (the base's: see Changed). A cleanup or a model
     switch waits for the running turn. A failed initialization closes the
     checkpointer it opened. A model switch
@@ -2356,6 +2357,17 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **The ADK conversation store is owner-only.** `sessions.db` (the default
+  `session_store`, sqlite) was created with the process's umask: 0644 in a
+  0755 folder under the usual 022, so another account on the machine could
+  read every conversation, though the raw LLM log of the same words is
+  0600. The file is now created 0600 before the database opens it, in a
+  folder created 0700 (a folder that exists, which `sqlite_uri` may name,
+  is left as it is), and a file from an earlier version is tightened to
+  0600 when it is opened (`workflow.checkpointers.private_sqlite_file`, over
+  `file_utils.make_private_file`; a symlink is left alone). Deep Agents'
+  `checkpoints.db` is made the same way.
 
 - **On ADK, an MCP tool's error result is a failed tool call.** A result
   the server marks `isError` was a `TOOL_RESULT` with `success=True`, shown

@@ -205,6 +205,42 @@ def copy_regular_file_no_follow(
         os.close(fd)
 
 
+def make_private_file(path: Path) -> None:
+    """Make ``path`` an owner-only file (0600) before a library opens it.
+
+    For a file that holds what the user said, such as a session database,
+    which its library would create with the process's umask (0644 under
+    022). A missing file is created empty: SQLite takes an empty file for an
+    empty database. A missing directory is created owner-only (0700); one
+    that exists is left as it is, since it may be the user's own. An
+    existing file is tightened, dropping its group and other bits (one an
+    older version created 0644). A symlink, and what it points at, are left
+    alone, as is a file this process may not change.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
+    except OSError:  # a symlink (ELOOP), or nothing this process may open
+        return
+    try:
+        status = os.fstat(fd)
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISREG(status.st_mode) and mode & 0o077:
+            os.fchmod(fd, mode & 0o700)
+    except OSError:  # not this process's file
+        pass
+    finally:
+        os.close(fd)
+
+
 def _open_temp_beside(
     path: Path, *, mode: int = 0o666, dir_fd: int | None = None
 ) -> tuple[int, Path]:

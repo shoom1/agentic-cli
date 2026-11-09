@@ -34,6 +34,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
+from agentic_cli.file_utils import make_private_file
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -275,14 +276,30 @@ def sqlite_file(value: str) -> str:
     return os.path.expanduser(value)
 
 
+def private_sqlite_file(path: str | Path) -> None:
+    """Make the sqlite database file ``path`` names owner-only before it is opened.
+
+    The conversation store holds every word of every conversation, as the
+    raw LLM log does, so it is 0600 in a directory created 0700
+    (``file_utils.make_private_file``): its library would create it with the
+    process's umask. A file from an older version is tightened as it is
+    opened. ADK's ``sessions.db`` and Deep Agents' ``checkpoints.db`` both
+    come through here. ``:memory:`` names no file.
+    """
+    if str(path) in ("", ":memory:"):
+        return
+    make_private_file(Path(path))
+
+
 def deepagents_sqlite_path(settings: Any) -> Path:
     """The Deep Agents backend's sqlite checkpoint file.
 
     ``sqlite_uri``'s file when it is set (the file ADK uses too), else
     ``{workspace}/sessions/checkpoints.db``, next to ADK's ``sessions.db``.
-    The file's directory is created.
+    The file is made owner-only (``private_sqlite_file``), its directory
+    created if missing.
     """
     uri = getattr(settings, "sqlite_uri", None)
     path = Path(sqlite_file(uri)) if uri else settings.sessions_dir / "checkpoints.db"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_sqlite_file(path)
     return path
