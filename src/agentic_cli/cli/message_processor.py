@@ -710,14 +710,18 @@ class MessageProcessor:
 
                 # Consume the event stream in a task of its own. Awaiting it
                 # passes a cancel of this coroutine (Ctrl+C) on to it, and
-                # returns once it has unwound.
+                # returns once it has unwound. The stream is closed in that
+                # task however it ends (a handler that raises, a cancel while
+                # one waits): left to the loop's finalizer, it would reset
+                # the turn's ContextVars from another context, which fails.
                 async def _consume() -> None:
-                    async for event in source_factory(workflow):
-                        handler = dispatch.get(event.type)
-                        if handler is not None:
-                            await handler(
-                                self, event, state, ui, settings, workflow
-                            )
+                    async with aclosing(source_factory(workflow)) as events:
+                        async for event in events:
+                            handler = dispatch.get(event.type)
+                            if handler is not None:
+                                await handler(
+                                    self, event, state, ui, settings, workflow
+                                )
 
                 proc_task = asyncio.create_task(_consume())
                 await proc_task

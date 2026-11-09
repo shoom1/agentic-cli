@@ -2217,6 +2217,15 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A turn closes its event stream before it returns.** When a turn
+  stopped reading the workflow's events early (an event handler that
+  raised, or Ctrl+C while one waited), the event generator was left to the
+  event loop's finalizer, which closed it from another context: resetting
+  the turn's context variables failed, and the loop logged "ValueError:
+  <Token …> was created in a different Context". `MessageProcessor` now
+  closes the stream in the turn's own task (`contextlib.aclosing`), for
+  every turn: a message, a job's resume and `/compact`.
+
 - **A run whose workflow did not start says how to go on.** Starting a new
   conversation, it warned "Cannot adopt session — workflow not
   initialized."; it now says "The workflow did not start. Fix it with
