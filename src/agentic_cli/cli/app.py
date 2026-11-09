@@ -10,6 +10,7 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
@@ -615,6 +616,11 @@ class BaseCLIApp:
     #: The status bar's job monitor while ``run()`` runs (None before, and
     #: for an app built with ``__new__``).
     _job_monitor: "JobMonitor | None" = None
+
+    #: The lock on the conversation ``--continue``/``--resume`` chose, taken
+    #: before the prompt and kept by the switch to it once the prompt is up
+    #: (``_open_on_startup``); None otherwise.
+    _pending_hold: Hold | None = None
 
     def __init__(
         self,
@@ -1700,13 +1706,19 @@ class BaseCLIApp:
 
     async def _resume(self, session_id: str) -> bool:
         """``resume_session`` without its "Operation cancelled..." line: at
-        startup (``_open_on_startup``) a Ctrl+C ends the app, not the switch.
+        startup (``_open_on_startup``, which holds the turn lock) a Ctrl+C
+        ends the app, not the switch. The lock the start took on
+        ``session_id`` before the prompt is the one the switch keeps.
 
         Its finished jobs are named, not run: this runs outside the input
         handler, where Ctrl+C cannot stop a turn. They are told at the first
         turn boundary (``job_auto_resume``) or by ``/jobs resume``.
         """
-        opened = await self._open_conversation(session_id)
+        hold, self._pending_hold = self._pending_hold, None
+        if hold is not None and hold.session_id != session_id:
+            self._conversation.abandon(hold)
+            hold = None
+        opened = await self._open(session_id, hold)
         if opened:
             await self._name_its_waiting_jobs()
         return opened
@@ -1817,19 +1829,26 @@ class BaseCLIApp:
         show_replay(self.session, replay)
         return True
 
-    def _switch_parts(self) -> SwitchParts:
-        """What a switch acts on besides the conversation, as the app has it now."""
+    def _switch_parts(self, *, drawn: bool = True) -> SwitchParts:
+        """What a switch acts on besides the conversation, as the app has it now.
+
+        Args:
+            drawn: Draw the status line after the switch (not before the
+                prompt: the start draws it).
+        """
         controller = self._workflow_controller
         self._place()  # known before anything is held (an app built with __new__)
+
+        def status(swapped: bool) -> None:
+            if drawn:  # the trigger as a /settings rebuild shows it; no prompt yet
+                _show_new_context(controller, self.session, swapped=swapped)
+
         return SwitchParts(
             workflow=controller.workflow if controller.is_ready else None,
             processor=self._message_processor,
             tracker=self._usage_tracker,
             propose=self._saving_facts,
-            # The trigger as a /settings rebuild shows it; no prompt yet.
-            status=lambda swapped: _show_new_context(
-                controller, self.session, swapped=swapped
-            ),
+            status=status,
         )
 
     async def pick_session(self) -> str | None:
@@ -1939,7 +1958,12 @@ class BaseCLIApp:
 
         Runs for every startup: a fresh auto-generated id must be adopted too,
         otherwise turns fall back to the manager's ``default_session`` and
-        unnamed runs silently share one conversation. By ``session_start``:
+        unnamed runs silently share one conversation. The run's own
+        conversation is held and loaded through the switch every change of
+        conversation makes (``ConversationCore.switch``), even when the
+        workflow did not start: the turns write to it once ``/settings``
+        fixes the start, so no other process may open it meanwhile. By
+        ``session_start``:
 
         - ``"continue"`` finds the newest stored conversation no other
           process has open (``_newest_free``, among the newest ``PICK_LIMIT``
@@ -1951,6 +1975,11 @@ class BaseCLIApp:
           opens the newest, /resume in the app picks one."), ``exit_status``
           is 1, and False is returned;
         - ``"new"`` starts in the new conversation.
+
+        The conversation ``"continue"`` or ``"resume"`` chose is held from
+        here (another process asking for it is refused), beside the run's
+        own, until the switch to it once the prompt is up keeps it or lets
+        it go.
 
         A workflow that cannot start keeps the prompt, so ``/settings`` can
         fix it, and says how to resume then; a backend without sessions
@@ -1971,7 +2000,7 @@ class BaseCLIApp:
                 "The workflow did not start. Fix it with /settings; "
                 "your next message starts it again.",
             ))
-            return True
+            return await self._adopt_its_own()
 
         workflow = self._workflow_controller.workflow
         if mode != "new" and not getattr(workflow, "supports_sessions", False):
@@ -1991,24 +2020,26 @@ class BaseCLIApp:
                     self.session.add_error(f"No conversation '{target}' found{run}{note}")
                     self.exit_status = 1
                     return False
-                holder = self._hold(target)
-                if holder is not None:
+                taken = self._conversation.acquire(target, self._place())
+                if isinstance(taken, int):
                     self.session.add_error(
-                        f"Conversation '{target}' is open in another process ({holder})."
+                        f"Conversation '{target}' is open in another process ({taken})."
                     )
                     self.exit_status = 1
                     return False
-                self._pending_resume = target
+                self._pending_resume, self._pending_hold = target, taken
             elif mode == "continue":
                 # A listing can read whole sessions (ADK's from before the
                 # title keys): the newest alone, unless it is held.
-                self._pending_resume, passed_over = self._newest_free(
+                self._pending_hold, passed_over = self._newest_free(
                     await workflow.list_sessions(limit=1)
                 )
                 if passed_over:
-                    self._pending_resume, passed_over = self._newest_free(
+                    self._pending_hold, passed_over = self._newest_free(
                         await workflow.list_sessions(limit=PICK_LIMIT)
                     )
+                if self._pending_hold is not None:
+                    self._pending_resume = self._pending_hold.session_id
                 if passed_over:
                     self.session.add_warning(_passed_over_line(
                         passed_over, continuing=self._pending_resume
@@ -2028,42 +2059,54 @@ class BaseCLIApp:
                 f"Could not list the saved conversations: {reason}. Starting a new one."
             )
 
-        if self._pending_resume is None:  # this run's own conversation, held until it leaves
-            holder = self._hold(self._session_id)
-            if holder is not None:
-                self.session.add_error(
-                    f"Conversation '{self._session_id}' is open in another process ({holder})."
-                )
-                self.exit_status = 1
-                return False
+        return await self._adopt_its_own()
+
+    async def _adopt_its_own(self) -> bool:
+        """Hold and load the conversation the run starts in (the switch to it,
+        before the prompt: no memories to propose, no status line yet, which
+        the start draws); False, status 1, when another process has it open
+        (an id given to the constructor)."""
+        session_id = self._session_id
         try:
-            resumed = await workflow.load_session(self._session_id)
+            switched = await self._conversation.switch(
+                session_id, self._switch_parts(drawn=False), propose=False
+            )
         except Exception as error:  # noqa: BLE001 - turns name their conversation anyway
             logger.debug("session_adopt_failed", exc_info=True)
             self.session.add_warning(
                 f"Cannot adopt session — {str(error) or type(error).__name__}"
             )
-            return True
-        if resumed:
-            self.session.add_success(f"Session '{self._session_id}' resumed.")
-        elif self._resume_requested:
+            return True  # held all the same: the switch is made before the load
+        if not switched.made:
+            if self._pending_hold is not None:
+                self._conversation.abandon(self._pending_hold)
+                self._pending_resume = self._pending_hold = None
+            self.session.add_error(
+                f"Conversation '{session_id}' is open in another process ({switched.holder})."
+            )
+            self.exit_status = 1
+            return False
+        if switched.loaded:
+            self.session.add_success(f"Session '{session_id}' resumed.")
+        elif switched.loaded is False and self._resume_requested:
             # An explicit session_id that didn't exist yet: tell the user it's new.
-            self.session.add_message("system", f"New session '{self._session_id}'.")
+            self.session.add_message("system", f"New session '{session_id}'.")
         return True
 
-    def _newest_free(self, rows: "list[SessionInfo]") -> tuple[str | None, list[tuple[str, int]]]:
-        """The newest of ``rows`` no other process has open, now held here.
+    def _newest_free(self, rows: "list[SessionInfo]") -> tuple[Hold | None, list[tuple[str, int]]]:
+        """The newest of ``rows`` no other process has open, now held here
+        (beside the conversation held; the switch to it keeps it or lets it go).
 
         Returns:
-            Its id (None when every one is open elsewhere, or there is none),
+            Its hold (None when every one is open elsewhere, or there is none),
             and the newer ones passed over, each with the process holding it.
         """
         passed_over: list[tuple[str, int]] = []
         for info in rows:
-            holder = self._hold(info.session_id)
-            if holder is None:
-                return info.session_id, passed_over
-            passed_over.append((info.session_id, holder))
+            taken = self._conversation.acquire(info.session_id, self._place())
+            if not isinstance(taken, int):
+                return taken, passed_over
+            passed_over.append((info.session_id, taken))
         return None, passed_over
 
     async def _open_on_startup(self) -> None:
@@ -2075,27 +2118,30 @@ class BaseCLIApp:
         the input handler, so a Ctrl+C here ends the app, as at an idle prompt
         (its resume, cancelled on the way out, says nothing of a cancel). A
         failure is said and logged: the new conversation goes on.
+
+        With a conversation to resume it holds the turn lock from its start,
+        which comes before the prompt can take a line (``run()`` starts it
+        first): a turn typed or pasted ahead waits for the resume and runs in
+        the conversation asked for, not in the run's new one.
         """
-        while not self.session.app.is_running:
-            await asyncio.sleep(0.02)
-        await self._name_waiting_proposals()
-        if self._pending_resume is None:
-            return
         target = self._pending_resume
-        try:
-            if not await self._resume(target):
-                self._hold(self._session_id)  # it stays in its new one: give the target back
-        except Exception as error:  # noqa: BLE001 - the new conversation goes on
-            if self._session_id != target:
-                self._hold(self._session_id)
-            logger.debug("startup_open_failed", session_id=target, exc_info=True)
-            reason = str(error) or type(error).__name__
-            if self._session_id == target:  # opened: the next turn goes there
-                self.session.add_error(
-                    f"Opened '{target}', but could not show where it left off: {reason}"
-                )
-            else:
-                self.session.add_error(f"Could not open '{target}': {reason}")
+        async with self._turn_lock if target is not None else contextlib.nullcontext():
+            while not self.session.app.is_running:
+                await asyncio.sleep(0.02)
+            await self._name_waiting_proposals()
+            if target is None:
+                return
+            try:
+                await self._resume(target)  # one not opened stays in the run's own
+            except Exception as error:  # noqa: BLE001 - the new conversation goes on
+                logger.debug("startup_open_failed", session_id=target, exc_info=True)
+                reason = str(error) or type(error).__name__
+                if self._session_id == target:  # opened: the next turn goes there
+                    self.session.add_error(
+                        f"Opened '{target}', but could not show where it left off: {reason}"
+                    )
+                else:
+                    self.session.add_error(f"Could not open '{target}': {reason}")
 
     def _place(self) -> Place:
         """Where the conversation is kept: its backend and store, as the
@@ -2155,6 +2201,14 @@ class BaseCLIApp:
         """
         return self._conversation.hold(session_id, self._place())
 
+    def _let_go(self) -> None:
+        """At exit: let go of the conversation held, and of one the start held
+        for ``--continue``/``--resume`` and did not open (an exit before it)."""
+        if self._pending_hold is not None:
+            self._conversation.abandon(self._pending_hold)
+            self._pending_hold = None
+        self._conversation.release()
+
     def _resume_hint(self) -> str:
         """The exit line that names how to come back to the current conversation."""
         if self._command:
@@ -2199,6 +2253,7 @@ class BaseCLIApp:
             # of a conversation that is not stored ends here, before the prompt.
             if not await self._adopt_session_on_startup():
                 logger.info("app_start_refused", exit_status=self.exit_status)
+                self._let_go()
                 return
 
             # Register input handler
@@ -2237,7 +2292,7 @@ class BaseCLIApp:
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
-        self._conversation.release()
+        self._let_go()
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,15 @@ from tests.cli.test_compact_and_new import (  # noqa: E402,F401
     project,
     quiet_app,
     said,
+)
+from agentic_cli.cli.session_args import SessionStart  # noqa: E402
+from tests.cli.console_app import ScriptedManager  # noqa: E402
+from tests.cli.test_resume_at_startup import (  # noqa: E402,F401
+    Session,
+    app_with,
+    manager,
+    resumed,
+    store,
 )
 from tests.cli.test_resume_session import Workflow, conversation  # noqa: E402
 
@@ -132,3 +142,91 @@ class TestACtrlCWhileTheTargetIsLookedUpAgain:
         assert [c for c in workflow.calls if c.startswith("load_session")] == [
             "load_session abc", f"load_session {old}",
         ]
+
+
+class TestTheConversationARunStartsIn:
+    """Held from the start, whatever the start does: the turns write to it."""
+
+    @staticmethod
+    def looked_at(app_ref: list, *session_ids: str):
+        """An ``until`` for the session: once the prompt is up (the startup's
+        open done when ``resumed``), who holds each conversation named."""
+        seen: list = []
+
+        def looked(session) -> bool:
+            if not seen:
+                app = app_ref[0]
+                ids = session_ids or (app.session_id,)
+                seen.append([
+                    ConversationLock(app.settings.sessions_dir / "locks").take(
+                        app._conversation_key(session_id)
+                    )
+                    for session_id in ids
+                ])
+            return True
+
+        return looked, seen
+
+    @pytest.mark.parametrize("start", [SessionStart(), SessionStart("resume", "abc")])
+    async def test_it_is_held_when_the_workflow_did_not_start(
+        self, manager, tmp_path, monkeypatch, start
+    ):
+        """The user fixes the start with ``/settings`` and goes on in it: a
+        second terminal's ``--continue`` must not open it meanwhile."""
+        (tmp_path / "init-fails").touch()
+        (tmp_path / "ready").touch()  # a later retry would start
+        monkeypatch.setattr(ScriptedManager, "initializations", 0)
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        app_ref: list = []
+        looked, seen = self.looked_at(app_ref)
+        app = app_with(Session(until=looked), start)
+        app_ref.append(app)
+
+        await app.run()
+
+        assert app.session_id != "abc"  # it starts in a new one
+        assert seen == [[os.getpid()]]
+
+    async def test_it_is_held_while_the_one_asked_for_opens_then_let_go(self, manager):
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        app_ref: list = []
+        looked, seen = self.looked_at(app_ref, "abc")
+        session = Session(until=lambda s: resumed(s) and looked(s))
+        app = app_with(session, SessionStart("resume", "abc"))
+        fresh = app.session_id
+        app_ref.append(app)
+
+        await app.run()
+
+        assert app.session_id == "abc" and seen == [[os.getpid()]]
+        assert free(app, app._conversation_key(fresh))
+
+
+class TestATurnTypedBeforeTheStartupOpen:
+    """``--continue`` and ``--resume`` open their conversation once the prompt
+    is up; a line typed or pasted ahead (keys pressed while the workflow
+    started) went to the run's new conversation, while the lock held the one
+    asked for. It now waits for the open, and runs there."""
+
+    async def test_it_waits_and_runs_in_the_conversation_opened(self, project, monkeypatch):
+        workflow = Workflow(conversation("T", "Earlier work", 2))
+        app = app_on(workflow, fake_settings())
+        app.session.app = SimpleNamespace(is_running=False)  # the prompt is not up yet
+
+        async def no_proposals():
+            return None
+
+        monkeypatch.setattr(app, "_name_waiting_proposals", no_proposals)
+        app._pending_resume = "T"  # what --resume T / --continue chose
+        fresh = app.session_id
+
+        opening = asyncio.create_task(app._open_on_startup())
+        await asyncio.sleep(0.05)
+        typed = asyncio.create_task(app._handle_message("typed ahead"))
+        await asyncio.sleep(0.05)
+        app.session.app.is_running = True
+        await asyncio.wait_for(opening, 5)
+        await asyncio.wait_for(typed, 5)
+
+        assert app.session_id == "T" != fresh
+        assert workflow.turns == ["T"]
