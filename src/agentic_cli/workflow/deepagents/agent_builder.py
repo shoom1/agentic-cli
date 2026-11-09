@@ -82,6 +82,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
+from agentic_cli.workflow.context import ContextBudget
 from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.outside_content import OutsideContentMarks
 from agentic_cli.workflow.deepagents.summarization import (
@@ -116,6 +117,7 @@ def build_agent_tree(
     settings: "BaseSettings | None",
     checkpointer: "BaseCheckpointSaver | None",
     bound: Callable[[object], ToolDefinition | None] = identify_tool,
+    budgets: Mapping[str, ContextBudget] | None = None,
     summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
     open_calls: OpenCalls | None = None,
     marks: OutsideContentMarks | None = None,
@@ -149,6 +151,10 @@ def build_agent_tree(
             object the framework built and bound. Defaults to the framework
             registry's identity map; a manager with tool objects of its own
             (its MCP tools) passes its map chained before it.
+        budgets: Each agent's context numbers, by name, as the manager computed
+            them (``BaseWorkflowManager._compute_budgets``): its summarization
+            runs on them. An agent without one (or no mapping) gets them
+            computed from its resolved model and the settings.
         summarizers: Filled, when given, with each agent's summarization
             middleware, by name (none for an agent built without settings):
             the manager keeps the root's to summarize on demand
@@ -184,6 +190,7 @@ def build_agent_tree(
         model = chat_models[name]
         model_side = _model_side(
             model, resolved.get(name), settings,
+            budget=budgets.get(name) if budgets is not None else None,
             memory_index=memory_index if name == root else None,
             memory_index_cached=memory_index_cached if name == root else None,
             memory_index_forget=memory_index_forget if name == root else None,
@@ -275,6 +282,7 @@ def _model_side(
     resolved: "ResolvedModel | None",
     settings: "BaseSettings | None",
     *,
+    budget: ContextBudget | None = None,
     memory_index: Callable[[], str] | None = None,
     memory_index_cached: Callable[[], str] | None = None,
     memory_index_forget: Callable[[], None] | None = None,
@@ -285,7 +293,8 @@ def _model_side(
     stack: list[AgentMiddleware] = [
         ForeignReasoningMiddleware(resolved.record.kind, agent=resolved.agent),
         build_summarization(
-            model, resolved, settings, index=memory_index_cached, on_written=memory_index_forget
+            model, resolved, settings, budget=budget,
+            index=memory_index_cached, on_written=memory_index_forget,
         ),
         # Inside the summarization: it summarizes on the overflows it raises.
         ContextOverflowMiddleware(),

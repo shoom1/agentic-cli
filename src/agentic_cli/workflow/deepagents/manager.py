@@ -266,6 +266,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             settings=self._settings,
             checkpointer=self._checkpointer,
             bound=self._identify_tool,
+            budgets=self._budgets,
             summarizers=summarizers,
             open_calls=self._open_calls,
             marks=self._outside_marks,

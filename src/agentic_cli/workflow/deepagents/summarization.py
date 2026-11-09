@@ -98,6 +98,7 @@ from langchain_core.runnables.config import set_config_context
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import (
+    ContextBudget,
     FailedSummaries,
     chars_per_token,
     context_budget,
@@ -140,18 +141,24 @@ _SUMMARIZATION_LOGGER = "deepagents.middleware.summarization"
 
 
 def summarization_thresholds(
-    resolved: "ResolvedModel", settings: "BaseSettings"
+    resolved: "ResolvedModel",
+    settings: "BaseSettings",
+    budget: ContextBudget | None = None,
 ) -> tuple["ContextSize", "ContextSize"]:
     """The ``(trigger, keep)`` an agent's summarization runs on, in tokens.
 
     Args:
         resolved: The agent's model: its window and its ``max_tokens``.
         settings: ``context_summarize_at`` and ``context_max_tokens``.
+        budget: The agent's numbers as its manager computed them
+            (``BaseWorkflowManager._compute_budgets``), which are then the
+            thresholds; computed from ``resolved`` and ``settings`` when None.
 
     Raises:
         ContextBudgetError: The model's input budget is too small to work in.
     """
-    budget = context_budget(resolved, settings)
+    if budget is None:
+        budget = context_budget(resolved, settings)
     return ("tokens", budget.trigger), ("tokens", budget.keep)
 
 
@@ -455,6 +462,7 @@ def build_summarization(
     resolved: "ResolvedModel",
     settings: "BaseSettings",
     *,
+    budget: ContextBudget | None = None,
     index: Callable[[], str] | None = None,
     on_written: Callable[[], None] | None = None,
 ) -> SummarizationMiddleware:
@@ -465,6 +473,8 @@ def build_summarization(
         resolved: The agent's resolved model (thresholds; ``agent`` names it).
         settings: The manager's settings (``context_summarize_at``,
             ``context_max_tokens``).
+        budget: The agent's numbers as its manager computed them, which set
+            the thresholds (``summarization_thresholds``); None: computed here.
         index: The memory index the agent's requests carry, counted in its
             requests' size: the manager's ``_memory_index_cached``, which
             never reads a file. Before a conversation's first request it
@@ -477,7 +487,7 @@ def build_summarization(
         ContextBudgetError: The model's input budget is too small to work in.
     """
     install_history_filters()
-    trigger, keep = summarization_thresholds(resolved, settings)
+    trigger, keep = summarization_thresholds(resolved, settings, budget)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         index=index,

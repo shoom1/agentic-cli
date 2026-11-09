@@ -1641,7 +1641,9 @@ class BaseWorkflowManager(ABC):
         Called by ``_initialize_locked`` with the models resolved and nothing
         else built, so the failure it raises leaves nothing to release but the
         catalog. A backend that computes its own overrides this rather than
-        assigning ``_budgets`` in ``_do_initialize``.
+        assigning ``_budgets`` in ``_do_initialize``. ADK and Deep Agents take
+        every number they summarize and trim by from ``_budgets``, so an
+        override of it (in a subclass of either) sets them all.
 
         Raises:
             ContextBudgetError: An agent's model leaves too small an input
