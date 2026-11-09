@@ -11,6 +11,7 @@ stays with the previous backend.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -18,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agentic_cli.cli.app import BaseCLIApp
+from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.models import ModelRef, ProviderKind, parse_ref
@@ -60,6 +62,9 @@ def _app(settings: BaseSettings, workflow) -> BaseCLIApp:
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._settings = settings
     app._workflow_controller = controller
+    # An orchestrator swap switches the conversation (the turn lock, the task list).
+    app._turn_lock, app._message_processor = asyncio.Lock(), MessageProcessor()
+    app._usage_tracker = None
     app.notices, app.errors = [], []
     app.session = SimpleNamespace(
         add_message=lambda role, text: app.notices.append(text),

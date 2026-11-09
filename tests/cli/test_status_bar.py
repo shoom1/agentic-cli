@@ -13,6 +13,7 @@ initialized offline.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agentic_cli.cli.app import BaseCLIApp
+from agentic_cli.cli.conversation import Place
+from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
@@ -62,6 +65,10 @@ def app_for(configs: list[AgentConfig], settings: BaseSettings, manager) -> Base
     app._settings = settings
     app._workflow_controller = controller
     app._usage_tracker = tracker
+    # An orchestrator swap switches the conversation (the turn lock, the task
+    # list), from the place the workflow started in, as run() records it.
+    app._turn_lock, app._message_processor = asyncio.Lock(), MessageProcessor()
+    app._conversation.place = Place.of(settings)
     app.statuses = []
     app.session = SimpleNamespace(
         add_message=lambda *a: None, add_error=lambda *a: None,

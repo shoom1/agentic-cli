@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -230,3 +231,73 @@ class TestATurnTypedBeforeTheStartupOpen:
 
         assert app.session_id == "T" != fresh
         assert workflow.turns == ["T"]
+
+
+class TestAnOrchestratorSwitch:
+    """``/settings`` swaps the backend: the conversation goes on there, from
+    empty, under the same id, through the same switch. Its lock moved to the
+    new backend's key (it stayed on the old one's, so another process could
+    open the conversation this one writes to); the old backend's task list
+    and the memories it holds stay behind (the next turn redrew its tasks in
+    the new, empty conversation, and the exit proposed memories from it)."""
+
+    @staticmethod
+    def swapping(app_settings):
+        workflow = Workflow()
+        workflow.backend_type = "adk"
+        app = app_on(workflow, app_settings)
+        replacement = Workflow()
+        replacement.backend_type = "deepagents"
+        replacement.initialize_services = AsyncMock()
+        return app, replacement
+
+    @staticmethod
+    async def swap(app, replacement) -> None:
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=replacement,
+        ):
+            assert await app.apply_settings({"orchestrator": "deepagents"})
+        assert app._workflow_controller.workflow is replacement
+
+    async def test_the_lock_follows_it_to_the_new_backend(self, home):
+        app, replacement = self.swapping(BaseSettings(session_store="sqlite"))
+        assert app._hold(app.session_id) is None  # as the start does
+        old_key = app._conversation_key(app.session_id)
+
+        await self.swap(app, replacement)
+
+        key = app._conversation_key(app.session_id)
+        assert key[0] == "deepagents" and key[1:] == old_key[1:]
+        assert not free(app, key) and free(app, old_key)
+        assert replacement.calls == [f"load_session {app.session_id}"]
+
+    async def test_the_old_backends_tasks_and_memories_stay_behind(self, home):
+        app, replacement = self.swapping(fake_settings(auto_extract_session_facts=True))
+        app._message_processor._last_task_progress = "- [x] the old backend's task"
+        app._turned = True  # a turn ran on the old backend
+
+        await self.swap(app, replacement)
+        await app._extract_session_facts_on_exit()
+
+        assert app._message_processor._last_task_progress is None
+        assert app._turned is False and replacement.ended == []
+
+    async def test_one_open_on_the_new_backend_elsewhere_starts_a_new_one_there(self, home):
+        app, replacement = self.swapping(BaseSettings(session_store="sqlite"))
+        old = app.session_id
+        assert app._hold(old) is None
+        there = ("deepagents", *app._conversation_key(old)[1:])
+        other = open_elsewhere(app, there)
+
+        await self.swap(app, replacement)
+        other.release()
+
+        new = app.session_id
+        assert new != old and app._conversation_key(new)[0] == "deepagents"
+        assert not free(app, app._conversation_key(new))
+        assert said(app.session, "add_message")[-1] == (
+            f"This conversation is open in another process ({os.getpid()}) on deepagents: "
+            f"a new one starts here, {new}. Its history stays with the previous "
+            "backend: switch back to continue it."
+        )

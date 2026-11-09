@@ -1291,13 +1291,46 @@ class BaseCLIApp:
         Sessions do not move between backends (neither reads the other's
         store), so the new one continues the id from empty; adopting it there
         keeps ``/status`` and the memories proposed at exit on this conversation,
-        not on the manager's default session.
+        not on the manager's default session. It is the switch every change of
+        conversation makes (``ConversationCore.switch``), to the same id in
+        the new backend's place, under the turn lock: the lock moves to the
+        new backend's key and the old one's is let go, the old backend's task
+        list and usage context are forgotten (the session's totals stay), and
+        the conversation counts as unused, so the exit proposes memories only
+        from what runs here (the backend that holds the earlier ones is gone).
+        The switch is made before the load: the backend has changed already.
+
+        One another process has open on the new backend (it resumed this id
+        there) is left to it: a new conversation starts here, and says so.
         """
-        try:
-            await workflow.load_session(self._session_id)
-        except Exception:  # noqa: BLE001 - the next turn names its conversation anyway
-            logger.debug("swap_adopt_failed", session_id=self._session_id, exc_info=True)
-        return _SWAP_NOTE
+        place = Place.of(self._settings)  # the backend the swap started
+        async with self._turn_lock:
+            parts = dataclasses.replace(self._switch_parts(), workflow=workflow)
+            try:
+                switched = await self._conversation.switch(
+                    self._session_id, parts, place=place, propose=False
+                )
+            except Exception:  # noqa: BLE001 - the next turn names its conversation anyway
+                logger.debug("swap_adopt_failed", session_id=self._session_id, exc_info=True)
+                return _SWAP_NOTE
+            if switched.made:
+                return _SWAP_NOTE
+            import uuid
+
+            held = (
+                f"This conversation is open in another process ({switched.holder}) on "
+                f"{place.backend}"
+            )
+            new = uuid.uuid4().hex[:12]
+            try:
+                await self._conversation.switch(new, parts, place=place, propose=False)
+            except Exception as error:  # noqa: BLE001 - said; the next turn retries the store
+                logger.debug("swap_adopt_failed", session_id=new, exc_info=True)
+                return f"{held}, and a new one could not start: {str(error) or type(error).__name__}."
+            return (
+                f"{held}: a new one starts here, {new}. Its history stays with the "
+                "previous backend: switch back to continue it."
+            )
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
