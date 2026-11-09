@@ -115,6 +115,18 @@ class TestThePlugins:
             tool=_stand_in(), tool_args={}, tool_context=None
         ) is None
 
+    async def test_the_gate_denies_a_function_tool_described_like_the_stand_in(self):
+        """An unregistered function whose docstring reads "Tool not found"
+        is no stand-in: it is denied, and never runs."""
+        result = await PermissionPlugin(OpenCalls()).before_tool_callback(
+            tool=FunctionTool(func=_described_like_the_stand_in),
+            tool_args={},
+            tool_context=None,
+        )
+
+        assert result is not None and result["success"] is False
+        assert "not registered" in result["error"]
+
     async def test_the_tool_error_plugin_answers_as_deep_agents_does(self):
         with capture_logs() as logs:
             result = await ToolErrorPlugin().on_tool_error_callback(
@@ -151,6 +163,11 @@ def _answer() -> dict:
     return {"success": True}
 
 
+def _described_like_the_stand_in() -> dict:
+    """Tool not found"""
+    return {"success": True}
+
+
 class TestTheADKItRestsOn:
     """ADK's stand-in for an unknown tool name and its lookup error (private ADK)."""
 
@@ -178,6 +195,22 @@ class TestTheADKItRestsOn:
         assert str(prepared.tool_lookup_error).splitlines()[:2] == [
             "Tool 'nope' not found.", "Available tools: save_plan, get_plan",
         ]
+
+    def test_a_real_tool_described_like_the_stand_in_is_none(self):
+        """Only the exact class counts: a description is a tool's own (a
+        function's docstring, the text an MCP server gives), so a
+        ``FunctionTool`` or a ``BaseTool`` subclass described "Tool not
+        found" is a real tool, which the gate must still judge."""
+        from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
+
+        class Described(BaseTool):
+            """A tool of an application's own."""
+
+        function_tool = FunctionTool(func=_described_like_the_stand_in)
+
+        assert function_tool.description == "Tool not found"
+        assert not is_unknown_tool(function_tool)
+        assert not is_unknown_tool(Described(name="nope", description="Tool not found"))
 
     def test_only_the_stand_in_is_one(self):
         from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
