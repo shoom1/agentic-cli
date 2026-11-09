@@ -1595,12 +1595,11 @@ class BaseCLIApp:
         """Claim one job and run its resume turn, and close out its transition.
 
         Under the turn lock the job is looked at again: another conversation
-        may have become current while this waited for it (``--continue`` and
-        ``--resume`` switch once the prompt is up, as a task of their own,
-        after a turn typed ahead took the lock). A job that now waits for its
-        conversation is not claimed, nor told here, where ``ctx`` and the task
-        list are another conversation's: it stays pending until its
-        conversation is opened. The claim is durable, so an interrupted
+        may have become current while this waited for it (an app's own task
+        that called ``resume_session`` or ``start_new_session`` took the lock
+        first). A job that now waits for its conversation is not claimed, nor
+        told here, where ``ctx`` and the task list are another conversation's:
+        it stays pending until its conversation is opened. The claim is durable, so an interrupted
         delivery is recoverable and two coordinators cannot both deliver the
         same result.
 

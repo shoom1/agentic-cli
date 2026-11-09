@@ -12,8 +12,11 @@ kept, the one before let go, the task list and the usage counters reset)
 or abandoned, and the status line is drawn. A Ctrl+C at any step leaves the
 app in exactly one conversation, holding exactly its lock.
 
-The place a conversation is held at (its backend and store) is recorded
-when the lock is taken: a ``/settings`` change of ``session_store`` takes
+The place a conversation is held at (its backend and store) is the one the
+workflow runs it in: recorded as the app starts, and moved by an
+orchestrator switch, or by a ``/settings`` change of the orchestrator or
+``session_store`` while the workflow is down (its next start builds on the
+new values). A change of ``session_store`` while the workflow runs takes
 effect at the next start, and the lock keeps the store the workflow runs.
 
 The app is a real ``BaseCLIApp`` whose session is a fake and whose

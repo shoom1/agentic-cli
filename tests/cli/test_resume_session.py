@@ -567,18 +567,19 @@ class TestItsFinishedJobs:
 
 
 class TestAJobWhoseConversationWasLeftWhileItWaited:
-    async def test_the_startup_switch_between_the_check_and_the_delivery_leaves_its_job(
+    async def test_a_switch_between_the_check_and_the_delivery_leaves_its_job(
         self, project, monkeypatch
     ):
-        """``--continue``/``--resume`` switches conversation once the prompt is up,
-        as a task of its own, while the input handlers run one at a time. A
-        turn typed ahead takes the turn lock first and submits a job that ends
-        before the turn does; the turn's ``resume_finished_jobs`` checks that
-        job belongs here, and its delivery then waits on the lock, where the
-        startup switch goes first. The job's conversation is no longer the
-        current one by then: it is not told here (``ctx`` and the task list
-        would show the left conversation's numbers in this one), nor claimed;
-        it waits for its conversation, as another conversation's job does."""
+        """An app's own task calls ``resume_session`` while a turn runs, and
+        waits on the turn lock. The turn submits a job that ends before the
+        turn does; the switch takes the lock as the turn ends, and while it
+        loads, the turn's ``resume_finished_jobs`` checks that job belongs
+        here, and its delivery waits on the lock. The job's conversation is no longer the current one by then:
+        it is not told here (``ctx`` and the task list would show the left
+        conversation's numbers in this one), nor claimed; it waits for its
+        conversation, as another conversation's job does. (``--continue`` and
+        ``--resume`` take the lock before the prompt takes a line, so their
+        switch never lands between the two.)"""
         from agentic_cli.cli.message_processor import TurnResult, TurnStatus
         from agentic_cli.workflow.events import WorkflowEvent
 
@@ -586,13 +587,6 @@ class TestAJobWhoseConversationWasLeftWhileItWaited:
         app = app_on(workflow, fake_settings(job_auto_resume=True))
         me = app.settings.default_user
         jobs = workflow.job_manager = _Jobs()
-        app.session.app = SimpleNamespace(is_running=True)
-
-        async def no_proposals():
-            return None
-
-        monkeypatch.setattr(app, "_name_waiting_proposals", no_proposals)
-        app._pending_resume = "T"  # what --resume T / --continue chose
         fresh = app.session_id
         started, release = asyncio.Event(), asyncio.Event()
 
@@ -614,19 +608,22 @@ class TestAJobWhoseConversationWasLeftWhileItWaited:
 
         app._message_processor.process_resume = process_resume
 
-        handler = asyncio.create_task(app._handle_message("typed ahead"))
+        workflow.load_gate = asyncio.Event()  # the switch stops at its load
+        handler = asyncio.create_task(app._handle_message("Build it."))
         await asyncio.wait_for(started.wait(), 5)
-        opening = asyncio.create_task(app._open_on_startup())
-        await asyncio.sleep(0.2)  # the startup switch now waits on the turn lock
-        release.set()
+        switching = asyncio.create_task(app.resume_session("T"))  # the app's own task
+        await asyncio.sleep(0.1)  # the switch now waits on the turn lock
+        release.set()  # the turn ends, and the switch takes the lock
+        await asyncio.wait_for(workflow.loading.wait(), 5)
+        await asyncio.sleep(0.2)  # the turn's delivery found the job here, and waits
+        workflow.load_gate.set()
         await asyncio.wait_for(handler, 5)
-        await asyncio.wait_for(opening, 5)
+        assert await asyncio.wait_for(switching, 5)
 
-        assert app.session_id == "T"
+        assert app.session_id == "T" and workflow.turns == [fresh]
         assert seen == []
         assert jobs.claimed == []  # still waiting: told when `fresh` is opened
         assert [r.job_id for r in jobs.awaiting_resume()] == ["j1"]
-        assert fresh != "T"
 
 
 class TestPickSession:
