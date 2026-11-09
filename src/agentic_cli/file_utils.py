@@ -236,14 +236,23 @@ def make_private_file(path: Path, *, tighten: bool = True) -> None:
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
     except FileExistsError:
-        if not tighten:
-            return
+        if tighten:
+            tighten_file(path)
     else:
         os.close(fd)
-        return
+
+
+def tighten_file(path: Path) -> None:
+    """Drop the group and other permission bits of the regular file ``path``.
+
+    A missing file, a symlink (and what it points at), a file this process
+    may not change, and every file where the platform has no ``fchmod``
+    (Windows' Python before 3.13) are left as they are; nothing is raised.
+    """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
-    except OSError:  # a symlink (ELOOP), or nothing this process may open
+    except OSError:  # missing, a symlink (ELOOP), or nothing this process may open
         return
     try:
         status = os.fstat(fd)

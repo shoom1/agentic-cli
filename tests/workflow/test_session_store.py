@@ -146,6 +146,19 @@ class TestAdkSessionServiceSelection:
 
         assert oct(_mode(db)) == oct(0o600)
 
+    async def test_a_journal_left_beside_a_database_from_before_is_tightened(
+        self, tmp_path: Path, umask_022
+    ):
+        (tmp_path / "sessions").mkdir()
+        for name in ("sessions.db", "sessions.db-journal"):
+            (tmp_path / "sessions" / name).write_bytes(b"")
+            (tmp_path / "sessions" / name).chmod(0o644)
+
+        mgr = self._manager(_settings(tmp_path, session_store="sqlite"))
+        mgr._make_session_service()
+
+        assert oct(_mode(tmp_path / "sessions" / "sessions.db-journal")) == oct(0o600)
+
     async def test_an_existing_database_the_user_names_is_left_as_it_is(
         self, tmp_path: Path, umask_022
     ):

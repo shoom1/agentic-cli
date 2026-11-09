@@ -425,6 +425,35 @@ class TestDeepAgentsSqlitePath:
 
         assert oct(_mode(path)) == oct(0o600)
 
+    def test_sqlites_files_beside_one_from_before_are_tightened_too(self, isolated):
+        """A crash of an earlier build can leave ``-wal`` and ``-shm`` (or a
+        ``-journal``) 0644; SQLite writes the new pages into them until a
+        clean close."""
+        settings = _settings(isolated)
+        settings.sessions_dir.mkdir(parents=True)
+        names = ["checkpoints.db", "checkpoints.db-wal", "checkpoints.db-shm",
+                 "checkpoints.db-journal"]
+        for name in names:
+            (settings.sessions_dir / name).write_bytes(b"")
+            (settings.sessions_dir / name).chmod(0o644)
+
+        deepagents_sqlite_path(settings)
+
+        assert {name: oct(_mode(settings.sessions_dir / name)) for name in names} == {
+            name: oct(0o600) for name in names
+        }
+
+    def test_sqlites_files_beside_one_the_user_names_are_left_as_they_are(self, isolated):
+        team = isolated / "team"
+        team.mkdir()
+        for name in ("agent.db", "agent.db-wal"):
+            (team / name).write_bytes(b"")
+            (team / name).chmod(0o660)
+
+        deepagents_sqlite_path(_settings(isolated, sqlite_uri=str(team / "agent.db")))
+
+        assert oct(_mode(team / "agent.db-wal")) == oct(0o660)
+
     def test_an_existing_file_the_user_names_is_left_as_it_is(self, isolated):
         """``sqlite_uri`` may name a file shared on purpose (0660 in a team
         folder): tightening it at every start would lock the others out."""

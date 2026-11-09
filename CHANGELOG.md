@@ -2384,7 +2384,8 @@ step; each entry says what to use instead.
   0600. The file is now created 0600 before the database opens it, in a
   folder created 0700 (a folder that exists is left as it is), and at the
   default location a file from an earlier version is tightened to 0600 when
-  it is opened (`workflow.checkpointers.private_sqlite_file`, over
+  it is opened, with the `-journal`, `-wal` or `-shm` file a crash left
+  beside it (`workflow.checkpointers.private_sqlite_file`, over
   `file_utils.make_private_file`; a symlink is left alone). A file that
   `sqlite_uri` names and that exists keeps its permissions: it may be
   shared on purpose (0660 in a team folder). Deep Agents' `checkpoints.db`

@@ -13,7 +13,7 @@ import stat
 
 import pytest
 
-from agentic_cli.file_utils import make_private_file
+from agentic_cli.file_utils import make_private_file, tighten_file
 
 
 def _mode(path) -> int:
@@ -127,3 +127,10 @@ def test_without_tightening_an_existing_file_is_left_and_a_missing_one_made_priv
 
     assert _mode(shared) == 0o660
     assert (_mode(new), _mode(new.parent)) == (0o600, 0o700)
+
+
+def test_tightening_a_missing_file_makes_none(tmp_path):
+    """What a database's ``-wal`` or ``-journal`` usually is: not there."""
+    tighten_file(tmp_path / "sessions.db-wal")
+
+    assert list(tmp_path.iterdir()) == []
