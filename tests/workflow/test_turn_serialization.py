@@ -246,9 +246,9 @@ class TestLifecycleWaitsForTurns:
             order: list[str] = []
             real_release = h.manager._release_resources
 
-            async def _tracked(keep_session_service: bool = False):
+            async def _tracked():
                 order.append("cleanup")
-                await real_release(keep_session_service)
+                await real_release()
 
             h.manager._release_resources = _tracked
 

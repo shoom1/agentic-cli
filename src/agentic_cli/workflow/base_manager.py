@@ -7,6 +7,8 @@ The base class provides auto-detection of required managers (memory, planning,
 HITL) based on tool requirements, creating them lazily when needed.
 
 It also provides shared implementations for:
+- The lifecycle: initialization, ``cleanup``, ``reinitialize`` and the one
+  release they run, which the backends join through two hooks
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
 - Context: each agent's context numbers (``context_budget``), for a UI
@@ -188,22 +190,43 @@ class BaseWorkflowManager(ABC):
         on cancellation. The active session/user identity remains a
         ContextVar, so it stays correct for nested and task-spawned work.
 
+    Lifecycle contract:
+        The base owns the lifecycle: ``initialize_services`` (transactional:
+        a failed attempt is rolled back), ``cleanup``, ``reinitialize`` (a
+        model switch, which keeps the session store and the services with
+        ``_keeping``) and the one release they all run,
+        ``_release_resources``. A backend builds in ``_do_initialize`` and
+        takes part in the release through two hooks, ``_detach_backend``
+        (what it built for this initialization) and ``_detach_store`` (the
+        store its conversations live in), each detaching its handles and
+        returning their closers; the base closes them under a shield, so a
+        cancel never leaves one open. A backend that overrides ``cleanup`` or
+        ``reinitialize`` keeps its own (the deprecated LangGraph backend
+        does).
+
     Example:
-        A minimal backend. ``initialize_services`` is the base's: it calls the
+        A minimal backend: it builds its engine in ``_do_initialize`` and
+        hands it to the release in ``_detach_backend``; everything else of
+        the lifecycle is the base's. ``initialize_services`` calls the
         backend's ``_validate_agent_graph`` (the base's validates nothing and
         leaves ``root_agent_name`` None), resolves the models, builds the
         services the tools declare and then calls ``_do_initialize``. A turn
-        passes each event through ``_apply_event_hook``, which is the
-        constructor's ``on_event``. The backend takes both locks to tear down,
-        and resets what it set up in ``_release_resources`` (the base closes
-        the catalog and the services only)::
+        enters through ``_turn_admission``, which initializes the manager
+        when it is not and re-checks ``_backend_ready`` under the turn lock,
+        and passes each event through ``_apply_event_hook``, which is the
+        constructor's ``on_event``. A backend with a session store also
+        returns its closers from ``_detach_store``, which a model switch
+        skips, and builds on the store it still holds::
 
+            from functools import partial
             from typing import Callable
 
             from agentic_cli import BaseWorkflowManager, WorkflowEvent
             from agentic_cli.workflow.config import AgentGraph, validate_agent_graph
 
             class CustomWorkflowManager(BaseWorkflowManager):
+                _engine = None  # what a turn runs on
+
                 @property
                 def backend_type(self) -> str:
                     return "custom"
@@ -215,7 +238,14 @@ class BaseWorkflowManager(ABC):
                     return validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
                 async def _do_initialize(self) -> None:
-                    ...  # build the backend's agents or graph
+                    self._engine = object()  # build the backend's agents or graph
+
+                def _backend_ready(self) -> bool:
+                    return self._initialized and self._engine is not None
+
+                def _detach_backend(self):
+                    engine, self._engine = self._engine, None
+                    return [("engine", partial(self._aclose_owned, engine, "engine"))]
 
                 async def process(self, message, user_id, session_id=None):
                     async with self._turn_admission():
@@ -224,25 +254,6 @@ class BaseWorkflowManager(ABC):
                             event = self._apply_event_hook(event)  # None: dropped
                             if event is not None:
                                 yield event
-
-                async def reinitialize(self, model=None, preserve_sessions=True):
-                    async with self._lifecycle_lock:
-                        async with self._turn_lock:
-                            with self._carrying_services(preserve_sessions):
-                                await self._release_resources()
-                                self._reset_model(model)
-                                await self._initialize_locked()
-
-                async def cleanup(self) -> None:
-                    async with self._lifecycle_lock:
-                        async with self._turn_lock:
-                            await self._release_resources()
-
-                async def _release_resources(self) -> None:
-                    self._initialized = False
-                    self._budgets = {}
-                    self._index_snapshots.clear()
-                    await super()._release_resources()
     """
 
     #: The conversation a call without a session id belongs to

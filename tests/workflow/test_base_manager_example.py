@@ -63,17 +63,27 @@ async def test_a_turn_initializes_it_and_replies(example):
         await manager.cleanup()
 
 
+def test_the_lifecycle_is_the_bases(example):
+    """The example implements the build and the release's hook, not the lifecycle."""
+    for method in ("initialize_services", "cleanup", "reinitialize", "_release_resources"):
+        assert method not in vars(example), f"the example overrides {method}"
+    assert "_detach_backend" in vars(example)
+
+
 async def test_cleanup_releases_it_and_the_next_turn_starts_it_again(example):
     with MockContext(google_api_key="test-key") as ctx:
         manager = example([AgentConfig(name="a", prompt="p")], settings=ctx.settings)
         await _reply(manager, "first")
+        engine = manager._engine
 
         await manager.cleanup()
 
         assert not manager.is_initialized
+        assert manager._engine is None
         assert manager.catalog is None
         assert manager.services == {}
         assert await _reply(manager, "second") == ["echo: second"]
+        assert manager._engine is not None and manager._engine is not engine
         assert manager.is_initialized
         assert manager.catalog is not None
 
@@ -90,6 +100,7 @@ async def test_reinitialize_keeps_the_services_it_carries(example):
 
         assert manager.is_initialized
         assert manager.services[PERMISSION_ENGINE] is engine
+        assert manager._engine is not None
         assert await _reply(manager, "again") == ["echo: again"]
 
         await manager.cleanup()
