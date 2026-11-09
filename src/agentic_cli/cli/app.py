@@ -450,13 +450,28 @@ def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -
 class SlashCommandCompleter(Completer):
     """Completer that only triggers for slash commands."""
 
-    def __init__(self, commands: list[str]) -> None:
-        """Initialize with a list of command names (without leading slash).
+    def __init__(self, commands: "CommandRegistry | Iterable[str]") -> None:
+        """Initialize with the commands to complete.
 
         Args:
-            commands: List of command names, e.g., ["help", "settings", "quit"]
+            commands: A ``CommandRegistry``, read each time a completion is
+                asked for (a command registered later completes too, as the
+                app's session does), or command names without the leading
+                slash, e.g. ``["help", "settings", "quit"]``, fixed here.
         """
-        self.commands = sorted(commands)
+        if isinstance(commands, CommandRegistry):
+            self._registry: CommandRegistry | None = commands
+            self._names: list[str] = []
+        else:
+            self._registry = None
+            self._names = sorted(commands)
+
+    @property
+    def commands(self) -> list[str]:
+        """The command names and aliases it completes, sorted."""
+        if self._registry is not None:
+            return self._registry.get_completions()
+        return self._names
 
     def get_completions(self, document: Document, complete_event):
         """Yield completions only when text starts with /."""
@@ -584,11 +599,6 @@ class BaseCLIApp:
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
-        # === Command Registry ===
-        self.command_registry = CommandRegistry()
-        self._register_builtin_commands()
-        self.register_commands()  # Domain-specific commands
-
         # === Components ===
         self._usage_tracker = UsageTracker()
         self._workflow_controller = WorkflowController(
@@ -604,16 +614,22 @@ class BaseCLIApp:
         # Whether a turn ran in the current conversation since it was adopted:
         # its memories are proposed on leaving it, or at exit, only then.
         self._turned = False
+        self.should_exit = False
+
+        # === Commands: registered once the session exists (below) ===
+        self.command_registry = CommandRegistry()
 
         # === UI: ThinkingPromptSession ===
-        completer = SlashCommandCompleter(self.command_registry.get_completions())
-
+        # get_theme() runs here, with every attribute above in place: its
+        # theme is the one the session is built with.
         self.session = ThinkingPromptSession(
             message=">>> ",
             app_info=self._app_info,
             theme=self.get_theme(settings.ui_theme),
             history=InMemoryHistory(),
-            completer=completer,
+            # Reads the registry as it completes: a command registered later
+            # completes too.
+            completer=SlashCommandCompleter(self.command_registry),
             complete_while_typing=True,
             completions_menu_height=8,
             enable_status_bar=True,
@@ -626,8 +642,9 @@ class BaseCLIApp:
             dialog_placement=settings.dialog_placement,
         )
 
-        # === State ===
-        self.should_exit = False
+        # === Hooks: last, on the built app ===
+        self._register_builtin_commands()
+        self.register_commands()  # Domain-specific commands
 
         logger.debug("app_initialized_fast")
 
@@ -641,7 +658,11 @@ class BaseCLIApp:
         lets thinking-prompt choose from the terminal (mono under
         ``NO_COLOR``, light or dark from ``COLORFGBG``, else the terminal's
         own colors), so agentic-cli's colors do not apply there. The session
-        is built in ``get_theme(settings.ui_theme)``.
+        is built in ``get_theme(settings.ui_theme)``: it is called while the
+        constructor builds the session, with every other attribute of the
+        app in place, and again when ``/settings`` changes ``ui_theme``. An
+        attribute of the app's own that it reads is set before
+        ``super().__init__()``.
 
         Override to recolor a theme, e.g. for ``"dark"`` return
         ``dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box=...)``
@@ -654,7 +675,14 @@ class BaseCLIApp:
     def register_commands(self) -> None:
         """Register domain-specific commands.
 
-        Override to register additional commands.
+        Override to register additional commands
+        (``self.command_registry.register(...)``). Called last in the
+        constructor, after the built-ins (``_register_builtin_commands``),
+        once the settings, the usage tracker, the workflow controller and
+        the session exist. An attribute of the app's own that it reads is
+        set before ``super().__init__()``. A command registered later works
+        too: the slash-command completer and ``/help`` read the registry each
+        time.
         """
         pass
 

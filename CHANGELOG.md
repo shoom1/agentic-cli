@@ -2215,6 +2215,19 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **An app's hooks run on a built app, and a command registered later
+  completes.** `register_commands()` ran before the usage tracker, the
+  workflow controller and the session existed, so a hook that read
+  `self.usage_tracker` (or anything built after it) failed with an
+  `AttributeError`; and the slash-command completer copied the command names
+  once, so a command registered after construction never completed.
+  `register_commands()`, after `_register_builtin_commands()`, now runs last
+  in the constructor, `get_theme()` as the session is built with everything
+  else in place, and the completer reads the registry each time it
+  completes (`SlashCommandCompleter` takes a `CommandRegistry`, or a list of
+  names as before). The hooks still run during construction: an attribute
+  of an app's own that one reads is set before `super().__init__()`.
+
 - **`/settings` says when a change takes effect, and rebuilds the workflow
   for each setting its models are built with.** The retries
   (`retry_max_attempts`, `retry_initial_delay`, `retry_backoff_factor`) and

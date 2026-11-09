@@ -188,12 +188,12 @@ import argparse
 
 class MyApp(BaseCLIApp):
     def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose  # before super().__init__(): the hooks run in it
         super().__init__(
             app_info=AppInfo(name="My App", version="0.1.0"),
             agent_configs=AGENTS,
             settings=BaseSettings(),
         )
-        self.verbose = verbose
 
     @classmethod
     def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
@@ -235,6 +235,13 @@ class MyApp(BaseCLIApp):
             return dataclasses.replace(ThinkingPromptStyles.dark(), thinking_box="fg:#9b59b6")
         return super().get_theme(name)
 ```
+
+The hooks run while the app is built: `get_theme()` as the session is built,
+and `register_commands()` last, once the session, the settings and the
+workflow controller exist. An attribute of your own that a hook reads is set
+before `super().__init__()`, as `self.verbose` is above. A command
+registered later (`app.command_registry.register(...)`) completes and is
+listed by `/help` too.
 
 The session draws in `get_theme(name)` for the user's `ui_theme` (see
 [Theme and dialog placement](#theme-and-dialog-placement)): `dark` unless they
