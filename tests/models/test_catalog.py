@@ -1305,7 +1305,7 @@ class TestNotOffered:
             "provider 'together' is not defined in model_providers",
             "Model google:gemini-9-ultra in models is not offered: not served by google. "
             "Remove it from models, or name a model google serves "
-            "(/models google: lists what it serves).",
+            "(`/models google:` lists what it serves).",
         ]
 
     async def test_a_warning_comes_once_per_process_not_per_catalog(self, caplog):
@@ -1350,7 +1350,7 @@ class TestAModelItsProviderDoesNotServe:
         assert self.warnings(caplog) == [
             "Model anthropic:claude-sonnet-3-7 (default_model) is not served by anthropic: "
             "its listing lacks it, so a turn on it will fail at the provider. Choose a model "
-            "anthropic serves for default_model (/models anthropic: lists what it serves)."
+            "anthropic serves for default_model (`/models anthropic:` lists what it serves)."
         ]
         assert catalog.not_offered() == {str(retired): "not served by anthropic"}
         assert catalog.record(retired).model == retired.model
@@ -1369,7 +1369,7 @@ class TestAModelItsProviderDoesNotServe:
         assert self.warnings(caplog) == [
             "Model google:gemini-9-ultra (agent 'writer') is not served by google: its listing "
             "lacks it, so a turn on it will fail at the provider. Choose a model google serves "
-            "for agent 'writer' (/models google: lists what it serves)."
+            "for agent 'writer' (`/models google:` lists what it serves)."
         ]
 
     async def test_a_model_nothing_describes_runs_on_the_conservative_record(self, caplog):
@@ -1389,7 +1389,7 @@ class TestAModelItsProviderDoesNotServe:
         assert set(record.sources.values()) == {"default"}
         (warning,) = self.warnings(caplog)
         assert warning.endswith(
-            "(/models openrouter: lists what it serves). Nothing describes it either: it runs "
+            "(`/models openrouter:` lists what it serves). Nothing describes it either: it runs "
             "without thinking and with a 128,000-token window (the floor for an unknown one), "
             "unless a models entry says otherwise."
         )

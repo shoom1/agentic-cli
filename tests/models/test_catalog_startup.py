@@ -327,5 +327,5 @@ async def test_a_role_that_runs_on_an_entry_its_provider_dropped_is_named_in_the
         "Model anthropic:claude-sonnet-4-7 in models is not served by anthropic: its listing "
         "lacks it, yet the default role, which nothing maps, runs on it (the list's newest "
         "default-tier model), so a turn on it will fail at the provider. Set default_model, "
-        "or restart to take another (/models anthropic: lists what it serves)."
+        "or restart to take another (`/models anthropic:` lists what it serves)."
     ]

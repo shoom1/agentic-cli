@@ -329,7 +329,7 @@ class TestResolution:
             assert warned == [
                 "Model google:gemini-9-ultra (agent 'writer') is not served by google: its listing "
                 "lacks it, so a turn on it will fail at the provider. Choose a model google serves "
-                "for agent 'writer' (/models google: lists what it serves)."
+                "for agent 'writer' (`/models google:` lists what it serves)."
             ]
             assert str(unserved._resolved_models["writer"].ref) == "google:gemini-9-ultra"
             assert unserved.catalog.is_authoritative("google")

@@ -1097,7 +1097,7 @@ async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, 
     assert catalog.not_offered() == {str(NEW): "not served by anthropic"}
     assert _catalog_warnings(caplog) == [
         f"Model {NEW} in models is not offered: not served by anthropic. Remove it from models, "
-        "or name a model anthropic serves (/models anthropic: lists what it serves)."
+        "or name a model anthropic serves (`/models anthropic:` lists what it serves)."
     ]
 
 

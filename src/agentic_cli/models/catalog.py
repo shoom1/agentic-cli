@@ -753,7 +753,7 @@ class ModelCatalog:
         (a turn on it fails at the provider), and when nothing describes it, on
         the conservative record."""
         provider = ref.provider
-        find = f"/models {provider}: lists what it serves"
+        find = f"`/models {provider}:` lists what it serves"
         role = self._taken_by_roles.get(ref)
         if ref not in self._references and role is not None:
             setting = "default_model" if role == "default" else f"model_roles[{role!r}]"
