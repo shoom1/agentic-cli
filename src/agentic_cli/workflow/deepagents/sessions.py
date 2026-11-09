@@ -118,7 +118,9 @@ def run_config(ref: SessionRef, **extra: Any) -> dict[str, Any]:
     }
 
 
-def job_notification(record: Any, result: Any) -> HumanMessage:
+def job_notification(
+    record: Any, result: Any = None, *, notice: str | None = None
+) -> HumanMessage:
     """The message that tells the root agent ``record``'s job finished.
 
     Its text is ``job_notice``: ``JOB_NOTICE_HEADER``, ``JOB_NOTICE_ASK``,
@@ -127,9 +129,11 @@ def job_notification(record: Any, result: Any) -> HumanMessage:
     Args:
         record: The finished ``JobRecord``.
         result: The job's result, or None.
+        notice: The text, when it was built already (the base's
+            ``resume_with_job_result`` builds it); ``result`` is then unused.
     """
     return HumanMessage(
-        content=job_notice(record, result),
+        content=job_notice(record, result) if notice is None else notice,
         response_metadata={_MARK: {"kind": JOB_RESULT, "job_id": record.job_id}},
     )
 

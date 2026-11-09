@@ -114,7 +114,7 @@ def _resume_manager(
     mgr._ensure_initialized = _ensure_initialized
 
     class _SessionService:
-        async def get_session(self, *, app_name, user_id, session_id):
+        async def get_session(self, *, app_name, user_id, session_id, config=None):
             return SimpleNamespace(events=[], state=dict(state or {})) if session_exists else None
 
     mgr._session_service = _SessionService()
@@ -317,8 +317,10 @@ async def test_resume_missing_session_yields_nothing():
 class _SessionSvc:
     def __init__(self, present: bool) -> None:
         self._present = present
+        self.configs: list = []
 
-    async def get_session(self, *, app_name, user_id, session_id):
+    async def get_session(self, *, app_name, user_id, session_id, config=None):
+        self.configs.append(config)
         return object() if self._present else None
 
 
@@ -351,3 +353,71 @@ async def test_a_job_without_its_call_id_can_resume_but_not_on_a_native_app():
     assert await _can_resume_manager(True).can_resume(_record(call_id=None)) is True
     native = _can_resume_manager(True, native=True)
     assert await native.can_resume(_record(call_id=None)) is False
+
+
+async def test_can_resume_reads_no_events():
+    """Whether the session is there needs none of its events: ADK reads none
+    with ``num_recent_events=0`` (a long session read whole took tens of
+    milliseconds, and the status bar asks again every 30 s)."""
+    mgr = _can_resume_manager(True)
+
+    assert await mgr.can_resume(_record()) is True
+
+    assert [config.num_recent_events for config in mgr._session_service.configs] == [0]
+
+
+async def test_a_resume_checks_the_session_without_its_events_then_reads_them():
+    """The resume's check reads no events; the notice's turn reads them all
+    (a call left open is answered from them)."""
+    from google.adk.events import Event
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+
+    service = InMemorySessionService()
+    session = await service.create_session(app_name="test", user_id="u1", session_id="s1")
+    for n in range(3):
+        await service.append_event(session, Event(
+            author="user", invocation_id=f"i{n}",
+            content=types.Content(role="user", parts=[types.Part.from_text(text=f"m{n}")]),
+        ))
+    read: list[tuple[int | None, int]] = []
+    get_session = service.get_session
+
+    async def recorded(**kwargs):
+        got = await get_session(**kwargs)
+        config = kwargs.get("config")
+        read.append((config.num_recent_events if config else None, len(got.events)))
+        return got
+
+    service.get_session = recorded
+    runner = _FakeRunner()
+    mgr = _resume_manager(runner)
+    mgr._session_service = service
+
+    events = [ev async for ev in mgr.resume_with_job_result(_record(), result="x")]
+
+    assert [e.content for e in events] == ["ev-1", "ev-2"]
+    assert read == [(0, 0), (None, 3)]
+
+
+async def test_on_the_durable_store_a_session_read_without_events_is_still_there(tmp_path):
+    """``num_recent_events=0`` on ADK's database service (``session_store='sqlite'``):
+    a stored session is found, with no events read; a missing one is not."""
+    from google.adk.events import Event
+    from google.adk.sessions import DatabaseSessionService
+    from google.genai import types
+
+    service = DatabaseSessionService(db_url=f"sqlite+aiosqlite:///{tmp_path / 'sessions.db'}")
+    try:
+        session = await service.create_session(app_name="test", user_id="u1", session_id="s1")
+        await service.append_event(session, Event(
+            author="user", invocation_id="i1",
+            content=types.Content(role="user", parts=[types.Part.from_text(text="hi")]),
+        ))
+        mgr = _can_resume_manager(True)
+        mgr._session_service = service
+
+        assert await mgr.can_resume(_record()) is True
+        assert await mgr.can_resume(_record(session_id="gone")) is False
+    finally:
+        await service.close()

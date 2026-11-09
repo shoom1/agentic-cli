@@ -1379,15 +1379,27 @@ word counting to a researcher whose tool is named in its YAML.
 
 ### Turn and lifecycle contracts
 
-A workflow manager runs **one turn at a time**: `process()` and
-`resume_with_job_result()` serialize on a turn lock, and `reinitialize()` and
-`cleanup()` take it too (after the lifecycle lock they share with
-`initialize_services()`), so the backend is never torn down mid-stream.
-`initialize_services()` takes only the lifecycle lock: a turn initializes
-before it takes the turn lock, which keeps the two from deadlocking. Admission
-also re-verifies the backend is live after acquiring the turn lock, so a turn
-queued behind a cleanup reinitializes (or fails cleanly) instead of running
-against released resources. Run separate managers for genuine parallelism.
+A workflow manager runs **one turn at a time**: `process()`,
+`resume_with_job_result()` and `compact()` serialize on a turn lock, and
+`reinitialize()` and `cleanup()` take it too (after the lifecycle lock they
+share with `initialize_services()`), so the backend is never torn down
+mid-stream. `initialize_services()` takes only the lifecycle lock: a turn
+initializes before it takes the turn lock, which keeps the two from
+deadlocking. Admission also re-verifies the backend is live after acquiring
+the turn lock, so a turn queued behind a cleanup reinitializes (or fails
+cleanly) instead of running against released resources. Run separate managers
+for genuine parallelism.
+
+Every turn starts the same way, `async with self._turn(session_id, user_id) as
+ref:` (`BaseWorkflowManager`'s): the conversation is resolved and named in the
+log context, the turn admitted, and the settings, the services and the active
+turn set for the block. The rest of the turn protocol is the base's too. A
+finished job's resume (`resume_with_job_result(record, result=None)`) checks
+that the record names its conversation, runs as a turn of it, checks the
+conversation is there, reads the job's result on a worker thread when it is
+not given (the job manager takes a lock other processes share), and hands the
+notice to the backend; `can_resume(record)` makes the same checks without the
+turn; `compact(session, focus=None)` runs the backend's summary as a turn.
 
 The lifecycle is `BaseWorkflowManager`'s: `initialize_services()` (a failed
 attempt is rolled back), `cleanup()`, `reinitialize()` and the one release
@@ -1398,12 +1410,17 @@ Ctrl+C during a model switch stops only the wait, and nothing is left open. A
 model switch (`reinitialize(preserve_sessions=True)`) keeps the conversation's
 session store and services, also when it fails. A backend of your own
 implements `backend_type`, `_get_state_tools`, `_do_initialize` (its build)
-and `process`, and two hooks for what it holds: `_detach_backend()` (what each
-initialization builds: agents, a runner, MCP sessions) and `_detach_store()`
-(the store its conversations live in, which a model switch keeps). Each is
-synchronous (`def`), sets its handles to `None` and returns `(name, close)`
-pairs; both default to nothing. `BaseWorkflowManager`'s docstring ends with
-such a backend.
+and `process` (inside `_turn`), and two hooks for what it holds:
+`_detach_backend()` (what each initialization builds: agents, a runner, MCP
+sessions) and `_detach_store()` (the store its conversations live in, which a
+model switch keeps). Each is synchronous (`def`), sets its handles to `None`
+and returns `(name, close)` pairs; both default to nothing. For job resume it
+implements `_conversation_exists(ref)` and `_deliver_job_notice(notice,
+record, result, ref)` (tell the root agent `notice` as one user-role message,
+yielding the turn's events), and for `/compact` `_compact_turn(session,
+focus)`; `supports_job_resume` and `supports_compact` are derived from them
+(or from its own `resume_with_job_result` or `compact`, which it keeps), and
+the CLI asks them. `BaseWorkflowManager`'s docstring ends with such a backend.
 
 `MessageProcessor.process()` returns a `TurnResult` (`TurnStatus.COMPLETED` /
 `FAILED` / `UNAVAILABLE`); a turn is never replayed by the harness, so a
