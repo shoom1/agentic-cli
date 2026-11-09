@@ -980,10 +980,11 @@ the start of the entry's title.
   trigger leaves the shared session alone. ADK's own pass after each turn is
   switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
   for a summary after the answer. A summary that fails is one warning a
-  turn, "Could not summarize the earlier conversation; older turns are left
-  out instead.", and the next turn tries again (a later call of the same
-  turn only once the range has grown); Ctrl+C during one writes
-  nothing. A request still over its agent's input budget (the summary
+  turn, "Could not summarize the earlier conversation; the agent goes on
+  without a new summary." (the text Deep Agents gives; the fit guard below
+  says itself what it leaves out), and the next turn tries again (a later
+  call of the same turn only once the range has grown); Ctrl+C during one
+  writes nothing. A request still over its agent's input budget (the summary
   lags a call, a sub-agent may run on a smaller model, an unknown window
   counts as 128,000 tokens) has its oldest whole turns left out of that
   request only, by the fit guard (`workflow/adk/fit_guard_plugin.py`), which
@@ -2005,9 +2006,9 @@ the start of the entry's title.
   that ran on 0.6 no longer starts**; 16,843 tokens is the smallest
   window that works. A summary the model writes no text for (Claude can
   refuse one) is not stored: the request goes on in full, the user is told
-  "Could not summarize the earlier conversation; it is sent in full
-  instead." once a turn, and the next turn tries again (a later call of the
-  same turn only once the range has grown). Both settings are
+  "Could not summarize the earlier conversation; the agent goes on without
+  a new summary." once a turn, as on ADK, and the next turn tries again (a
+  later call of the same turn only once the range has grown). Both settings are
   project-settable, and a `/settings` change of either rebuilds the agents,
   keeping the conversation.
 - **google-adk 2.13 is supported, as is 2.12.** The OpenAI-compatible model

@@ -58,7 +58,6 @@ from google.genai import types
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.adk.compaction import SUMMARY_FAILED, SUMMARY_FAILED_CODE
 from agentic_cli.workflow.adk.fit_guard_plugin import (
     drop_turns,
     fold_summary,
@@ -70,6 +69,8 @@ from agentic_cli.workflow.adk.fit_guard_plugin import (
 )
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
+    SUMMARY_FAILED,
+    SUMMARY_FAILED_CODE,
     is_context_overflow,
     is_overflow_text,
     overflow_message,

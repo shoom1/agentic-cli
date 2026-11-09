@@ -442,11 +442,8 @@ class RunCallback(AsyncCallbackHandler):
     async def on_custom_event(
         self, name: str, data: Any, *, run_id: UUID, **kwargs: Any
     ) -> None:
-        from agentic_cli.workflow.deepagents.summarization import (
-            SUMMARY_FAILED,
-            SUMMARY_FAILED_CODE,
-            SUMMARY_NOT_WRITTEN,
-        )
+        from agentic_cli.workflow.context import SUMMARY_FAILED, SUMMARY_FAILED_CODE
+        from agentic_cli.workflow.deepagents.summarization import SUMMARY_NOT_WRITTEN
 
         if not isinstance(data, dict):
             return

@@ -646,7 +646,7 @@ class TestAFailedSummary:
         errors = [e for e in turn.events if e.type is EventType.ERROR]
         (error,) = errors
         assert error.content == (
-            "Could not summarize the earlier conversation; older turns are left out instead."
+            "Could not summarize the earlier conversation; the agent goes on without a new summary."
         )
         assert error.metadata == {"recoverable": True, "error_code": "summary_failed"}
         assert [e.type for e in turn.events] == [EventType.CONTEXT_SUMMARIZING, EventType.ERROR]
