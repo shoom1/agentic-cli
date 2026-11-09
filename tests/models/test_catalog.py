@@ -60,8 +60,10 @@ def catalog_for(
     references=(),
     computed_roles=(),
     clock=None,
+    named_by=None,
     **keys,
 ) -> ModelCatalog:
+    extra = {"named_by": named_by} if named_by is not None else {}
     return ModelCatalog(
         providers=providers(specs=specs or {}, env=env, **keys),
         entries=entries,
@@ -69,6 +71,7 @@ def catalog_for(
         computed_roles=computed_roles,
         transport=(api or ProviderAPI()).transport,
         clock=clock or Clock(),
+        **extra,
     )
 
 
@@ -78,10 +81,14 @@ async def loaded(api: ProviderAPI | None = None, **kwargs) -> ModelCatalog:
     return catalog
 
 
-async def checked(api: ProviderAPI | None = None, **kwargs) -> ModelCatalog:
+async def checked(
+    api: ProviderAPI | None = None, *, catalog: ModelCatalog | None = None, **kwargs
+) -> ModelCatalog:
     """A catalog loaded, then checked: its background refresh, which lists each
     provider in use the start did not wait on, has run."""
-    catalog = await loaded(api, **kwargs)
+    if catalog is None:
+        catalog = catalog_for(api, **kwargs)
+    await catalog.load()
     task = catalog.start_background_refresh()
     if task is not None:
         await task
@@ -1243,20 +1250,22 @@ class TestNotOffered:
         }
         assert catalog.offered() == ["google:gemini-2.5-flash"]
 
-    async def test_a_model_a_setting_names_is_left_out_without_a_warning(self, caplog):
-        """A reference that a fresh listing lacks fails startup, and any other is
-        accepted and shown by /models with its reason: only an entry, which would
-        otherwise vanish from the list, is warned of."""
-        catalog = catalog_for(
-            references=[ModelRef("google", "gemini-9-ultra"), ModelRef("together", "x")],
-            google=KEYS["google"],
-        )
+    async def test_a_model_a_setting_names_is_warned_of_once_and_runs(self, caplog):
+        """A reference a fresh listing lacks is accepted (the settings decide what
+        runs) and warned of once; one on a provider that is not defined is not
+        (resolution names it, and the start fails on it)."""
+        missing = ModelRef("google", "gemini-9-ultra")
+        catalog = catalog_for(references=[missing, ModelRef("together", "x")], google=KEYS["google"])
 
         with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
             await catalog.load()
+            await catalog.load()
 
-        assert catalog.not_offered() != {}
-        assert [r for r in caplog.records if r.name == "agentic_cli.models.catalog"] == []
+        assert catalog.record(missing).model == missing.model
+        warned = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
+        assert len(warned) == 1 and warned[0].startswith(
+            "Model google:gemini-9-ultra (a setting) is not served by google"
+        )
 
     async def test_the_offered_entries_records_in_list_order(self):
         catalog = await checked(
@@ -1294,7 +1303,9 @@ class TestNotOffered:
         assert [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"] == [
             "Model together:deepseek-ai/DeepSeek-V3.1 in models is not offered: "
             "provider 'together' is not defined in model_providers",
-            "Model google:gemini-9-ultra in models is not offered: not served by google",
+            "Model google:gemini-9-ultra in models is not offered: not served by google. "
+            "Remove it from models, or name a model google serves "
+            "(/models google: lists what it serves).",
         ]
 
     async def test_a_warning_comes_once_per_process_not_per_catalog(self, caplog):
@@ -1312,6 +1323,100 @@ class TestNotOffered:
         warned = [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
         assert len(warned) == 2
         assert "together:" in warned[0] and "gemini-9-ultra" in warned[1]
+
+
+class TestAModelItsProviderDoesNotServe:
+    """The settings decide what runs: a model they name that its provider does not
+    serve is used as they name it, left out of the list, and warned of once, with
+    the setting that names it and what to do."""
+
+    @staticmethod
+    def warnings(caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "agentic_cli.models.catalog"]
+
+    async def test_the_background_refresh_warns_of_a_reference(self, caplog):
+        retired = ModelRef("anthropic", "claude-sonnet-3-7")
+        catalog = catalog_for(
+            entries={ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()},
+            references=[retired], named_by={retired: "default_model"},
+            anthropic=KEYS["anthropic"],
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+            assert self.warnings(caplog) == []  # nothing listed yet, nothing to say
+            await catalog.start_background_refresh()
+
+        assert self.warnings(caplog) == [
+            "Model anthropic:claude-sonnet-3-7 (default_model) is not served by anthropic: "
+            "its listing lacks it, so a turn on it will fail at the provider. Choose a model "
+            "anthropic serves for default_model (/models anthropic: lists what it serves)."
+        ]
+        assert catalog.not_offered() == {str(retired): "not served by anthropic"}
+        assert catalog.record(retired).model == retired.model
+
+    async def test_a_listing_the_start_needed_anyway_warns_at_load(self, caplog):
+        """No entry, so Google is listed at the start for the list's tiers: its
+        listing lacks the agent's model, which no longer stops the start."""
+        missing = ModelRef("google", "gemini-9-ultra")
+        catalog = catalog_for(
+            references=[missing], named_by={missing: "agent 'writer'"}, google=KEYS["google"]
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        assert self.warnings(caplog) == [
+            "Model google:gemini-9-ultra (agent 'writer') is not served by google: its listing "
+            "lacks it, so a turn on it will fail at the provider. Choose a model google serves "
+            "for agent 'writer' (/models google: lists what it serves)."
+        ]
+
+    async def test_a_model_nothing_describes_runs_on_the_conservative_record(self, caplog):
+        """Nothing describes it and its provider's listing lacks it, so the app cannot
+        know its limits: it runs as the settings name it, on the conservative record,
+        and the warning says so."""
+        typo = ModelRef("openrouter", "qwen/qwen3-235b-a2")
+        catalog = catalog_for(
+            references=[typo], named_by={typo: "default_model"}, openrouter="r-test-key"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await catalog.load()
+
+        record = catalog.record(typo)
+        assert (record.thinking, record.context_window, record.tools) == (ThinkingRule(), None, True)
+        assert set(record.sources.values()) == {"default"}
+        (warning,) = self.warnings(caplog)
+        assert warning.endswith(
+            "(/models openrouter: lists what it serves). Nothing describes it either: it runs "
+            "without thinking and with a 128,000-token window (the floor for an unknown one), "
+            "unless a models entry says otherwise."
+        )
+
+    async def test_a_model_an_entry_describes_says_nothing_of_its_limits(self, caplog):
+        typo = ModelRef("openrouter", "qwen/qwen3-235b-a2")
+        catalog = catalog_for(
+            entries={typo: ModelEntry(context_window=32768)}, references=[typo],
+            named_by={typo: "default_model"}, openrouter="r-test-key",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await checked(catalog=catalog)
+
+        (warning,) = self.warnings(caplog)
+        assert warning.startswith("Model openrouter:qwen/qwen3-235b-a2 (default_model) is not")
+        assert "Nothing describes it" not in warning
+        assert catalog.record(typo).context_window == 32768
+
+    async def test_once_per_process(self, caplog):
+        missing = ModelRef("google", "gemini-9-ultra")
+
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            for _ in range(2):
+                await loaded(references=[missing], google=KEYS["google"])
+
+        assert len(self.warnings(caplog)) == 1
 
 
 # --- search: a provider's full listing ----------------------------------------------------

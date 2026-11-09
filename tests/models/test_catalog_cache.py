@@ -1096,8 +1096,28 @@ async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, 
     assert api.calls == ["anthropic"]
     assert catalog.not_offered() == {str(NEW): "not served by anthropic"}
     assert _catalog_warnings(caplog) == [
-        f"Model {NEW} in models is not offered: not served by anthropic"
+        f"Model {NEW} in models is not offered: not served by anthropic. Remove it from models, "
+        "or name a model anthropic serves (/models anthropic: lists what it serves)."
     ]
+
+
+async def test_a_reference_its_provider_lacks_costs_one_listing_not_one_at_every_start(cache):
+    """A default_model nothing describes, which OpenRouter's listing lacks: the
+    first start lists OpenRouter for it and finds it absent, and the listing
+    records that, so the next starts (within a day) do not wait for it again."""
+    clock = Clock()
+    typo = ModelRef("openrouter", "qwen/qwen3-235b-a2")
+    calls = []
+    for _ in range(3):
+        api = ProviderAPI()
+        catalog = make(cache, api, references=(typo,), openrouter=KEYS["openrouter"], clock=clock)
+        await catalog.load()
+        calls.append(api.calls)
+        assert catalog.not_offered() == {str(typo): "not served by openrouter"}
+        clock.now += 600
+
+    assert calls == [["openrouter"], [], []]
+    assert read(cache)["providers"]["openrouter"]["absent"] == [typo.model]
 
 
 # --- a listing ages in the process ---------------------------------------------------------

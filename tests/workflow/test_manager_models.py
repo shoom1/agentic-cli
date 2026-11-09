@@ -287,7 +287,7 @@ class TestResolution:
         assert providers.calls == []
 
     async def test_a_model_its_provider_does_not_serve_still_starts(
-        self, providers, monkeypatch
+        self, providers, monkeypatch, caplog
     ):
         """The settings decide what runs: Google's fresh listing lacks the writer's
         model, and the manager starts on it (a turn on it fails at the provider),
@@ -297,8 +297,18 @@ class TestResolution:
         providers.answers["anthropic"] = 500
 
         unserved = adk(team("gemini-9-ultra"), settings())
-        await unserved.initialize_services()
+        with caplog.at_level(logging.WARNING, logger="agentic_cli.models.catalog"):
+            await unserved.initialize_services()
         try:
+            warned = [
+                r.getMessage() for r in caplog.records
+                if r.name == "agentic_cli.models.catalog" and r.getMessage().startswith("Model ")
+            ]
+            assert warned == [
+                "Model google:gemini-9-ultra (agent 'writer') is not served by google: its listing "
+                "lacks it, so a turn on it will fail at the provider. Choose a model google serves "
+                "for agent 'writer' (/models google: lists what it serves)."
+            ]
             assert str(unserved._resolved_models["writer"].ref) == "google:gemini-9-ultra"
             assert unserved.catalog.is_authoritative("google")
             assert unserved.catalog.not_offered() == {"google:gemini-9-ultra": "not served by google"}
