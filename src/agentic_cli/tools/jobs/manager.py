@@ -337,6 +337,99 @@ def _json_safe_spec(spec: dict) -> dict:
     return safe
 
 
+class _FieldRule(Enum):
+    """How a manager reads a ``JobRecord`` field back from ``meta.json``.
+
+    A manager's record is a copy; the file is shared by every manager over
+    the jobs directory (another CLI of the app, or the manager an
+    orchestrator switch builds while the old one is open). Before it decides
+    anything, a manager reads each field back by its rule, so what another
+    manager wrote is what it decides on, and what it writes.
+    """
+
+    # Set at submit and never changed: never read back.
+    IMMUTABLE = "immutable"
+    # Read back. A terminal state on disk is never replaced: how a job ended,
+    # once recorded, is how it ended.
+    STATE = "state"
+    # What the launcher and the pollers record about the run: read back.
+    EXECUTOR = "executor"
+    # Which manager launches and runs the job: read back.
+    OWNER = "owner"
+    # The delivery claim: read back as one, from the legacy ``resumed`` in a
+    # record written before the claim existed.
+    CLAIM = "claim"
+    # Once true on either side, true: a cancel requested by any manager.
+    STICKY = "sticky"
+
+
+# Every ``JobRecord`` field, with its rule. A field added to the record fails
+# the test suite until it is placed here.
+_FIELD_RULES: dict[str, _FieldRule] = {
+    "job_id": _FieldRule.IMMUTABLE,
+    "tool": _FieldRule.IMMUTABLE,
+    "backend": _FieldRule.IMMUTABLE,
+    "name": _FieldRule.IMMUTABLE,
+    "state": _FieldRule.STATE,
+    "spec": _FieldRule.IMMUTABLE,
+    "backend_handle": _FieldRule.EXECUTOR,
+    "pid": _FieldRule.EXECUTOR,
+    "exit_code": _FieldRule.EXECUTOR,
+    "tags": _FieldRule.IMMUTABLE,
+    "submitted_at": _FieldRule.IMMUTABLE,
+    "started_at": _FieldRule.EXECUTOR,
+    "finished_at": _FieldRule.EXECUTOR,
+    "error": _FieldRule.EXECUTOR,
+    "session_id": _FieldRule.IMMUTABLE,
+    "user_id": _FieldRule.IMMUTABLE,
+    "resume_on_complete": _FieldRule.IMMUTABLE,
+    "call_id": _FieldRule.IMMUTABLE,
+    "call_name": _FieldRule.IMMUTABLE,
+    "resume_state": _FieldRule.CLAIM,
+    "resume_error": _FieldRule.CLAIM,
+    "resume_owner": _FieldRule.CLAIM,
+    "exec_owner": _FieldRule.OWNER,
+    "cancel_requested": _FieldRule.STICKY,
+}
+
+
+def _claim_on_disk(data: dict) -> str | None:
+    """The delivery state ``data`` records, or None when it records none."""
+    state = data.get("resume_state")
+    if state is None and data.get("resumed") is not None:
+        # A record written before the lifecycle existed.
+        state = (
+            ResumeState.DELIVERED.value if data["resumed"] else ResumeState.PENDING.value
+        )
+    return state
+
+
+def _reload_fields(rec: JobRecord, data: dict) -> None:
+    """Read back into ``rec`` what ``data``, its ``meta.json``, records.
+
+    Field by field, by ``_FIELD_RULES``. A key ``data`` does not have leaves
+    the field as it is: the record was written by a version without it.
+    """
+    claim = _claim_on_disk(data)
+    for name, rule in _FIELD_RULES.items():
+        if rule is _FieldRule.IMMUTABLE:
+            continue
+        if rule is _FieldRule.STATE:
+            try:
+                rec.state = JobState(data[name])
+            except (KeyError, ValueError):  # pragma: no cover - none, or unknown
+                pass
+        elif rule is _FieldRule.STICKY:
+            if data.get(name):
+                setattr(rec, name, True)
+        elif rule is _FieldRule.CLAIM:
+            # The claim moves as one: its owner and error go with its state.
+            if claim is not None:
+                setattr(rec, name, claim if name == "resume_state" else data.get(name))
+        elif name in data:  # EXECUTOR, OWNER
+            setattr(rec, name, data[name])
+
+
 class JobManager:
     """Lifecycle + persistence + concurrency for long-running jobs."""
 
@@ -1116,18 +1209,6 @@ class JobManager:
         if self._records.pop(job_id, None) is not None:
             logger.info("job_record_deleted_elsewhere", job_id=job_id)
 
-    # The lifecycle a record's *executor* owns and persists. Every manager
-    # reads these back before acting: an in-memory copy is only ever a snapshot
-    # of what some manager last wrote.
-    _DURABLE_LIFECYCLE_FIELDS = (
-        "exit_code",
-        "error",
-        "started_at",
-        "finished_at",
-        "pid",
-        "backend_handle",
-    )
-
     def _adopt_shared_fields(self, rec: JobRecord, data: dict) -> None:
         """Adopt the fields any manager may write from a persisted snapshot.
 
@@ -1159,7 +1240,7 @@ class JobManager:
         self._persisted.add(rec.job_id)
 
     def _reload_durable(self, rec: JobRecord) -> DurableRead:
-        """Reload the whole persisted lifecycle into ``rec``.
+        """Reload the whole persisted lifecycle into ``rec``, by ``_FIELD_RULES``.
 
         A manager's in-memory record is a snapshot; the file is the shared
         truth. Every mutator reloads before deciding, so a stale view cannot
@@ -1175,16 +1256,7 @@ class JobManager:
         status, data = self._read_persisted(rec.job_id)
         if status is not DurableRead.PRESENT:
             return status
-        raw_state = data.get("state")
-        if raw_state is not None:
-            try:
-                rec.state = JobState(raw_state)
-            except ValueError:  # pragma: no cover - unknown state on disk
-                pass
-        for name in self._DURABLE_LIFECYCLE_FIELDS:
-            if name in data:
-                setattr(rec, name, data[name])
-        self._adopt_shared_fields(rec, data)
+        _reload_fields(rec, data)
         return status
 
     def _recovery_target(self, rec: JobRecord) -> bool:
