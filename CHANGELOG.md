@@ -2215,6 +2215,20 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`/settings` says when a change takes effect, and rebuilds the workflow
+  for each setting its models are built with.** The retries
+  (`retry_max_attempts`, `retry_initial_delay`, `retry_backoff_factor`) and
+  `anthropic_request_timeout` are read when each model's client is built,
+  yet a change of them was reported as applied and ran only after some
+  later rebuild; `session_store`, `log_level` and `log_format`, read only as
+  the app starts, were reported as applied too. `settings_persistence` now
+  declares, beside `PROJECT_SETTABLE_KEYS`, when each key `/settings` may
+  show takes effect, and `apply_settings` follows it: `REBUILD_KEYS` rebuild
+  the workflow (the retry and timeout keys now among them), `RESTART_KEYS`
+  are saved and their line says "(takes effect at the next start)", and
+  `LIVE_KEYS` apply at once. A restart-only change made while the workflow
+  is starting waits for that start, as a rebuild does.
+
 - **`/settings` while the workflow is still starting runs the change it
   saves.** A start resolves its models from the settings before it builds
   the rest, so a change of model (or of anything else the agents are built

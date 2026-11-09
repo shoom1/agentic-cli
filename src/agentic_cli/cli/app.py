@@ -53,6 +53,8 @@ from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_line
 from agentic_cli.settings_persistence import (
     HAND_EDITED_KEYS,
     PROJECT_SETTABLE_KEYS,
+    REBUILD_KEYS,
+    RESTART_KEYS,
     USER_PREFERENCE_KEYS,
 )
 from agentic_cli.workflow.settings import OrchestratorType
@@ -367,6 +369,10 @@ _SWAP_NOTE = (
     "to continue it. Here it starts empty."
 )
 
+#: How ``/settings`` reports a change of a key read only as the app starts
+#: (``settings_persistence.RESTART_KEYS``).
+_AT_NEXT_START = "(takes effect at the next start)"
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -674,6 +680,15 @@ class BaseCLIApp:
         out, and an app shows them by listing them:
         ``[*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]``.
 
+        When a Save takes effect is declared for each of those keys beside
+        them in ``settings_persistence``: one in ``REBUILD_KEYS`` (the model
+        pickers, ``thinking_effort``, ``orchestrator``, the summary
+        thresholds, ``tool_result_max_chars``, the retries and
+        ``anthropic_request_timeout``) rebuilds the workflow; one in
+        ``RESTART_KEYS`` (``session_store``, ``log_level``, ``log_format``)
+        is saved, and its line says it takes effect at the next start; one
+        in ``LIVE_KEYS`` (the rest) applies at once.
+
         Returns:
             List of field names that should appear in the settings UI
         """
@@ -976,15 +991,25 @@ class BaseCLIApp:
         cancel is re-raised (``/settings`` saves it), so the settings name
         the backend that runs.
 
-        Settings are applied in two ways:
-        1. Special settings (model, a role's model, thinking_effort) use
-           dedicated setters and trigger workflow reinitialization
-        2. All other settings are applied directly to the settings object
+        Each change is set on the settings object (``update_setting``; the
+        model pickers and the thinking effort through their own setters) and
+        takes effect as ``settings_persistence`` declares for its field:
+
+        1. ``REBUILD_KEYS`` (read when the workflow builds its agents and
+           their models: the models, the orchestrator, the summary
+           thresholds, the result cap, the retries and request timeout)
+           reinitialize the workflow, or swap it for an orchestrator change;
+        2. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
+           ``log_level``, ``log_format``) are applied and saved, and their
+           line says "(takes effect at the next start)";
+        3. any other key (``LIVE_KEYS``, or an app's own) applies at once:
+           what reads it reads the settings each time.
 
         A reinitialization keeps the sessions, as a model switch does. One
         asked for while the workflow is still starting waits for that start
         first, as a turn does ("Waiting for initialization...": the start
-        resolved its models from the settings before the change); Ctrl+C
+        resolved its models from the settings before the change), and so
+        does a restart-only change, which that start may read; Ctrl+C
         stops the wait, re-raised, and changes nothing. When that start
         fails, the change is applied as for any workflow that is not
         running: nothing is rebuilt, and the next start uses it. A
@@ -1003,27 +1028,22 @@ class BaseCLIApp:
             self.session.add_message("system", "No changes made.")
             return True
 
-        # `orchestrator` triggers a reinit too: the controller swaps the backend
-        # when it changes (otherwise the change only took effect on restart).
-        # So does a role's model ("model_role:<role>"): agents resolve their
-        # roles when the workflow initializes. And so do the settings of when
-        # to summarize and where a tool result is cut: each agent's
-        # thresholds and cap are fixed when it is built.
-        reinit_settings = {
-            "model", "thinking_effort", "orchestrator",
-            "context_summarize_at", "context_max_tokens", "tool_result_max_chars",
-        }
-        needs_reinit = any(
-            key in reinit_settings or key.startswith(MODEL_ROLE_KEY_PREFIX) for key in changes
-        )
+        # When each change takes effect (settings_persistence): a key the
+        # workflow reads as it builds its agents and models rebuilds it (an
+        # orchestrator change swaps the backend); one read only as the app
+        # starts is said to take effect at the next start; the rest apply at
+        # once, read where they are used.
+        needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
+        at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
 
         controller = self._workflow_controller
-        if needs_reinit and controller.state is WorkflowState.INITIALIZING:
-            # The start in progress resolved its models from the settings as
-            # they are: wait for it, as a turn does, then rebuild on the new
-            # values below. Ctrl+C stops the wait before anything changed. A
-            # start that fails leaves the workflow down, and the change is
-            # applied for the next start, as for any failed workflow.
+        if (needs_reinit or at_next_start) and controller.state is WorkflowState.INITIALIZING:
+            # The start in progress read the settings as they are (its models
+            # first, its session store too): wait for it, as a turn does, so
+            # the rebuild below runs on the new values and a restart-only
+            # change is not half taken. Ctrl+C stops the wait before anything
+            # changed. A start that fails leaves the workflow down, and the
+            # change is applied for the next start, as for any failed workflow.
             with _says_so_when_stopped(self.session):
                 await controller.ensure_initialized(self.session)
 
@@ -1101,7 +1121,10 @@ class BaseCLIApp:
 
         # Report changes
         for key, value in changes.items():
-            self.session.add_success(f"{_setting_label(key, self._settings)}: {value}")
+            line = f"{_setting_label(key, self._settings)}: {value}"
+            if key in at_next_start:
+                line += f" {_AT_NEXT_START}"
+            self.session.add_success(line)
         for notice in switched:
             self.session.add_message("system", notice)
         if not was_langgraph:  # a switch to it, not a change made while on it
