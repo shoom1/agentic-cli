@@ -1007,6 +1007,60 @@ class JobManager:
                 return False
             return True
 
+    def release_resume(self, job_id: str) -> None:
+        """Hand back a claim nothing was delivered under: ``RESUMING`` → ``PENDING``.
+
+        The counterpart of ``begin_resume``, for a claim its delivery did not
+        use: the request that took it stopped before the result could reach
+        the agent (a Ctrl+C while the claim was being taken), so the job
+        waits to be delivered again, by this process or another, rather than
+        being closed ``FAILED``. Decided under the cross-process lock on the
+        record read back, like the claim itself.
+
+        Only the process holding the claim may release it. Anything else is
+        a coordinator bug and raises, as in ``complete_resume``. If the lock
+        cannot be taken nothing changes: the claim stays ``RESUMING`` under
+        this process, and startup recovery records it failed once the
+        process is gone (the result stays readable with ``/jobs <id>``).
+
+        Raises:
+            ResumeStateError: If the job is unknown, was not claimed, or is
+                claimed by someone else.
+        """
+        with self._lock:
+            rec = self._records.get(job_id)
+            if rec is None:
+                raise ResumeStateError(f"Unknown job {job_id!r}: nothing to release.")
+            try:
+                with self._mutate(rec) as status:
+                    if status is not DurableRead.PRESENT:
+                        logger.warning(
+                            "job_resume_release_record_gone",
+                            job_id=job_id,
+                            status=status.value,
+                        )
+                        return
+                    if rec.resume_state != ResumeState.RESUMING.value:
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is {rec.resume_state!r}, not "
+                            f"{ResumeState.RESUMING.value!r}: release_resume() "
+                            "must follow a successful begin_resume()."
+                        )
+                    owner = _owner_token()
+                    if rec.resume_owner not in (None, owner):
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is claimed by {rec.resume_owner!r}, "
+                            f"not {owner!r}: only the claiming process may "
+                            "release it."
+                        )
+                    rec.resume_state = ResumeState.PENDING.value
+                    rec.resume_owner = None
+                    rec.resume_error = None
+            except ClaimLockUnavailable as exc:
+                logger.warning(
+                    "job_resume_release_unpersisted", job_id=job_id, error=str(exc)
+                )
+
     def complete_resume(
         self, job_id: str, *, delivered: bool, error: str | None = None
     ) -> None:

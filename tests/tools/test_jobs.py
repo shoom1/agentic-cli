@@ -2497,3 +2497,61 @@ class TestTheSnapshot:
 
         assert answered, "snapshot() waited for the jobs directory's lock"
         assert [r.job_id for r in answered[0]] == [rec.job_id]
+
+
+class TestReleasingAClaim:
+    """``release_resume``: the claim a delivery did not use goes back to PENDING.
+
+    The counterpart of ``begin_resume``. A request stopped while its claim
+    was being taken (Ctrl+C during the lock's wait) delivered nothing, and
+    the job waits to be delivered again rather than being closed FAILED.
+    Only the process holding the claim may release it.
+    """
+
+    def _finished(self, jm: JobManager) -> JobRecord:
+        rec = jm.submit(
+            tool="run_shell_job", backend="subprocess", spec={"command": "true"},
+            resume_on_complete=True, call_id="c1", session_id="s", user_id="u",
+        )
+        return _wait(jm, rec.job_id)
+
+    def _on_disk(self, jm: JobManager, job_id: str) -> dict:
+        return json.loads((jm.base_dir / job_id / "meta.json").read_text())
+
+    def test_the_owner_hands_its_claim_back(self, jm: JobManager):
+        rec = self._finished(jm)
+        assert jm.begin_resume(rec.job_id)
+
+        jm.release_resume(rec.job_id)
+
+        on_disk = self._on_disk(jm, rec.job_id)
+        assert (on_disk["resume_state"], on_disk["resume_owner"]) == ("pending", None)
+        assert [r.job_id for r in jm.awaiting_resume()] == [rec.job_id]
+        assert jm.begin_resume(rec.job_id), "a later delivery could not claim it"
+
+    def test_another_process_s_claim_is_not_released(self, jm: JobManager):
+        from agentic_cli.tools.jobs.manager import ResumeStateError
+
+        rec = self._finished(jm)
+        meta = jm.base_dir / rec.job_id / "meta.json"
+        claimed = {**self._on_disk(jm, rec.job_id),
+                   "resume_state": "resuming", "resume_owner": "elsewhere:4242"}
+        meta.write_text(json.dumps(claimed))
+
+        with pytest.raises(ResumeStateError, match="elsewhere:4242"):
+            jm.release_resume(rec.job_id)
+
+        on_disk = self._on_disk(jm, rec.job_id)
+        assert (on_disk["resume_state"], on_disk["resume_owner"]) == (
+            "resuming", "elsewhere:4242",
+        )
+
+    def test_a_job_nobody_claimed_raises(self, jm: JobManager):
+        from agentic_cli.tools.jobs.manager import ResumeStateError
+
+        rec = self._finished(jm)
+        with pytest.raises(ResumeStateError, match="pending"):
+            jm.release_resume(rec.job_id)
+        with pytest.raises(ResumeStateError, match="Unknown job"):
+            jm.release_resume("nope")
+        assert self._on_disk(jm, rec.job_id)["resume_state"] == "pending"

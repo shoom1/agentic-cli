@@ -531,6 +531,17 @@ the start of the entry's title.
 
 ### Added
 
+- **`JobManager.snapshot()`, `JobManager.release_resume(job_id)` and
+  `JobRecord.awaiting_resume`.** `snapshot()` returns the jobs a manager
+  holds as it last read them, taking no lock, so a caller on the event loop
+  never waits for another CLI; a job's state there may be a tick old.
+  `release_resume()`, the counterpart of `begin_resume()`, hands back a
+  delivery claim nothing was delivered under (`RESUMING` → `PENDING`): only
+  the process holding the claim may, and anything else raises
+  `ResumeStateError`, as `complete_resume()` does. `awaiting_resume` says
+  of one record what `JobManager.awaiting_resume()` returns: finished,
+  flagged `resume_on_complete`, its delivery still `PENDING`.
+
 - **An example of agents defined in YAML, and a README section on the format.**
   `examples/yaml_agents/` is a runnable app whose coordinator and researcher
   are declared in `agents.yaml`: their prompts are read from `prompts/` through
