@@ -363,6 +363,23 @@ class PermissionEngine:
         self._ask_lock = asyncio.Lock()
         self._base_rules: list[Rule] = self._load_all_rules()
 
+    def set_workflow(
+        self,
+        workflow: "BaseWorkflowManager",
+        *,
+        per_call: "Callable[[BaseSettings], Collection[str]] | None" = None,
+    ) -> None:
+        """Ask through ``workflow`` from now on, and ``per_call`` which capabilities are approved per call.
+
+        A hand-over between workflow managers
+        (``BaseWorkflowManager.give_services``) moves the engine, its
+        session grants with it, to the manager that owns it now: its prompts
+        reach that manager's user, and the per-call say is that manager's.
+        ``per_call`` replaces the one given before (None: none).
+        """
+        self._workflow = workflow
+        self._per_call = per_call
+
     # ------------------------------------------------------------------
     # Rule loading
     # ------------------------------------------------------------------

@@ -182,3 +182,53 @@ def test_services_assigned_to_the_manager_are_the_ones_it_publishes(ctx):
 
     assert manager.services is services
     assert set(manager.services) == {"job_manager", "sandbox_manager"}
+
+
+class TestWhatASetOwns:
+    """A set holds services it does not own (another manager's, borrowed or
+    given away): no release of it closes them."""
+
+    def test_a_release_drops_what_it_does_not_own_unclosed(self):
+        from agentic_cli.workflow.services import ServiceSet
+
+        own, theirs = SimpleNamespace(), SimpleNamespace()
+        held = ServiceSet({"job_manager": own})
+        held.borrow({"sandbox_manager": theirs, "job_manager": SimpleNamespace()})
+
+        assert held.services == {"job_manager": own, "sandbox_manager": theirs}
+        assert held.release() == {"job_manager": own}
+        assert held.services == {} and held.not_owned == {}
+
+    def test_a_carried_service_stays_whoever_owns_it(self):
+        from agentic_cli.workflow.services import ServiceSet
+
+        own, theirs = SimpleNamespace(), SimpleNamespace()
+        held = ServiceSet({"job_manager": own})
+        held.borrow({"sandbox_manager": theirs})
+        held.carried = frozenset(held.services)
+
+        assert held.release() == {}
+        assert held.services == {"job_manager": own, "sandbox_manager": theirs}
+        assert held.owns("job_manager", own) and not held.owns("sandbox_manager", theirs)
+
+    def test_it_lends_the_table_s_services_it_owns_but_the_manager(self):
+        from agentic_cli.workflow.services import ServiceSet
+
+        manager, own, theirs = object(), SimpleNamespace(), SimpleNamespace()
+        held = ServiceSet({"workflow": manager, "job_manager": own, "own": SimpleNamespace()})
+        held.borrow({"sandbox_manager": theirs})
+
+        assert held.lendable(manager) == {"job_manager": own}
+
+    def test_given_away_it_closes_them_no_more(self):
+        from agentic_cli.workflow.services import ServiceSet
+
+        lent = SimpleNamespace()
+        lender, borrower = ServiceSet({"job_manager": lent}), ServiceSet()
+        borrower.borrow({"job_manager": lent})
+
+        lender.give(borrower.borrowed({"job_manager": lent}))
+        borrower.adopt({"job_manager": lent})
+
+        assert lender.release() == {}
+        assert borrower.release() == {"job_manager": lent}

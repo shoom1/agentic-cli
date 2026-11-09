@@ -9,8 +9,11 @@ built and closed, the tools it gives, and whether a tool may declare it.
 Adding a service is adding a row: ``service_registry.KNOWN_SERVICE_KEYS``
 (what a tool may declare) and the closers are read from the table.
 
-:class:`ServiceSet` is what one manager holds: the services it publishes, and
-which of them a model switch carries (``BaseWorkflowManager._keeping``).
+:class:`ServiceSet` is what one manager holds: the services it publishes,
+which of them a model switch carries (``BaseWorkflowManager._keeping``), and
+which of them it holds but does not own. A manager can lend its services to
+another (:class:`ServiceLoan`), which owns them once they are given: each
+service's references to its owner then move to the new one (``rebind``).
 
 The builders and tool makers import what they build when they run: tools
 import ``service_registry`` (and so this module) when they register.
@@ -21,6 +24,7 @@ from __future__ import annotations
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.logging import Loggers
@@ -52,6 +56,9 @@ Builder = Callable[["BaseWorkflowManager", Mapping[str, Any]], Any]
 #: The tools a service gives: called with the service, every service present
 #: (the manager's own ``WORKFLOW`` included) and the manager.
 ToolMaker = Callable[[Any, Mapping[str, Any], "BaseWorkflowManager"], Iterable[Callable]]
+#: How a service's references to its owner move to a new owner: called with
+#: the service, the manager that gave it and the one that owns it now.
+Rebinder = Callable[[Any, "BaseWorkflowManager", "BaseWorkflowManager"], None]
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,8 @@ class ServiceSpec:
         declarable: Whether a tool may name it in ``register_tool(requires=)``.
         always: Built for every manager, whatever the tools declare.
         built_with: The key of the service it is built with (and only with).
+        rebind: How its references to its owner move to a new owner
+            (:data:`Rebinder`), for a service built holding the manager.
     """
 
     key: str
@@ -78,6 +87,7 @@ class ServiceSpec:
     declarable: bool = False
     always: bool = False
     built_with: str | None = None
+    rebind: Rebinder | None = None
 
 
 # ---- Builders: each imports what it builds, when it runs ----
@@ -156,6 +166,23 @@ def _permission_engine(manager: "BaseWorkflowManager", available: Mapping[str, A
     )
 
 
+# ---- Rebinders: what a service holds of its owner, moved to a new one ----
+
+
+def _rebind_permission_engine(engine: Any, old: Any, new: Any) -> None:
+    # Its prompts reach the new owner's user; its per-call say is the new owner's.
+    engine.set_workflow(new, per_call=new._per_call_capabilities)
+
+
+def _rebind_knowledge_base(kb: Any, old: Any, new: Any) -> None:
+    # A scope that summarized through the old owner summarizes through the new
+    # one (none does with knowledge_base_summarize off).
+    for scope in kb.scopes:
+        manager = kb.manager(scope)
+        if manager.summarizer is old:
+            manager.summarizer = new
+
+
 # ---- Tool makers ----
 
 
@@ -206,7 +233,12 @@ SERVICES: tuple[ServiceSpec, ...] = (
     ServiceSpec(MEMORY_STORE, _memory_store, tools=_memory_tools, declarable=True),
     ServiceSpec(
         # A database connection per scope.
-        KNOWLEDGE_BASE, _knowledge_base, close="close", tools=_kb_tools, declarable=True
+        KNOWLEDGE_BASE,
+        _knowledge_base,
+        close="close",
+        tools=_kb_tools,
+        declarable=True,
+        rebind=_rebind_knowledge_base,
     ),
     ServiceSpec(LLM_SUMMARIZER, _the_manager, tools=_webfetch_tool, declarable=True),
     ServiceSpec(
@@ -215,7 +247,9 @@ SERVICES: tuple[ServiceSpec, ...] = (
     ServiceSpec(JOB_MANAGER, _job_manager, close="close", declarable=True),
     ServiceSpec(ARXIV_SOURCE, _arxiv_source, tools=_arxiv_tools, declarable=True),
     # Every agent may need it.
-    ServiceSpec(PERMISSION_ENGINE, _permission_engine, always=True),
+    ServiceSpec(
+        PERMISSION_ENGINE, _permission_engine, always=True, rebind=_rebind_permission_engine
+    ),
     # The interaction tools: the manager is always there for them.
     ServiceSpec(WORKFLOW, _the_manager, tools=_interaction_tools, always=True),
 )
@@ -246,17 +280,74 @@ def close_services(
             logger.warning("resource_close_failed", resource=key, error=str(exc))
 
 
+def rebind_services(services: Mapping[str, Any], old: Any, new: Any) -> None:
+    """Move what each of ``services`` holds of its owner ``old`` to ``new``.
+
+    Each service by its row's ``rebind``. Never raises: a rebind that fails
+    is logged (``service_rebind_failed``) and the rest still move.
+    """
+    for key, service in services.items():
+        spec = _SPECS.get(key)
+        if spec is None or spec.rebind is None:
+            continue
+        try:
+            spec.rebind(service, old, new)
+        except Exception as exc:  # noqa: BLE001 - a hand-over must not stop halfway
+            logger.warning(
+                "service_rebind_failed", service=key, error=f"{type(exc).__name__}: {exc}"
+            )
+
+
+class ServiceLoan:
+    """Services one manager lends another, until it gives them over.
+
+    ``BaseWorkflowManager.lend_services`` makes one, of the services the
+    lender owns: the table's, but the manager itself (each manager is its
+    own ``WORKFLOW`` and summarizer). A manager that initializes with it
+    (``initialize_services(services=loan)``) borrows them: it publishes them
+    for its tools, builds only what they lack, and no release of it closes
+    them. The lender's ``give_services(loan)`` makes the borrower their
+    owner. Until then the lender owns them, uses them, and closes them when
+    it releases.
+
+    Attributes:
+        lender: The manager that lent them.
+        services: The services lent, by key.
+        borrower: The manager that last initialized with them, or None.
+        given: Whether the lender gave them over.
+    """
+
+    def __init__(self, lender: "BaseWorkflowManager", services: Mapping[str, Any]) -> None:
+        self.lender = lender
+        self.services: Mapping[str, Any] = MappingProxyType(dict(services))
+        self.borrower: "BaseWorkflowManager | None" = None
+        self.given = False
+
+
 class ServiceSet:
     """The services one manager holds.
 
     ``services`` is the dict the manager publishes for its tools (the
     registry a turn's ``get_service`` reads); ``carried`` names those a
-    model switch keeps through its release (``BaseWorkflowManager._keeping``).
+    model switch keeps through its release (``BaseWorkflowManager._keeping``);
+    ``not_owned`` holds those published here that another manager owns
+    (borrowed and not yet given, or given away and not yet released): no
+    release here closes them, and one that does not carry them drops them.
     """
 
     def __init__(self, services: dict[str, Any] | None = None) -> None:
         self.services: dict[str, Any] = {} if services is None else services
         self.carried: frozenset[str] = frozenset()
+        self.not_owned: dict[str, Any] = {}
+
+    def reset(self, services: dict[str, Any]) -> None:
+        """Hold ``services`` from now on, all of them owned here."""
+        self.services = services
+        self.not_owned = {}
+
+    def owns(self, key: str, service: Any) -> bool:
+        """Whether ``service`` is published here under ``key`` and owned here."""
+        return self.services.get(key) is service and self.not_owned.get(key) is not service
 
     def build_into(
         self, manager: "BaseWorkflowManager", built: dict[str, Any], existing: frozenset[str]
@@ -296,12 +387,53 @@ class ServiceSet:
     def release(self) -> dict[str, Any]:
         """Detach the services a release closes, and return them for closing.
 
-        Every service but those ``carried``: they stay published and open.
+        Every service owned here but those ``carried``: they stay published
+        and open. One owned elsewhere is never returned: carried, it stays
+        published; otherwise it is dropped.
         """
         carried = {key: s for key, s in self.services.items() if key in self.carried}
-        detached = {key: s for key, s in self.services.items() if key not in self.carried}
+        detached = {
+            key: s
+            for key, s in self.services.items()
+            if key not in self.carried and self.owns(key, s)
+        }
+        self.not_owned = {key: s for key, s in self.not_owned.items() if carried.get(key) is s}
         self.services = carried
         return detached
+
+    def lendable(self, manager: "BaseWorkflowManager") -> dict[str, Any]:
+        """What ``manager``, which holds this set, may lend: the table's
+        services it owns, but itself."""
+        return {
+            key: s
+            for key, s in self.services.items()
+            if key in _SPECS and s is not manager and self.owns(key, s)
+        }
+
+    def borrow(self, services: Mapping[str, Any]) -> None:
+        """Publish another manager's ``services``, as its: a key published here already keeps its own."""
+        for key, service in services.items():
+            if key not in self.services:
+                self.services[key] = service
+                self.not_owned[key] = service
+
+    def borrowed(self, services: Mapping[str, Any]) -> dict[str, Any]:
+        """Those of ``services`` published here as another manager's."""
+        return {
+            key: s
+            for key, s in services.items()
+            if self.services.get(key) is s and self.not_owned.get(key) is s
+        }
+
+    def give(self, services: Mapping[str, Any]) -> None:
+        """Own ``services`` no more: they stay published until the release, which drops them."""
+        self.not_owned.update(services)
+
+    def adopt(self, services: Mapping[str, Any]) -> None:
+        """Own ``services``, borrowed until now."""
+        for key, service in services.items():
+            if self.not_owned.get(key) is service:
+                del self.not_owned[key]
 
     def tool_map(self, manager: "BaseWorkflowManager") -> dict[str, Callable]:
         """The service-bound tools of the services present, by name.

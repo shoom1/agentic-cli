@@ -65,7 +65,13 @@ from agentic_cli.workflow.service_registry import (
     MEMORY_STORE,
     SANDBOX_MANAGER,
 )
-from agentic_cli.workflow.services import SERVICE_CLOSERS, ServiceSet, close_services
+from agentic_cli.workflow.services import (
+    SERVICE_CLOSERS,
+    ServiceLoan,
+    ServiceSet,
+    close_services,
+    rebind_services,
+)
 from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
@@ -206,6 +212,28 @@ class BaseWorkflowManager(ABC):
         closers after the one running). A backend that overrides ``cleanup``
         or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
+
+        A run's services (the permission engine and its session grants, the
+        sandbox kernels, the job manager and its in-process jobs, the
+        knowledge bases and the embedding model, the memory store) can move
+        to another manager, of either backend, instead of being built
+        again::
+
+            loan = old.lend_services()
+            await new.initialize_services(services=loan)  # builds only what is missing
+            await old.give_services(loan)  # new owns them now
+            await old.cleanup()  # closes none of them
+
+        Until ``give_services`` the old manager owns them: a new manager
+        that fails to initialize, is cancelled while it does, or is cleaned
+        up before they are given closes none of them, and the old one keeps
+        working with them (nothing has to hand them back). ``give_services``
+        waits for the old manager's running turn, makes the new manager
+        their owner and moves what they hold of their owner to it: the
+        permission engine's prompts and per-call say, the knowledge base's
+        summarizer. Each manager keeps its own ``WORKFLOW`` and summarizer
+        entries and builds its own service-bound tools; the old one runs no
+        more turns, and is released.
 
         The base also computes each agent's context numbers (``_budgets``),
         once the models are resolved and before any service is built, so a
@@ -489,7 +517,7 @@ class BaseWorkflowManager(ABC):
 
     @_services.setter
     def _services(self, services: dict[str, Any]) -> None:
-        self._service_set.services = services
+        self._service_set.reset(services)
 
     @property
     def _carried_service_keys(self) -> frozenset[str]:
@@ -1339,6 +1367,75 @@ class BaseWorkflowManager(ABC):
         """:meth:`_keeping` under its earlier name (LangGraph's ``reinitialize`` uses it)."""
         return self._keeping(carry)
 
+    def lend_services(self) -> ServiceLoan:
+        """Lend this manager's services to another manager, of either backend.
+
+        The services it owns, but its own ``WORKFLOW`` and summarizer
+        entries, which are the manager itself. The other manager borrows
+        them as it initializes (``initialize_services(services=loan)``) and
+        builds only what they lack; :meth:`give_services` then makes it
+        their owner. Until then this manager owns them, keeps working with
+        them and closes them when it releases: a borrower that fails, is
+        cancelled or is cleaned up closes none of them.
+        """
+        return ServiceLoan(self, self._service_set.lendable(self))
+
+    async def give_services(self, loan: ServiceLoan) -> None:
+        """Give the services this manager lent to the manager that borrowed them.
+
+        Takes this manager's lifecycle lock and then its turn lock (so it
+        waits for a running turn), then the borrower's lifecycle lock (so no
+        initialization of it runs meanwhile). The borrower owns them from
+        here on and closes them when it releases; this manager's release
+        drops them unclosed. What each holds of its owner moves to the
+        borrower (``ServiceSpec.rebind``): the permission engine asks through
+        it and takes its per-call say, the knowledge base summarizes through
+        it. A service the borrower already had its own of stays this
+        manager's. This manager runs no more turns after it: release it.
+
+        Raises:
+            ValueError: This manager did not lend them.
+            RuntimeError: They were given already; no manager borrowed them
+                (none initialized with them, or its initialization failed or
+                was cancelled, or it was released since); or this manager
+                released them while they were lent.
+        """
+        if loan.lender is not self:
+            raise ValueError(f"{type(self).__name__} did not lend these services.")
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                if loan.given:
+                    raise RuntimeError("These services were given already.")
+                borrower = loan.borrower
+                if borrower is None:
+                    raise RuntimeError(
+                        "No manager has borrowed these services: initialize one "
+                        "with initialize_services(services=loan) first."
+                    )
+                async with borrower._lifecycle_lock:
+                    moving = borrower._service_set.borrowed(loan.services)
+                    if loan.services and not moving:
+                        raise RuntimeError(
+                            f"{type(borrower).__name__} holds none of the services it "
+                            "borrowed: its initialization failed or was cancelled, or "
+                            "it was released."
+                        )
+                    lost = sorted(
+                        key for key, s in moving.items() if not self._service_set.owns(key, s)
+                    )
+                    if lost:
+                        raise RuntimeError(
+                            f"{type(self).__name__} released {', '.join(lost)} while "
+                            "they were lent: they are closed."
+                        )
+                    self._service_set.give(moving)
+                    borrower._service_set.adopt(moving)
+                    rebind_services(moving, self, borrower)
+                    loan.given = True
+        logger.info(
+            "services_given", services=sorted(moving), to=borrower.backend_type
+        )
+
     @property
     @abstractmethod
     def backend_type(self) -> str:
@@ -1488,7 +1585,9 @@ class BaseWorkflowManager(ABC):
             "(compact). Check ``supports_compact`` before calling."
         )
 
-    async def initialize_services(self, validate: bool = True) -> None:
+    async def initialize_services(
+        self, validate: bool = True, *, services: ServiceLoan | None = None
+    ) -> None:
         """Initialize backend services asynchronously.
 
         Concurrency-safe, idempotent and transactional: concurrent callers
@@ -1498,19 +1597,46 @@ class BaseWorkflowManager(ABC):
 
         Args:
             validate: If True, validate settings before initialization.
+            services: Another manager's services to start with
+                (:meth:`lend_services`): published for the tools as that
+                manager's, so only what they lack is built, and closed by no
+                release of this one (a failed or cancelled attempt's rollback
+                included) until the lender gives them over
+                (:meth:`give_services`).
         Raises:
             SettingsValidationError: If settings validation fails.
+            ValueError: ``services`` are this manager's own.
+            RuntimeError: ``services`` were given already, or this manager
+                is initialized (it borrows only as it builds its services).
         """
+        if services is not None:
+            if services.lender is self:
+                raise ValueError(f"{type(self).__name__} cannot borrow its own services.")
+            if services.given:
+                raise RuntimeError("These services were given already: lend them again.")
         async with self._lifecycle_lock:
-            await self._initialize_locked(validate=validate)
+            if services is None:
+                await self._initialize_locked(validate=validate)
+                return
+            if self._initialized:
+                raise RuntimeError(
+                    f"{type(self).__name__} is initialized: it borrows services "
+                    "only as it builds its own (initialize_services(services=...) "
+                    "before anything else initializes it)."
+                )
+            await self._initialize_locked(validate=validate, services=services)
 
-    async def _initialize_locked(self, validate: bool = True) -> None:
+    async def _initialize_locked(
+        self, validate: bool = True, services: ServiceLoan | None = None
+    ) -> None:
         """Initialization body. The caller must hold ``_lifecycle_lock``.
 
         Args:
             validate: Check the model settings before anything is allocated
                 (``config.validate_settings``). Model resolution itself always
                 runs: the backend builds its agents from it.
+            services: Another manager's services to borrow before the
+                services are built (:meth:`initialize_services`).
         """
         if self._initialized:
             return
@@ -1535,6 +1661,11 @@ class BaseWorkflowManager(ABC):
             # small to work in (ContextBudgetError) fails here too, before a
             # service or a session store is built.
             self._budgets = self._compute_budgets()
+            if services is not None:
+                # Another manager's, published as its: only what they lack
+                # is built, and the rollback below drops them unclosed.
+                self._service_set.borrow(services.services)
+                services.borrower = self
             # Create services BEFORE backend init so _build_tools() can
             # produce factory-bound tools during agent/graph creation.
             # Construction is offloaded to a worker thread (heavy constructors)
@@ -1836,8 +1967,10 @@ class BaseWorkflowManager(ABC):
            store), which is not called while a model switch keeps the store
            (:meth:`_keeping`). Each detaches its handles and returns their
            closers.
-        3. The services, detached now, except those a model switch carries,
-           and their closes started on a worker thread
+        3. The services, detached now, except those a model switch carries
+           and those another manager owns (lent to this one, or given
+           away: dropped, never closed here), and their closes started on a
+           worker thread
            (:meth:`_start_closing_services`): they block, and on the event
            loop they froze the app.
         4. The closers, in one task of its own, in a fixed order: the
