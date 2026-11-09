@@ -1523,7 +1523,9 @@ the start of the entry's title.
   of them at once and each for at most 10 seconds; an older entry is used
   while it is listed again in the background. As in 0.6, an id unknown to a
   provider is rejected only when that provider's own listing succeeded; a
-  failed, untried or older listing accepts it. After a key change to an
+  failed, untried or older listing accepts it, and a listing grows older in
+  a long session too: 24 hours after it was fetched it no longer rejects an
+  id, and `/models <text>` lists the provider again. After a key change to an
   account with other models, run `/models refresh` to list again at once.
   Every process of the app shares the file, two releases of it included
   (a dev checkout beside the installed app): a listing writes only its own

@@ -1011,3 +1011,94 @@ async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, 
     assert _catalog_warnings(caplog) == [
         f"Model {NEW} in models is not offered: not served by anthropic"
     ]
+
+
+# --- a listing ages in the process ---------------------------------------------------------
+#
+# Fresh, stale and degraded are what the catalog knows now, not what it decided
+# when a listing arrived: one process per conversation can outlive the TTL.
+
+
+async def test_a_cached_listing_goes_stale_in_a_session_that_outlives_the_ttl(cache):
+    """A conversation starts on a 23-hour-old cache entry and goes on for three
+    days: the listing is then stale, so /models <text> lists again and finds a
+    model released since."""
+    clock = Clock()
+    await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 23 * 3600
+    api = ProviderAPI(anthropic=_serving(NEW.model))
+    catalog = make(cache, api, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+    assert states(catalog) == {"anthropic": ProviderState.FRESH}
+    assert api.calls == []
+
+    clock.now += 3 * DAY
+
+    assert states(catalog) == {"anthropic": ProviderState.STALE}
+    assert not catalog.is_authoritative("anthropic")
+    found = await catalog.search(NEW.model)
+    assert [record.ref for record in found] == [NEW]
+    assert api.calls == ["anthropic"]
+    assert states(catalog) == {"anthropic": ProviderState.FRESH}
+    assert catalog.is_authoritative("anthropic")
+
+
+async def test_a_listing_this_process_made_goes_stale_after_the_ttl_too():
+    """Not the cache's doing: a catalog without a cache file ages its own listing."""
+    clock = Clock()
+    catalog = make(None, google=KEYS["google"], clock=clock)
+    await catalog.load()
+
+    clock.now += DAY - 1
+    assert states(catalog) == {"google": ProviderState.FRESH}
+    with pytest.raises(ModelResolutionError, match="not available"):
+        catalog.record(ModelRef("google", "gemini-9-ultra"))
+
+    clock.now += 1
+    assert states(catalog) == {"google": ProviderState.STALE}
+    assert catalog.status()[0].fetched_at == 1_000_000.0  # the listing in use is the old one
+    assert catalog.record(ModelRef("google", "gemini-9-ultra")).model == "gemini-9-ultra"
+    assert "gemini-2.0-flash" in [record.model for record in catalog.records("google")]
+
+
+async def test_a_listing_that_aged_stops_leaving_a_model_out_of_the_list(cache):
+    """A model a setting names that a fresh listing lacks is left out of the
+    list; once the listing is stale it cannot prove the model is missing."""
+    clock = Clock()
+    await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 3600
+    catalog = make(
+        cache, NoNetwork(), references=(NEW,), anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+    assert str(NEW) not in catalog.offered()
+
+    clock.now += DAY
+
+    assert str(NEW) in catalog.offered()
+
+
+async def test_a_failed_or_untried_provider_is_not_made_stale_by_time(cache):
+    clock = Clock()
+    catalog = make(cache, ProviderAPI(google=refuse), google=KEYS["google"], clock=clock)
+    await catalog.load()
+    untried = make(None, google=KEYS["google"], clock=clock)
+
+    clock.now += 3 * DAY
+
+    assert states(catalog) == {"google": ProviderState.DEGRADED}
+    assert states(untried) == {"google": ProviderState.UNATTEMPTED}
+    await catalog.aclose()
+
+
+async def test_refresh_makes_an_aged_listing_fresh_again(cache):
+    clock = Clock()
+    catalog = make(cache, google=KEYS["google"], clock=clock)
+    await catalog.load()
+    clock.now += 2 * DAY
+    assert states(catalog) == {"google": ProviderState.STALE}
+
+    await catalog.refresh()
+
+    assert states(catalog) == {"google": ProviderState.FRESH}
+    assert read(cache)["providers"]["google"]["fetched_at"] == clock.now

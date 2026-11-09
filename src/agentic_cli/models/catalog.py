@@ -44,6 +44,9 @@ takes the first one listed's facts; OpenAI its curated and reasoning models.
 **Validation.** An unknown id is rejected only when its provider's listing is
 fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
 prove a model does not exist, so the id is accepted with the table's record.
+A provider's state is derived each time it is asked, from its listing's age,
+its last failure and the clock: a listing that outlives the TTL in a long
+session is stale, whether the cache or this process made it.
 A fresh listing read from the cache can predate a model, so before it
 rejects one the provider is listed again, once: while loading for an entry's
 model, through ``confirm_rejections`` for a referenced one. A listing records
@@ -159,14 +162,13 @@ class _ProviderState:
     """What the catalog knows of one provider's models."""
 
     provider: Provider
-    known: ProviderState = ProviderState.UNATTEMPTED
     #: The last successful listing; kept through a failed refresh.
     listing: Listing | None = None
     #: The last attempt, while it is a failure.
     failure: Listing | None = None
     #: A cached entry that a background refresh should replace.
     due: bool = False
-    #: The fresh listing was read from the cache, not listed by this catalog.
+    #: The listing was read from the cache, not listed by this catalog.
     from_cache: bool = False
     #: The entries' models the listing lacked when it was made: a cached
     #: listing that lacks one of these is not listed again for it.
@@ -361,7 +363,9 @@ class ModelCatalog:
             The matches, by provider in catalog order, then by model id.
         """
         listable = [name for name, state in self._states.items() if state.listable]
-        unlisted = [n for n in listable if self._states[n].known is ProviderState.UNATTEMPTED]
+        unlisted = [
+            n for n in listable if self._state_of(self._states[n]) is ProviderState.UNATTEMPTED
+        ]
         if unlisted:
             cached = self._cache.read()
             for name in unlisted:
@@ -370,7 +374,7 @@ class ModelCatalog:
                 if entry is not None:
                     self._adopt(state, entry)
             self._searched.update(unlisted)
-        stale = [n for n in listable if self._states[n].known is not ProviderState.FRESH]
+        stale = [n for n in listable if self._state_of(self._states[n]) is not ProviderState.FRESH]
         await asyncio.gather(*(self._list(name) for name in stale))
         needle = text.casefold()
         found: list[ModelRecord] = []
@@ -407,7 +411,7 @@ class ModelCatalog:
         found = state.accepted.get(ref.model)
         if found is not None:
             return found
-        if state.known is ProviderState.FRESH:
+        if self._state_of(state) is ProviderState.FRESH:
             if state.from_cache:
                 self._cached_rejections.add(ref.provider)
             models = [record.model for record in state.offered]
@@ -429,7 +433,7 @@ class ModelCatalog:
     def is_authoritative(self, provider: str) -> bool:
         """Whether ``provider``'s listing can reject an unknown id (FRESH only)."""
         found = self._states.get(provider)
-        return found is not None and found.known is ProviderState.FRESH
+        return found is not None and self._state_of(found) is ProviderState.FRESH
 
     def status(self) -> list[ProviderStatus]:
         """The status of each provider in use or searched, in catalog order
@@ -537,7 +541,7 @@ class ModelCatalog:
         state = self._states.get(ref.provider)
         return (
             state is not None
-            and state.known is ProviderState.FRESH
+            and self._state_of(state) is ProviderState.FRESH
             and ref.model not in state.accepted
         )
 
@@ -562,7 +566,7 @@ class ModelCatalog:
         """
         state = self._states[ref.provider]
         return (
-            state.known is not ProviderState.FRESH
+            self._state_of(state) is not ProviderState.FRESH
             and state.listing is not None
             and ref.model in state.absent
         )
@@ -611,10 +615,8 @@ class ModelCatalog:
         )
         if listing.ok:
             state.listing, state.failure = listing, None
-            state.known = ProviderState.FRESH
         else:
             state.failure = listing
-            state.known = ProviderState.DEGRADED
             # At startup this is the first run's validation going missing, as
             # 0.6 reported it; later it only means a refresh will retry.
             logger.log(
@@ -645,18 +647,28 @@ class ModelCatalog:
         """Use a cache entry: fresh, stale, or a cached failure."""
         listing = entry.to_listing(state.provider.name)
         if listing.ok:
-            age = self._clock() - listing.fetched_at
-            fresh = 0 <= age < self._ttl
             state.listing, state.failure = listing, None
-            state.known = ProviderState.FRESH if fresh else ProviderState.STALE
-            state.due = not fresh
-            state.from_cache = fresh
+            state.due = not self._is_fresh(listing)
+            state.from_cache = True
             state.absent = frozenset(entry.absent)
         else:
             state.listing, state.failure = None, listing
-            state.known = ProviderState.DEGRADED
             state.due = True
         self._rebuild(state)
+
+    def _state_of(self, state: _ProviderState) -> ProviderState:
+        """What the catalog knows of the provider now, from its listing, its last
+        failure and the clock: a listing that ages past the TTL is stale
+        whether the cache or this process made it."""
+        if state.failure is not None:
+            return ProviderState.DEGRADED
+        if state.listing is None:
+            return ProviderState.UNATTEMPTED
+        return ProviderState.FRESH if self._is_fresh(state.listing) else ProviderState.STALE
+
+    def _is_fresh(self, listing: Listing) -> bool:
+        """Whether ``listing`` is under the TTL old; one stamped in the future is not."""
+        return 0 <= self._clock() - listing.fetched_at < self._ttl
 
     def _status(self, name: str) -> ProviderStatus:
         state = self._states[name]
@@ -664,7 +676,7 @@ class ModelCatalog:
         return ProviderStatus(
             provider=name,
             has_credentials=state.provider.has_credentials,
-            state=state.known,
+            state=self._state_of(state),
             fetched_at=latest.fetched_at if latest is not None else None,
             model_count=len(state.offered),
             error=state.failure.error if state.failure is not None else None,
