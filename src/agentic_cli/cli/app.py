@@ -649,8 +649,11 @@ class BaseCLIApp:
         self._resume_requested = session_id is not None
         # The conversation the turns run in: its id, whether a turn ran in it
         # since it was opened, and the lock held on it against another
-        # process opening it (cli/conversation.py).
-        self._conversation_core = ConversationCore(session_id or uuid.uuid4().hex[:12])
+        # process opening it, at the place the settings keep it in (read
+        # again as run() starts the workflow: cli/conversation.py).
+        self._conversation_core = ConversationCore(
+            session_id or uuid.uuid4().hex[:12], Place.of(settings)
+        )
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
         self._pending_resume: str | None = None
@@ -1851,7 +1854,7 @@ class BaseCLIApp:
             if info.session_id != self._session_id
         ][:PICK_LIMIT]
         if not rows:
-            note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+            note = "" if self._place().locked else _MEMORY_NOTE
             self.session.add_message("system", f"No other conversations to resume.{note}")
             return None
         # Drawn where the settings say now: /settings may have changed the
@@ -1977,7 +1980,7 @@ class BaseCLIApp:
             self.session.add_error("This app's backend keeps no sessions.")
             self.exit_status = 1
             return False
-        note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+        note = "" if self._place().locked else _MEMORY_NOTE
         try:
             if mode == "resume":
                 if await workflow.session_info(target) is None:
@@ -2096,10 +2099,25 @@ class BaseCLIApp:
             else:
                 self.session.add_error(f"Could not open '{target}': {reason}")
 
+    def _place(self) -> Place:
+        """Where the conversation is kept: its backend and store, as the
+        workflow runs them.
+
+        Recorded when the workflow starts (``run()``) and when an orchestrator
+        switch starts another one, never read from the settings in between: a
+        ``/settings`` change of ``session_store`` takes effect at the next
+        start, and until then the lock keys the store the workflow keeps.
+        An app built with ``__new__`` reads its settings on first use.
+        """
+        core = self._conversation
+        if core.place is None:
+            core.place = Place.of(self._settings)
+        return core.place
+
     def _conversation_key(self, session_id: str) -> tuple:
         """What names a stored conversation for its lock: the same id in
         another backend or store is another conversation."""
-        return Place.of(self._settings).key(session_id)
+        return self._place().key(session_id)
 
     def _acquire(self, session_id: str) -> Hold | int:
         """``_hold``'s first half: ``session_id`` held beside the one held now.
@@ -2108,7 +2126,7 @@ class BaseCLIApp:
             The hold to ``_commit`` or ``_abandon`` (one that locks nothing on
             the memory store); the process id holding it elsewhere.
         """
-        return self._conversation.acquire(session_id, Place.of(self._settings))
+        return self._conversation.acquire(session_id, self._place())
 
     @contextmanager
     def conversation_held(self, session_id: str) -> Iterator[int | None]:
@@ -2152,7 +2170,7 @@ class BaseCLIApp:
             None once it is held; else the process id of the one holding it
             (0 when unknown), and the conversation held before stays held.
         """
-        return self._conversation.hold(session_id, Place.of(self._settings))
+        return self._conversation.hold(session_id, self._place())
 
     def _resume_hint(self) -> str:
         """The exit line that names how to come back to the current conversation."""
@@ -2188,6 +2206,8 @@ class BaseCLIApp:
         # Once, before anything waits for the workflow: a backend that cannot
         # start (its extra missing, or a key) is still deprecated.
         _warn_if_langgraph(self._settings, self.session)
+        # The place the workflow starts in keys the conversation's lock.
+        self._conversation.place = Place.of(self._settings)
 
         async with self._workflow_controller.background_init(self.session):
             # Adopt this run's session id (generated, or session_id=) so every
@@ -2226,7 +2246,7 @@ class BaseCLIApp:
             # Named at exit when a later run can resume it: stored, not in memory.
             controller = self._workflow_controller
             resumable = (
-                self._settings.session_store != "memory"
+                self._place().locked  # stored, not on the memory store
                 and controller.is_ready
                 and await self._is_stored(controller.workflow, self._session_id)
             )
