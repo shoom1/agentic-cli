@@ -105,13 +105,17 @@ class DurableRead(str, Enum):
 
 
 class ClaimLockUnavailable(RuntimeError):
-    """The cross-process resume lock could not be established.
+    """The cross-process lock over the jobs directory could not be taken.
 
     Raised rather than swallowed: without the lock, two processes can both
-    decide a job is theirs to deliver. Callers that could *cause* a duplicate
-    delivery (claiming, startup recovery) must treat this as "not mine" and do
-    nothing; callers that only *prevent* one (recording a completed delivery)
-    proceed best-effort.
+    decide a job is theirs to launch or deliver, and a write can lose what
+    another process has just recorded. So without it no record is written: a
+    launch or a delivery is not claimed, startup recovery does nothing, a
+    cancel or a refresh leaves the record as it is (a read answers with the
+    record as this manager has it), and recording a completed delivery
+    records nothing, so the claim stays ``RESUMING`` until startup recovery
+    fails it once its process is gone. Only a new job's first write goes
+    ahead: there is nothing on disk yet for it to lose.
     """
 
 

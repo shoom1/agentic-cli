@@ -2160,13 +2160,13 @@ class TestResumeTransitionGuards:
 class TestStartupRecoveryHonorsDurableReads:
     """Recovery reloads durable state — and must act on what the read *said*.
 
-    ``_recover_interrupted_launches`` / ``_recover_interrupted_resumes`` called
-    ``_reload_durable()`` and threw the answer away. A record another manager
-    deleted between the initial load and recovery was therefore rewritten from
-    the stale in-memory copy (``owns_shared_state=True`` writes unconditionally),
-    resurrecting a job that had been cleaned away; a record that could not be
-    parsed was overwritten with a recovery verdict decided on state we had
-    failed to read.
+    ``_recover_interrupted_launches`` / ``_recover_interrupted_resumes`` once
+    reloaded the record and threw away what the read found. A record another
+    manager deleted between the initial load and recovery was therefore
+    rewritten from the stale in-memory copy, by a write that did not look at
+    the file, resurrecting a job that had been cleaned away; a record that
+    could not be parsed was overwritten with a recovery verdict decided on
+    state we had failed to read.
     """
 
     @staticmethod
