@@ -349,12 +349,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **An agent's tool the registry did not issue is named at startup.** The
-  permission gate denies every call to a plain callable in
-  `AgentConfig.tools` that `@register_tool` did not issue, and an app learned
-  it only from the model's refusals. Building the agents now logs one
-  `tool_not_registered` warning per agent and tool (shown above the prompt in
-  the CLI), naming both; a backend's tool object, such as ADK's
-  `GoogleSearchTool`, is not named.
+  permission gate denies every call to a tool in `AgentConfig.tools` that
+  `@register_tool` did not issue, and an app learned it only from the model's
+  refusals. Building the agents now logs one `tool_not_registered` warning per
+  agent and tool (shown above the prompt in the CLI), naming both: a plain
+  callable, an ADK `FunctionTool` or LangChain `StructuredTool` (a `@tool`)
+  wrapping an unregistered function, or an app's own tool class. ADK's own
+  tool objects are not named: a built-in such as `GoogleSearchTool` runs
+  inside the model and never reaches the gate.
 
 - **`/memory`, to review what memory holds.** `/memory` lists both scopes,
   newest first (date, scope, type, source, description, id), with the
@@ -1979,6 +1981,9 @@ step; each entry says what to use instead.
   `().__class__.__base__.__subclasses__()` gets past; it is now
   `hello_deepagents.py`'s evaluator of numbers, operators and a few math
   names, which also refuses a power too large to compute (`9 ** 9 ** 9` hung).
+  In all three, `calculate` now also refuses a result that is complex
+  (`(-8) ** 0.5`, which ADK's Claude adapter could not send back, ending the
+  turn) or infinite.
 
 - **Knowledge base: one header that cannot be read no longer loses the
   documents after it.** `metadata.json` was read in one step, so a header

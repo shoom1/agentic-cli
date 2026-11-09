@@ -39,7 +39,15 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 """
 
-_CHECK_TOOLS = _LOAD + """
+_IMPORT = """
+import importlib, json, sys
+
+# The checkout under test first, then the suite and the examples' packages.
+sys.path[:0] = [{src!r}, {repo!r}, {examples!r}]
+module = importlib.import_module({name!r})
+"""
+
+_REPORT = """
 from agentic_cli.tools.registry import identify_tool
 from agentic_cli.workflow.config import AgentConfig
 
@@ -61,6 +69,7 @@ unregistered = [
 ]
 print(json.dumps({{"configs": len(found), "unregistered": unregistered}}))
 """
+_CHECK_TOOLS = _LOAD + _REPORT
 
 _CALCULATE = _LOAD + """
 expressions = {expressions!r}
@@ -87,7 +96,8 @@ def _script(template: str, example: Path, **values) -> str:
     return template.format(
         src=str(_REPO_ROOT / "src"),
         repo=str(_REPO_ROOT),
-        name=example.stem,
+        examples=str(_REPO_ROOT / "examples"),
+        name=values.pop("name", example.stem),
         path=str(example),
         **values,
     )
@@ -113,8 +123,22 @@ def test_every_agent_tool_is_registered(example, tmp_path):
     )
 
 
+def test_the_research_demo_agent_tools_are_registered(tmp_path):
+    """research_demo is a package, which the per-file loop above skips."""
+    agents = _REPO_ROOT / "examples" / "research_demo" / "agents.py"
+
+    report = _run(_script(_IMPORT + _REPORT, agents, name="research_demo.agents"), tmp_path)
+
+    assert report["configs"] > 0
+    assert report["unregistered"] == [], report["unregistered"]
+
+
 _SAFE = ["sqrt(16)", "2 + 3 * 4", "round(pi, 2)"]
 _REFUSED = [
+    "(-8) ** 0.5",  # complex: no provider adapter can send it back
+    "(-8) ** (1 / 3)",
+    "1e308 * 10",  # inf
+    "1e999",
     "().__class__.__base__.__subclasses__()",
     "__import__('os').getcwd()",
     "(lambda: 1)()",
