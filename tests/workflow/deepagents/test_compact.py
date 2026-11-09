@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -51,6 +52,7 @@ from agentic_cli.workflow.deepagents.summarization import (  # noqa: E402
     ReportingSummarizationMiddleware,
 )
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow import live_events  # noqa: E402
 from agentic_cli.workflow.context import is_context_overflow  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.models import ProviderKind  # noqa: E402
@@ -267,6 +269,33 @@ class TestCompactNow:
                 trimmed.metadata["tokens_after"]) == (
             result.messages_summarized, result.tokens_before, result.tokens_after
         )
+
+    async def test_called_directly_it_summarizes_and_reports_to_nobody(
+        self, small, monkeypatch, caplog
+    ):
+        """An app may call ``manager.compact`` itself, outside ``live_events.reporting``:
+        what it reports has no one to go to (``BaseWorkflowManager.compact``: "when
+        there are any"), as on ADK. The summary is written all the same, its run
+        callback fails nowhere (LangChain only logs a callback that raises), the
+        result is what the caller gets, and nothing is left to turn up in a
+        later turn's stream."""
+        manager, chat = solo(monkeypatch, small, [*answers(3), ai("A summary."), ai("Answer 4.")])
+        try:
+            for text in THREE:
+                await turn(manager, text)
+            assert live_events.current() is None
+            result = await manager.compact(manager.session_ref("s", "u"))
+            state = await state_of(manager)
+            fourth = await turn(manager, "Turn 4?")
+        finally:
+            await manager.cleanup()
+
+        assert isinstance(result, CompactResult) and result.messages_summarized == 4
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+        assert state[SUMMARIZATION_EVENT_KEY]["summary_message"].text == SUMMARY
+        assert [m.text[:9] for m in chat.conversation(4)][0] == SUMMARY[:9]
+        assert EventType.CONTEXT_SUMMARIZING not in [event.type for event in fourth]
+        assert EventType.CONTEXT_TRIMMED not in [event.type for event in fourth]
 
     async def test_a_short_conversation_has_nothing_to_summarize(self, small, monkeypatch):
         manager, chat = solo(monkeypatch, small, answers(2))

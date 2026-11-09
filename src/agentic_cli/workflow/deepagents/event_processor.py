@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import time
-from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -335,11 +334,9 @@ class RunCallback(AsyncCallbackHandler):
     """Reports one turn's events that the stream cannot carry.
 
     Attached to the turn's run config, LangChain hands it to every model call
-    in the run, sub-agents' and tools' included. With ``live``, each event
-    goes out through it as it happens (the manager merges it into the turn's
-    stream); without, it is collected for ``drain``, which a caller runs at
-    each stream item, before that item's own events: what it collected
-    happened inside the node whose output the item is.
+    in the run, sub-agents' and tools' included. Each event goes out through
+    ``live`` as it happens (the manager merges it into the turn's stream), so
+    it shows while the node it happened in still runs.
 
     - A summary call (run metadata ``lc_source="summarization"``) reports
       ``CONTEXT_SUMMARIZING`` as it starts, then its ``LLM_USAGE``, with
@@ -359,8 +356,7 @@ class RunCallback(AsyncCallbackHandler):
         root: The root agent, for a call no agent is named on.
         agent_models: Each agent's resolved model, by name.
         llm_log: Where raw LLM traffic is written; None logs none.
-        live: The turn's live events, which every event goes out through;
-            None collects them for ``drain``.
+        live: The turn's live events, which every event goes out through.
         budgets: Each agent's context numbers, by name, which a summary's
             ``LLM_USAGE`` carries; none without.
     """
@@ -371,7 +367,7 @@ class RunCallback(AsyncCallbackHandler):
         root: str,
         agent_models: Mapping[str, "ResolvedModel"],
         llm_log: "LLMLogWriter | None" = None,
-        live: "LiveEvents | None" = None,
+        live: "LiveEvents",
         budgets: Mapping[str, ContextBudget] | None = None,
     ) -> None:
         super().__init__()
@@ -380,8 +376,6 @@ class RunCallback(AsyncCallbackHandler):
         self._budgets: Mapping[str, ContextBudget] = budgets or {}
         self._llm_log = llm_log
         self._live = live
-        # A sync tool's model call reports from LangChain's executor thread.
-        self._events: deque[WorkflowEvent] = deque()
         # The calls in flight that are reported when they end, by run id:
         # summary calls, and every call when logging.
         self._calls: dict[UUID, _ModelCall] = {}
@@ -489,17 +483,7 @@ class RunCallback(AsyncCallbackHandler):
         self._llm_log.write(event)
 
     def _emit(self, event: WorkflowEvent) -> None:
-        if self._live is not None:
-            self._live.emit(event)
-        else:
-            self._events.append(event)
-
-    def drain(self) -> list[WorkflowEvent]:
-        """The events collected since the last drain, oldest first (none with ``live``)."""
-        events: list[WorkflowEvent] = []
-        while self._events:
-            events.append(self._events.popleft())
-        return events
+        self._live.emit(event)
 
 
 def _purpose(metadata: Mapping[str, Any]) -> str:

@@ -701,7 +701,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                     root=root,
                     agent_models=self._resolved_models,
                     llm_log=self._raw_llm_log(),
-                    live=live_events.current(),
+                    # Called outside a reporting context there is no one to
+                    # report to: what it reports is queued where nothing reads.
+                    live=live_events.current() or LiveEvents(),
                     budgets=self._budgets,
                 )
                 summary = await write_summary(
