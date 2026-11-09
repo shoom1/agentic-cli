@@ -238,3 +238,77 @@ class TestAContextOverflow:
 
         assert (event.metadata["recoverable"], event.metadata["agent"]) == (True, "researcher")
         assert event.content.startswith("researcher failed: ")
+
+
+# --- a tool's result ----------------------------------------------------------------
+
+
+def _result(response: dict) -> types.Part:
+    return types.Part(function_response=types.FunctionResponse(
+        id="c1", name="lookup", response=response,
+    ))
+
+
+def _mcp_error(*blocks: dict) -> dict:
+    """An MCP error result as ADK's ``McpTool`` returns it:
+    ``CallToolResult.model_dump(exclude_none=True, mode="json")``."""
+    return {"content": list(blocks), "isError": True}
+
+
+class TestToolResults:
+    """A failed result is a failed ``TOOL_RESULT`` naming its error, as on Deep
+    Agents (``tests/workflow/deepagents/test_mcp.py``)."""
+
+    def test_an_mcp_error_result_is_a_failure_its_text_the_error(self):
+        response = _mcp_error({"type": "text", "text": "No such city: Atlantis"})
+
+        event = ADKEventProcessor(model="m").process_part(_result(response), "s1")
+
+        assert event.type is EventType.TOOL_RESULT
+        assert event.metadata["success"] is False
+        assert event.metadata["error"] == "No such city: Atlantis"
+        assert event.metadata["result"] == response  # what the model read
+        assert event.content == "Failed: No such city: Atlantis"
+
+    def test_its_text_blocks_are_joined_and_the_rest_left_out(self):
+        response = _mcp_error(
+            {"type": "text", "text": "No such city."},
+            {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+            {"type": "text", "text": "Try Paris."},
+        )
+
+        event = ADKEventProcessor(model="m").process_part(_result(response), "s1")
+
+        assert event.metadata["error"] == "No such city.\nTry Paris."
+
+    def test_one_without_text_still_fails(self):
+        event = ADKEventProcessor(model="m").process_part(_result(_mcp_error()), "s1")
+
+        assert event.metadata["success"] is False
+        assert event.metadata["error"] == "The MCP tool returned an error without text."
+
+    def test_an_mcp_result_that_is_no_error_is_a_success(self):
+        response = {"content": [{"type": "text", "text": "5"}], "isError": False}
+
+        event = ADKEventProcessor(model="m").process_part(_result(response), "s1")
+
+        assert event.metadata["success"] is True
+        assert "error" not in event.metadata
+
+    def test_a_framework_error_names_its_error(self):
+        response = {"success": False, "error": "Permission denied: no"}
+
+        event = ADKEventProcessor(model="m").process_part(_result(response), "s1")
+
+        assert (event.metadata["success"], event.metadata["error"]) == (
+            False, "Permission denied: no",
+        )
+        assert event.content == "Failed: Permission denied: no"
+
+    def test_a_success_names_no_error(self):
+        event = ADKEventProcessor(model="m").process_part(
+            _result({"success": True, "value": 1}), "s1"
+        )
+
+        assert event.metadata["success"] is True
+        assert "error" not in event.metadata

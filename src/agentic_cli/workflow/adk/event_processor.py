@@ -29,6 +29,9 @@ NO_ANSWER_CODES = (
     | {"MODEL_RETURNED_NO_CONTENT"}
 )
 
+#: The error of an MCP error result whose content holds no text.
+_MCP_ERROR_WITHOUT_TEXT = "The MCP tool returned an error without text."
+
 #: Finish reasons that are no reason: the reply ended as it should.
 _NORMAL_FINISH = frozenset(
     {types.FinishReason.STOP.value, types.FinishReason.FINISH_REASON_UNSPECIFIED.value}
@@ -58,6 +61,10 @@ class ADKEventProcessor:
     default model for an agent the framework did not build) and its context
     numbers (``context_trigger``, ``window_known``, from ``budgets``), which
     the CLI shows the main agent's prompt against.
+
+    A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
+    false, an ``error`` value) or is an MCP tool's error result (``isError``),
+    its error in ``metadata["error"]``, as on Deep Agents.
 
     A conversation the main agent's model no longer takes ends its turn with
     an error response from the overflow handler
@@ -236,27 +243,20 @@ class ADKEventProcessor:
         if hasattr(part, "function_response") and part.function_response:
             tool_name = part.function_response.name
             response = part.function_response.response
-
-            # Determine success and extract result
-            success = True
-            result_data = response
-
-            if isinstance(response, dict):
-                # Check for error value, not just key presence
-                if response.get("error"):
-                    success = False
-                # Also respect explicit "success" field if present
-                if "success" in response:
-                    success = response["success"]
-                result_data = response
+            success, error = _outcome(response)
 
             logger.debug("tool_result", tool_name=tool_name, success=success)
 
-            return WorkflowEvent.tool_result(
+            event = WorkflowEvent.tool_result(
                 tool_name=tool_name,
-                result=result_data,
+                result=response,
                 success=success,
+                error=error,
             )
+            if _is_mcp_error(response):
+                # Shown as any failed result is ("Failed: <error>").
+                event.content = f"Failed: {error}"
+            return event
 
         if part.code_execution_result:
             return WorkflowEvent.code_execution(str(part.code_execution_result.outcome))
@@ -277,6 +277,40 @@ class ADKEventProcessor:
         if self._on_event:
             return self._on_event(event)
         return event
+
+
+def _is_mcp_error(response: Any) -> bool:
+    """Whether ``response`` is an MCP tool's error result.
+
+    ADK's ``McpTool`` returns the server's ``CallToolResult`` as a dict
+    (``model_dump(exclude_none=True, mode="json")``), ``isError`` true for a
+    failure the server reports.
+    """
+    return isinstance(response, dict) and response.get("isError") is True
+
+
+def _outcome(response: Any) -> tuple[bool, str | None]:
+    """Whether a tool's result is a success, and its error when it is not.
+
+    The framework's shape fails with an ``error`` value or ``success``
+    false, and its error is that value. An MCP error result fails too, its
+    error the text of its text blocks, as Deep Agents reports it
+    (``langchain-mcp-adapters`` joins them by line).
+    """
+    if _is_mcp_error(response):
+        texts = [
+            block.get("text") for block in response.get("content") or ()
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        ]
+        return False, "\n".join(texts) or _MCP_ERROR_WITHOUT_TEXT
+    if not isinstance(response, dict):
+        return True, None
+    # An error value, not just the key; an explicit "success" decides.
+    success = not response.get("error")
+    if "success" in response:
+        success = response["success"]
+    error = response.get("error")
+    return success, error if not success and isinstance(error, str) else None
 
 
 def _no_answer(adk_event: Any) -> str | None:

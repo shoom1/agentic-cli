@@ -81,7 +81,7 @@ agentic-cli/
 │   │   │   ├── overflow_plugin.py # OverflowPlugin: a provider's overflow summarized (the retry: the summary and the turns it kept) or trimmed, retried once, then CONTEXT_OVERFLOW
 │   │   │   ├── memory_index_plugin.py # MemoryIndexPlugin: the conversation's memory index first in the root's requests (before the overflow handler and the fit guard, which keep and fold it)
 │   │   │   ├── sessions.py   # A conversation's row in its session state (agentic_cli.title, agentic_cli.turns), saved with each user turn (run_async(state_delta=)); typed_prompts
-│   │   │   ├── event_processor.py  # ADKEventProcessor (a sub-agent's text marked as activity; a main-agent reply that is no answer, NO_ANSWER_CODES, → the turn's ERROR)
+│   │   │   ├── event_processor.py  # ADKEventProcessor (a sub-agent's text marked as activity; a main-agent reply that is no answer, NO_ANSWER_CODES, → the turn's ERROR; a failed result, an MCP isError one too, → a failed TOOL_RESULT naming its error, as on Deep Agents)
 │   │   │   ├── model_factory.py # build_adk_model: ResolvedModel → ADK model, config, planner
 │   │   │   ├── openai_compatible.py # OpenAICompatibleLlm (the configured providers: openrouter and openai_compatible kinds; reasoning text; OpenRouter's reasoning_details kept on the thought part (thought_signature, with the model that wrote them) and sent back on that turn's assistant message to that model only; no field sent as null)
 │   │   │   ├── anthropic_llm.py # DirectAnthropicLlm: bare claude-* strings → direct API
