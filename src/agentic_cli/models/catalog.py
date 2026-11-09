@@ -39,6 +39,7 @@ shows fewer (``records()``, the tier picks above, the models an "is not
 available" message names, the status count): Google its text models, without
 aliases, snapshots or variants; Anthropic each dated id as its alias, which
 takes the first one listed's facts; OpenAI its curated and reasoning models.
+``listing_records.records_for`` makes both maps, each record with its entry.
 
 **Validation.** An unknown id is rejected only when its provider's listing is
 fresh (``ProviderState.FRESH``); a stale, failed or untried listing cannot
@@ -85,9 +86,10 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agentic_cli.models.discovery import DEFAULT_TIMEOUT, ListedModel, Listing, list_models
-from agentic_cli.models.entries import DEFAULT_EFFORT_LEVELS, ModelEntry
-from agentic_cli.models.providers import Provider, ProviderKind
-from agentic_cli.models.records import ModelRecord, ThinkingMechanism, ThinkingRule
+from agentic_cli.models.entries import ModelEntry
+from agentic_cli.models.listing_records import records_for, with_entry
+from agentic_cli.models.providers import Provider
+from agentic_cli.models.records import ModelRecord
 from agentic_cli.models.refs import BUILTIN_PROVIDERS, ModelRef, ModelSpecError, parse_ref
 from agentic_cli.models.resolve import ModelResolutionError
 from agentic_cli.models.table import ShippedTable, load_table, newest
@@ -101,17 +103,6 @@ DEFAULT_TTL = 86400.0
 #: a file of another version is listed again.
 CACHE_VERSION = 3
 
-# OpenRouter's ``reasoning.effort`` values, lowest first.
-_OPENROUTER_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
-# Claude thinking for a listing that names a type the table did not expect.
-_CLAUDE_ADAPTIVE_LEVELS = ("low", "medium", "high", "max")
-_CLAUDE_BUDGETS = (4096, 10000, 32000)
-_CLAUDE_BUDGET_RANGE = (1024, 128000)
-_ENTRY_THINKING = {
-    "none": ThinkingMechanism.NONE,
-    "chat_template": ThinkingMechanism.CHAT_TEMPLATE,
-    "effort": ThinkingMechanism.EFFORT,
-}
 # The tiers the list offers of each built-in provider when no entry can run.
 _TIERS = ("fast", "default", "strong")
 # How many models an "is not available" message names.
@@ -427,7 +418,7 @@ class ModelCatalog:
                 f"Model {ref} is not available. Available {ref.provider} models: {shown}"
             )
         record = self._table.record_for(ref.provider, state.provider.kind, ref.model)
-        return _with_entry(record, self._entries.get(ref))
+        return with_entry(record, self._entries.get(ref))
 
     def records(self, provider: str) -> list[ModelRecord]:
         """The models offered for ``provider``: those its listing shows, else
@@ -683,126 +674,12 @@ class ModelCatalog:
     def _rebuild(self, state: _ProviderState) -> None:
         """Recompute a provider's records from what it now knows; swapped in whole.
 
-        Each record takes its model's entry here, so ``records()`` and
-        ``record()`` give the same record.
+        Each record takes its model's entry (``records_for``), so ``records()``
+        and ``record()`` give the same record.
         """
-        accepted, offered = self._records_for(state)
-        name = state.provider.name
-        accepted = {
-            model: _with_entry(record, self._entries.get(ModelRef(name, model)))
-            for model, record in accepted.items()
-        }
-        state.accepted = MappingProxyType(accepted)
-        state.offered = tuple(accepted[record.model] for record in offered)
-
-    def _records_for(
-        self, state: _ProviderState
-    ) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
-        listing = state.listing
-        name, kind = state.provider.name, state.provider.kind
-        if kind is ProviderKind.OPENAI_COMPATIBLE:
-            return self._compatible_records(state.provider, listing)
-        if listing is None:
-            models = self._table.fallback_models(kind)
-            fallback = [self._table.record_for(name, kind, model) for model in models]
-            return {record.model: record for record in fallback}, fallback
-        build = {
-            ProviderKind.GOOGLE: self._google,
-            ProviderKind.ANTHROPIC: self._anthropic,
-            ProviderKind.OPENAI: self._openai,
-            ProviderKind.OPENROUTER: self._openrouter,
-        }[kind]
-        # Every id the provider serves is accepted; only the shown ones are offered.
-        accepted: dict[str, ModelRecord] = {}
-        shown: dict[str, ModelRecord] = {}
-        for listed in listing.models:
-            if listed.id not in accepted:
-                accepted[listed.id] = build(name, listed)
-            if listed.alias is None:
-                if listed.shown:
-                    shown.setdefault(listed.id, accepted[listed.id])
-                continue
-            # Anthropic: a dated id is shown as its alias, which takes the
-            # first one listed's facts, as in 0.6.
-            if listed.alias not in accepted:
-                accepted[listed.alias] = build(name, dataclasses.replace(listed, id=listed.alias))
-            shown.setdefault(listed.alias, accepted[listed.alias])
-        if kind is not ProviderKind.OPENAI:
-            return accepted, list(shown.values())
-        # R15: the curated ids the account has, then any other reasoning
-        # model it lists. Other ids (embeddings, TTS, gpt-4.1) are accepted by
-        # record() but never offered.
-        curated = self._table.curated_openai()
-        offered = [accepted[model] for model in curated if model in accepted]
-        offered += [
-            record
-            for model, record in accepted.items()
-            if model not in curated and record.thinking.mechanism is ThinkingMechanism.EFFORT
-        ]
-        return accepted, offered
-
-    def _google(self, name: str, listed: ListedModel) -> ModelRecord:
-        record = self._table.record_for(name, ProviderKind.GOOGLE, listed.id)
-        thinking = None
-        if listed.reasoning is False and record.thinking.mechanism is not ThinkingMechanism.NONE:
-            thinking = ThinkingRule()
-        return _merge(
-            record,
-            "listing",
-            display_name=listed.display_name or None,
-            context_window=listed.context_window,
-            max_output=listed.max_output,
-            thinking=thinking,
+        state.accepted, state.offered = records_for(
+            state.provider, state.listing, self._table, self._entries
         )
-
-    def _anthropic(self, name: str, listed: ListedModel) -> ModelRecord:
-        record = self._table.record_for(name, ProviderKind.ANTHROPIC, listed.id)
-        return _merge(
-            record,
-            "listing",
-            display_name=listed.display_name or None,
-            context_window=listed.context_window,
-            max_output=listed.max_output,
-            image_input=listed.image_input,
-            thinking=_claude_thinking(record.thinking, listed),
-        )
-
-    def _openai(self, name: str, listed: ListedModel) -> ModelRecord:
-        # Ids only: the listing confirms the model exists; the table says what it is.
-        return self._table.record_for(name, ProviderKind.OPENAI, listed.id)
-
-    def _openrouter(self, name: str, listed: ListedModel) -> ModelRecord:
-        record = self._table.record_for(name, ProviderKind.OPENROUTER, listed.id)
-        reasons = listed.reasoning is True
-        effort = ThinkingRule(ThinkingMechanism.EFFORT, levels=_OPENROUTER_EFFORTS)
-        return _merge(
-            record,
-            "listing",
-            display_name=listed.display_name or None,
-            context_window=listed.context_window,
-            max_output=listed.max_output,
-            image_input=listed.image_input,
-            tools=listed.tools,
-            thinking=effort if reasons else None,
-            reasoning_text=True if reasons else None,
-        )
-
-    def _compatible_records(
-        self, provider: Provider, listing: Listing | None
-    ) -> tuple[dict[str, ModelRecord], list[ModelRecord]]:
-        """An OpenAI-compatible provider's served models: each the conservative
-        record (tools assumed), with its served name and context length."""
-        records: dict[str, ModelRecord] = {}
-        for listed in listing.models if listing is not None else ():
-            if listed.id not in records:
-                record = self._table.record_for(provider.name, provider.kind, listed.id)
-                records[listed.id] = _merge(
-                    record,
-                    "listing",
-                    display_name=listed.display_name or None,
-                    context_window=listed.context_window,
-                )
-        return records, list(records.values())
 
     # --- the cache file ---------------------------------------------------------
 
@@ -865,48 +742,6 @@ class ModelCatalog:
             logger.debug("Could not write the model cache %s: %s", self._cache_path, exc)
 
 
-def _claude_thinking(table: ThinkingRule, listed: ListedModel) -> ThinkingRule | None:
-    """Claude's thinking from the listing; None leaves the table's rule.
-
-    The listing's types decide the mechanism (adaptive wins when both are
-    listed, with the listing's effort ladder, else the table's); without
-    either, the table's (version) rule stands. Whether thinking can be turned
-    off is the listing's answer when it gives one (its ``disabled`` type),
-    else the table's.
-    """
-    if listed.reasoning is False:
-        return ThinkingRule() if table.mechanism is not ThinkingMechanism.NONE else None
-    rule = _claude_mechanism(table, listed)
-    if listed.can_disable is None:
-        return rule
-    decided = rule if rule is not None else table
-    if decided.mechanism is ThinkingMechanism.NONE or decided.can_disable is listed.can_disable:
-        return rule
-    return dataclasses.replace(decided, can_disable=listed.can_disable)
-
-
-def _claude_mechanism(table: ThinkingRule, listed: ListedModel) -> ThinkingRule | None:
-    """The rule the listing's thinking types name; None when they name neither."""
-    if "adaptive" in listed.thinking_types:
-        table_adaptive = table.mechanism is ThinkingMechanism.ANTHROPIC_ADAPTIVE
-        default_levels = table.levels if table_adaptive else _CLAUDE_ADAPTIVE_LEVELS
-        levels = listed.effort_levels or default_levels
-        return ThinkingRule(
-            ThinkingMechanism.ANTHROPIC_ADAPTIVE,
-            levels=tuple(levels),
-            can_disable=table.can_disable if table_adaptive else True,
-        )
-    if "enabled" in listed.thinking_types:
-        if table.mechanism is ThinkingMechanism.ANTHROPIC_BUDGET:
-            return table
-        return ThinkingRule(
-            ThinkingMechanism.ANTHROPIC_BUDGET,
-            budgets=_CLAUDE_BUDGETS,
-            budget_range=_CLAUDE_BUDGET_RANGE,
-        )
-    return None
-
-
 def _parsed(specs: Iterable[str]) -> Iterator[ModelRef]:
     """Each of ``specs`` that is a reference or a bare model id; the rest skipped."""
     for spec in specs:
@@ -919,49 +754,6 @@ def _parsed(specs: Iterable[str]) -> Iterator[ModelRef]:
 def _describes(entry: _CacheEntry, provider: Provider) -> bool:
     """Whether a cache entry is a listing of ``provider``: of its address and kind."""
     return entry.base_url == provider.base_url and entry.kind == provider.kind.value
-
-
-def _with_entry(record: ModelRecord, entry: ModelEntry | None) -> ModelRecord:
-    """``record`` with each value its ``models`` entry sets, from ``config``.
-
-    ``thinking`` sets the mechanism (an ``effort`` ladder is the entry's
-    ``effort_levels``, else ``DEFAULT_EFFORT_LEVELS``). On a model that
-    already takes an effort, ``thinking: effort`` changes nothing and
-    ``effort_levels`` replaces its ladder; on any other, ``effort_levels``
-    alone is ignored.
-    """
-    if entry is None:
-        return record
-    takes_effort = record.thinking.mechanism is ThinkingMechanism.EFFORT
-    thinking = None
-    if entry.thinking is not None and not (entry.thinking == "effort" and takes_effort):
-        mechanism = _ENTRY_THINKING[entry.thinking]
-        if mechanism is ThinkingMechanism.EFFORT:
-            levels = tuple(entry.effort_levels or DEFAULT_EFFORT_LEVELS)
-            thinking = ThinkingRule(mechanism, levels=levels)
-        else:
-            thinking = ThinkingRule(mechanism)
-    elif entry.effort_levels is not None and takes_effort:
-        thinking = dataclasses.replace(record.thinking, levels=tuple(entry.effort_levels))
-    return _merge(
-        record,
-        "config",
-        context_window=entry.context_window,
-        max_output=entry.max_output,
-        tools=entry.tools,
-        image_input=entry.image_input,
-        thinking=thinking,
-        reasoning_text=entry.reasoning_text,
-    )
-
-
-def _merge(record: ModelRecord, source: str, **values: Any) -> ModelRecord:
-    """``record`` with the values that are not None, each marked as from ``source``."""
-    changes = {name: value for name, value in values.items() if value is not None}
-    if not changes:
-        return record
-    sources = {**record.sources, **dict.fromkeys(changes, source)}
-    return dataclasses.replace(record, sources=MappingProxyType(sources), **changes)
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
