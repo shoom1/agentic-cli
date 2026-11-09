@@ -19,15 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
-from agentic_cli.logging import Loggers
-
 if TYPE_CHECKING:
     from pydantic_settings import BaseSettings
-
-logger = Loggers.config()
-
-#: ``save``'s "no default to compare with" (a ``None`` could be a default).
-_NO_DEFAULT = object()
 
 #: A settings field whose name matches this is a credential. It is never saved,
 #: whichever application defines it (see ``is_secret_field``). ``token`` counts
@@ -153,7 +146,7 @@ class SettingsSaveResult:
 
     ``project_path`` is where allowlisted keys go. ``user_path`` is set only
     when user-scoped (non-allowlisted) keys changed the user config;
-    ``user_scoped_keys`` lists the keys added/updated/removed there.
+    ``user_scoped_keys`` lists the keys written there.
     """
 
     project_path: Path
@@ -227,12 +220,14 @@ class SettingsPersistence:
 
         Any other key is merged into the user config, which keeps every key
         this method does not manage (hand-stored secrets, unknown or domain
-        keys). The pick is written, and removed from the file only when it
-        is what the app starts on without the user's file (``_app_default``:
-        the class default, then the app's ``model_post_init``), so the next
-        start follows the app again. The class default itself is no such
-        value for an app that sets a default of its own in
-        ``model_post_init``: a user who picks it is written down.
+        keys). The pick is written, even a value equal to the class default,
+        and no save removes a key. What an app starts on without the user's
+        file can be set by its ``model_post_init``, a validator, its
+        ``__init__``, an env file below the user file or the environment, and
+        the settings class cannot tell which: a key removed on a guess would
+        bring the app's value back on the next start, though the user chose
+        another. A user who wants a key to follow the app again deletes it
+        from the file.
 
         Secrets and identity fields are never written anywhere: see
         ``is_secret_field``. Nor are ``HAND_EDITED_KEYS`` (``models``,
@@ -246,8 +241,17 @@ class SettingsPersistence:
 
         Returns:
             SettingsSaveResult with the written path(s)
+
+        Raises:
+            TypeError: ``keys`` is None.
         """
         from agentic_cli.file_utils import atomic_write_text
+
+        if keys is None:
+            raise TypeError(
+                "save() needs the keys to write (the fields changed); a full save "
+                "of the live settings was removed in 0.7.0"
+            )
 
         fields = type(settings).model_fields
         secret = {name for name, f in fields.items() if is_secret_field(name, f)}
@@ -284,21 +288,8 @@ class SettingsPersistence:
             project_path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(project_path, json.dumps(merged, indent=2, default=str))
 
-        user_keys = keys - PROJECT_SETTABLE_KEYS
-        app_default = self._app_default(type(settings)) if user_keys else None
-        user_updates: dict[str, Any] = {}
-        user_removals: set[str] = set()
-        for key in user_keys:
-            # No default to compare with (the app's could not be read, or the
-            # field is a required one): the pick is written.
-            default = (
-                _NO_DEFAULT if app_default is None else getattr(app_default, key, _NO_DEFAULT)
-            )
-            if default is not _NO_DEFAULT and getattr(settings, key) == default:
-                user_removals.add(key)
-            else:
-                user_updates[key] = dump[key]
-        user_path, user_scoped = self._merge_user(user_updates, user_removals)
+        user_updates = {k: dump[k] for k in sorted(keys - PROJECT_SETTABLE_KEYS)}
+        user_path, user_scoped = self._merge_user(user_updates) if user_updates else (None, ())
         return SettingsSaveResult(
             project_path=project_path,
             user_path=user_path,
@@ -306,43 +297,19 @@ class SettingsPersistence:
             project_keys=(*project_updates, *entry_fields),
         )
 
-    @staticmethod
-    def _app_default(settings_class: type["BaseSettings"]) -> "BaseSettings | None":
-        """The settings as the app itself starts them when no source gives a
-        value: the class defaults, then its ``model_post_init`` (the place an
-        app sets a default of its own, for the fields no source set).
-        ``model_construct()`` runs no source and no validator, and does run
-        ``model_post_init``. None when the class cannot be built that way, so
-        a caller never takes a guess for the default."""
-        try:
-            return settings_class.model_construct()
-        except Exception as e:
-            logger.debug(
-                "settings_app_default_unreadable",
-                settings_class=settings_class.__name__,
-                error=str(e),
-            )
-            return None
-
-    def _merge_user(
-        self, updates: dict[str, Any], removals: set[str]
-    ) -> tuple[Path | None, tuple[str, ...]]:
+    def _merge_user(self, updates: dict[str, Any]) -> tuple[Path | None, tuple[str, ...]]:
         """Merge-write the user file; never clobber keys it does not manage
         (e.g. hand-stored API keys). Returns (path written or None, keys)."""
         from agentic_cli.file_utils import atomic_write_text
 
         user_path = self.user_config_path
         existing = self._read_object(user_path)
-        merged = dict(existing)
-        removed = tuple(k for k in sorted(removals) if k in existing)
-        for key in removed:
-            del merged[key]
-        merged.update(updates)
+        merged = {**existing, **updates}
         if merged == existing:
             return None, ()
         user_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(user_path, json.dumps(merged, indent=2, default=str))
-        return user_path, tuple(sorted(updates)) + removed
+        return user_path, tuple(sorted(updates))
 
     @staticmethod
     def _read_object(path: Path) -> dict[str, Any]:

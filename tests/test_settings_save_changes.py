@@ -75,12 +75,38 @@ class TestSaveOnlyGivenKeys:
         SettingsPersistence(APP).save(settings, keys={"thinking_effort"})
         assert _read(fs["project"]) == {"log_level": "debug", "thinking_effort": "low"}
 
-    def test_a_key_changed_back_to_default_leaves_the_user_file(self, fs):
+    def test_a_key_changed_back_to_default_is_written(self, fs):
         fs["user"].parent.mkdir(parents=True)
         fs["user"].write_text(json.dumps({"raw_llm_logging": True, "other": 1}))
         settings = BaseSettings(raw_llm_logging=False)  # the user switched it back
         SettingsPersistence(APP).save(settings, keys={"raw_llm_logging"})
-        assert _read(fs["user"]) == {"other": 1}
+        assert _read(fs["user"]) == {"raw_llm_logging": False, "other": 1}
+
+    def test_project_keys_leave_a_malformed_user_file_alone(self, fs):
+        """The user file is not part of this save: reading it would fail the
+        save after the project file was written, and /settings would say
+        "not saved" for a key it saved."""
+        settings = BaseSettings()  # loaded before the file broke
+        settings.update_setting("thinking_effort", "low")
+        fs["user"].parent.mkdir(parents=True)
+        fs["user"].write_text("{not json")
+
+        saved = SettingsPersistence(APP).save(settings, keys={"thinking_effort"})
+
+        assert _read(fs["project"]) == {"thinking_effort": "low"}
+        assert saved.user_path is None and saved.user_scoped_keys == ()
+        assert fs["user"].read_text() == "{not json"
+
+    def test_a_user_key_is_not_written_over_a_malformed_user_file(self, fs):
+        settings = BaseSettings()  # loaded before the file broke
+        settings.update_setting("raw_llm_logging", True)
+        fs["user"].parent.mkdir(parents=True)
+        fs["user"].write_text("{not json")
+
+        with pytest.raises(ValueError):
+            SettingsPersistence(APP).save(settings, keys={"raw_llm_logging"})
+
+        assert fs["user"].read_text() == "{not json"
 
     def test_no_keys_writes_nothing(self, fs):
         SettingsPersistence(APP).save(BaseSettings(raw_llm_logging=True), keys=set())
@@ -96,6 +122,25 @@ class TestTheSaveTakesTheKeysToWrite:
     def test_keys_are_required(self, fs):
         with pytest.raises(TypeError, match="keys"):
             SettingsPersistence(APP).save(BaseSettings(raw_llm_logging=True))
+        assert not fs["project"].exists()
+        assert not fs["user"].exists()
+
+    def test_none_for_keys_is_refused_and_says_why(self, fs):
+        """An override with the old signature, ``save_settings(self, keys=None)``,
+        passes its ``keys`` on: it is told what is needed, not that None is
+        not iterable."""
+        with pytest.raises(TypeError, match="needs the keys to write"):
+            SettingsPersistence(APP).save(BaseSettings(raw_llm_logging=True), keys=None)
+        assert not fs["project"].exists()
+        assert not fs["user"].exists()
+
+    @pytest.mark.asyncio
+    async def test_the_app_s_save_refuses_none_the_same_way(self, fs):
+        from agentic_cli.cli.app import BaseCLIApp
+
+        app = SimpleNamespace(_settings=BaseSettings(raw_llm_logging=True))
+        with pytest.raises(TypeError, match="needs the keys to write"):
+            await BaseCLIApp.save_settings(app, keys=None)
         assert not fs["project"].exists()
         assert not fs["user"].exists()
 

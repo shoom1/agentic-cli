@@ -166,13 +166,14 @@ class TestTrustSplitSave:
         assert data["raw_llm_logging"] is True
         assert data["stateful_executor_backend"] == "local"
 
-    def test_keyed_save_at_defaults_does_not_create_user_config(self, isolated_fs):
-        """A user-scoped key at its default, absent from the file, writes nothing."""
+    def test_keyed_save_at_defaults_writes_the_pick(self, isolated_fs):
+        """A pick equal to the default is still a pick."""
         from agentic_cli.config import BaseSettings
 
         self._persistence().save(BaseSettings(), keys={"raw_llm_logging"})
 
-        assert not (isolated_fs / "home" / ".agentic_cli" / "settings.json").exists()
+        user_file = isolated_fs / "home" / ".agentic_cli" / "settings.json"
+        assert json.loads(user_file.read_text()) == {"raw_llm_logging": False}
 
     def test_user_config_merge_preserves_unmanaged_keys(self, isolated_fs):
         """Hand-stored secrets and unknown keys in user config survive a save."""
@@ -192,8 +193,9 @@ class TestTrustSplitSave:
         assert data["domain_custom_key"] == 7
         assert data["raw_llm_logging"] is True
 
-    def test_revert_to_default_removes_user_config_key(self, isolated_fs):
-        """Reverting a user-scoped key to its default removes it from user config."""
+    def test_revert_to_default_writes_the_default(self, isolated_fs):
+        """Reverting a user-scoped key to its default writes the default: what
+        the app starts on may not be the class default, so no key is removed."""
         from agentic_cli.config import BaseSettings
 
         user_dir = isolated_fs / "home" / ".agentic_cli"
@@ -207,7 +209,7 @@ class TestTrustSplitSave:
         self._persistence().save(settings, keys={"raw_llm_logging"})
 
         data = json.loads((user_dir / "settings.json").read_text())
-        assert "raw_llm_logging" not in data
+        assert data["raw_llm_logging"] is False
         assert data["domain_custom_key"] == 7  # unmanaged key untouched
 
     def test_round_trip_user_scoped_change_persists(self, isolated_fs):

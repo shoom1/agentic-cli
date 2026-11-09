@@ -555,7 +555,10 @@ Settings are **read** by constructing the settings class: `MySettings()`, or
 `get_settings()` / `reload_settings()` for the framework's own instance. The
 constructor, the environment, the project file's allowlisted keys, the user
 file and the env files (see [Precedence](#precedence-and-the-trust-boundary))
-are its sources, and nothing else reads them. They are **written** one way:
+are its sources. Two readers take only what they need from the same files: the
+permission engine reads the project file's deny rules, and a configured
+provider's key is looked up in the environment and the absolute env files.
+Settings are **written** one way:
 `/settings` calls `BaseCLIApp.save_settings(keys=...)`, which calls
 `SettingsPersistence(app_name).save(settings, keys=...)` (atomic writes). A save
 writes only the keys it names, as they stand, each into the file the loader
@@ -586,11 +589,11 @@ class MyApp(BaseCLIApp):
         return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]
 ```
 
-A Save writes the value picked to the user file. One set to what the app starts
-on without that file (the field's default, or the one the app sets in
-`model_post_init`) leaves it, so the next start follows the app again; a pick of
-the class default by an app that starts elsewhere is kept. `examples/research_demo`
-lists both.
+A Save writes the value picked to the user file, even one equal to the
+default: what an app starts on can be set by the app itself (`model_post_init`,
+a validator, an env file below the user file), so a save cannot tell it from
+the class default and never removes a key. To follow the app again, delete the
+key from the file. `examples/research_demo` lists both.
 
 - **The theme** switches at once, through `get_theme(name)`. thinking-prompt
   repaints: it clears the screen and the terminal's scrollback, shell output

@@ -716,8 +716,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them; they are the only user-scoped keys `/settings` may show, and it shows
   them only when an app lists them in `get_ui_setting_keys()`
   (`return [*super().get_ui_setting_keys(), "ui_theme", "dialog_placement"]`;
-  `research_demo` does). A Save writes them to the user file, and one set back
-  to its default leaves it. Both switch while the app runs:
+  `research_demo` does). A Save writes the value picked to the user file. Both
+  switch while the app runs:
   - A new theme applies at once: `apply_settings` calls
     `session.set_theme(get_theme(ui_theme), repaint=True)` after its report
     lines, and not for a change it rolls back. The repaint clears the screen
@@ -1761,11 +1761,15 @@ step; each entry says what to use instead.
   user-scoped field set to `None` never left the user file; the `path=` dump
   wrote the whole object to any file; `load()` returned the project file if
   there was one, else the user file, raw (no environment, no merge, no
-  allowlist), and nothing called it. For a save of every field, name them:
-  `keys=type(settings).model_fields`. `save_settings` runs the file writes on
-  a worker thread, off the event loop, and `/settings` no longer falls back on
-  `save_settings()` for an override that cannot take `keys`: it reports
-  "Settings applied but not saved: …".
+  allowlist), and nothing called it. Name the fields the app changed:
+  `keys=` of every field would freeze the environment's values and the whole
+  `model_roles` dict, the very thing the removal ends. `save_settings` runs the
+  file writes on a worker thread, off the event loop, and `/settings` no longer
+  falls back on `save_settings()` for an override that cannot take `keys`: it
+  reports "Settings applied but not saved: …". `save(settings, keys=None)`,
+  which an override with the old `keys=None` default passes on, is a
+  `TypeError` that says the keys to write are required.
+
 - **`WorkflowEvent.tool_result(duration_ms=)` and `ExecutionTimeoutError`.** No
   backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
   showed: the parameter, the `duration_ms` metadata key it set and the suffix
@@ -2012,14 +2016,16 @@ step; each entry says what to use instead.
 
 - **A pick of the class default in `/settings` survives an app that starts
   elsewhere.** "Back at default" was judged against the settings class's
-  default, so for an app that sets its own default in `model_post_init` (the
-  pattern `examples/research_demo` teaches), `ui_theme="light"` say, a user who
-  picked the class default (`dark`) had the key removed from the user file:
-  the dialog said "Settings saved" and the next start showed `light` again. A
-  save now writes what the user picked, and removes a user-scoped key from the
-  user file only when the pick is what the app itself starts on without that
-  file (the class defaults and its `model_post_init`, read through
-  `model_construct()`); when they cannot be read that way, the pick is written.
+  default, so for an app that sets its own default (in `model_post_init`, the
+  pattern `examples/research_demo` teaches, or in a validator, or by an env
+  file below the user file), `ui_theme="light"` say, a user who picked the
+  class default (`dark`) had the key removed from the user file: the dialog
+  said "Settings saved" and the next start showed `light` again. A save now
+  writes what the user picked, equal to the class default or not, and removes
+  no key (a settings class cannot tell what its app starts on without the user
+  file); to follow the app again, delete the key from `~/.{app_name}/settings.json`.
+  A save of project keys alone no longer reads the user file, so a malformed
+  one does not make the dialog report "not saved" for keys it saved.
 
 - **`examples/hello_agent.py` and `examples/hello_langgraph.py` run their
   tools.** They passed `get_current_time`, `calculate` and `echo` unregistered,

@@ -840,6 +840,10 @@ class BaseCLIApp:
 
         Returns:
             SettingsSaveResult with the written path(s)
+
+        Raises:
+            TypeError: ``keys`` is None (an override that passes its own
+                ``keys=None`` default on has no keys to write).
         """
         from agentic_cli.settings_persistence import SettingsPersistence
 
