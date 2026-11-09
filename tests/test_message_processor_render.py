@@ -55,9 +55,7 @@ async def _render(
 GOLDEN_PLANNING_TURN = [
     WorkflowEvent.thinking("Planning the research."),
     WorkflowEvent.tool_call("save_plan", {"content": "- [ ] Search arXiv"}),
-    WorkflowEvent.tool_result(
-        "save_plan", {"success": True}, success=True, duration_ms=8
-    ),
+    WorkflowEvent.tool_result("save_plan", {"success": True}, success=True),
     WorkflowEvent.task_progress(
         "[ ] Search arXiv",
         {"total": 1, "completed": 0},
@@ -224,7 +222,6 @@ class TestSandboxExecuteRendering:
                 "sandbox_execute",
                 {"success": True, "stdout": "RESULT-42\n"},
                 success=True,
-                duration_ms=12,
             ),
         ]
         ui, _, _ = await _render(events)
@@ -245,7 +242,6 @@ class TestSandboxExecuteRendering:
                 "sandbox_execute",
                 {"success": True, "stdout": ""},
                 success=True,
-                duration_ms=5,
             ),
         ]
         ui, _, _ = await _render(events)

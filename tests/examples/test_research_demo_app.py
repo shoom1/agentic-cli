@@ -261,9 +261,7 @@ class TestMessageRouting:
             [
                 WorkflowEvent.thinking("Considering the question."),
                 WorkflowEvent.tool_call("kb_search", {"query": "decoding"}),
-                WorkflowEvent.tool_result(
-                    "kb_search", {"success": True}, success=True, duration_ms=5
-                ),
+                WorkflowEvent.tool_result("kb_search", {"success": True}, success=True),
                 WorkflowEvent.text("Here is what I found."),
             ],
         )

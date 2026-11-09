@@ -20,7 +20,6 @@ Example:
             print(f"Args: {event.metadata.get('tool_args', {})}")
         elif event.type == EventType.TOOL_RESULT:
             print(f"Result: {event.metadata['result']}")
-            print(f"Duration: {event.metadata.get('duration_ms')}ms")
 """
 
 from dataclasses import dataclass, field
@@ -148,7 +147,6 @@ class WorkflowEvent:
         tool_name: str,
         result: Any,
         success: bool = True,
-        duration_ms: float | None = None,
         error: str | None = None,
     ) -> "WorkflowEvent":
         """Create a tool result event.
@@ -157,7 +155,6 @@ class WorkflowEvent:
             tool_name: Name of the tool that was called
             result: The result from the tool
             success: Whether the tool call succeeded
-            duration_ms: How long the tool took to execute (milliseconds)
             error: Error message if success is False
         """
         content = cls._format_result_content(result, tool_name)
@@ -167,8 +164,6 @@ class WorkflowEvent:
             "result": result,
             "success": success,
         }
-        if duration_ms is not None:
-            metadata["duration_ms"] = duration_ms
         if error is not None:
             metadata["error"] = error
 

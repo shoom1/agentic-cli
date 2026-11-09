@@ -93,14 +93,12 @@ class TestWorkflowEvent:
             "search_kb",
             result={"matches": 5, "results": []},
             success=True,
-            duration_ms=150.5,
         )
 
         assert event.type == EventType.TOOL_RESULT
         assert event.metadata["tool_name"] == "search_kb"
         assert event.metadata["result"]["matches"] == 5
         assert event.metadata["success"] is True
-        assert event.metadata["duration_ms"] == 150.5
 
     def test_create_tool_result_event_failed(self):
         """Test creating failed tool result event."""

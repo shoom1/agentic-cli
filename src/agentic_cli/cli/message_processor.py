@@ -1013,9 +1013,7 @@ class MessageProcessor:
         state.side_effects_seen = True
         tool_name = event.metadata.get("tool_name", "unknown")
         success = event.metadata.get("success", True)
-        duration = event.metadata.get("duration_ms")
         icon = "+" if success else "x"
-        duration_str = f" ({duration}ms)" if duration else ""
         # The stateful executor gets a single combined message: a +/x header with
         # the run's output indented under a ╰ marker (mirrors the code block).
         if tool_name == "sandbox_execute":
@@ -1023,12 +1021,12 @@ class MessageProcessor:
 
             result = event.metadata.get("result")
             result_dict = result if isinstance(result, dict) else {}
-            state.status_line = f"{icon} {tool_name}{duration_str}"
+            state.status_line = f"{icon} {tool_name}"
             ui.add_rich(render_sandbox_result(result_dict, success=success))
             return
         lines = event.content.split("\n")
         first_line = lines[0]
-        state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"
+        state.status_line = f"{icon} {tool_name}: {first_line}"
         style = "green" if success else "red"
         # Tool names and output are data: escape them, or a path such as
         # "notes[/draft].md" is parsed as a closing tag (MarkupError, failing
@@ -1036,8 +1034,7 @@ class MessageProcessor:
         from rich.markup import escape
 
         display = (
-            f"[{style}]{icon}[/{style}] {escape(tool_name)}: "
-            f"{escape(first_line)}{duration_str}"
+            f"[{style}]{icon}[/{style}] {escape(tool_name)}: {escape(first_line)}"
         )
         if len(lines) > 1:
             display += "\n" + escape("\n".join(lines[1:]))
