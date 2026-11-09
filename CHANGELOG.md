@@ -97,6 +97,11 @@ the start of the entry's title.
   `load_agents_from_yaml` raises `ValueError` for a file it cannot use.
   (Fixed: **arXiv requests are paced…**, **`load_agents_from_yaml` raises…**;
   Changed: **`web_fetch` answers an error…**)
+- A custom `JobBackend` whose queued jobs a later start can launch from the
+  saved spec (plain data: a command, a remote request) sets
+  `survives_restart = True`; with the default, False, a queued job runs only
+  in the app that submitted it, and is failed if that app closes before
+  starting it. (Fixed: **A queued in-process job runs…**)
 - Gone: `agentic_cli.tools.shell` (the OS sandbox is
   `agentic_cli.tools.os_sandbox`), `ExecutionTimeoutError`,
   `WorkflowEvent.tool_result(duration_ms=)`, `UsageTracker.record()`'s

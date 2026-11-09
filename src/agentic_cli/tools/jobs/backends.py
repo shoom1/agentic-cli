@@ -123,8 +123,10 @@ class JobBackend(ABC):
     # True only when the job is addressed through a durable handle (a pid, a
     # remote id) rather than an object in the starter's memory — otherwise
     # "cancelled" would be recorded while the job kept running elsewhere.
-    # Distinct from ``survives_restart``: a backend can publish a readable
-    # outcome without being remotely controllable.
+    # Distinct from ``survives_restart``, which says whether another manager
+    # may *launch* a queued job from its saved record: stopping a running one
+    # from there needs a handle that reaches it, and reading how it ended
+    # (the ``exit_code`` sentinel) needs neither.
     cancels_foreign_jobs: bool = False
 
     def pin(self, spec: dict) -> dict:

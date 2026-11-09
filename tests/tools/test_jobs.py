@@ -2350,12 +2350,31 @@ class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
             owner.close()
 
     def test_close_without_the_lock_leaves_it_queued(self, tmp_path: Path, monkeypatch):
-        """Startup recovery fails it once this process is gone."""
+        """Startup recovery fails it once this process is gone. The backends
+        are released all the same."""
         from agentic_cli.tools.jobs import manager as jobs_manager
+
+        class _Released(JobBackend):
+            name = "released"
+            closed = False
+
+            def start(self, record, job_dir):
+                return None
+
+            def poll(self, record, job_dir):
+                return JobState.RUNNING
+
+            def cancel(self, record, job_dir):
+                return True
+
+            def close(self):
+                self.closed = True
 
         base = tmp_path / "jobs"
         gate, marker = tmp_path / "gate", tmp_path / "marker"
         owner = JobManager(base_dir=base, max_concurrent=1)
+        released = _Released()
+        owner.register_backend(released)
         try:
             _, queued = self._busy_then_queued(owner, gate, marker)
 
@@ -2367,7 +2386,7 @@ class TestAnInProcessJobRunsOnlyWhereItWasSubmitted:
 
             on_disk = json.loads((base / queued.job_id / "meta.json").read_text())
             assert on_disk["state"] == JobState.QUEUED.value
-            assert owner._backends["inprocess"]._pool._shutdown is True
+            assert released.closed, "close() released no backend"
         finally:
             gate.write_text("go")
             monkeypatch.undo()
