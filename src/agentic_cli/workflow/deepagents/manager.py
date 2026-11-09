@@ -76,7 +76,7 @@ from agentic_cli.workflow.deepagents.summarization import (
     write_summary,
 )
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
-from agentic_cli.workflow.events import EventType, WorkflowEvent
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
@@ -279,6 +279,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             marks=self._outside_marks,
             memory_index=self._memory_index_now if index_wanted else None,
             memory_index_cached=self._memory_index_cached if index_wanted else None,
+            memory_index_forget=self._forget_memory_index if index_wanted else None,
         )
         self._root_name = graph.root_name
         self._root_summarization = summarizers.get(graph.root_name)
@@ -800,15 +801,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                             namespace, mode, payload = item
                             events = processor.process(namespace, mode, payload)
                         for event in events:
-                            if (
-                                event.type is EventType.CONTEXT_TRIMMED
-                                and event.metadata.get("source") == "summarization"
-                                and event.metadata.get("agent") == self._root_name
-                            ):
-                                # The prompt prefix changes here anyway: the
-                                # conversation's next request takes a new
-                                # memory index.
-                                self._forget_memory_index(ref)
                             event = self._apply_event_hook(event)
                             if event is not None:
                                 count += 1

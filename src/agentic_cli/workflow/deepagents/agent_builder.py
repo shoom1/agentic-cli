@@ -121,6 +121,7 @@ def build_agent_tree(
     marks: OutsideContentMarks | None = None,
     memory_index: Callable[[], str] | None = None,
     memory_index_cached: Callable[[], str] | None = None,
+    memory_index_forget: Callable[[], None] | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -163,6 +164,9 @@ def build_agent_tree(
             other agent gets one.
         memory_index_cached: The same index, which reads no file: the root's
             summarization counts it in its requests' size.
+        memory_index_forget: Drops the conversation's index snapshot: the
+            root's summarization calls it when it writes a summary, before
+            the request that carries the summary is sent.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -182,6 +186,7 @@ def build_agent_tree(
             model, resolved.get(name), settings,
             memory_index=memory_index if name == root else None,
             memory_index_cached=memory_index_cached if name == root else None,
+            memory_index_forget=memory_index_forget if name == root else None,
         )
         if summarizers is not None:
             summarizers.update(
@@ -272,13 +277,16 @@ def _model_side(
     *,
     memory_index: Callable[[], str] | None = None,
     memory_index_cached: Callable[[], str] | None = None,
+    memory_index_forget: Callable[[], None] | None = None,
 ) -> list["AgentMiddleware"]:
     """What shapes each of the agent's model requests, outermost first."""
     if resolved is None or settings is None:
         return []
     stack: list[AgentMiddleware] = [
         ForeignReasoningMiddleware(resolved.record.kind, agent=resolved.agent),
-        build_summarization(model, resolved, settings, index=memory_index_cached),
+        build_summarization(
+            model, resolved, settings, index=memory_index_cached, on_written=memory_index_forget
+        ),
         # Inside the summarization: it summarizes on the overflows it raises.
         ContextOverflowMiddleware(),
     ]

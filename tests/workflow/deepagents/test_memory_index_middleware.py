@@ -13,7 +13,7 @@ from agentic_cli.tools import memory_tools
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.deepagents import manager as manager_module
 from agentic_cli.workflow.deepagents.middleware import MemoryIndexMiddleware
-from agentic_cli.workflow.deepagents.summarization import build_summarization
+from agentic_cli.workflow.deepagents.summarization import NoSummaryWritten, build_summarization
 from tests.conftest import MockContext
 from tests.workflow.compacting import compact_now
 from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai, task
@@ -149,6 +149,25 @@ def test_the_summarization_counts_the_index():
     assert len(chat.requests) == 1  # over it with the index: summarized
 
 
+async def test_a_summary_written_calls_back_and_one_refused_does_not():
+    """``on_written`` runs once a summary has text, in the sync and the async
+    path, and never for one the model wrote no text for (nothing is stored then)."""
+    written: list[int] = []
+    chat = ScriptedChat(script=[ai("A summary."), ai("Another."), ai(""), ai("")])
+    middleware = build_summarization(
+        chat, resolved("local:small", agent="solo"), context(), on_written=lambda: written.append(1)
+    )
+    history = [HumanMessage("Hi."), AIMessage("Hello.")]
+    assert middleware._create_summary(history) == "A summary."
+    assert await middleware._acreate_summary(history) == "Another."
+    assert written == [1, 1]
+    with pytest.raises(NoSummaryWritten):
+        middleware._create_summary(history)
+    with pytest.raises(NoSummaryWritten):
+        await middleware._acreate_summary(history)
+    assert written == [1, 1]
+
+
 SMALL_ROOT = [_agent("solo", "Answer.", tools=[memory_tools.read_memory])]
 
 
@@ -168,7 +187,12 @@ def _blocks(message) -> list[str]:
     return [block["text"] for block in message.content]
 
 
-async def test_a_summary_in_a_turn_takes_a_new_index_for_the_next_request(hermetic, monkeypatch):
+async def test_a_summary_in_a_turn_takes_a_new_index_with_the_request_that_carries_it(
+    hermetic, monkeypatch
+):
+    """The index changes only where the prompt prefix already does (spec §11.4):
+    the request the summary is applied to carries the new index, so the new
+    prefix is written to the provider's cache once, not twice."""
     manager, chat, store = _small(hermetic, monkeypatch, [
         *(ai(f"Answer {n}.") for n in range(1, 6)), ai("A summary."), ai("Answer 6."), ai("Answer 7."),
     ])
@@ -182,16 +206,17 @@ async def test_a_summary_in_a_turn_takes_a_new_index_for_the_next_request(hermet
         await manager.cleanup()
     old = _blocks(chat.conversation(0)[0])[0]
     assert old.startswith(INDEX_OPEN) and "Prefers dark mode" not in old
+    assert _blocks(chat.conversation(4)[0])[0] == old  # fixed until the summary
     summary_request = chat.requests[5]
     assert len(summary_request) == 1 and "<messages>" in summary_request[0].text
     assert INDEX_OPEN not in summary_request[0].text  # never summarized into itself
-    # The request the summary was applied to still carries the conversation's index.
+    # The request the summary is applied to: the summary, behind the index as the files are now.
     sixth = _blocks(chat.conversation(6)[0])
-    assert sixth[0] == old and sixth[1].startswith("Here is a summary")
-    # The next one takes the index as the files are now.
+    assert sixth[0].startswith(INDEX_OPEN) and "Prefers dark mode" in sixth[0]
+    assert sixth[1].startswith("Here is a summary")
+    # And it stays that one: the next request's prefix is the sixth's.
     seventh = _blocks(chat.conversation(7)[0])
-    assert seventh[0].startswith(INDEX_OPEN) and "Prefers dark mode" in seventh[0]
-    assert seventh[1].startswith("Here is a summary")
+    assert seventh[:2] == sixth[:2]
 
 
 async def test_compact_takes_a_new_index_for_the_next_request(hermetic, monkeypatch):
