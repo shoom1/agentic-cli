@@ -170,11 +170,13 @@ class BaseWorkflowManager(ABC):
         genuine parallelism. (The HITL input callback is context-local, so it
         does not depend on that serialization; see ``set_input_callback``.)
 
-        Lifecycle mutation (``initialize_services``/``reinitialize``/
-        ``cleanup``) additionally takes the turn lock, so the backend is never
-        torn down under a running generator. Both locks are released on
-        cancellation. The active session/user identity remains a ContextVar,
-        so it stays correct for nested and task-spawned work.
+        ``reinitialize`` and ``cleanup`` take the lifecycle lock and then the
+        turn lock, so the backend is never torn down under a running
+        generator. ``initialize_services`` takes only the lifecycle lock: a
+        turn initializes before it takes the turn lock (``_turn_admission``),
+        which is what keeps the two from deadlocking. Both locks are released
+        on cancellation. The active session/user identity remains a
+        ContextVar, so it stays correct for nested and task-spawned work.
 
     Example:
         A minimal backend. ``initialize_services`` is the base's: it validates
@@ -236,7 +238,13 @@ class BaseWorkflowManager(ABC):
         Args:
             agent_configs: List of agent configurations defining the workflow.
             settings: Application settings (resolved via get_settings() if None).
-            app_name: Application name for services.
+            app_name: The name conversations are kept under: ``app_name``
+                returns it and ``session_ref`` puts it in every conversation's
+                identity (the backends' session stores and checkpoints key by
+                it). Defaults to ``settings.app_name``. What the app keeps on
+                disk and builds for the tools (the jobs folder, tool outputs,
+                the permission context) is named by ``settings.app_name``,
+                whatever this is.
             model: This manager's default model, as a ``provider:model``
                 reference or a model id (never a role). It takes the
                 ``default`` role for this manager only; without it, the
@@ -259,8 +267,9 @@ class BaseWorkflowManager(ABC):
         # _lifecycle_lock serializes initialize/reinitialize/cleanup: background
         # init and a first user message may call them concurrently, and the
         # _initialized guard alone is check-then-act.
-        # _turn_lock serializes turns, and is taken by lifecycle mutation so it
-        # cannot tear the backend down under a running generator.
+        # _turn_lock serializes turns, and is taken by reinitialize and cleanup
+        # (after the lifecycle lock) so they cannot tear the backend down under
+        # a running generator.
         # Lock order is lifecycle → turn: a turn releases the lifecycle lock
         # (inside _ensure_initialized) *before* taking the turn lock, so the
         # two can never deadlock.
@@ -791,8 +800,13 @@ class BaseWorkflowManager(ABC):
         text, the knowledge base's content), and this is the backstop.
 
         Args:
-            content: The content to summarize (included in prompt by caller).
-            prompt: The full summarization prompt.
+            content: The text being summarized. Not used here: ``prompt``
+                already holds it (every caller builds the prompt around it),
+                so sending both would send the text twice. It is part of the
+                summarizer protocol (the knowledge base's ``Summarizer``,
+                web_fetch's ``LLMSummarizer``) for implementations that need
+                the text apart from the prompt.
+            prompt: The full summarization prompt, which is what is sent.
         Returns:
             Summarized text response.
         """
@@ -1535,11 +1549,16 @@ class BaseWorkflowManager(ABC):
         )
 
     async def _release_resources(self) -> None:
-        """Release everything this manager owns. Idempotent, never raises.
+        """Close the model catalog and the services. Idempotent, never raises.
 
-        Backends override to add their own resources (ADK closes the session
-        service); the base releases the model catalog and the service
-        registry.
+        The base body releases only what the base built: the catalog (its
+        background refresh) and the services, except those a reinitialize is
+        carrying (:meth:`_carrying_services`). It leaves ``_initialized``,
+        ``_budgets`` and ``_index_snapshots`` as they are, and a backend's own
+        resources are its own: an override resets them (ADK's and Deep Agents'
+        do, and neither calls this body; the class docstring's example calls
+        it). ``_initialize_locked`` also calls it to roll back a failed
+        attempt.
         """
         await self._close_catalog()
         self._cleanup_managers()

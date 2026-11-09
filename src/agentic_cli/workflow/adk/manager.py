@@ -204,7 +204,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             agent_configs: List of agent configurations. First agent with sub_agents
                           is treated as the root/coordinator agent.
             settings: Application settings (uses get_settings() if not provided)
-            app_name: Application name for services (uses settings.app_name if not provided)
+            app_name: Application name for sessions: ADK's app name and the key
+                of every conversation (``settings.app_name`` if not provided).
             model: This manager's default model, a ``provider:model`` reference
                 or a model id (see ``BaseWorkflowManager``)
             on_event: Optional hook to transform/filter events before yielding

@@ -1,4 +1,5 @@
-"""What a minimal backend gets from the base without setting it itself.
+"""What a minimal backend gets from the base without setting it itself, and
+what the base's documentation says of it.
 
 ``BaseWorkflowManager`` reads the current ``session_id`` (``session_ref``,
 ``load_session``) and the ``_open_calls`` record (``request_user_input``), and
@@ -6,9 +7,14 @@ the CLI's ``/status`` shows ``session_id``. Each backend used to set them, and
 the base read them through ``getattr``/``hasattr``: a backend that set neither
 silently never adopted the id ``load_session`` promises to adopt, and its
 questions were never recorded as open. The base declares both.
+
+The documented constructor ``app_name`` and ``initialize_services``' locks are
+pinned at the end.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import UserInputRequest
@@ -18,14 +24,19 @@ from agentic_cli.workflow.sessions import (
     reset_active_tool_call,
     set_active_tool_call,
 )
+from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 from tests.conftest import settings_double
 
 
 class _Minimal(BaseWorkflowManager):
     """The abstract hooks and nothing else: no ``session_id``, no ``_open_calls``."""
 
-    def __init__(self) -> None:
-        super().__init__(agent_configs=[], settings=settings_double(default_user="user"))
+    def __init__(self, app_name: str | None = None) -> None:
+        super().__init__(
+            agent_configs=[],
+            settings=settings_double(default_user="user"),
+            app_name=app_name,
+        )
 
     @property
     def backend_type(self) -> str:
@@ -136,3 +147,32 @@ class TestOpenCalls:
 
 async def _answer(text: str) -> str:
     return text
+
+
+class TestAppName:
+    def test_it_defaults_to_the_settings_app_name(self):
+        m = _Minimal()
+
+        assert m.app_name == "test-app"
+        assert m.session_ref().app_name == "test-app"
+
+    def test_the_constructors_names_the_conversations_not_the_services(self):
+        m = _Minimal(app_name="other")
+
+        assert m.app_name == "other"
+        assert m.session_ref("s").app_name == "other"
+        # What the app keeps and builds for the tools is named by the settings.
+        engine = m._build_services()[PERMISSION_ENGINE]
+        assert engine._ctx.app_name == "test-app"
+
+
+class TestInitializeServicesLocks:
+    async def test_it_does_not_wait_for_a_running_turn(self):
+        """It takes the lifecycle lock only: a turn initializes before it takes
+        the turn lock, so initializing while one is held must not block."""
+        m = _Minimal()
+
+        async with m._turn_lock:
+            await asyncio.wait_for(m.initialize_services(validate=False), timeout=5)
+
+        assert m.is_initialized

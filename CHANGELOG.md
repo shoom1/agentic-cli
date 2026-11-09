@@ -2224,6 +2224,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **The documented lifecycle contract says what the code does.** The README's
+  "Turn and lifecycle contracts", `CLAUDE.md` and `BaseWorkflowManager`'s
+  docstring said `initialize_services()` takes the turn lock. It takes only the
+  lifecycle lock (a turn initializes before it takes the turn lock);
+  `reinitialize()` and `cleanup()` take both. The docstrings of the
+  constructor's `app_name` (it names the conversations; the services use
+  `settings.app_name`), `summarize` (`content` is not sent, the prompt holds
+  it) and `_release_resources` (it closes the catalog and the services, and
+  leaves a backend's own state to its override) are corrected too.
+
 - **The example in `BaseWorkflowManager`'s docstring is a backend that runs.**
   It left out five abstract members (`backend_type`, `_get_state_tools`,
   `_do_initialize`, `reinitialize`, `cleanup`), replaced `initialize_services`

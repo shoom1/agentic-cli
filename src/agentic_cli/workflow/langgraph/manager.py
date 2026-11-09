@@ -120,7 +120,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         Args:
             agent_configs: List of agent configurations.
             settings: Application settings (uses get_settings() if not provided).
-            app_name: Application name for services.
+            app_name: Application name for sessions (``settings.app_name`` if
+                not provided).
             model: This manager's default model, a ``provider:model`` reference
                 or a model id (see ``BaseWorkflowManager``).
             checkpointer: Checkpointer type for state persistence.
