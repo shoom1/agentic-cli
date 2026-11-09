@@ -330,7 +330,7 @@ class TestTheSwitchIsInterruptedOnceMade:
 
             assert settings.orchestrator.value == "deepagents"
             assert controller.workflow is replacement
-            assert not controller._needs_orchestrator_swap()
+            assert controller.backend == "deepagents"
             app._open_here.assert_awaited_once_with(replacement)
             assert any("deepagents" in line for line in app.successes)
             app.session.add_message.assert_any_call("system", "history stays behind")

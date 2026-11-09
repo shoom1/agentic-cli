@@ -158,7 +158,7 @@ async def test_an_orchestrator_change_is_made_before_the_next_rebuild(settings, 
     await controller.ensure_initialized()
 
     assert controller.workflow.backend_type == "deepagents"
-    assert not controller._needs_orchestrator_swap()
+    assert controller.backend == "deepagents"
     await controller.close()
 
 

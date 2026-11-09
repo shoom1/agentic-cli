@@ -427,8 +427,8 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
         backend)`` says so (n: how many were built before)."""
         built: list = []
 
-        def create(agent_configs, settings, app_name=None, model=None):
-            backend = getattr(settings.orchestrator, "value", settings.orchestrator)
+        def create(agent_configs, settings, app_name=None, model=None, orchestrator=None):
+            backend = orchestrator or getattr(settings.orchestrator, "value", settings.orchestrator)
             manager = cls.Manager(backend, fails(len(built), backend))
             built.append(manager)
             return manager

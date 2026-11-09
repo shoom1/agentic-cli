@@ -48,11 +48,12 @@ class Place:
     locks: Path
 
     @classmethod
-    def of(cls, settings: Any) -> "Place":
-        """The place ``settings`` keep conversations in, as the workflow reads them."""
+    def of(cls, settings: Any, *, backend: str | None = None) -> "Place":
+        """The place ``settings`` keep conversations in, as the workflow reads
+        them, on ``backend`` (the settings' orchestrator by default)."""
         orchestrator = getattr(settings, "orchestrator", "")
         return cls(
-            backend=getattr(orchestrator, "value", orchestrator),
+            backend=backend or getattr(orchestrator, "value", orchestrator),
             store=settings.session_store,
             app_name=settings.app_name,
             user=settings.default_user,

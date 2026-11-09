@@ -130,6 +130,31 @@ class TestCreateWorkflowManagerRouting:
         mock_lg_cls.assert_called_once()
         assert result is mock_lg_cls.return_value
 
+    @patch("agentic_cli.workflow.langgraph.LangGraphWorkflowManager")
+    def test_the_orchestrator_given_is_built_whatever_the_settings_say(
+        self, mock_lg_cls, agent_configs
+    ):
+        """A new conversation on another backend (``/new langgraph``) while
+        the settings name ADK for new conversations."""
+        settings = _make_settings(orchestrator=OrchestratorType.ADK)
+        result = create_workflow_manager_from_settings(
+            agent_configs, settings, orchestrator="langgraph"
+        )
+        mock_lg_cls.assert_called_once()
+        assert result is mock_lg_cls.return_value
+
+    def test_check_backend_names_an_unknown_one_and_a_missing_extra(self, monkeypatch):
+        import sys
+
+        from agentic_cli.workflow.factory import check_backend
+
+        assert check_backend("deepagents") is OrchestratorType.DEEPAGENTS
+        with pytest.raises(ValueError, match="nope"):
+            check_backend("nope")
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
+        with pytest.raises(ImportError, match=r"pip install 'agentic-cli\[deepagents\]'"):
+            check_backend("deepagents")
+
     def test_no_model_with_adk_returns_adk(self, agent_configs):
         """No model specified + ADK orchestrator → ADK manager."""
         settings = _make_settings(orchestrator=OrchestratorType.ADK, default_model=None)
@@ -141,84 +166,136 @@ class TestCreateWorkflowManagerRouting:
         assert result is mock_adk_cls.return_value
 
 
-# --- WorkflowController orchestrator swap tests ---
+# --- WorkflowController: the backend it runs ---
 
 
-class TestWorkflowControllerOrchestratorSwap:
-    """A swap happens only when the manager type no longer matches the setting."""
+class TestTheBackend:
+    """The controller runs the backend of the conversation, not the setting.
+
+    ``settings.orchestrator`` is the backend for new conversations: the
+    controller takes it at its first start, and changes backend only through
+    ``switch_backend`` (a new conversation on another backend). A model switch
+    (``reinitialize``) never changes it, whatever the settings say, since a
+    conversation's history lives in its backend's store alone.
+    """
 
     def _make_controller(self, orchestrator=OrchestratorType.ADK):
         configs = [AgentConfig(name="test", prompt="Test")]
         settings = _make_settings(orchestrator=orchestrator)
         return WorkflowController(configs, settings)
 
-    def test_no_swap_gemini_to_claude_on_adk(self):
-        """ADK manager + Claude model → no swap (Claude runs on ADK natively)."""
-        controller = self._make_controller()
-        controller._workflow = _FakeADKWorkflow()
+    def test_it_is_the_settings_until_one_is_chosen(self):
+        assert self._make_controller(OrchestratorType.LANGGRAPH).backend == "langgraph"
 
-        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
+    @pytest.mark.parametrize("orchestrator, live", [
+        (OrchestratorType.ADK, _FakeLangGraphWorkflow),
+        (OrchestratorType.LANGGRAPH, _FakeADKWorkflow),
+    ], ids=["langgraph-runs-settings-say-adk", "adk-runs-settings-say-langgraph"])
+    async def test_a_model_switch_never_changes_it(self, orchestrator, live):
+        controller = self._make_controller(orchestrator)
+        workflow = live("gemini-2.5-pro")
+        controller._workflow = workflow
 
-    def test_no_swap_gemini_to_gemini(self):
-        """ADK manager + Gemini model → no swap needed."""
-        controller = self._make_controller()
-        controller._workflow = _FakeADKWorkflow()
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings"
+        ) as create:
+            await controller.reinitialize(model="claude-sonnet-4-5")
 
-        assert controller._needs_orchestrator_swap("gemini-2.5-pro") is False
+        create.assert_not_called()
+        workflow.reinitialize.assert_awaited_once_with(
+            model="claude-sonnet-4-5", preserve_sessions=True
+        )
+        assert controller._workflow is workflow
 
-    def test_swap_stale_langgraph_manager_on_adk(self):
-        """ADK orchestrator + a stale LangGraph manager → swap back to ADK."""
-        controller = self._make_controller()
-        controller._workflow = _FakeLangGraphWorkflow("claude-sonnet-4-5")
-
-        assert controller._needs_orchestrator_swap("claude-opus-4") is True
-
-    def test_no_swap_when_langgraph_orchestrator(self):
-        """LangGraph orchestrator + LangGraph manager → no swap (user chose it)."""
-        controller = self._make_controller(orchestrator=OrchestratorType.LANGGRAPH)
-        controller._workflow = _FakeLangGraphWorkflow("gemini-2.5-pro")
-
-        assert controller._needs_orchestrator_swap("gemini-2.5-flash") is False
-
-    def test_swap_stale_adk_manager_on_langgraph(self):
-        """LangGraph orchestrator + a stale ADK manager → swap to LangGraph."""
-        controller = self._make_controller(orchestrator=OrchestratorType.LANGGRAPH)
-        controller._workflow = _FakeADKWorkflow("gemini-2.5-pro")
-
-        assert controller._needs_orchestrator_swap("gemini-2.5-flash") is True
-
-    def test_no_swap_when_model_is_none(self):
-        """No model specified → no swap."""
-        controller = self._make_controller()
-        controller._workflow = _FakeADKWorkflow()
-
-        assert controller._needs_orchestrator_swap(None) is False
-
-    def test_no_swap_when_workflow_is_none(self):
-        """No workflow initialized → no swap."""
-        controller = self._make_controller()
-        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
-
-    def test_swap_when_model_none_but_backend_stale(self):
-        """A-3: changing the orchestrator alone (model unchanged) must still
-        swap a stale manager — model=None must not short-circuit the check."""
-        controller = self._make_controller(orchestrator=OrchestratorType.ADK)
-        controller._workflow = _FakeLangGraphWorkflow("gemini-2.5-pro")
-        assert controller._needs_orchestrator_swap(None) is True
-
-    def test_swap_check_does_not_import_langgraph(self, monkeypatch):
-        """A-2: the swap check must route on backend_type, not by importing the
-        LangGraph manager — else changing the model on an ADK-only install
-        (no `langgraph` extra) raises ImportError."""
+    async def test_a_model_switch_imports_no_other_backend(self, monkeypatch):
+        """Changing the model on an ADK-only install (no ``langgraph`` extra)
+        must not import the LangGraph manager."""
         import sys
 
-        monkeypatch.setitem(
-            sys.modules, "agentic_cli.workflow.langgraph.manager", None
-        )
-        controller = self._make_controller(orchestrator=OrchestratorType.ADK)
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.langgraph.manager", None)
+        controller = self._make_controller(OrchestratorType.ADK)
         controller._workflow = _FakeADKWorkflow()
-        # Must not raise ImportError:
-        assert controller._needs_orchestrator_swap("claude-sonnet-4-5") is False
+
+        await controller.reinitialize(model="claude-sonnet-4-5")  # no ImportError
+
+    async def test_switch_backend_starts_the_backend_named(self):
+        controller = self._make_controller(OrchestratorType.ADK)
+        old = _FakeADKWorkflow()
+        controller._workflow = old
+        new = _FakeLangGraphWorkflow()
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ) as create:
+            await controller.switch_backend("langgraph")
+
+        assert create.call_args.kwargs["orchestrator"] == "langgraph"
+        assert controller._workflow is new and controller.backend == "langgraph"
+        old.cleanup.assert_awaited_once()
+
+    async def test_switching_to_the_backend_it_runs_does_nothing(self):
+        controller = self._make_controller(OrchestratorType.ADK)
+        workflow = _FakeADKWorkflow()
+        controller._workflow = workflow
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings"
+        ) as create:
+            await controller.switch_backend("adk")
+
+        create.assert_not_called()
+        assert controller._workflow is workflow
+
+    async def test_while_none_runs_the_next_start_builds_it(self):
+        controller = self._make_controller(OrchestratorType.ADK)
+        built = _FakeLangGraphWorkflow()
+
+        await controller.switch_backend("langgraph")
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=built,
+        ) as create:
+            assert await controller.ensure_initialized() is False  # not started yet
+            await controller.start_background_init()
+            assert await controller.ensure_initialized() is True
+
+        assert create.call_args.kwargs["orchestrator"] == "langgraph"
+        assert controller._workflow is built and controller.backend == "langgraph"
+        await controller.close()
+
+    async def test_a_retry_after_a_failed_start_keeps_the_backend_chosen(self):
+        """The settings may say otherwise by then: the backend is the
+        conversation's."""
+        controller = self._make_controller(OrchestratorType.LANGGRAPH)
+        builds: list = []
+
+        def create(**kwargs):
+            builds.append(kwargs["orchestrator"])
+            manager = _FakeLangGraphWorkflow()
+            if len(builds) == 1:
+                manager.initialize_services = AsyncMock(side_effect=RuntimeError("no key"))
+            return manager
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            side_effect=create,
+        ):
+            await controller.start_background_init()
+            assert await controller.ensure_initialized() is False
+            controller._settings.orchestrator = OrchestratorType.ADK  # /settings, used conversation
+            assert await controller.ensure_initialized() is True
+
+        assert builds == ["langgraph", "langgraph"]
+        await controller.close()
+
+    async def test_an_unknown_backend_is_refused(self):
+        controller = self._make_controller()
+
+        with pytest.raises(ValueError):
+            await controller.switch_backend("nope")
+
+        assert controller.backend == "adk"
 
     async def test_reinitialize_claude_on_adk_reinits_in_place(self):
         """ADK manager + Claude model → no swap; reinitialize in place."""
@@ -263,22 +340,7 @@ class TestWorkflowControllerOrchestratorSwap:
         with pytest.raises(RuntimeError, match="Cannot reinitialize"):
             await controller.reinitialize(model="claude-sonnet-4-5")
 
-    async def test_reinitialize_migrates_stale_langgraph_to_adk(self):
-        """A stale LangGraph manager under ADK orchestrator is replaced on reinit."""
-        controller = self._make_controller()
-        old_workflow = _FakeLangGraphWorkflow("claude-sonnet-4-5")
-        controller._workflow = old_workflow
 
-        with patch(
-            "agentic_cli.workflow.adk.manager.GoogleADKWorkflowManager"
-        ) as mock_adk_cls:
-            new_workflow = AsyncMock()
-            mock_adk_cls.return_value = new_workflow
-            await controller.reinitialize(model="gemini-2.5-pro")
-
-        old_workflow.reinitialize.assert_not_called()
-        new_workflow.initialize_services.assert_awaited_once()
-        assert controller._workflow is new_workflow
 # --- Lifecycle: readiness, atomic swap, close() ---
 
 
@@ -373,13 +435,12 @@ class TestControllerLifecycle:
 
 
 class TestOrchestratorSwapLifecycle:
-    """Swap must initialize the replacement first, then replace atomically."""
+    """A swap (``switch_backend``) initializes the replacement first, then
+    replaces atomically."""
 
     def _controller_needing_swap(self):
-        # Live ADK manager while settings demand LangGraph → swap required
-        controller = _make_lifecycle_controller(
-            orchestrator=OrchestratorType.LANGGRAPH
-        )
+        # A live ADK manager, and a new conversation on LangGraph to start.
+        controller = _make_lifecycle_controller(orchestrator=OrchestratorType.ADK)
         old = _FakeADKWorkflow()
         controller._workflow = old
         return controller, old
@@ -394,7 +455,7 @@ class TestOrchestratorSwapLifecycle:
             return_value=new,
         ):
             with pytest.raises(RuntimeError, match="init failed"):
-                await controller.reinitialize()
+                await controller.switch_backend("langgraph")
 
         assert controller._workflow is old
         old.cleanup.assert_not_awaited()
@@ -408,7 +469,7 @@ class TestOrchestratorSwapLifecycle:
             "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
             return_value=new,
         ):
-            await controller.reinitialize()
+            await controller.switch_backend("langgraph")
 
         assert controller._workflow is new
         old.cleanup.assert_awaited_once()
@@ -436,7 +497,7 @@ class TestOrchestratorSwapLifecycle:
             "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
             return_value=new,
         ):
-            swapping = asyncio.create_task(controller.reinitialize())
+            swapping = asyncio.create_task(controller.switch_backend("langgraph"))
             await asyncio.wait_for(releasing.wait(), timeout=5)
             swapping.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -468,7 +529,7 @@ class TestOrchestratorSwapLifecycle:
             "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
             return_value=new,
         ):
-            swapping = asyncio.create_task(controller.reinitialize())
+            swapping = asyncio.create_task(controller.switch_backend("langgraph"))
             await asyncio.wait_for(releasing.wait(), timeout=5)
             swapping.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -574,9 +635,7 @@ class TestControllerLifecycleSerialization:
     async def test_concurrent_swaps_clean_every_losing_candidate(self):
         import asyncio
 
-        controller = _make_lifecycle_controller(
-            orchestrator=OrchestratorType.LANGGRAPH
-        )
+        controller = _make_lifecycle_controller(orchestrator=OrchestratorType.ADK)
         old = _FakeADKWorkflow()
         old.is_initialized = True
         controller._workflow = old
@@ -594,7 +653,7 @@ class TestControllerLifecycleSerialization:
             side_effect=_build,
         ):
             await asyncio.gather(
-                controller.reinitialize(), controller.reinitialize()
+                controller.switch_backend("langgraph"), controller.switch_backend("langgraph")
             )
 
         assert controller._workflow in built
@@ -1069,9 +1128,7 @@ class TestInitErrorIsClearedOnSuccess:
         assert controller.init_error is None
 
     async def test_successful_swap_clears_the_error(self):
-        controller = _make_lifecycle_controller(
-            orchestrator=OrchestratorType.LANGGRAPH
-        )
+        controller = _make_lifecycle_controller(orchestrator=OrchestratorType.ADK)
         old = _FakeADKWorkflow()
         old.is_initialized = True
         controller._workflow = old
@@ -1083,7 +1140,7 @@ class TestInitErrorIsClearedOnSuccess:
             "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
             return_value=new,
         ):
-            await controller.reinitialize()
+            await controller.switch_backend("langgraph")
 
         assert controller.init_error is None
 

@@ -61,6 +61,7 @@ from agentic_cli.settings_persistence import (
     RESTART_KEYS,
     USER_PREFERENCE_KEYS,
 )
+from agentic_cli.workflow.factory import orchestrator_of
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -1230,6 +1231,8 @@ class BaseCLIApp:
 
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
+        # The backend the conversation runs on, before the change.
+        backend_before = controller.backend if "orchestrator" in changes else None
         was_langgraph = _runs_langgraph(self._settings)
         theme_before = self._settings.ui_theme
 
@@ -1242,6 +1245,10 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set {label}: {e}")
                 return False
 
+        # The backend new conversations run on, and whether it is another.
+        target = orchestrator_of(self._settings).value
+        moves_backend = "orchestrator" in changes and target != backend_before
+
         # Reinitialize workflow if needed
         switched: list[str] = []
         swap_note: str | None = None
@@ -1251,7 +1258,10 @@ class BaseCLIApp:
             previous_model = previous.model
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
-                await controller.reinitialize(model=new_model)
+                if moves_backend:  # (until the new-conversation path: the swap)
+                    await controller.switch_backend(target)
+                else:
+                    await controller.reinitialize(model=new_model)
             except asyncio.CancelledError as cancel:
                 if not (controller.is_ready and controller.workflow is not previous):
                     # Ctrl+C stopped /settings mid-restart. Nothing of the
@@ -1306,7 +1316,9 @@ class BaseCLIApp:
         # now on, as an orchestrator swap holds it, before a turn writes there.
         moved = [key for key in changes if _ui_key_target_field(key) in _PLACE_KEYS]
         if moved and not controller.is_ready and controller.next_start_builds:
-            place = Place.of(self._settings)
+            place = Place.of(
+                self._settings, backend=target if moves_backend else controller.backend
+            )
             holder = await self._hold_it_at(place)
             if holder is not None:  # open there in another process: nothing changes
                 _restore_settings(self._settings, snapshot)
@@ -1317,6 +1329,8 @@ class BaseCLIApp:
                     "Settings were not changed."
                 )
                 return False
+            if moves_backend:  # the next start builds it
+                await controller.switch_backend(target)
 
         # Report changes
         for key, value in changes.items():
