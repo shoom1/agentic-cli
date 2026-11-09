@@ -919,11 +919,11 @@ the start of the entry's title.
     the new colors, while Rich panels and tables keep the colors they were
     printed in.
   - A new placement applies from the next dialog agentic-cli opens:
-    `/settings`, the `/resume` picker and the tools' questions (permission
-    prompts included) pass `placement=` from the settings each time, since
-    thinking-prompt's session placement is fixed when it starts. An app's
-    own dialogs keep that startup placement unless they pass `placement=`
-    themselves.
+    `/settings`, the `/resume` picker, `/memory`'s dialogs and the tools'
+    questions (permission prompts included) pass `placement=` from the
+    settings each time, since thinking-prompt's session placement is fixed
+    when it starts. An app's own dialogs keep that startup placement unless
+    they pass `placement=` themselves.
 - **ADK summarizes the main agent's conversation before it outgrows the
   model, as Deep Agents does.** ADK sent the whole session with every model
   call, so a conversation that outgrew the window failed every later turn

@@ -611,9 +611,10 @@ key from the file. `examples/research_demo` lists both.
   `dark` from `COLORFGBG` when the terminal sets it, and `terminal` (the
   terminal's own palette) otherwise; agentic-cli's dark colors do not apply
   there. `NO_COLOR` draws in mono whatever the theme.
-- **The placement** applies from the next dialog agentic-cli opens: `/settings`
-  and the tools' questions, permission prompts included. An app's own dialogs
-  keep the placement the session started with, unless they pass
+- **The placement** applies from the next dialog agentic-cli opens: `/settings`,
+  the `/resume` picker, `/memory`'s dialogs and the tools' questions,
+  permission prompts included. An app's own dialogs keep the placement the
+  session started with, unless they pass
   `placement=self.settings.dialog_placement`.
 
 ### Settings Context
