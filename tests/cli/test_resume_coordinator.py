@@ -7,6 +7,9 @@ message processor.
 Delivery uses the job's resume lifecycle: claim (pending → resuming) *before*
 the turn, record delivered/failed *after* it. Marking delivery up-front — the
 previous behaviour — silently dropped every resume whose turn then failed.
+The processor makes the claim (``process_resume(claim=)``) once the result can
+reach the agent: the fakes here call it first, as the real one does after its
+checks.
 """
 
 from __future__ import annotations
@@ -47,8 +50,10 @@ class _FakeMessageProcessor:
         self._result = result or TurnResult(TurnStatus.COMPLETED)
 
     async def process_resume(
-        self, *, record, workflow_controller, ui, settings, usage_tracker,
+        self, *, record, workflow_controller, ui, settings, usage_tracker, claim,
     ):
+        if not await claim():
+            return TurnResult(TurnStatus.UNAVAILABLE, error="another delivery has the job")
         self.resumed.append(record.job_id)
         return self._result
 
@@ -119,7 +124,9 @@ async def test_a_job_whose_conversation_is_gone_is_told_here():
     assert jm.claimed == ["gone"]
 
 
-async def test_claims_before_processing_and_records_after():
+async def test_claims_once_it_can_reach_the_agent_and_records_after():
+    """The processor checks first (the workflow, the conversation), then
+    claims, then runs the turn; the outcome is recorded after it."""
     order: list = []
     app, jm = _app([SimpleNamespace(job_id="a")])
 
@@ -131,14 +138,16 @@ async def test_claims_before_processing_and_records_after():
         real_complete(jid, **kw),
     )[1]
 
-    async def _proc(*, record, **kw):
-        order.append(("proc", record.job_id))
+    async def _proc(*, record, claim, **kw):
+        order.append(("checks", record.job_id))
+        assert await claim()
+        order.append(("turn", record.job_id))
         return TurnResult(TurnStatus.COMPLETED)
 
     app._message_processor.process_resume = _proc
 
     await app.resume_finished_jobs()
-    assert order == [("claim", "a"), ("proc", "a"), ("done", "a", True)]
+    assert order == [("checks", "a"), ("claim", "a"), ("turn", "a"), ("done", "a", True)]
 
 
 async def test_failed_resume_is_recorded_as_failed_not_delivered():
@@ -295,6 +304,7 @@ class TestClaimIsAlwaysClosed:
     async def test_processor_exception_closes_the_claim(self):
         class _Raising:
             async def process_resume(self, **kwargs):
+                await kwargs["claim"]()
                 raise RuntimeError("processor exploded")
 
         app, jm = _strict_app([SimpleNamespace(job_id="a", name="build")], _Raising())
@@ -303,24 +313,31 @@ class TestClaimIsAlwaysClosed:
         assert jm.open_claims == set(), "the job is stuck RESUMING"
         assert jm.completed == [("a", False, "processor exploded")]
 
-    async def test_can_resume_failure_closes_the_claim(self):
-        """``can_resume()`` raising inside process_resume is still a closed claim."""
+    async def test_a_lookup_that_fails_before_the_claim_leaves_the_job_pending(self):
+        """``can_resume()`` raising inside process_resume, before the claim:
+        nothing reached the agent, the user is told, and a later delivery
+        tells the job."""
+        errors: list[str] = []
 
         class _Raising:
             async def process_resume(self, **kwargs):
                 raise ConnectionError("session store unreachable")
 
         app, jm = _strict_app([SimpleNamespace(job_id="a", name="build")], _Raising())
+        app.session = SimpleNamespace(add_error=errors.append)
 
-        await app.resume_finished_jobs()
-        assert jm.open_claims == set()
-        assert jm.completed[0][1] is False
+        assert await app.resume_finished_jobs() == 0
+        assert jm.claimed == [] and jm.completed == []
+        assert errors == [
+            "Background job 'build' could not be resumed now: session store unreachable"
+        ]
 
     async def test_cancellation_closes_the_claim_and_propagates(self):
         started = asyncio.Event()
 
         class _Hanging:
             async def process_resume(self, **kwargs):
+                await kwargs["claim"]()
                 started.set()
                 await asyncio.Event().wait()
 

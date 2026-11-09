@@ -20,7 +20,7 @@ from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.workflow.sessions import ConversationChangedError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
@@ -425,6 +425,8 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
+        *,
+        claim: "Callable[[], Awaitable[bool]] | None" = None,
     ) -> TurnResult:
         """Resume the agent with a finished long-running job's result.
 
@@ -438,11 +440,18 @@ class MessageProcessor:
             ui: UI session for output.
             settings: Application settings.
             usage_tracker: Optional tracker for accumulating LLM token usage.
+            claim: Called once the result can reach the agent (the workflow
+                is ready and the conversation looked up) and before anything
+                is said: the caller claims the job's delivery there
+                (``JobManager.begin_resume``), so a request stopped, or a
+                workflow found not ready, before it claims nothing. False:
+                another delivery has the job, and nothing is said or run.
 
         Returns:
-            The turn's outcome. ``UNAVAILABLE`` when the workflow is not ready
-            or the originating conversation is gone; the caller must not record
-            the job as delivered unless ``TurnResult.delivered`` is True.
+            The turn's outcome. ``UNAVAILABLE`` when the workflow is not ready,
+            the originating conversation is gone, or ``claim`` said no; the
+            caller must not record the job as delivered unless
+            ``TurnResult.delivered`` is True.
 
         Raises:
             asyncio.CancelledError: Ctrl+C stopped the request, as it stops a
@@ -467,6 +476,10 @@ class MessageProcessor:
             resumable = hasattr(
                 workflow, "resume_with_job_result"
             ) and await workflow.can_resume(record)
+            if claim is not None and not await claim():
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE, error="another delivery has the job"
+                )
             if not resumable:
                 logger.info(
                     "job_resume_not_resumable",

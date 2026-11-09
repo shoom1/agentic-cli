@@ -1383,8 +1383,9 @@ class BaseCLIApp:
         ungated).
 
         Delivery follows the job's resume lifecycle: the job is *claimed*
-        (pending → resuming) once the turn lock is held and before the turn
-        runs, so a crash cannot silently re-deliver it, and only recorded
+        (pending → resuming) once the turn lock is held, the workflow found
+        ready and the conversation looked up, and before the turn runs, so a
+        crash cannot silently re-deliver it, and only recorded
         delivered once the turn actually completed — a failed or cancelled
         resume is recorded as such instead of being dropped. The check above
         is made again under the lock (``_deliver_resume``): the conversation
@@ -1432,10 +1433,18 @@ class BaseCLIApp:
         delivery is recoverable and two coordinators cannot both deliver the
         same result.
 
+        The job is claimed only once its result can reach the agent:
+        ``process_resume`` calls ``claim`` after it found the workflow ready
+        and looked the conversation up, before it says anything. A delivery
+        stopped before then (the workflow not started, Ctrl+C or a failure
+        during the lookup) claims nothing, and the job stays pending for a
+        later one; a failure is said.
+
         Every exit path closes a claim, so no record can be left ``RESUMING``
         in this process: a normal outcome records delivered/failed, an
         exception records failed with the reason, and a cancellation records
-        failed before re-raising (cancellation still propagates).
+        failed before re-raising (cancellation still propagates): the turn
+        may have written the job's notice to the conversation already.
 
         The job manager is called on a worker thread (``_claim_delivery``,
         ``complete_resume``): it takes the jobs directory's lock, which
@@ -1449,24 +1458,29 @@ class BaseCLIApp:
         Returns:
             True if the result was delivered to the agent, False if the job
             was claimed and not delivered, None if it was not claimed (it
-            waits for its conversation, or another coordinator has it).
+            waits for its conversation, its delivery stopped before it could
+            reach the agent, or another coordinator has it).
         """
         claimed = False
+
+        async def claim() -> bool:
+            nonlocal claimed
+            claimed = await _claim_delivery(jm, record.job_id)
+            if claimed and getattr(record, "session_id", None) == self._session_id:
+                self._turned = True  # the resume adds to this conversation
+            return claimed
+
         try:
             async with self._turn_lock:
                 if not await self._told_here(record):
                     return None
-                if not await _claim_delivery(jm, record.job_id):
-                    return None
-                claimed = True
-                if getattr(record, "session_id", None) == self._session_id:
-                    self._turned = True  # the resume adds to this conversation
                 result = await self._message_processor.process_resume(
                     record=record,
                     workflow_controller=self._workflow_controller,
                     ui=self.session,
                     settings=self._settings,
                     usage_tracker=self._usage_tracker,
+                    claim=claim,
                 )
         except asyncio.CancelledError:
             if claimed:
@@ -1478,7 +1492,15 @@ class BaseCLIApp:
             raise
         except Exception as exc:  # noqa: BLE001 - the claim must always close
             if not claimed:
-                raise
+                # Before the claim (the conversation's lookup, say): nothing
+                # reached the agent, and a later delivery tells it.
+                logger.warning(
+                    "job_resume_unclaimed_failure", job_id=record.job_id, error=str(exc)
+                )
+                self.session.add_error(
+                    f"Background job '{record.name}' could not be resumed now: {exc}"
+                )
+                return None
             await asyncio.to_thread(
                 jm.complete_resume, record.job_id, delivered=False, error=str(exc)
             )
@@ -1490,6 +1512,8 @@ class BaseCLIApp:
             )
             return False
 
+        if not claimed:
+            return None  # stopped before its result could reach the agent
         await asyncio.to_thread(
             jm.complete_resume, record.job_id, delivered=result.delivered,
             error=result.error,

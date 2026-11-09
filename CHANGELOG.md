@@ -2226,6 +2226,19 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A finished job's result is no longer given up when its delivery stops
+  before reaching the agent.** The CLI claimed a job's delivery before it
+  checked that the workflow was ready and looked the job's conversation
+  up: when the workflow had not started, or Ctrl+C or an error landed
+  during the lookup, the delivery was recorded failed, which is final, so
+  no later `/jobs resume` told the result, though nothing had reached the
+  agent. The delivery is now claimed after those checks
+  (`MessageProcessor.process_resume(claim=)`, called once the result can
+  reach the agent), and a job whose delivery stopped before is told by a
+  later one; an error there is said ("Background job 'build' could not be
+  resumed now: …"). Ctrl+C during the resume turn still records the
+  delivery failed: the job's notice may already be in the conversation.
+
 - **The status bar's `↻N` no longer counts a job whose result is being
   delivered.** It counted every finished resume job not yet delivered, so
   the job a resume turn was telling stayed counted while that turn ran. It
