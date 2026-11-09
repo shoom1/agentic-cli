@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import socket
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator
@@ -266,9 +267,17 @@ class JobRecord:
         return round(max(0.0, end - start), 1)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
+        """The record as ``meta.json`` holds it; it shares nothing with ``self``.
+
+        Built field by field: ``dataclasses.asdict`` deep-copied the whole
+        record first, ``spec`` included, so a live object JSON cannot hold
+        (a bound method of a service holding a lock) failed the copy before
+        ``_json_safe_spec`` could replace it.
+        """
+        d = {f.name: getattr(self, f.name) for f in fields(self)}
         d["state"] = self.state.value
         d["spec"] = _json_safe_spec(self.spec)
+        d["tags"] = list(self.tags)
         return d
 
     @classmethod
@@ -281,10 +290,10 @@ class JobRecord:
             d["resume_state"] = (
                 ResumeState.DELIVERED.value if legacy_resumed else ResumeState.PENDING.value
             )
-        fields = cls.__dataclass_fields__  # type: ignore[attr-defined]
+        declared = cls.__dataclass_fields__  # type: ignore[attr-defined]
         # Only pass keys the record actually declares, so a missing optional
         # key falls back to its default instead of becoming None.
-        return cls(**{k: v for k, v in d.items() if k in fields})
+        return cls(**{k: v for k, v in d.items() if k in declared})
 
     def summary(self) -> dict:
         """Compact, JSON-safe view for tools / UI."""
@@ -308,16 +317,22 @@ class JobRecord:
 
 
 def _json_safe_spec(spec: dict) -> dict:
-    """Keep only JSON-serializable spec entries (drop live callables, etc.)."""
+    """Keep only JSON-serializable spec entries (drop live callables, etc.).
+
+    A kept entry is a copy, so the result shares nothing with ``spec``; one
+    JSON cannot hold becomes a placeholder and is never copied.
+    """
+    import copy
     import json
 
     safe: dict = {}
     for k, v in spec.items():
         try:
             json.dumps(v)
-            safe[k] = v
         except (TypeError, ValueError):
             safe[k] = f"<non-serializable: {type(v).__name__}>"
+        else:
+            safe[k] = copy.deepcopy(v)
     return safe
 
 
@@ -426,9 +441,17 @@ class JobManager:
                 session_id=session_id,
                 user_id=user_id,
             )
+            # Kept only once it is on disk: a record kept but never written
+            # was launched by the next submit, after the tool was told this
+            # one had failed.
+            job_dir = self._job_dir(job_id)
+            try:
+                job_dir.mkdir(parents=True, exist_ok=True)
+                self._persist(rec)
+            except BaseException:
+                shutil.rmtree(job_dir, ignore_errors=True)
+                raise
             self._records[job_id] = rec
-            self._job_dir(job_id).mkdir(parents=True, exist_ok=True)
-            self._persist(rec)
             self._maybe_start_queued()
             return rec
 
@@ -624,8 +647,6 @@ class JobManager:
         is irreversible, and a stale terminal snapshot would take a job another
         manager is still running with it.
         """
-        import shutil
-
         with self._lock:
             self.reconcile()
             try:

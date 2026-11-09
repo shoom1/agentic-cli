@@ -59,7 +59,7 @@ def jobs(tmp_path: Path):
 
 
 def _submit(jobs: JobManager, gate: _Gate, name: str):
-    def work():  # a function, not the bound method: the spec is deep-copied
+    def work():
         return gate.work(name)
 
     return jobs.submit(tool="t", backend="inprocess", spec={"target": work})

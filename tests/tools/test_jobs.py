@@ -154,6 +154,93 @@ class TestInProcessBackend:
         assert rec.state is JobState.FAILED
 
 
+def _greet(name: str) -> str:
+    return f"hi {name}"
+
+
+class TestSavingARecord:
+    """Saving a record never copies its spec, and a failed submit leaves nothing.
+
+    ``to_dict`` deep-copied the whole record (``dataclasses.asdict``) before it
+    replaced what JSON cannot hold, so a job whose target was a bound method of
+    an object holding a lock could not be submitted. And ``submit`` kept the
+    record before writing it: the stray QUEUED record was launched, or raised
+    again, at the next submit, after that one had saved its own job.
+    """
+
+    def test_a_bound_method_of_an_object_holding_a_lock_runs(self, jm: JobManager):
+        import threading
+
+        class Service:
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+
+            def work(self) -> str:
+                with self._lock:
+                    return "done"
+
+        rec = jm.submit(tool="t", backend="inprocess", spec={"target": Service().work})
+
+        assert _wait(jm, rec.job_id).state is JobState.SUCCEEDED
+        assert jm.result(rec.job_id) == "done"
+
+    def test_a_submit_whose_write_fails_leaves_nothing_behind(
+        self, jm: JobManager, monkeypatch
+    ):
+        from agentic_cli.tools.jobs import manager as jobs_manager
+
+        real_write = jobs_manager.atomic_write_json
+        failures = [OSError("No space left on device")]
+
+        def write_once_failing(path, data, **kwargs):
+            if failures:
+                raise failures.pop()
+            return real_write(path, data, **kwargs)
+
+        monkeypatch.setattr(jobs_manager, "atomic_write_json", write_once_failing)
+
+        with pytest.raises(OSError):
+            jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        assert [p.name for p in jm.base_dir.iterdir() if p.is_dir()] == []
+
+        good = jm.submit(tool="t", backend="subprocess", spec={"command": "true"})
+        assert [r.job_id for r in jm.list()] == [good.job_id]
+        assert [p.name for p in jm.base_dir.iterdir() if p.is_dir()] == [good.job_id]
+
+    def test_the_saved_json_is_what_it_was(self):
+        """Field by field, the same keys and values ``asdict`` gave."""
+        import dataclasses
+
+        rec = JobRecord(
+            job_id="j1", tool="t", backend="inprocess", name="n",
+            state=JobState.SUCCEEDED,
+            spec={"target": _greet, "args": ("x",), "kwargs": {"k": [1, {"a": None}]},
+                  "cwd": "/tmp"},
+            backend_handle="thread", pid=42, exit_code=0, tags=["a", "b"],
+            submitted_at=1.0, started_at=2.0, finished_at=3.0, error="e",
+            session_id="s", user_id="u", resume_on_complete=True, call_id="c",
+            call_name="t", resume_state="resuming", resume_error="r",
+            resume_owner="h:1", exec_owner="h:1:abc", cancel_requested=True,
+        )
+        expected = dataclasses.asdict(rec)  # what to_dict wrote, for a spec it could copy
+        expected["state"] = "succeeded"
+        expected["spec"] = {**expected["spec"], "target": "<non-serializable: function>"}
+
+        assert json.dumps(rec.to_dict(), indent=2) == json.dumps(expected, indent=2)
+
+    def test_the_dict_does_not_share_the_record_s_lists(self):
+        rec = JobRecord(
+            job_id="j1", tool="t", backend="subprocess", name="n",
+            state=JobState.QUEUED, spec={"command": ["echo", "hi"]}, tags=["a"],
+        )
+        saved = rec.to_dict()
+        saved["tags"].append("b")
+        saved["spec"]["command"].append("there")
+
+        assert rec.tags == ["a"]
+        assert rec.spec == {"command": ["echo", "hi"]}
+
+
 class TestTheExitSentinel:
     """A poll that lands while the sentinel is being written waits for it.
 
@@ -1539,7 +1626,7 @@ class TestJobRecordLifecycleCoherence:
 
 
 def _wait_for_gate(path: str, timeout: float = 5.0) -> str:
-    """Block until ``path`` appears. Module level so the spec stays copyable."""
+    """Block until ``path`` appears."""
     import os
 
     deadline = time.time() + timeout

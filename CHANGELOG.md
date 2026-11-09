@@ -2210,6 +2210,19 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **An in-process job whose target holds a lock can be submitted, and a
+  submit that fails leaves nothing behind.** `JobRecord.to_dict` deep-copied
+  the whole record before it replaced what JSON cannot hold, so
+  `JobManager.submit` raised `TypeError: cannot pickle '_thread.lock'
+  object` for an in-process job whose target was a bound method of an object
+  holding a lock (a service, a client). And `submit` kept the record before
+  writing it: the next `submit` launched that job, or raised again, after
+  saving its own, so a tool told the first had failed while it ran later,
+  and a model that retried ran it twice. `to_dict` now builds the dict field
+  by field (the same JSON as before, sharing nothing with the record), and
+  `submit` keeps a job only once it is on disk: one that fails to save
+  removes its folder and raises.
+
 - **A job manager leaves alone a job whose backend it has not registered.**
   A `JobManager` without a job's backend recorded the job UNKNOWN, a
   terminal state, whoever was running it, and an app registers its own
