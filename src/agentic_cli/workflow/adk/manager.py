@@ -798,7 +798,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _manages_context(self) -> bool:
-        """True for an app built from agent configs; a native ADK YAML app's agents are ADK's own."""
+        """True for an app built from agent configs, not for a native ADK YAML app."""
         return not self._adk_config_path
 
     def _validate_agent_graph(self) -> AgentGraph | None:

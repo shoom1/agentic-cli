@@ -238,7 +238,8 @@ class BaseWorkflowManager(ABC):
         hands it to the release in ``_detach_backend``; everything else of
         the lifecycle is the base's. ``initialize_services`` calls the
         backend's ``_validate_agent_graph`` (the base's validates nothing and
-        leaves ``root_agent_name`` None), resolves the models, builds the
+        leaves ``root_agent_name`` None), resolves the models, computes the
+        context budgets (none: ``_manages_context`` says False), builds the
         services the tools declare and then calls ``_do_initialize``. A turn
         enters through ``_turn``, which initializes the manager when it is
         not and re-checks ``_backend_ready`` under the turn lock, and passes
