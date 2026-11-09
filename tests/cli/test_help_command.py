@@ -100,11 +100,62 @@ async def test_a_command_without_examples_shows_its_usage_only():
     assert "Examples" not in text
 
 
-async def test_an_unknown_name_says_so_and_points_to_the_list():
+async def test_an_unknown_name_is_a_warning_that_points_to_the_list():
     app = _App()
 
     await HelpCommand().execute("nope", app)
 
-    printed = app.session.printed()
-    assert "No command /nope" in printed
-    assert "/help" in printed
+    (warning,) = [call for call in app.session.calls if call[0] == "warning"]
+    assert "No command /nope" in warning[1]
+    assert "/help" in warning[1]
+
+
+class _Odd(Command):
+    """An app's command whose category is no CommandCategory member, and whose
+    texts look like Rich markup."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="odd",
+            description="[bold]not bold[/bold]",
+            aliases=["o[/x]"],
+            usage="/odd [id]",
+            examples=["/odd [red]1"],
+            category="custom",  # type: ignore[arg-type]
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        return None
+
+
+async def test_a_command_of_another_category_is_still_listed():
+    app = _App()
+    app.command_registry.register(_Odd())
+
+    await HelpCommand().execute("", app)
+
+    text = app.session.printed()
+    assert text.index("Other") < text.index("/odd")
+
+
+async def test_markup_like_text_prints_as_written_in_the_list():
+    app = _App()
+    app.command_registry.register(_Odd())
+
+    await HelpCommand().execute("", app)
+
+    text = app.session.printed()
+    assert "[bold]not bold[/bold]" in text
+    assert "/o[/x]" in text
+
+
+async def test_markup_like_text_prints_as_written_in_one_command_s_help():
+    app = _App()
+    app.command_registry.register(_Odd())
+
+    await HelpCommand().execute("odd", app)
+
+    text = app.session.printed()
+    assert "[bold]not bold[/bold]" in text
+    assert "/o[/x]" in text
+    assert "/odd [id]" in text and "/odd [red]1" in text

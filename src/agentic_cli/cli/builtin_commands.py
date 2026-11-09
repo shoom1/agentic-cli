@@ -38,30 +38,33 @@ class HelpCommand(Command):
             return
         command = registry.get(name)
         if command is None:
-            app.session.add_message("system", f"No command /{name}. Type /help for the list.")
+            app.session.add_warning(f"No command /{name}. Type /help for the list.")
             return
         app.session.add_rich(_command_help(command))
 
 
 def _command_list(commands: list[Command]) -> Panel:
-    """Every command under its category, the categories in their declared order."""
+    """Every command under its category, the categories in their declared order,
+    then any command of another category (an app's) under "Other"; nothing is
+    read as markup."""
     table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     table.add_column("Command", style="bold cyan", no_wrap=True)
     table.add_column("Aliases", style="dim", no_wrap=True)
     table.add_column("Description")
-    by_category: dict[CommandCategory, list[Command]] = {}
+    by_category: dict[Any, list[Command]] = {}
     for command in commands:
         by_category.setdefault(command.category, []).append(command)
-    for category in CommandCategory:
-        group = sorted(by_category.get(category, []), key=lambda c: c.name)
+    groups = [(category.value.capitalize(), by_category.pop(category, [])) for category in CommandCategory]
+    groups.append(("Other", [command for rest in by_category.values() for command in rest]))
+    for heading, group in groups:
         if not group:
             continue
         if table.row_count:
             table.add_row("", "", "")
-        table.add_row(Text(category.value.capitalize(), style="bold"), "", "")
-        for command in group:
+        table.add_row(Text(heading, style="bold"), "", "")
+        for command in sorted(group, key=lambda c: c.name):
             aliases = ", ".join(f"/{alias}" for alias in command.aliases)
-            table.add_row(f"/{command.name}", aliases, Text(command.description))
+            table.add_row(Text(f"/{command.name}"), Text(aliases), Text(command.description))
     body = Group(table, Text(""), Text("/help <command> shows its usage and examples.", style="dim"))
     return Panel(body, title="[bold]Available Commands[/bold]", border_style="cyan")
 
