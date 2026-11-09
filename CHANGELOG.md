@@ -953,10 +953,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/new`). Ctrl+C stops it like any request, "Operation cancelled...",
   once, with nothing changed. The model and the settings, "Allow for this
   session" grants, sandbox kernels and background jobs stay. A job started
-  in the old conversation still reports to it: its line names that
-  conversation ("… — resuming its conversation <id>."), its usage counts
-  in the totals, and `ctx` and the task list stay the current
-  conversation's (`process_resume(..., current_session_id=...)`). `/clear`
+  in the old conversation still reports to it: once it has finished it
+  waits until that conversation is opened (`/resume` tells it when
+  `job_auto_resume` is on; the status bar's `↻N` counts it), and is never
+  told in the new one, whose `ctx` and task list it would move. `/clear`
   is still a screen clear.
 - **A session list's rows: `SessionInfo` and `session_info()`.**
   `list_sessions(*, user_id=None, limit=None)` returns one frozen
@@ -1740,6 +1740,18 @@ The APIs that 0.6.1, 0.6.3 and 0.6.4 deprecated for 0.7.0 are gone, with no
 further deprecation step. So are the 0.6 model registry and the backends'
 model code, which the model layer replaces (see Added) without a deprecation
 step; each entry says what to use instead.
+
+- **`WorkflowEvent.tool_result(duration_ms=)` and `ExecutionTimeoutError`.** No
+  backend passed `duration_ms`, so the CLI's "(N ms)" after a tool result never
+  showed: the parameter, the `duration_ms` metadata key it set and the suffix
+  are gone (an app that sets `metadata["duration_ms"]` on its own events no
+  longer gets the suffix), and `error` is keyword-only, so a call that passed
+  `duration_ms` fourth, positionally, is a `TypeError` rather than an error
+  message of `150.5`. `ExecutionTimeoutError`, exported from
+  `agentic_cli.tools` and aliased as `TimeoutError` in
+  `agentic_cli.tools.executor`, was never raised: `execute_python` reports a
+  timeout in its result (`success` false, `error` "Execution timed out after N
+  seconds"), so there is nothing to catch.
 
 - **research_demo's own `/memory`.** The built-in replaces it.
 

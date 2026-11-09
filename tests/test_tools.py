@@ -28,7 +28,6 @@ def test_tool_category_has_new_categories():
 from agentic_cli.tools.executor import (
     MockPythonExecutor,
     SafePythonExecutor,
-    TimeoutError,
 )
 from agentic_cli.tools.registry import (
     ToolCategory,

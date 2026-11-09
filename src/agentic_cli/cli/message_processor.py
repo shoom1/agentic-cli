@@ -421,7 +421,6 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
-        current_session_id: str | None = None,
     ) -> TurnResult:
         """Resume the agent with a finished long-running job's result.
 
@@ -429,18 +428,12 @@ class MessageProcessor:
         same rendering path as a user turn (events box, tool results, token
         accounting, Ctrl+C).
 
-        A job from a conversation other than ``current_session_id`` (one
-        ``/new`` left) resumes in its own conversation, and its line names
-        it. Its usage counts in the totals, but the context ``ctx`` shows and
-        the task list a next turn draws stay the current conversation's.
-
         Args:
             record: The terminal JobRecord to resume from.
             workflow_controller: Controller managing workflow lifecycle.
             ui: UI session for output.
             settings: Application settings.
             usage_tracker: Optional tracker for accumulating LLM token usage.
-            current_session_id: The conversation the user is in, if known.
 
         Returns:
             The turn's outcome. ``UNAVAILABLE`` when the workflow is not ready
@@ -487,60 +480,19 @@ class MessageProcessor:
                     error="originating conversation is no longer available",
                 )
 
-            # A record without its session is no other conversation's.
-            owner = getattr(record, "session_id", None)
-            elsewhere = (
-                current_session_id is not None and owner is not None
-                and owner != current_session_id
-            )
-            logger.info("resuming_job", job_id=record.job_id, state=record.state.value,
-                        other_conversation=elsewhere)
-            whose = f"its conversation {owner}" if elsewhere else ""
+            logger.info("resuming_job", job_id=record.job_id, state=record.state.value)
             ui.add_message(
                 "system",
                 f"↻ Background job '{record.name}' finished ({icon} {record.state.value}) "
-                f"— resuming{' ' + whose if whose else ''}.",
+                "— resuming.",
             )
 
             def _source(wf):
                 return wf.resume_with_job_result(record)
 
-            if not elsewhere:
-                return await self._run_turn(
-                    _source, workflow_controller, ui, settings, usage_tracker
-                )
-            with self._keeping_the_current_conversation(usage_tracker):
-                result = await self._run_turn(
-                    _source, workflow_controller, ui, settings, usage_tracker
-                )
-            workflow_controller.update_status_bar(ui)
-            return result
-
-    @contextmanager
-    def _keeping_the_current_conversation(
-        self, usage_tracker: "UsageTracker | None"
-    ) -> "Iterator[None]":
-        """Run another conversation's turn without its context or tasks becoming the current one's.
-
-        The tracker's context fields (``ctx``) and the task list a next turn
-        draws are set aside and put back once the turn is over, however it
-        ends; the totals keep its usage. The task list is empty meanwhile, so
-        the turn draws none of the current conversation's.
-        """
-        tracker = usage_tracker
-        context = (
-            (tracker.last_prompt_tokens, tracker.context_trigger, tracker.window_known)
-            if tracker is not None else None
-        )
-        tasks = (self._last_task_progress, self._last_task_content)
-        self._last_task_progress = self._last_task_content = None
-        try:
-            yield
-        finally:
-            if tracker is not None and context is not None:
-                (tracker.last_prompt_tokens, tracker.context_trigger,
-                 tracker.window_known) = context
-            self._last_task_progress, self._last_task_content = tasks
+            return await self._run_turn(
+                _source, workflow_controller, ui, settings, usage_tracker
+            )
 
     async def process_compact(
         self,
@@ -1061,9 +1013,7 @@ class MessageProcessor:
         state.side_effects_seen = True
         tool_name = event.metadata.get("tool_name", "unknown")
         success = event.metadata.get("success", True)
-        duration = event.metadata.get("duration_ms")
         icon = "+" if success else "x"
-        duration_str = f" ({duration}ms)" if duration else ""
         # The stateful executor gets a single combined message: a +/x header with
         # the run's output indented under a ╰ marker (mirrors the code block).
         if tool_name == "sandbox_execute":
@@ -1071,12 +1021,12 @@ class MessageProcessor:
 
             result = event.metadata.get("result")
             result_dict = result if isinstance(result, dict) else {}
-            state.status_line = f"{icon} {tool_name}{duration_str}"
+            state.status_line = f"{icon} {tool_name}"
             ui.add_rich(render_sandbox_result(result_dict, success=success))
             return
         lines = event.content.split("\n")
         first_line = lines[0]
-        state.status_line = f"{icon} {tool_name}: {first_line}{duration_str}"
+        state.status_line = f"{icon} {tool_name}: {first_line}"
         style = "green" if success else "red"
         # Tool names and output are data: escape them, or a path such as
         # "notes[/draft].md" is parsed as a closing tag (MarkupError, failing
@@ -1084,8 +1034,7 @@ class MessageProcessor:
         from rich.markup import escape
 
         display = (
-            f"[{style}]{icon}[/{style}] {escape(tool_name)}: "
-            f"{escape(first_line)}{duration_str}"
+            f"[{style}]{icon}[/{style}] {escape(tool_name)}: {escape(first_line)}"
         )
         if len(lines) > 1:
             display += "\n" + escape("\n".join(lines[1:]))

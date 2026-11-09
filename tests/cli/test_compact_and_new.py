@@ -729,67 +729,6 @@ class TestANewSessionOnADK:
         assert said(app.session, "add_message")[-1] == f"New conversation {new}."
         assert old not in listed
 
-    async def test_a_resume_of_another_conversation_leaves_ctx_and_the_tasks_alone(
-        self, project, monkeypatch
-    ):
-        """After /new, a job started before it resumes its own conversation:
-        its usage counts in the totals, but ``ctx`` and the task list stay
-        the current conversation's, and its line names its conversation."""
-        serve(monkeypatch, Claude(solo=[
-            calls("new_session_probe_start_job", "toolu_j1", 12_000, command="make"),
-            says("Started.", 12_000), says("Hello back.", 2_000),
-            says("The build finished.", 12_500),
-        ]))
-        manager = GoogleADKWorkflowManager(
-            agent_configs=[AgentConfig(name="solo", prompt=PROMPTS["solo"],
-                                       tools=[new_session_probe_start_job],
-                                       include_state_tools=False)],
-            settings=settings(),
-        )
-        await manager.initialize_services()
-        app = app_on(manager, manager._settings)
-        tracker, processor = app.usage_tracker, app._message_processor
-        completed: list = []
-        jobs = SimpleNamespace(
-            complete_resume=lambda job_id, delivered, error=None: completed.append(
-                (job_id, delivered)
-            )
-        )
-        try:
-            old = app.session_id
-            await app.process_input("Start the job.")
-            await app.start_new_session()
-            await app.process_input("Hello.")
-            processor._last_task_progress = processor._last_task_content = "[ ] Write it"
-            before = (tracker.format_context(), tracker.prompt_tokens)
-            opened = app.session.start_thinking.call_count
-            record = SimpleNamespace(
-                job_id="j1", name="build", tool="new_session_probe_start_job",
-                call_id=STARTED[-1], call_name="new_session_probe_start_job",
-                session_id=old, user_id=app.settings.default_user,
-                state=JobState.SUCCEEDED, exit_code=0, error=None,
-            )
-            delivered = await app._deliver_resume(jobs, record)
-            after = (tracker.format_context(), tracker.prompt_tokens)
-            titles = [c.kwargs.get("title")
-                      for c in app.session.start_thinking.call_args_list[opened:]]
-            status = app.session.set_status.call_args.args[0]
-        finally:
-            await manager.cleanup()
-
-        assert delivered and completed == [("j1", True)]
-        assert before[0] == after[0] == "ctx 2k/16k (12%)"
-        assert after[1] == before[1] + 12_500  # the totals still count it
-        assert "ctx 2k/16k (12%)" in status
-        assert (processor._last_task_progress, processor._last_task_content) == (
-            "[ ] Write it", "[ ] Write it"
-        )
-        assert "Tasks" not in titles  # the current list is not drawn for it
-        assert said(app.session, "add_message")[-1] == (
-            f"↻ Background job 'build' finished (✓ succeeded) — resuming its "
-            f"conversation {old}."
-        )
-
     async def test_grants_jobs_and_the_model_stay_and_a_job_reports_to_its_conversation(
         self, project, monkeypatch
     ):

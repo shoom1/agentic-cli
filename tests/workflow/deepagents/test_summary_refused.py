@@ -109,24 +109,6 @@ class TestAnEmptySummary:
         assert EventType.CONTEXT_TRIMMED not in _types(third)
         assert len(chat.requests) == 4  # the refused request and the summary; no resend
 
-    def test_the_sync_path_sends_the_request_in_full_too(self):
-        chat = ScriptedChat(script=[ai("")])
-        middleware = build_summarization(chat, resolved("local:small", agent="solo"), context())
-        history = []
-        for n in range(1, 7):
-            history += [HumanMessage(f"Turn {n}: {USER_TURN}"), AIMessage(f"Answer {n}.")]
-        history.append(HumanMessage("Turn 7."))
-        request = ModelRequest(model=chat, messages=history, state={"messages": history})
-        sent = []
-
-        def handler(request):
-            sent.append(request.messages)
-            return "the answer"
-
-        assert middleware.wrap_model_call(request, handler) == "the answer"
-        assert len(chat.requests) == 1  # the summary call, which wrote nothing
-        assert sent == [history]
-
 
 def is_summary_request(messages) -> bool:
     return len(messages) == 1 and "<messages>" in messages[0].text

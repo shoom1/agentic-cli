@@ -513,16 +513,79 @@ class TestItsFinishedJobs:
             SimpleNamespace(job_id="j1", name="build", session_id="abc", user_id=me),
             SimpleNamespace(job_id="j2", name="other", session_id="xyz", user_id=me),
         )
-        seen: list[tuple[str, str]] = []
+        seen: list[str] = []
 
-        async def process_resume(*, record, current_session_id=None, **_):
-            seen.append((record.job_id, current_session_id))
+        async def process_resume(*, record, **_):
+            seen.append(record.job_id)
             return TurnResult(TurnStatus.COMPLETED)
 
         app._message_processor.process_resume = process_resume
 
         assert await app.resume_session("abc")
-        assert seen == [(job, "abc") for job in told]
+        assert seen == told
+
+
+class TestAJobWhoseConversationWasLeftWhileItWaited:
+    async def test_the_startup_switch_between_the_check_and_the_delivery_leaves_its_job(
+        self, project, monkeypatch
+    ):
+        """``--continue``/``--resume`` switches conversation once the prompt is up,
+        as a task of its own, while the input handlers run one at a time. A
+        turn typed ahead takes the turn lock first and submits a job that ends
+        before the turn does; the turn's ``resume_finished_jobs`` checks that
+        job belongs here, and its delivery then waits on the lock, where the
+        startup switch goes first. The job's conversation is no longer the
+        current one by then: it is not told here (``ctx`` and the task list
+        would show the left conversation's numbers in this one), nor claimed;
+        it waits for its conversation, as another conversation's job does."""
+        from agentic_cli.cli.message_processor import TurnResult, TurnStatus
+        from agentic_cli.workflow.events import WorkflowEvent
+
+        workflow = Workflow(conversation("T", "Earlier work", 2))
+        app = app_on(workflow, fake_settings(job_auto_resume=True))
+        me = app.settings.default_user
+        jobs = workflow.job_manager = _Jobs()
+        app.session.app = SimpleNamespace(is_running=True)
+
+        async def no_proposals():
+            return None
+
+        monkeypatch.setattr(app, "_name_waiting_proposals", no_proposals)
+        app._pending_resume = "T"  # what --resume T / --continue chose
+        fresh = app.session_id
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def process(message, user_id, session_id=None):
+            workflow.turns.append(session_id)
+            started.set()
+            await release.wait()
+            # A quick background job this turn submitted ends before it does.
+            jobs.records.append(SimpleNamespace(
+                job_id="j1", name="build", session_id=session_id, user_id=me))
+            yield WorkflowEvent.text("ok")
+
+        monkeypatch.setattr(workflow, "process", process)
+        seen: list[tuple[str, str]] = []
+
+        async def process_resume(*, record, **_):
+            seen.append((record.session_id, app.session_id))
+            return TurnResult(TurnStatus.COMPLETED)
+
+        app._message_processor.process_resume = process_resume
+
+        handler = asyncio.create_task(app._handle_message("typed ahead"))
+        await asyncio.wait_for(started.wait(), 5)
+        opening = asyncio.create_task(app._open_on_startup())
+        await asyncio.sleep(0.2)  # the startup switch now waits on the turn lock
+        release.set()
+        await asyncio.wait_for(handler, 5)
+        await asyncio.wait_for(opening, 5)
+
+        assert app.session_id == "T"
+        assert seen == []
+        assert jobs.claimed == []  # still waiting: told when `fresh` is opened
+        assert [r.job_id for r in jobs.awaiting_resume()] == ["j1"]
+        assert fresh != "T"
 
 
 class TestPickSession:

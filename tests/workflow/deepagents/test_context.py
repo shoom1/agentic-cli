@@ -426,9 +426,6 @@ class TestForeignReasoning:
         assert await middleware.awrap_model_call(request, handler) == "response"
         assert sent[0][1].content == [{"type": "text", "text": "Gemini answer."}]
         assert gemini_message.content[0]["type"] == "thinking"  # the state keeps it
-        assert middleware.wrap_model_call(request, lambda r: r.messages)[1].content == (
-            [{"type": "text", "text": "Gemini answer."}]
-        )
 
 
 def _gemini_overflow() -> genai_errors.ClientError:
@@ -477,18 +474,11 @@ class TestContextOverflowMiddleware:
         async def handler(request):
             raise error
 
-        def sync_handler(request):
-            raise error
-
-        middleware = ContextOverflowMiddleware()
         with pytest.raises(ContextOverflowError) as caught:
-            await middleware.awrap_model_call(self._request(), handler)
-        with pytest.raises(ContextOverflowError) as caught_sync:
-            middleware.wrap_model_call(self._request(), sync_handler)
+            await ContextOverflowMiddleware().awrap_model_call(self._request(), handler)
 
-        for raised in (caught.value, caught_sync.value):
-            assert raised.__cause__ is error
-            assert str(raised) == str(error)
+        assert caught.value.__cause__ is error
+        assert str(caught.value) == str(error)
 
     @pytest.mark.parametrize("error", [
         _claude_bad_request(), ValueError("prompt is too long"),
@@ -503,26 +493,11 @@ class TestContextOverflowMiddleware:
 
         assert caught.value is error
 
-    @pytest.mark.parametrize("error", [
-        _claude_bad_request(), ValueError("prompt is too long"),
-        ContextOverflowError("already LangChain's"),
-    ])
-    def test_anything_else_passes_the_sync_path_unchanged(self, error):
-        def handler(request):
-            raise error
-
-        with pytest.raises(type(error)) as caught:
-            ContextOverflowMiddleware().wrap_model_call(self._request(), handler)
-
-        assert caught.value is error
-
     async def test_an_answer_passes_through(self):
         async def handler(request):
             return "response"
 
-        middleware = ContextOverflowMiddleware()
-        assert await middleware.awrap_model_call(self._request(), handler) == "response"
-        assert middleware.wrap_model_call(self._request(), lambda r: "response") == "response"
+        assert await ContextOverflowMiddleware().awrap_model_call(self._request(), handler) == "response"
 
 
 # --- whole turns ----------------------------------------------------------------------------

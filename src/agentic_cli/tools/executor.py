@@ -37,15 +37,6 @@ _RESULT_SENTINEL = "__AGENTIC_EXECUTOR_RESULT_SENTINEL__"
 _STARTED_MARKER = "__AGENTIC_EXECUTOR_STARTED__"
 
 
-class ExecutionTimeoutError(Exception):
-    """Raised when code execution times out."""
-
-    pass
-
-
-# Backward-compatible alias
-TimeoutError = ExecutionTimeoutError
-
 def default_opt_out(app_name: str | None) -> str:
     """Where to turn the OS sandbox off, when the caller names no better
     place: the user's settings file (the setting is the user's: the project

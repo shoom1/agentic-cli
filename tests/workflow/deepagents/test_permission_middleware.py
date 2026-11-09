@@ -626,13 +626,3 @@ class TestToolCallErrorMiddleware:
         )
 
         assert _content(message) == tool_error_result("task", error)
-
-    def test_the_sync_path_converts_too(self):
-        error = ValueError("bad")
-
-        def handler(request):
-            raise error
-
-        message = ToolCallErrorMiddleware().wrap_tool_call(_request(_Native(name="flaky")), handler)
-
-        assert _content(message) == tool_error_result("flaky", error)

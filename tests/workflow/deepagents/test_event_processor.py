@@ -604,38 +604,41 @@ class TestAttribution:
         assert processor.process((), "custom", {"anything": 1}) == []
 
 
+async def _reported(live: LiveEvents, act) -> list[WorkflowEvent]:
+    """What ``act`` (an async callable) reports through ``live``, as a turn merges it."""
+
+    async def source():
+        await act()
+        if False:  # pragma: no cover - a source that yields nothing itself
+            yield
+
+    return [item async for item in merged(source(), live)]
+
+
 class TestRunCallback:
-    def test_drain_hands_over_what_was_collected_once(self):
-        callback = RunCallback(root="coordinator", agent_models=MODELS)
-        first, second = WorkflowEvent.text("a"), WorkflowEvent.text("b")
-
-        callback._emit(first)
-        callback._emit(second)
-
-        assert isinstance(callback, AsyncCallbackHandler)
-        assert callback.drain() == [first, second]
-        assert callback.drain() == []
-
     async def test_a_summary_call_reports_that_it_started(self):
-        callback = RunCallback(root="coordinator", agent_models=MODELS)
+        live = LiveEvents()
+        callback = RunCallback(root="coordinator", agent_models=MODELS, live=live)
 
-        await callback.on_chat_model_start(
-            {}, [[HumanMessage("Summarize.")]], run_id=uuid.uuid4(),
-            metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
-        )
-        await callback.on_chat_model_start(  # an agent's own step reports nothing
-            {}, [[HumanMessage("Hi.")]], run_id=uuid.uuid4(),
-            metadata={"lc_agent_name": "researcher"},
-        )
+        async def act():
+            await callback.on_chat_model_start(
+                {}, [[HumanMessage("Summarize.")]], run_id=uuid.uuid4(),
+                metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
+            )
+            await callback.on_chat_model_start(  # an agent's own step reports nothing
+                {}, [[HumanMessage("Hi.")]], run_id=uuid.uuid4(),
+                metadata={"lc_agent_name": "researcher"},
+            )
 
-        (event,) = callback.drain()
+        (event,) = await _reported(live, act)
         assert event.type is EventType.CONTEXT_SUMMARIZING
         assert event.content == "Summarizing the earlier conversation…"
         assert event.metadata["agent"] == "researcher"
 
-    async def test_with_live_events_everything_goes_out_through_them(self):
+    async def test_everything_goes_out_through_the_live_events(self):
         live = LiveEvents()
         callback = RunCallback(root="coordinator", agent_models=MODELS, live=live)
+        assert isinstance(callback, AsyncCallbackHandler)
         run = uuid.uuid4()
 
         async def source():
@@ -650,24 +653,27 @@ class TestRunCallback:
         assert [getattr(item, "type", item) for item in items] == [
             EventType.CONTEXT_SUMMARIZING, "the stream's next item"
         ]
-        assert callback.drain() == []
 
     async def test_a_summarys_usage_is_the_summarized_agents(self):
-        callback = RunCallback(root="coordinator", agent_models=MODELS, budgets=BUDGETS)
+        live = LiveEvents()
+        callback = RunCallback(
+            root="coordinator", agent_models=MODELS, live=live, budgets=BUDGETS
+        )
         run = uuid.uuid4()
         answer = AIMessage("A summary.", usage_metadata={
             "input_tokens": 900, "output_tokens": 40, "total_tokens": 940,
         })
 
-        await callback.on_chat_model_start(
-            {}, [[HumanMessage("Summarize.")]], run_id=run,
-            metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
-        )
-        await callback.on_llm_end(
-            LLMResult(generations=[[ChatGeneration(message=answer)]]), run_id=run
-        )
+        async def act():
+            await callback.on_chat_model_start(
+                {}, [[HumanMessage("Summarize.")]], run_id=run,
+                metadata={"lc_source": "summarization", "lc_agent_name": "researcher"},
+            )
+            await callback.on_llm_end(
+                LLMResult(generations=[[ChatGeneration(message=answer)]]), run_id=run
+            )
 
-        _, usage = callback.drain()
+        _, usage = await _reported(live, act)
         assert usage.type is EventType.LLM_USAGE
         assert {key: usage.metadata.get(key) for key in ("purpose", "model", *CONTEXT_KEYS)} == {
             "purpose": "summarization", "model": "google:gemini-2.5-flash",
@@ -675,16 +681,18 @@ class TestRunCallback:
         }
 
     async def test_a_summary_reports_its_tokens(self):
-        callback = RunCallback(root="coordinator", agent_models=MODELS)
+        live = LiveEvents()
+        callback = RunCallback(root="coordinator", agent_models=MODELS, live=live)
 
-        await callback.on_custom_event(
-            "agentic_cli.context_summarized",
-            {"agent": "researcher", "messages_before": 11, "messages_after": 2,
-             "messages_summarized": 10, "tokens_before": 18_000, "tokens_after": 3_100},
-            run_id=uuid.uuid4(),
-        )
+        async def act():
+            await callback.on_custom_event(
+                "agentic_cli.context_summarized",
+                {"agent": "researcher", "messages_before": 11, "messages_after": 2,
+                 "messages_summarized": 10, "tokens_before": 18_000, "tokens_after": 3_100},
+                run_id=uuid.uuid4(),
+            )
 
-        (event,) = callback.drain()
+        (event,) = await _reported(live, act)
         assert event.type is EventType.CONTEXT_TRIMMED
         assert {key: event.metadata[key] for key in (
             "source", "agent", "messages_summarized", "tokens_before", "tokens_after"

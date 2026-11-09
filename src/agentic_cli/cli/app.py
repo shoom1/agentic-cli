@@ -1233,10 +1233,12 @@ class BaseCLIApp:
         ungated).
 
         Delivery follows the job's resume lifecycle: the job is *claimed*
-        (pending → resuming) before the turn runs, so a crash cannot silently
-        re-deliver it, and only recorded delivered once the turn actually
-        completed — a failed or cancelled resume is recorded as such instead of
-        being dropped.
+        (pending → resuming) once the turn lock is held and before the turn
+        runs, so a crash cannot silently re-deliver it, and only recorded
+        delivered once the turn actually completed — a failed or cancelled
+        resume is recorded as such instead of being dropped. The check above
+        is made again under the lock (``_deliver_resume``): the conversation
+        may have changed while the delivery waited for it.
 
         Returns:
             The number of jobs a resume turn was run for (unchanged meaning:
@@ -1253,17 +1255,21 @@ class BaseCLIApp:
         attempted = 0
         workflow = self._workflow_controller.workflow
         for record in jm.awaiting_resume():
-            if not self._job_belongs_here(record) and await self._can_be_opened(
-                workflow, record
-            ):
+            if await self._waits_for_its_conversation(workflow, record):
                 continue  # told when its conversation is opened
-            # Claim first: durable, so an interrupted delivery is recoverable
-            # and two coordinators can't both deliver the same result.
-            if not jm.begin_resume(record.job_id):
-                continue
-            attempted += 1
-            await self._deliver_resume(jm, record)
+            if await self._deliver_resume(jm, record) is not None:
+                attempted += 1
         return attempted
+
+    async def _waits_for_its_conversation(self, workflow: Any, record: Any) -> bool:
+        """Whether ``record`` is another conversation's job, told when that one is opened.
+
+        Not the current conversation's, and its conversation can be opened
+        (``_can_be_opened``): a job whose conversation is gone is told here.
+        """
+        return not self._job_belongs_here(record) and await self._can_be_opened(
+            workflow, record
+        )
 
     @staticmethod
     async def _can_be_opened(workflow: Any, record: Any) -> bool:
@@ -1288,23 +1294,43 @@ class BaseCLIApp:
             None, getattr(self._settings, "default_user", None)
         )
 
-    async def _deliver_resume(self, jm, record) -> bool:
-        """Run one claimed job's resume turn and close out its transition.
+    async def _deliver_resume(self, jm, record) -> bool | None:
+        """Claim one job and run its resume turn, and close out its transition.
 
-        Every exit path closes the claim, so no record can be left ``RESUMING``
+        Under the turn lock the job is looked at again: another conversation
+        may have become current while this waited for it (``--continue`` and
+        ``--resume`` switch once the prompt is up, as a task of their own,
+        after a turn typed ahead took the lock). A job that now waits for its
+        conversation is not claimed, nor told here, where ``ctx`` and the task
+        list are another conversation's: it stays pending until its
+        conversation is opened. The claim is durable, so an interrupted
+        delivery is recoverable and two coordinators cannot both deliver the
+        same result.
+
+        Every exit path closes a claim, so no record can be left ``RESUMING``
         in this process: a normal outcome records delivered/failed, an
         exception records failed with the reason, and a cancellation records
         failed before re-raising (cancellation still propagates).
 
         Args:
-            jm: The JobManager holding the claim.
-            record: The claimed job record.
+            jm: The JobManager.
+            record: The job record.
 
         Returns:
-            True if the result was delivered to the agent.
+            True if the result was delivered to the agent, False if the job
+            was claimed and not delivered, None if it was not claimed (it
+            waits for its conversation, or another coordinator has it).
         """
+        claimed = False
         try:
             async with self._turn_lock:
+                if await self._waits_for_its_conversation(
+                    self._workflow_controller.workflow, record
+                ):
+                    return None
+                if not jm.begin_resume(record.job_id):
+                    return None
+                claimed = True
                 if getattr(record, "session_id", None) == self._session_id:
                     self._turned = True  # the resume adds to this conversation
                 result = await self._message_processor.process_resume(
@@ -1313,15 +1339,17 @@ class BaseCLIApp:
                     ui=self.session,
                     settings=self._settings,
                     usage_tracker=self._usage_tracker,
-                    current_session_id=self._session_id,
                 )
         except asyncio.CancelledError:
-            jm.complete_resume(
-                record.job_id, delivered=False, error="resume cancelled"
-            )
-            logger.info("job_resume_cancelled", job_id=record.job_id)
+            if claimed:
+                jm.complete_resume(
+                    record.job_id, delivered=False, error="resume cancelled"
+                )
+                logger.info("job_resume_cancelled", job_id=record.job_id)
             raise
         except Exception as exc:  # noqa: BLE001 - the claim must always close
+            if not claimed:
+                raise
             jm.complete_resume(record.job_id, delivered=False, error=str(exc))
             logger.warning(
                 "job_resume_raised", job_id=record.job_id, error=str(exc)
@@ -1389,9 +1417,8 @@ class BaseCLIApp:
         once, and nothing has changed. What belongs to the process stays: the
         model and the settings, "Allow for this session" grants, sandbox
         kernels, and background jobs, each of which still reports to the
-        conversation that started it (a job's resume runs in its record's
-        session, and leaves the current conversation's ``ctx`` and tasks
-        alone).
+        conversation that started it (a finished job waits until that
+        conversation is opened).
 
         Returns:
             The new session id (12 hex characters).

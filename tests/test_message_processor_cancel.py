@@ -312,7 +312,12 @@ async def test_a_cancel_with_a_question_open_closes_it_and_the_next_one_opens(ui
 
 class JobManager:
     def __init__(self) -> None:
+        self.claimed: list[str] = []
         self.completed: list[tuple[str, bool, str | None]] = []
+
+    def begin_resume(self, job_id: str) -> bool:
+        self.claimed.append(job_id)
+        return True
 
     def complete_resume(self, job_id: str, *, delivered: bool, error=None) -> None:
         self.completed.append((job_id, delivered, error))
@@ -335,6 +340,7 @@ async def test_a_cancelled_resume_turn_says_so_once_records_the_failure_and_re_r
     await _cancel_once_streaming(workflow, turn)
 
     assert _cancelled_lines(ui) == [call("system", CANCELLED_LINE)]
+    assert jm.claimed == ["j1"]
     assert jm.completed == [("j1", False, "resume cancelled")]
     assert not app._turn_lock.locked()
 

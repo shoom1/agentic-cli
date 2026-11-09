@@ -88,7 +88,7 @@ from deepagents.middleware.summarization import (
     SummarizationMiddleware,
 )
 from langchain.agents.middleware._retry import default_retry_on
-from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -239,10 +239,10 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     """Deep Agents' summarization, reporting each summary it applies.
 
     The report is a custom run event, so it reaches the turn's run callback
-    wherever the agent runs (a sub-agent included). Only the public model-call
-    hooks are wrapped; what a summary did is read from Deep Agents' summary
-    event in the update it returns, applied as Deep Agents applies it
-    (``_apply_event_to_messages``).
+    wherever the agent runs (a sub-agent included). Only the public async
+    model-call hook is wrapped (turns run through ``astream``); what a
+    summary did is read from Deep Agents' summary event in the update it
+    returns, applied as Deep Agents applies it (``_apply_event_to_messages``).
 
     Its helper's summary model is ``OverflowMapped``, inside LangChain's
     retry, so a summary refused as too long is cut and sent again, whatever
@@ -361,35 +361,6 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
                 logger.debug("deepagents_summary_not_reported", agent=self.agent)
         return response
 
-    def wrap_model_call(
-        self,
-        request: "ModelRequest",
-        handler: Callable[["ModelRequest"], "ModelResponse"],
-    ) -> Any:
-        sent = False
-
-        def call(request: "ModelRequest") -> "ModelResponse":
-            nonlocal sent
-            sent = True
-            return handler(request)
-
-        try:
-            response = super().wrap_model_call(request, call)
-        except NoSummaryWritten as error:
-            if sent:
-                raise _refused_unsummarized(error) from error
-            messages = self._get_effective_messages(request)
-            self._failures.failed(live_events.current(), *self._range(messages))
-            self._not_summarized()
-            return handler(request.override(messages=messages))
-        report = self._report(request, response)
-        if report is not None:
-            try:
-                dispatch_custom_event(CONTEXT_SUMMARIZED, report)
-            except RuntimeError:  # no run to report to (called outside a graph)
-                logger.debug("deepagents_summary_not_reported", agent=self.agent)
-        return response
-
     def _report(self, request: "ModelRequest", response: Any) -> dict[str, Any] | None:
         """What a summary did to the request, if this call applied a new one.
 
@@ -451,13 +422,6 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         logger.debug("deepagents_summary_not_written", agent=self.agent)
         try:
             await adispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
-        except RuntimeError:  # no run to report to (called outside a graph)
-            pass
-
-    def _not_summarized(self) -> None:
-        logger.debug("deepagents_summary_not_written", agent=self.agent)
-        try:
-            dispatch_custom_event(SUMMARY_NOT_WRITTEN, {"agent": self.agent})
         except RuntimeError:  # no run to report to (called outside a graph)
             pass
 

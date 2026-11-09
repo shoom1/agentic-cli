@@ -93,14 +93,12 @@ class TestWorkflowEvent:
             "search_kb",
             result={"matches": 5, "results": []},
             success=True,
-            duration_ms=150.5,
         )
 
         assert event.type == EventType.TOOL_RESULT
         assert event.metadata["tool_name"] == "search_kb"
         assert event.metadata["result"]["matches"] == 5
         assert event.metadata["success"] is True
-        assert event.metadata["duration_ms"] == 150.5
 
     def test_create_tool_result_event_failed(self):
         """Test creating failed tool result event."""
@@ -114,6 +112,12 @@ class TestWorkflowEvent:
         assert event.type == EventType.TOOL_RESULT
         assert event.metadata["success"] is False
         assert event.metadata["error"] == "API rate limited"
+
+    def test_a_positional_duration_is_refused_not_taken_for_the_error(self):
+        """0.6.x took ``duration_ms`` fourth: such a call must not silently
+        become ``error=150.5``."""
+        with pytest.raises(TypeError):
+            WorkflowEvent.tool_result("search_kb", {"matches": 5}, True, 150.5)
 
     def test_tool_result_truncates_long_content(self):
         """Test that tool result truncates long string results for content."""
