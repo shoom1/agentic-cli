@@ -15,6 +15,7 @@ pinned at the end.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.events import UserInputRequest
@@ -28,15 +29,8 @@ from agentic_cli.workflow.service_registry import PERMISSION_ENGINE
 from tests.conftest import settings_double
 
 
-class _Minimal(BaseWorkflowManager):
-    """The abstract hooks and nothing else: no ``session_id``, no ``_open_calls``."""
-
-    def __init__(self, app_name: str | None = None) -> None:
-        super().__init__(
-            agent_configs=[],
-            settings=settings_double(default_user="user"),
-            app_name=app_name,
-        )
+class _Hooks(BaseWorkflowManager):
+    """The abstract hooks and nothing else: no constructor, no state."""
 
     @property
     def backend_type(self) -> str:
@@ -56,6 +50,17 @@ class _Minimal(BaseWorkflowManager):
 
     async def cleanup(self):
         pass
+
+
+class _Minimal(_Hooks):
+    """A backend that sets neither ``session_id`` nor ``_open_calls``."""
+
+    def __init__(self, app_name: str | None = None) -> None:
+        super().__init__(
+            agent_configs=[],
+            settings=settings_double(default_user="user"),
+            app_name=app_name,
+        )
 
 
 class _Durable(_Minimal):
@@ -149,6 +154,113 @@ async def _answer(text: str) -> str:
     return text
 
 
+def _base(**kwargs):
+    return dict(agent_configs=[], settings=settings_double(default_user="user"), **kwargs)
+
+
+class TestBackendsThatDeclareThemselves:
+    """A backend that provides ``session_id`` or ``_open_calls`` its own way
+    keeps what it provides: the base declares a default, never overwrites."""
+
+    async def test_values_set_before_the_base_constructor_survive_it(self):
+        class SetsBeforeSuper(_Hooks):
+            def __init__(self) -> None:
+                self.session_id = "chosen-by-backend"
+                self.record = self._open_calls = OpenCalls()
+                super().__init__(**_base())
+
+        m = SetsBeforeSuper()
+
+        assert m.session_id == "chosen-by-backend"
+        assert m.session_ref().session_id == "chosen-by-backend"
+        assert m._open_calls is m.record
+        await m.load_session("resumed")
+        assert m.session_id == "resumed"
+
+    async def test_a_class_level_session_id_is_the_default(self):
+        class ClassDefault(_Hooks):
+            session_id = "main"
+
+            def __init__(self) -> None:
+                super().__init__(**_base())
+
+        m = ClassDefault()
+
+        assert m.session_id == "main"
+        assert m.session_ref().session_id == "main"
+        await m.load_session("resumed")
+        assert m.session_id == "resumed"
+        assert ClassDefault.session_id == "main"
+
+    async def test_a_session_id_property_whose_setter_needs_state_set_after_the_base_constructor(
+        self,
+    ):
+        class Conversation:
+            id = "conv-0"
+
+        class PropertyBacked(_Hooks):
+            def __init__(self) -> None:
+                super().__init__(**_base())
+                self.conversation = Conversation()
+
+            @property
+            def session_id(self) -> str:
+                return self.conversation.id
+
+            @session_id.setter
+            def session_id(self, value: str) -> None:
+                self.conversation.id = value
+
+        m = PropertyBacked()
+
+        assert m.session_ref().session_id == "conv-0"
+        await m.load_session("resumed")
+        assert m.conversation.id == "resumed"
+        assert m.session_ref().session_id == "resumed"
+
+    async def test_values_set_after_the_base_constructor_win(self):
+        class SetsAfterSuper(_Hooks):
+            def __init__(self) -> None:
+                super().__init__(**_base())
+                self.session_id = "after"
+                self.record = self._open_calls = OpenCalls()
+
+        m = SetsAfterSuper()
+
+        assert m.session_ref().session_id == "after"
+        assert m._open_calls is m.record
+
+    def test_an_open_calls_provided_by_the_class_is_kept(self):
+        class Provided(_Hooks):
+            record = OpenCalls()
+            _open_calls = record
+
+            def __init__(self) -> None:
+                super().__init__(**_base())
+
+        assert Provided()._open_calls is Provided.record
+
+    def test_each_manager_has_its_own_record_and_session_id(self):
+        first, second = _Minimal(), _Minimal()
+
+        assert first._open_calls is not second._open_calls
+
+    async def test_adopting_an_id_leaves_other_managers_alone(self):
+        first, second = _Minimal(), _Minimal()
+
+        await first.load_session("resumed")
+
+        assert first.session_id == "resumed"
+        assert second.session_id == "default_session"
+        assert BaseWorkflowManager.session_id == "default_session"
+
+    def test_a_manager_built_without_its_constructor_has_the_default_id(self):
+        with patch.object(BaseWorkflowManager, "__abstractmethods__", set()):
+            m = BaseWorkflowManager.__new__(BaseWorkflowManager)
+
+        assert m.session_id == "default_session"
+
+
 class TestAppName:
     def test_it_defaults_to_the_settings_app_name(self):
         m = _Minimal()
@@ -156,7 +268,7 @@ class TestAppName:
         assert m.app_name == "test-app"
         assert m.session_ref().app_name == "test-app"
 
-    def test_the_constructors_names_the_conversations_not_the_services(self):
+    def test_the_constructor_s_app_name_names_the_conversations_not_the_services(self):
         m = _Minimal(app_name="other")
 
         assert m.app_name == "other"

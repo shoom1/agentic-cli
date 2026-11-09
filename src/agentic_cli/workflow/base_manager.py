@@ -225,6 +225,13 @@ class BaseWorkflowManager(ABC):
                     await super()._release_resources()
     """
 
+    #: The conversation a call without a session id belongs to
+    #: (``session_ref``): ``load_session`` adopts the one a resume names (on
+    #: the instance), and the CLI's /status shows it. A class attribute, so a
+    #: backend that provides its own (set before or after the base constructor,
+    #: a class default or a property) is never overwritten by the base.
+    session_id: str = "default_session"
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -259,10 +266,6 @@ class BaseWorkflowManager(ABC):
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
         self._initialized = False
-        # The conversation a call without a session id belongs to
-        # (``session_ref``): ``load_session`` adopts the one a resume names,
-        # and the CLI's /status shows it.
-        self.session_id: str = "default_session"
         # --- Concurrency contract (see the class docstring) ---
         # _lifecycle_lock serializes initialize/reinitialize/cleanup: background
         # init and a first user message may call them concurrently, and the
@@ -317,7 +320,10 @@ class BaseWorkflowManager(ABC):
         # What became of the turns' tool calls: a cancelled turn answers the
         # ones it leaves open from it (workflow/interrupts.py). A question a
         # tool asks marks its call as waiting at the prompt (request_user_input).
-        self._open_calls = OpenCalls()
+        # A backend that made its own before this constructor (or provides one
+        # on its class) keeps it.
+        if "_open_calls" not in vars(self) and not hasattr(type(self), "_open_calls"):
+            self._open_calls = OpenCalls()
         # The memory index each conversation's main agent gets (spec §11.1):
         # taken once, so the prompt prefix stays cached.
         self._index_snapshots: dict[SessionRef, str] = {}

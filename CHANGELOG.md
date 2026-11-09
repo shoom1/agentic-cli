@@ -2244,10 +2244,12 @@ step; each entry says what to use instead.
 
 - **A backend of your own adopts the conversation's id.** `load_session`
   adopted the id only when the subclass had set `session_id` itself (the three
-  shipped backends do), so a `BaseWorkflowManager` backend that did not never
-  continued the conversation `/resume` named, and `/status` replaced its whole
-  workflow section with "Not available". The base now declares `session_id`
-  (`"default_session"` until a conversation is adopted).
+  shipped backends do). For a `BaseWorkflowManager` backend that had not, a
+  call that left out the session id stayed on `default_session` after
+  `/resume` (the CLI passes the id to every turn, so `/resume` itself worked),
+  and `/status` showed "Not available" in place of its Session ID, Services
+  and context rows. The base now declares `session_id` as a class default
+  (`"default_session"`), which a backend that sets or provides its own keeps.
 
 - **`job_cancel` and `/jobs cancel` say when a job was not cancelled.** For
   a job the cancel could not reach (another CLI of the app runs it and its
