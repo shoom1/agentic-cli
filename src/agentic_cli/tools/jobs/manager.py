@@ -112,7 +112,9 @@ class ClaimLockUnavailable(RuntimeError):
     another process has just recorded. So without it no record is written: a
     launch or a delivery is not claimed, startup recovery does nothing, a
     cancel or a refresh leaves the record as it is (a read answers with the
-    record as this manager has it), and recording a completed delivery
+    record as this manager has it; a cancel whose request was recorded
+    before the wait leaves it requested, and whoever polls the job next
+    records how it ended: CANCELLED), and recording a completed delivery
     records nothing, so the claim stays ``RESUMING`` until startup recovery
     fails it once its process is gone. Only a new job's first write goes
     ahead: there is nothing on disk yet for it to lose.
@@ -264,6 +266,20 @@ class JobRecord:
         return self.resume_state in (
             ResumeState.DELIVERED.value,
             ResumeState.FAILED.value,
+        )
+
+    @property
+    def awaiting_resume(self) -> bool:
+        """Whether its result waits to be delivered: what ``JobManager.awaiting_resume`` returns.
+
+        Finished, flagged ``resume_on_complete``, and still ``PENDING``: one
+        being delivered (``RESUMING``) waits no more, nor does one whose
+        delivery ended.
+        """
+        return (
+            self.resume_on_complete
+            and self.resume_state == ResumeState.PENDING.value
+            and self.state in TERMINAL_STATES
         )
 
     def elapsed_s(self) -> float:
@@ -647,6 +663,20 @@ class JobManager:
             recs = [r for r in recs if tag in r.tags]
         return sorted(recs, key=lambda r: r.submitted_at, reverse=True)
 
+    def snapshot(self) -> list[JobRecord]:
+        """The jobs this manager holds, as it last read them.
+
+        Neither refreshed nor locked: it takes neither the jobs directory's
+        cross-process lock, which another CLI of the app may hold, nor this
+        manager's own, which a thread of its may hold through a transaction
+        or a cancel's wait, so it never waits. It is for a caller on the
+        event loop (``workflow/interrupts.py`` answers a stopped turn's calls
+        there), and for what a job never changes after submit: its call, its
+        conversation, its name. A job's state here may be a tick old;
+        ``list`` refreshes it first.
+        """
+        return list(self._records.copy().values())
+
     def tail(self, job_id: str, n: int = 50, stream: str = "stdout") -> list[str]:
         with self._lock:
             rec = self._records.get(job_id)
@@ -689,7 +719,7 @@ class JobManager:
 
         Brings the record up to date first, as every read does (the durable
         record, then the backend's poll, in the transaction that records the
-        cancel: ``_mutate``), and returns it as it is
+        request: ``_mutate``), and returns it as it is
         when that shows the job has ended: a job that has already finished
         stays finished, also when nobody had polled it since (terminal
         transitions are monotonic — neither a stale view nor a cancel that
@@ -703,6 +733,20 @@ class JobManager:
         ``cancel_requested``, holding its slot, and is recorded CANCELLED when
         it ends; the next queued job starts then, not now.
 
+        A running job's cancel takes three steps, so the backend's wait for
+        the job to stop (the subprocess backend's, up to ``_CANCEL_WAIT_S``)
+        holds no lock another CLI of the app waits on (``_request_cancel``,
+        then ``JobBackend.cancel`` outside the cross-process lock, then
+        ``_record_cancelled``). The request is recorded before the backend is
+        asked, so a manager that sees the job end meanwhile records it
+        CANCELLED; a terminal state recorded meanwhile is how it ended. A
+        queued job is cancelled in one transaction, as it has nothing to
+        wait for and another manager could launch it meanwhile. This
+        manager's own other calls still wait for the cancel (``_lock``), so
+        its backends are never called concurrently. A backend whose cancel
+        raises changes nothing: the request this call recorded is withdrawn
+        (``_withdraw_request``), and the error raised to the caller.
+
         Returns:
             The record — check ``state`` for what actually happened — or None
             if the job is unknown.
@@ -714,36 +758,122 @@ class JobManager:
             try:
                 with self._claim_transaction():
                     with self._mutate(rec) as status:
-                        if status is DurableRead.MISSING:
-                            return None
-                        if status is DurableRead.UNREADABLE:
-                            logger.warning("job_cancel_unreadable", job_id=job_id)
-                            return rec
-                        self._poll(rec)
-                        if rec.state not in TERMINAL_STATES:
-                            backend = self._backend_of(rec, asked=True)
-                            if backend is None:
-                                return rec
-                            foreign = self._execution_is_foreign(rec)
-                            if foreign and not self._can_cancel_foreign(rec):
-                                logger.warning(
-                                    "job_cancel_not_reachable",
-                                    job_id=job_id,
-                                    owner=rec.exec_owner,
-                                )
-                                return rec
-                            if backend.cancel(rec, self._job_dir(job_id)) is False:
-                                rec.cancel_requested = True  # not stopped yet
-                                return rec
-                            rec.state = JobState.CANCELLED
-                            rec.finished_at = _now()
-                    self._maybe_start_queued()  # it has ended: its slot is free
-                    return rec
+                        already = rec.cancel_requested
+                        backend = self._request_cancel(rec, status)
+                    requested = backend is not None and not already
+                    if status is DurableRead.MISSING:
+                        return None
+                    if backend is None:
+                        if status is DurableRead.PRESENT and rec.state in TERMINAL_STATES:
+                            self._maybe_start_queued()  # it has ended: its slot is free
+                        return rec
+                    if rec.state == JobState.QUEUED:
+                        # Nothing to wait for, and unlocked another manager
+                        # could launch it meanwhile.
+                        stopped = self._backend_cancel(backend, rec, requested)
+                        return self._record_cancelled(rec, stopped)
             except ClaimLockUnavailable as exc:
                 logger.warning(
                     "job_cancel_skipped_unlocked", job_id=job_id, error=str(exc)
                 )
                 return rec
+            # Outside the cross-process lock: the backend may wait for the job.
+            stopped = self._backend_cancel(backend, rec, requested)
+            if not stopped:
+                return rec  # RUNNING, with the request recorded: it ends CANCELLED
+            try:
+                return self._record_cancelled(rec, stopped)
+            except ClaimLockUnavailable as exc:
+                # The request is on disk: whoever polls the job next records
+                # it CANCELLED.
+                logger.warning(
+                    "job_cancel_unrecorded_unlocked", job_id=job_id, error=str(exc)
+                )
+                return rec
+
+    def _request_cancel(self, rec: JobRecord, status: DurableRead) -> JobBackend | None:
+        """Decide a cancel on ``rec`` as ``_mutate`` read it back (``status``).
+
+        Polls the job first: one that has ended is left as it ended. One
+        this manager can reach is marked ``cancel_requested``, which the
+        caller's transaction writes, and its backend returned for the
+        caller to cancel it; anything else returns None, the record left as
+        it is (unknown, unreadable, without its backend here, or another
+        live manager's job this one cannot reach).
+        """
+        if status is DurableRead.UNREADABLE:
+            logger.warning("job_cancel_unreadable", job_id=rec.job_id)
+            return None
+        if status is not DurableRead.PRESENT:
+            return None
+        self._poll(rec)
+        if rec.state in TERMINAL_STATES:
+            return None
+        backend = self._backend_of(rec, asked=True)
+        if backend is None:
+            return None
+        if self._execution_is_foreign(rec) and not self._can_cancel_foreign(rec):
+            logger.warning(
+                "job_cancel_not_reachable", job_id=rec.job_id, owner=rec.exec_owner
+            )
+            return None
+        rec.cancel_requested = True
+        return backend
+
+    def _backend_cancel(self, backend: JobBackend, rec: JobRecord, requested: bool) -> bool:
+        """``backend.cancel``: whether it stopped the job (None counts as stopped).
+
+        One that raises changes nothing, as before the request was recorded
+        ahead of it: the request, when this cancel made it (``requested``),
+        is withdrawn, then the error re-raised.
+        """
+        try:
+            return backend.cancel(rec, self._job_dir(rec.job_id)) is not False
+        except Exception:
+            if requested:
+                self._withdraw_request(rec)
+            raise
+
+    def _withdraw_request(self, rec: JobRecord) -> None:
+        """Clear the ``cancel_requested`` a cancel recorded, its backend having raised.
+
+        Under the cross-process lock, on the record read back. One that has
+        ended meanwhile is left as it ended. Without the lock the request
+        stays: the job is recorded CANCELLED when it ends.
+        """
+        try:
+            with self._claim_transaction():
+                with self._mutate(rec) as status:
+                    if status is DurableRead.PRESENT and rec.state not in TERMINAL_STATES:
+                        rec.cancel_requested = False
+        except ClaimLockUnavailable as exc:
+            logger.warning(
+                "job_cancel_request_kept_unlocked", job_id=rec.job_id, error=str(exc)
+            )
+
+    def _record_cancelled(self, rec: JobRecord, stopped: bool) -> JobRecord:
+        """Record a job the backend ``stopped`` CANCELLED, and fill its slot.
+
+        Under the cross-process lock, on the record read back: a terminal
+        state recorded meanwhile (its own manager saw it end, after the
+        request: CANCELLED) is kept. One not ``stopped`` stays as it is,
+        with its request recorded.
+
+        Raises:
+            ClaimLockUnavailable: nothing was read or written.
+        """
+        with self._claim_transaction():
+            with self._mutate(rec) as status:
+                if (
+                    stopped
+                    and status is DurableRead.PRESENT
+                    and rec.state not in TERMINAL_STATES
+                ):
+                    rec.state = JobState.CANCELLED
+                    rec.finished_at = _now()
+            if rec.state in TERMINAL_STATES:
+                self._maybe_start_queued()  # it has ended: its slot is free
+        return rec
 
     def reconcile(self) -> None:
         """Refresh non-terminal jobs from durable state and their backends.
@@ -822,13 +952,7 @@ class JobManager:
         """
         with self._lock:
             self.reconcile()
-            recs = [
-                r
-                for r in self._records.values()
-                if r.resume_on_complete
-                and r.resume_state == ResumeState.PENDING.value
-                and r.state in TERMINAL_STATES
-            ]
+            recs = [r for r in self._records.values() if r.awaiting_resume]
         return sorted(recs, key=lambda r: r.finished_at or r.submitted_at)
 
     def begin_resume(self, job_id: str) -> bool:
@@ -882,6 +1006,60 @@ class JobManager:
                 )
                 return False
             return True
+
+    def release_resume(self, job_id: str) -> None:
+        """Hand back a claim nothing was delivered under: ``RESUMING`` → ``PENDING``.
+
+        The counterpart of ``begin_resume``, for a claim its delivery did not
+        use: the request that took it stopped before the result could reach
+        the agent (a Ctrl+C while the claim was being taken), so the job
+        waits to be delivered again, by this process or another, rather than
+        being closed ``FAILED``. Decided under the cross-process lock on the
+        record read back, like the claim itself.
+
+        Only the process holding the claim may release it. Anything else is
+        a coordinator bug and raises, as in ``complete_resume``. If the lock
+        cannot be taken nothing changes: the claim stays ``RESUMING`` under
+        this process, and startup recovery records it failed once the
+        process is gone (the result stays readable with ``/jobs <id>``).
+
+        Raises:
+            ResumeStateError: If the job is unknown, was not claimed, or is
+                claimed by someone else.
+        """
+        with self._lock:
+            rec = self._records.get(job_id)
+            if rec is None:
+                raise ResumeStateError(f"Unknown job {job_id!r}: nothing to release.")
+            try:
+                with self._mutate(rec) as status:
+                    if status is not DurableRead.PRESENT:
+                        logger.warning(
+                            "job_resume_release_record_gone",
+                            job_id=job_id,
+                            status=status.value,
+                        )
+                        return
+                    if rec.resume_state != ResumeState.RESUMING.value:
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is {rec.resume_state!r}, not "
+                            f"{ResumeState.RESUMING.value!r}: release_resume() "
+                            "must follow a successful begin_resume()."
+                        )
+                    owner = _owner_token()
+                    if rec.resume_owner not in (None, owner):
+                        raise ResumeStateError(
+                            f"Job {job_id!r} is claimed by {rec.resume_owner!r}, "
+                            f"not {owner!r}: only the claiming process may "
+                            "release it."
+                        )
+                    rec.resume_state = ResumeState.PENDING.value
+                    rec.resume_owner = None
+                    rec.resume_error = None
+            except ClaimLockUnavailable as exc:
+                logger.warning(
+                    "job_resume_release_unpersisted", job_id=job_id, error=str(exc)
+                )
 
     def complete_resume(
         self, job_id: str, *, delivered: bool, error: str | None = None
