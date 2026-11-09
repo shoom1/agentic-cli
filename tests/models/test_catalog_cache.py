@@ -160,7 +160,7 @@ async def test_what_a_listing_serves_and_what_it_shows_survive_the_cache(cache):
     ]
     assert [r.model for r in catalog.records("anthropic")] == [
         "claude-sonnet-5-5", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5",
-        "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-haiku",
+        "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307",
     ]
 
 
@@ -937,6 +937,27 @@ async def test_a_confirmed_absence_is_trusted_at_the_next_start(cache):
     assert read(cache)["providers"]["anthropic"]["absent"] == [RETIRED.model]
 
 
+async def test_an_entry_naming_an_alias_the_provider_does_not_serve_is_trusted_as_absent(cache):
+    """``claude-3-haiku`` is the date-stripped id of a model Anthropic lists
+    (``claude-3-haiku-20240307``), not an alias it serves: the entry is left out,
+    and the listing that found it missing says so in the cache, so the next
+    starts do not list again for it."""
+    clock = Clock()
+    not_an_alias = ModelRef("anthropic", "claude-3-haiku")
+    entries = {not_an_alias: ModelEntry(), ModelRef("anthropic", "claude-sonnet-4-6"): ModelEntry()}
+    calls = []
+    for _ in range(3):
+        api = ProviderAPI()
+        catalog = make(cache, api, entries=entries, anthropic=KEYS["anthropic"], clock=clock)
+        await catalog.load()
+        calls.append(api.calls)
+        assert catalog.not_offered() == {str(not_an_alias): "not served by anthropic"}
+        clock.now += 600
+
+    assert calls == [["anthropic"], [], []]
+    assert read(cache)["providers"]["anthropic"]["absent"] == [not_an_alias.model]
+
+
 async def test_a_new_entry_is_still_confirmed_once(cache):
     """A model added to the list after the cached listing may be one released
     since: its provider is listed once more, and then trusted."""
@@ -978,6 +999,51 @@ async def test_a_stale_listing_keeps_out_an_entry_it_recorded_as_absent(cache):
     assert default.model in {record.model for record in catalog.records("anthropic")}
 
 
+async def test_a_model_is_never_both_offered_and_not_offered(cache):
+    """The retired model is an entry and the default model, and the listing in
+    use is a day old: one rule says whether a model can run, for the entries and
+    for the references alike, so /models shows it once, as not served."""
+    clock = Clock()
+    good = ModelRef("anthropic", "claude-sonnet-4-6")
+    entries = {RETIRED: ModelEntry(), good: ModelEntry()}
+    await make(
+        cache, entries=entries, references=(RETIRED,), anthropic=KEYS["anthropic"], clock=clock
+    ).load()
+    clock.now += DAY + 600
+
+    catalog = make(
+        cache, NoNetwork(), entries=entries, references=(RETIRED,),
+        anthropic=KEYS["anthropic"], clock=clock,
+    )
+    await catalog.load()
+
+    assert states(catalog)["anthropic"] is ProviderState.STALE
+    assert catalog.offered() == [str(good)]
+    assert catalog.offered(extra=[str(RETIRED)]) == [str(good)]
+    assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
+
+
+async def test_a_reference_the_listing_in_use_recorded_as_absent_is_left_out_too(cache):
+    """Another project's list recorded the model absent; here it is named by a
+    setting, not by an entry. It is accepted (a stale listing proves nothing) but
+    the list, which a role may be computed from, does not offer it, and
+    ``not_offered`` says why."""
+    clock = Clock()
+    await make(cache, entries={RETIRED: ModelEntry()}, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += DAY + 600
+
+    catalog = make(
+        cache, NoNetwork(), references=(RETIRED,), anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+
+    assert states(catalog)["anthropic"] is ProviderState.STALE
+    assert str(RETIRED) not in catalog.offered()
+    assert catalog.record(RETIRED).model == RETIRED.model
+    # And it says why, as for an entry: /models has a row for it, not a gap.
+    assert catalog.not_offered() == {str(RETIRED): "not served by anthropic"}
+
+
 async def test_offline_a_recorded_absence_keeps_the_listing_authoritative(cache):
     """With the network down, a start does not try the listing again for the
     retired model, so the fresh cached listing still rejects a typo."""
@@ -1011,3 +1077,94 @@ async def test_an_entry_the_provider_still_lacks_warns_after_one_listing(cache, 
     assert _catalog_warnings(caplog) == [
         f"Model {NEW} in models is not offered: not served by anthropic"
     ]
+
+
+# --- a listing ages in the process ---------------------------------------------------------
+#
+# Fresh, stale and degraded are what the catalog knows now, not what it decided
+# when a listing arrived: one process per conversation can outlive the TTL.
+
+
+async def test_a_cached_listing_goes_stale_in_a_session_that_outlives_the_ttl(cache):
+    """A conversation starts on a 23-hour-old cache entry and goes on for three
+    days: the listing is then stale, so /models <text> lists again and finds a
+    model released since."""
+    clock = Clock()
+    await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 23 * 3600
+    api = ProviderAPI(anthropic=_serving(NEW.model))
+    catalog = make(cache, api, anthropic=KEYS["anthropic"], clock=clock)
+    await catalog.load()
+    assert states(catalog) == {"anthropic": ProviderState.FRESH}
+    assert api.calls == []
+
+    clock.now += 3 * DAY
+
+    assert states(catalog) == {"anthropic": ProviderState.STALE}
+    assert not catalog.is_authoritative("anthropic")
+    found = await catalog.search(NEW.model)
+    assert [record.ref for record in found] == [NEW]
+    assert api.calls == ["anthropic"]
+    assert states(catalog) == {"anthropic": ProviderState.FRESH}
+    assert catalog.is_authoritative("anthropic")
+
+
+async def test_a_listing_this_process_made_goes_stale_after_the_ttl_too():
+    """Not the cache's doing: a catalog without a cache file ages its own listing."""
+    clock = Clock()
+    catalog = make(None, google=KEYS["google"], clock=clock)
+    await catalog.load()
+
+    clock.now += DAY - 1
+    assert states(catalog) == {"google": ProviderState.FRESH}
+    with pytest.raises(ModelResolutionError, match="not available"):
+        catalog.record(ModelRef("google", "gemini-9-ultra"))
+
+    clock.now += 1
+    assert states(catalog) == {"google": ProviderState.STALE}
+    assert catalog.status()[0].fetched_at == 1_000_000.0  # the listing in use is the old one
+    assert catalog.record(ModelRef("google", "gemini-9-ultra")).model == "gemini-9-ultra"
+    assert "gemini-2.0-flash" in [record.model for record in catalog.records("google")]
+
+
+async def test_a_listing_that_aged_stops_leaving_a_model_out_of_the_list(cache):
+    """A model a setting names that a fresh listing lacks is left out of the
+    list; once the listing is stale it cannot prove the model is missing."""
+    clock = Clock()
+    await make(cache, anthropic=KEYS["anthropic"], clock=clock).load()
+    clock.now += 3600
+    catalog = make(
+        cache, NoNetwork(), references=(NEW,), anthropic=KEYS["anthropic"], clock=clock
+    )
+    await catalog.load()
+    assert str(NEW) not in catalog.offered()
+
+    clock.now += DAY
+
+    assert str(NEW) in catalog.offered()
+
+
+async def test_a_failed_or_untried_provider_is_not_made_stale_by_time(cache):
+    clock = Clock()
+    catalog = make(cache, ProviderAPI(google=refuse), google=KEYS["google"], clock=clock)
+    await catalog.load()
+    untried = make(None, google=KEYS["google"], clock=clock)
+
+    clock.now += 3 * DAY
+
+    assert states(catalog) == {"google": ProviderState.DEGRADED}
+    assert states(untried) == {"google": ProviderState.UNATTEMPTED}
+    await catalog.aclose()
+
+
+async def test_refresh_makes_an_aged_listing_fresh_again(cache):
+    clock = Clock()
+    catalog = make(cache, google=KEYS["google"], clock=clock)
+    await catalog.load()
+    clock.now += 2 * DAY
+    assert states(catalog) == {"google": ProviderState.STALE}
+
+    await catalog.refresh()
+
+    assert states(catalog) == {"google": ProviderState.FRESH}
+    assert read(cache)["providers"]["google"]["fetched_at"] == clock.now

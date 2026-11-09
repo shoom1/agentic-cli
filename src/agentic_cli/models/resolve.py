@@ -103,7 +103,9 @@ class CatalogView(Protocol):
         ...
 
     def records(self, provider: str) -> Sequence[ModelRecord]:
-        """Every record the catalog holds for one provider."""
+        """The records the catalog shows for one provider (``ModelCatalog.records``):
+        the models its listing shows, else its fallbacks. ``record`` accepts
+        more ids than these, since a provider serves more than it shows."""
         ...
 
     def entry_records(self) -> Sequence[ModelRecord]:
