@@ -1,10 +1,12 @@
 """The ``compact()`` hook: summarize a conversation now, where a backend can.
 
 ``BaseWorkflowManager.compact(session, focus=None)`` raises
-``NotImplementedError``; ``supports_compact`` is derived from a backend
-overriding it, as ``supports_sessions`` is, so it cannot drift from the code.
-ADK and Deep Agents implement it (their own tests: ``test_adk_compaction.py``
-and ``deepagents/test_compact.py``); LangGraph, deprecated, does not.
+``NotImplementedError`` on a backend that has none; ``supports_compact`` is
+derived from a backend implementing the template's hook (``_compact_turn``,
+``test_base_turn_template.py``) or overriding ``compact``, as
+``supports_sessions`` is, so it cannot drift from the code. ADK and Deep
+Agents implement it (their own tests: ``test_adk_compaction.py`` and
+``deepagents/test_compact.py``); LangGraph, deprecated, does not.
 """
 
 from __future__ import annotations

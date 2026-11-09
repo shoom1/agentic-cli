@@ -21,7 +21,7 @@ middleware, kept when the agents are built.
 
 The lifecycle is the base's (``BaseWorkflowManager``): initialization,
 ``reinitialize`` and ``cleanup`` hold the lifecycle lock and then the turn
-lock, turns enter through ``_turn_admission``, a model switch is
+lock, turns enter through ``_turn``, a model switch is
 transactional, carrying the conversation's services and the checkpointer
 across, and a release closes everything under a shield. This manager
 implements the release's hooks (``_detach_backend``, ``_detach_store``).
@@ -41,7 +41,7 @@ from langchain_core.messages import HumanMessage
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import truncate
-from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.logging import Loggers
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
 from agentic_cli.tools.skills import SkillStore
 from agentic_cli.tools.skills.langchain_tools import SKILL_TOOL_NAMES, make_skill_tools
@@ -83,7 +83,6 @@ from agentic_cli.workflow.langchain_models import build_chat_model
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.llm_log import LLMLogWriter
 from agentic_cli.workflow.outside_content import JOB_RESULT
-from agentic_cli.workflow.service_registry import JOB_MANAGER
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -442,122 +441,66 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         Yields:
             The turn's ``WorkflowEvent``s, each through ``on_event``.
         """
-        current_session_id = session_id or self.session_id
-        bind_context(session_id=current_session_id, user_id=user_id)
-        logger.info("processing_message", message_length=len(message))
+        async with self._turn(session_id, user_id) as ref:
+            logger.info("processing_message", message_length=len(message))
+            for notice in self._take_notices():
+                yield notice
+            # What the conversation's checkpoint says of outside content.
+            self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+            # aclosing: a consumer that closes this generator closes the
+            # run now, inside the turn, so its cancel is on record first.
+            async with contextlib.aclosing(self._run_turn(
+                ref, {"messages": [HumanMessage(content=message)]}
+            )) as events:
+                async for event in events:
+                    yield event
 
-        async with self._turn_admission():
-            with self._workflow_context(session_id=current_session_id, user_id=user_id):
-                for notice in self._take_notices():
-                    yield notice
-                ref = self.session_ref(current_session_id, user_id)
-                # What the conversation's checkpoint says of outside content.
-                self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
-                # aclosing: a consumer that closes this generator closes the
-                # run now, inside the turn, so its cancel is on record first.
-                async with contextlib.aclosing(self._run_turn(
-                    ref, {"messages": [HumanMessage(content=message)]}
-                )) as events:
-                    async for event in events:
-                        yield event
+    async def _conversation_exists(self, ref: "SessionRef") -> bool:
+        """Whether ``ref``'s root thread holds at least one message, in this app.
 
-    async def can_resume(self, record) -> bool:
-        """True iff the job's conversation is still there to resume into.
-
-        It needs the record's session and user, and that conversation in this
-        app, holding a message. The call id is not needed: the root agent is
-        told in a message of its own, not as a second result for the call.
+        What ``can_resume`` and a job's resume ask (the base's templates).
         With a durable ``session_store`` (sqlite, the default, or postgres) a
-        job that finishes after a restart still resumes. After the session
+        job that finishes after a restart still resumes; after the session
         was deleted, or with ``memory`` once the process restarted, it does
-        not, and the CLI says the job finished while its conversation was
-        unavailable.
+        not. The call id is not needed: the root agent is told in a message
+        of its own, not as a second result for the call.
         """
-        if not (record.session_id and record.user_id) or self._sessions is None:
-            return False
-        return await self._sessions.exists(
-            self.session_ref(record.session_id, record.user_id)
-        )
+        return self._sessions is not None and await self._sessions.exists(ref)
 
-    async def resume_with_job_result(
-        self, record, result: Any = None
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: "SessionRef"
     ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Tell the root agent a long-running job finished, in a turn of its own.
+        """Run the root agent on a finished job's notice (the base's ``resume_with_job_result``).
 
-        The turn's input is one ``HumanMessage`` (``sessions.job_notification``):
-        ``JOB_NOTICE_HEADER``, then the payload ADK sends, as JSON, marked so
-        ``recent_messages`` leaves it out. It cannot be the call's
-        ``ToolMessage``: the call already has its pending result, and
-        Anthropic and OpenAI take one result per call. The root receives it
-        whichever agent started the job, since a sub-agent's run ended when
-        its ``task`` returned. Otherwise it is a turn like any other: it waits
-        for the turn lock and runs under the record's session and user. A
-        record without its session or user, or whose conversation is not
-        there (deleted, or another user's or app's), runs nothing and starts
-        no conversation.
-
-        Args:
-            record: The finished ``JobRecord``.
-            result: The job's result; fetched from the JobManager if omitted.
-
-        Yields:
-            The turn's ``WorkflowEvent``s, each through ``on_event``.
+        The turn's input is one ``HumanMessage`` (``sessions.job_notification``),
+        the notice as its text, marked so ``recent_messages`` leaves it out.
+        It cannot be the call's ``ToolMessage``: the call already has its
+        pending result, and Anthropic and OpenAI take one result per call.
+        The root receives it whichever agent started the job, since a
+        sub-agent's run ended when its ``task`` returned. Otherwise it is a
+        turn like any other: the pending notices open it, and the job's
+        output marks the conversation as having read outside content, in its
+        checkpoint too.
         """
-        session_id, user_id = record.session_id, record.user_id
-        if not session_id or not user_id:
-            logger.warning(
-                "job_resume_missing_ids",
-                job_id=getattr(record, "job_id", None),
-                have_session=bool(session_id),
-                have_user=bool(user_id),
-            )
-            return
+        # The job's output is outside content: its notice marks the conversation.
+        self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+        self._outside_marks.mark(ref, JOB_RESULT)
+        for pending in self._take_notices():
+            yield pending
+        async with contextlib.aclosing(self._run_turn(
+            ref,
+            {
+                "messages": [job_notification(record, notice=notice)],
+                "outside_content": JOB_RESULT,
+            },
+        )) as events:
+            async for event in events:
+                yield event
 
-        bind_context(session_id=session_id, user_id=user_id)
-
-        async with self._turn_admission():
-            with self._workflow_context(session_id=session_id, user_id=user_id):
-                ref = self.session_ref(session_id, user_id)
-                # Streaming into a thread that is not there would start one.
-                if not await self._sessions.exists(ref):
-                    logger.warning(
-                        "job_resume_session_missing",
-                        job_id=record.job_id,
-                        session_id=session_id,
-                    )
-                    return
-
-                # The job's output is outside content: its notice marks the conversation.
-                self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
-                self._outside_marks.mark(ref, JOB_RESULT)
-
-                if result is None:
-                    jobs = self._services.get(JOB_MANAGER)
-                    if jobs is not None:
-                        result = jobs.result(record.job_id)
-
-                logger.info(
-                    "job_resume_started",
-                    job_id=record.job_id,
-                    call_id=record.call_id,
-                    state=record.state.value,
-                )
-                for notice in self._take_notices():
-                    yield notice
-                async with contextlib.aclosing(self._run_turn(
-                    ref,
-                    {
-                        "messages": [job_notification(record, result)],
-                        "outside_content": JOB_RESULT,
-                    },
-                )) as events:
-                    async for event in events:
-                        yield event
-
-    async def compact(
-        self, session: "SessionRef", focus: str | None = None
+    async def _compact_turn(
+        self, session: "SessionRef", focus: str | None
     ) -> CompactResult | None:
-        """Summarize the root agent's conversation now (``/compact``).
+        """Summarize the root agent's conversation now (the base's ``compact``, ``/compact``).
 
         With the root's own summarization middleware, as Deep Agents
         summarizes when the conversation grows: the thread's messages with
@@ -575,9 +518,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         ``CONTEXT_TRIMMED`` (``source="compact"``) follows. The checkpoint
         keeps every message.
 
-        Under turn admission, so a turn or a job's resume never runs on the
-        thread meanwhile. Nothing is written until the summary is: a cancel
-        leaves the thread as it was.
+        The base runs it as a turn, so a turn or a job's resume never runs
+        on the thread meanwhile. Nothing is written until the summary is: a
+        cancel leaves the thread as it was.
 
         Args:
             session: The conversation.
@@ -591,71 +534,66 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             ValueError: The model wrote an empty summary.
             Exception: The summary call failed (the provider's error).
         """
-        bind_context(session_id=session.session_id, user_id=session.user_id)
-        async with self._turn_admission():
-            with self._workflow_context(
-                session_id=session.session_id, user_id=session.user_id
-            ):
-                config = run_config(session)
-                values = (await self._root.aget_state(config)).values
-                middleware = self._root_summarization
-                previous = values.get(SUMMARIZATION_EVENT_KEY)
-                messages = values.get("messages") or []
-                sent = middleware._apply_event_to_messages(messages, previous)
-                root = self._root_agent_name
-                model = self._resolved_models[root]
-                cut = compact_cutoff(
-                    sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
-                )
-                if cut is None:
-                    return None
-                kept = sent[cut:]
-                callback = RunCallback(
-                    root=root,
-                    agent_models=self._resolved_models,
-                    llm_log=self._raw_llm_log(),
-                    # Called outside a reporting context there is no one to
-                    # report to: what it reports is queued where nothing reads.
-                    live=live_events.current() or LiveEvents(),
-                    budgets=self._budgets,
-                )
-                summary = await write_summary(
-                    middleware, sent[:cut], focus=focus, callbacks=[callback]
-                )
-                if not summary:
-                    raise ValueError(f"{model.ref} wrote an empty summary")
-                newest = newest_answer(sent)
-                event = summary_event(
-                    middleware, previous, cut, summary,
-                    after=newest.id if newest is not None else None,
-                    messages=messages,
-                )
-                await self._root.aupdate_state(
-                    config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
-                )
-                # The prompt prefix changes here anyway: the conversation's
-                # next request takes a new memory index.
-                self._forget_memory_index(session)
-                await asyncio.shield(self._recording(session))
-                result = CompactResult(
-                    messages_summarized=cut,
-                    tokens_before=middleware.token_counter(sent),
-                    tokens_after=middleware.token_counter([event["summary_message"], *kept]),
-                )
-                live_events.report(WorkflowEvent.context_trimmed(
-                    len(sent), len(kept) + 1, "compact", root,
-                    messages_summarized=result.messages_summarized,
-                    tokens_before=result.tokens_before,
-                    tokens_after=result.tokens_after,
-                ))
-                logger.info(
-                    "conversation_compacted",
-                    messages=result.messages_summarized,
-                    tokens_before=result.tokens_before,
-                    tokens_after=result.tokens_after,
-                    focus=focus is not None,
-                )
-                return result
+        config = run_config(session)
+        values = (await self._root.aget_state(config)).values
+        middleware = self._root_summarization
+        previous = values.get(SUMMARIZATION_EVENT_KEY)
+        messages = values.get("messages") or []
+        sent = middleware._apply_event_to_messages(messages, previous)
+        root = self._root_agent_name
+        model = self._resolved_models[root]
+        cut = compact_cutoff(
+            sent, keep_tokens=self._budgets[root].keep, kind=model.record.kind
+        )
+        if cut is None:
+            return None
+        kept = sent[cut:]
+        callback = RunCallback(
+            root=root,
+            agent_models=self._resolved_models,
+            llm_log=self._raw_llm_log(),
+            # Called outside a reporting context there is no one to
+            # report to: what it reports is queued where nothing reads.
+            live=live_events.current() or LiveEvents(),
+            budgets=self._budgets,
+        )
+        summary = await write_summary(
+            middleware, sent[:cut], focus=focus, callbacks=[callback]
+        )
+        if not summary:
+            raise ValueError(f"{model.ref} wrote an empty summary")
+        newest = newest_answer(sent)
+        event = summary_event(
+            middleware, previous, cut, summary,
+            after=newest.id if newest is not None else None,
+            messages=messages,
+        )
+        await self._root.aupdate_state(
+            config, {SUMMARIZATION_EVENT_KEY: event}, as_node="model"
+        )
+        # The prompt prefix changes here anyway: the conversation's
+        # next request takes a new memory index.
+        self._forget_memory_index(session)
+        await asyncio.shield(self._recording(session))
+        result = CompactResult(
+            messages_summarized=cut,
+            tokens_before=middleware.token_counter(sent),
+            tokens_after=middleware.token_counter([event["summary_message"], *kept]),
+        )
+        live_events.report(WorkflowEvent.context_trimmed(
+            len(sent), len(kept) + 1, "compact", root,
+            messages_summarized=result.messages_summarized,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+        ))
+        logger.info(
+            "conversation_compacted",
+            messages=result.messages_summarized,
+            tokens_before=result.tokens_before,
+            tokens_after=result.tokens_after,
+            focus=focus is not None,
+        )
+        return result
 
     def _take_notices(self) -> list[WorkflowEvent]:
         """The pending notices, through ``on_event``; they open one turn only."""
@@ -668,7 +606,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Stream the root agent on ``ref``'s thread and yield its events.
 
-        The caller holds the turn and is inside ``_workflow_context``. What
+        The caller is inside the turn (the base's ``_turn``). What
         the run callback reports from inside a node (a summary that starts,
         its usage, the summary it made) is merged into the stream as it
         happens, so it shows while the node still runs, before the node's

@@ -1099,10 +1099,13 @@ the start of the entry's title.
   `window_known` beside `last_prompt_tokens`, and `format_context()` gives
   the segment.
 - **`BaseWorkflowManager.compact(session, focus=None)` summarizes a
-  conversation now**, whatever its size: the hook `/compact` runs.
-  `supports_compact` says whether a backend has it, derived as
-  `supports_sessions` is (the base raises `NotImplementedError`; LangGraph
-  has none). ADK and Deep Agents summarize the main agent's conversation as
+  conversation now**, whatever its size: what `/compact` runs. It is the
+  base's: it runs a backend's `_compact_turn(session, focus)` as a turn of
+  the conversation (`_turn`), and `supports_compact` says whether a backend
+  has it, derived from that hook (or a backend's own `compact`) as
+  `supports_sessions` is (without either, `compact` raises
+  `NotImplementedError` before any turn; LangGraph has none). ADK and Deep
+  Agents summarize the main agent's conversation as
   they do when it grows, but whatever the last prompt's size and the
   saving: `focus` is spliced into the summary prompt ("Focus the summary
   on: …"), and the same tail is kept word for word (the newest 12% of the
@@ -1252,6 +1255,28 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **Every turn starts in `BaseWorkflowManager._turn`, and a job's resume and
+  `can_resume` are the base's, over two backend hooks.**
+  `resume_with_job_result` was not declared on the base: a backend wrote it
+  and `can_resume` in full, and the CLI tested `hasattr(workflow,
+  "resume_with_job_result")`. A turn of any kind (`process`,
+  `resume_with_job_result`, `compact`) now starts with `async with
+  self._turn(session_id, user_id) as ref:`, which names the conversation in
+  the log context, enters turn admission and the workflow context, and
+  yields the conversation's `SessionRef`. `resume_with_job_result(record,
+  result=None)` is the base's: the record must name its conversation (its
+  session and user, and its call where the job answers it, as a native ADK
+  YAML app's does); then, as a turn of that conversation, the conversation
+  must be there (the hook `_conversation_exists(ref)`), the result, when not
+  given, is read from the job manager on a worker thread, and the hook
+  `_deliver_job_notice(notice, record, result, ref)` tells the root agent
+  `job_notice(record, result)` and yields the turn's events. `can_resume`
+  makes the same checks without the turn. `supports_job_resume` is derived
+  from the hook, or from a backend's own `resume_with_job_result`, which it
+  keeps, and the CLI asks it; without either, `resume_with_job_result`
+  raises `NotImplementedError` and `can_resume` is False. ADK and Deep
+  Agents implement only the hooks.
 
 - **`cleanup()` and `reinitialize()` are `BaseWorkflowManager`'s; a backend
   implements the release's hooks.** Both were abstract, so every backend wrote
@@ -2319,9 +2344,7 @@ step; each entry says what to use instead.
   another held it (its `/jobs clean` over large job folders, say) the
   prompt, its redraws and Ctrl+C waited too. Those calls now run on a
   worker thread; Ctrl+C stops waiting for one and says "Operation
-  cancelled...", and a cancel or a clean under way finishes. A resume turn
-  still reads the job's result on the event loop (the backends'
-  `resume_with_job_result`).
+  cancelled...", and a cancel or a clean under way finishes.
 
 - **The documented lifecycle contract says what the code does.** The README's
   "Turn and lifecycle contracts", `CLAUDE.md` and `BaseWorkflowManager`'s

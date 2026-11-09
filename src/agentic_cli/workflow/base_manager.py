@@ -9,6 +9,8 @@ HITL) based on tool requirements, creating them lazily when needed.
 It also provides shared implementations for:
 - The lifecycle: initialization, ``cleanup``, ``reinitialize`` and the one
   release they run, which the backends join through two hooks
+- The turn: one entry (``_turn``) for every turn, and the templates of a
+  job's resume, ``can_resume`` and ``compact`` over the backends' hooks
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
 - Context: each agent's context numbers (``context_budget``), for a UI
@@ -66,7 +68,7 @@ from agentic_cli.workflow.service_registry import (
     SANDBOX_MANAGER,
     WORKFLOW,
 )
-from agentic_cli.logging import Loggers
+from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -174,13 +176,14 @@ class BaseWorkflowManager(ABC):
     - User input request/response flow
 
     Concurrency contract:
-        A manager runs **one turn at a time**. ``process()`` and
-        ``resume_with_job_result()`` serialize on an internal turn lock, so
-        overlapping callers queue rather than interleave — the backend's
-        per-invocation event buffers are manager-scoped, and interleaving would
-        let one invocation drain another's events. Run separate managers for
-        genuine parallelism. (The HITL input callback is context-local, so it
-        does not depend on that serialization; see ``set_input_callback``.)
+        A manager runs **one turn at a time**. ``process()``,
+        ``resume_with_job_result()`` and ``compact()`` enter through
+        ``_turn`` and serialize on an internal turn lock, so overlapping
+        callers queue rather than interleave — the backend's per-invocation
+        event buffers are manager-scoped, and interleaving would let one
+        invocation drain another's events. Run separate managers for genuine
+        parallelism. (The HITL input callback is context-local, so it does
+        not depend on that serialization; see ``set_input_callback``.)
 
         ``reinitialize`` and ``cleanup`` take the lifecycle lock and then the
         turn lock, so the backend is never torn down under a running
@@ -206,6 +209,23 @@ class BaseWorkflowManager(ABC):
         or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
 
+    Turn contract:
+        Every turn starts with ``async with self._turn(session_id, user_id)
+        as ref:``: the conversation is resolved (``session_ref``) and named in
+        the log context, the manager initialized when it is not, the turn
+        lock taken with a live backend behind it (``_turn_admission``), and
+        the settings, the services and the active turn set for the block
+        (``_workflow_context``). A backend's ``process`` runs its agents
+        inside it. The rest of the turn protocol is the base's, over hooks:
+        ``resume_with_job_result`` (the record's checks, the turn, the job's
+        result read on a worker thread, the notice) runs the backend's
+        ``_deliver_job_notice`` in the conversation ``_conversation_exists``
+        finds, and ``can_resume`` makes the same checks without the turn;
+        ``compact`` runs the backend's ``_compact_turn`` as a turn. A backend
+        implements the hooks it can, and ``supports_job_resume`` and
+        ``supports_compact`` are derived from them; one that overrides a
+        template keeps its own.
+
     Example:
         A minimal backend: it builds its engine in ``_do_initialize`` and
         hands it to the release in ``_detach_backend``; everything else of
@@ -213,12 +233,14 @@ class BaseWorkflowManager(ABC):
         backend's ``_validate_agent_graph`` (the base's validates nothing and
         leaves ``root_agent_name`` None), resolves the models, builds the
         services the tools declare and then calls ``_do_initialize``. A turn
-        enters through ``_turn_admission``, which initializes the manager
-        when it is not and re-checks ``_backend_ready`` under the turn lock,
-        and passes each event through ``_apply_event_hook``, which is the
-        constructor's ``on_event``. A backend with a session store also
-        returns its closers from ``_detach_store``, which a model switch
-        skips, and builds on the store it still holds::
+        enters through ``_turn``, which initializes the manager when it is
+        not and re-checks ``_backend_ready`` under the turn lock, and passes
+        each event through ``_apply_event_hook``, which is the constructor's
+        ``on_event``. A backend with a session store also returns its
+        closers from ``_detach_store``, which a model switch skips, and
+        builds on the store it still holds. This one has no job resume and
+        no ``compact``: a backend that does implements their hooks (the turn
+        contract above)::
 
             from functools import partial
             from typing import Callable
@@ -250,12 +272,11 @@ class BaseWorkflowManager(ABC):
                     return [("engine", partial(self._aclose_owned, engine, "engine"))]
 
                 async def process(self, message, user_id, session_id=None):
-                    async with self._turn_admission():
-                        with self._workflow_context(session_id=session_id, user_id=user_id):
-                            event = WorkflowEvent.text(f"echo: {message}", session_id)
-                            event = self._apply_event_hook(event)  # None: dropped
-                            if event is not None:
-                                yield event
+                    async with self._turn(session_id, user_id) as ref:
+                        event = WorkflowEvent.text(f"echo: {message}", ref.session_id)
+                        event = self._apply_event_hook(event)  # None: dropped
+                        if event is not None:
+                            yield event
     """
 
     #: The conversation a call without a session id belongs to
@@ -1072,23 +1093,180 @@ class BaseWorkflowManager(ABC):
         ref = get_active_turn()
         return ref.user_id if ref else None
 
-    async def can_resume(self, record) -> bool:
+    # ---- Job resume: the base's template over the backend's hooks ----
+
+    @property
+    def supports_job_resume(self) -> bool:
+        """Whether this backend can tell a conversation that a job of it finished.
+
+        Derived, as ``supports_compact`` is, so it cannot drift from the
+        code: True when the subclass implements :meth:`_deliver_job_notice`
+        (the base's ``resume_with_job_result`` runs it) or overrides
+        ``resume_with_job_result`` itself, as a backend written before the
+        template does.
+        """
+        cls = type(self)
+        return (
+            cls._deliver_job_notice is not BaseWorkflowManager._deliver_job_notice
+            or cls.resume_with_job_result is not BaseWorkflowManager.resume_with_job_result
+        )
+
+    @property
+    def _answers_job_calls(self) -> bool:
+        """Whether a finished job answers its pending call, so its record must name the call.
+
+        False: the root agent is told in a message of its own, which needs
+        only the job's conversation. A backend whose job answers the call
+        instead (a native ADK YAML app's) says True, and a record without
+        ``call_id`` cannot be resumed there.
+        """
+        return False
+
+    def _record_resumable(self, record: Any) -> bool:
+        """Whether ``record`` names what a resume needs: its conversation
+        (session and user), and its call where a job answers it
+        (:attr:`_answers_job_calls`)."""
+        if not (record.session_id and record.user_id):
+            return False
+        return bool(getattr(record, "call_id", None)) or not self._answers_job_calls
+
+    async def can_resume(self, record: Any) -> bool:
         """Whether a finished job can be resumed into its conversation now.
 
-        Base default: False (no resume support). Backends that implement
-        ``resume_with_job_result`` override this to report whether the
-        originating conversation is still available: on ADK its session, on
-        Deep Agents the conversation's thread. Used by the harness to resume vs. surface a
-        "finished while its conversation was unavailable" notice.
+        The checks ``resume_with_job_result`` makes, without its turn: the
+        backend can resume (``supports_job_resume``), the record names its
+        conversation (session and user, and its call where a job answers it:
+        a native ADK YAML app's), and the conversation is in the backend's
+        store (:meth:`_conversation_exists`). The CLI asks it to resume a
+        job or to say "finished while its conversation was unavailable", and
+        whether a job's conversation is gone.
 
         Sessions are durable by default (``session_store='sqlite'``), so a
         conversation normally survives a CLI restart and stays resumable. It is
         unavailable when, for example, it was deleted, the record is missing the
-        identifiers the backend needs (session and user; a native ADK YAML
-        app's call id too), or the run used the explicitly ephemeral
-        ``session_store='memory'`` and the process restarted.
+        identifiers the backend needs, or the run used the explicitly
+        ephemeral ``session_store='memory'`` and the process restarted.
+        """
+        if not self.supports_job_resume or not self._record_resumable(record):
+            return False
+        return await self._conversation_exists(
+            self.session_ref(record.session_id, record.user_id)
+        )
+
+    async def resume_with_job_result(
+        self, record: Any, result: Any = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Tell the root agent a long-running job finished, in a turn of its own.
+
+        One template for every backend. The record must name its
+        conversation (its session and user, and its call where the job
+        answers it); then, as one turn of that conversation (:meth:`_turn`:
+        after any turn running, never against a released backend), the
+        conversation must be there (:meth:`_conversation_exists`: telling one
+        that is not would start it, and it never saw the job). The job's
+        result, when not given, is read from this manager's job manager on a
+        worker thread: it takes the jobs directory's cross-process lock,
+        which on the event loop froze the app while another process held
+        it. The notice is ``tools/jobs/resume.py::job_notice`` (the header,
+        what the agent is asked, the payload), and the backend tells it
+        (:meth:`_deliver_job_notice`), whose events this yields. A record
+        that names too little, or a conversation that is not there, runs
+        nothing and yields nothing (logged).
+
+        Args:
+            record: The finished ``JobRecord``.
+            result: The job's result; read from the job manager if omitted.
+
+        Yields:
+            The turn's ``WorkflowEvent``s.
+
+        Raises:
+            NotImplementedError: The backend cannot (``supports_job_resume``),
+                raised as iteration starts, before any turn.
+        """
+        if not self.supports_job_resume:
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot tell a conversation that its job "
+                "finished (resume_with_job_result). Check ``supports_job_resume`` "
+                "before calling."
+            )
+        if not self._record_resumable(record):
+            logger.warning(
+                "job_resume_missing_ids",
+                job_id=getattr(record, "job_id", None),
+                have_session=bool(record.session_id),
+                have_user=bool(record.user_id),
+                have_call_id=bool(getattr(record, "call_id", None)),
+            )
+            return
+        from agentic_cli.tools.jobs.resume import job_notice
+
+        async with self._turn(record.session_id, record.user_id) as ref:
+            if not await self._conversation_exists(ref):
+                logger.warning(
+                    "job_resume_session_missing",
+                    job_id=record.job_id,
+                    session_id=ref.session_id,
+                )
+                return
+            if result is None:
+                jobs = self._services.get(JOB_MANAGER)
+                if jobs is not None:
+                    result = await asyncio.to_thread(jobs.result, record.job_id)
+            logger.info(
+                "job_resume_started",
+                job_id=record.job_id,
+                call_id=getattr(record, "call_id", None),
+                state=record.state.value,
+            )
+            # aclosing: a consumer that closes this generator closes the
+            # backend's run now, inside the turn.
+            async with contextlib.aclosing(self._deliver_job_notice(
+                job_notice(record, result), record, result, ref
+            )) as events:
+                async for event in events:
+                    yield event
+
+    async def _conversation_exists(self, ref: SessionRef) -> bool:
+        """Whether ``ref``'s conversation is in this backend's store now.
+
+        A backend hook of the job resume (``resume_with_job_result`` asks it
+        inside the turn, before it tells the conversation anything). It
+        answers False before initialization and after a release, and never
+        creates the conversation. The base knows of no conversation, so it
+        answers False: a backend that implements :meth:`_deliver_job_notice`
+        implements this too.
         """
         return False
+
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: SessionRef
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Tell the root agent ``notice`` as one user-role message, and yield the turn's events.
+
+        A backend hook of the job resume: the base calls it inside the turn
+        of ``ref``'s conversation (the active turn, the services and the
+        settings set, the conversation there), and implementing it is what
+        makes ``supports_job_resume`` True. The backend marks the
+        conversation as having read outside content (a job's output is), runs
+        its root agent on the notice and yields what it yields, each event
+        through ``_apply_event_hook``. Closing the generator stops the run.
+
+        Args:
+            notice: What the root agent is told
+                (``tools/jobs/resume.py::job_notice``).
+            record: The finished ``JobRecord`` (its ids, for a backend that
+                marks the message with them).
+            result: The job's result as read, or None: what a backend whose
+                job answers its call instead sends
+                (``job_result_payload(record, result)``).
+            ref: The conversation, the turn's.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot tell a conversation that its job finished."
+        )
+        if False:  # pragma: no cover - an async generator
+            yield  # type: ignore[misc]
 
     @contextlib.contextmanager
     def _workflow_context(
@@ -1297,23 +1475,31 @@ class BaseWorkflowManager(ABC):
     def supports_compact(self) -> bool:
         """Whether this backend can summarize a conversation on demand (``compact``).
 
-        Derived from the subclass overriding ``compact``, as
-        ``supports_sessions`` is, so it cannot drift from the code.
+        Derived, as ``supports_sessions`` is, so it cannot drift from the
+        code: True when the subclass implements :meth:`_compact_turn` (the
+        base's ``compact`` runs it) or overrides ``compact`` itself. A backend
+        that cannot in some configuration narrows it (ADK, for a native ADK
+        YAML app).
         """
-        return type(self).compact is not BaseWorkflowManager.compact
+        cls = type(self)
+        return (
+            cls._compact_turn is not BaseWorkflowManager._compact_turn
+            or cls.compact is not BaseWorkflowManager.compact
+        )
 
     async def compact(
         self, session: SessionRef, focus: str | None = None
     ) -> "CompactResult | None":
         """Summarize the main agent's conversation in ``session`` now (``/compact``).
 
-        A backend that implements it runs it as a turn runs: under turn
-        admission, so it never interleaves with a turn or a job's resume, and
-        inside the workflow context of ``session``. It summarizes as its
-        conversations are summarized when they grow, but whatever the prompt's
-        size, keeping the same tail word for word; ``focus`` tells the summary
-        what to keep above all. What it reports goes to the caller's live
-        events (``workflow/live_events.py``), when there are any:
+        A template: it runs as one turn of ``session`` (:meth:`_turn`: under
+        turn admission, so it never interleaves with a turn or a job's
+        resume, and inside the conversation's workflow context), in which the
+        backend's :meth:`_compact_turn` summarizes as its conversations are
+        summarized when they grow, but whatever the prompt's size, keeping
+        the same tail word for word; ``focus`` tells the summary what to keep
+        above all. What it reports goes to the caller's live events
+        (``workflow/live_events.py``), when there are any:
         ``CONTEXT_SUMMARIZING``, the summary's ``LLM_USAGE``
         (``purpose="summarization"``) and ``CONTEXT_TRIMMED``
         (``source="compact"``). A cancel writes nothing.
@@ -1327,11 +1513,35 @@ class BaseWorkflowManager(ABC):
             conversation yet, or none before the tail kept word for word).
 
         Raises:
-            NotImplementedError: The backend cannot (``supports_compact``).
+            NotImplementedError: The backend cannot (``supports_compact``),
+                raised before any turn.
             Exception: Why the summary could not be written (the provider's
                 error).
         """
-        raise NotImplementedError(
+        if not self.supports_compact:
+            raise self._no_compact_support()
+        async with self._turn(session.session_id, session.user_id):
+            return await self._compact_turn(session, focus)
+
+    async def _compact_turn(
+        self, session: SessionRef, focus: str | None
+    ) -> "CompactResult | None":
+        """Summarize ``session``'s main-agent conversation now, inside its turn.
+
+        The backend hook of ``compact``: the base calls it inside the
+        conversation's turn, and implementing it is what makes
+        ``supports_compact`` True. It returns and raises what ``compact``
+        documents, and writes nothing until the summary is written.
+
+        Args:
+            session: The conversation, as the caller named it.
+            focus: What the summary should keep above all, if anything.
+        """
+        raise self._no_compact_support()
+
+    def _no_compact_support(self) -> NotImplementedError:
+        """The error for ``compact`` on a backend that cannot (``supports_compact``)."""
+        return NotImplementedError(
             f"{type(self).__name__} cannot summarize a conversation on demand "
             "(compact). Check ``supports_compact`` before calling."
         )
@@ -1601,6 +1811,34 @@ class BaseWorkflowManager(ABC):
             f"{type(self).__name__} was released while this turn waited for "
             "admission and could not be reinitialized. Retry the request."
         )
+
+    @contextlib.asynccontextmanager
+    async def _turn(
+        self, session_id: str | None = None, user_id: str | None = None
+    ) -> "AsyncGenerator[SessionRef, None]":
+        """Run the block as one turn of a conversation, and yield the conversation.
+
+        How every turn-shaped entry point starts (``process``,
+        ``resume_with_job_result``, ``compact``): the conversation is
+        resolved as ``session_ref`` resolves it (the manager's current
+        session and the default user for what is omitted) and named in the
+        log context; then turn admission (:meth:`_turn_admission`: the
+        manager initialized outside the turn lock, the lock taken, the
+        backend re-checked under it) and the workflow context
+        (:meth:`_workflow_context`: the settings, the services and the
+        active turn, reset as the block ends) are entered, in that order.
+
+        Yields:
+            The turn's conversation.
+
+        Raises:
+            RuntimeError: The backend cannot be made ready (``_turn_admission``).
+        """
+        ref = self.session_ref(session_id, user_id)
+        bind_context(session_id=ref.session_id, user_id=ref.user_id)
+        async with self._turn_admission():
+            with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
+                yield ref
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False

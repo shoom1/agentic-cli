@@ -42,6 +42,7 @@ from agentic_cli.tools.jobs.resume import (  # noqa: E402
     job_result_payload,
 )
 from agentic_cli.tools.registry import register_tool  # noqa: E402
+from agentic_cli.workflow import base_manager as base_manager_module  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
@@ -588,6 +589,8 @@ class TestNoConversationNoTurn:
         models = scripted(monkeypatch, solo=[ai("Hi.")])
         recorder = _Recorder()
         monkeypatch.setattr(manager_module, "logger", recorder)
+        # The base's resume template checks the record and the conversation.
+        monkeypatch.setattr(base_manager_module, "logger", recorder)
         manager = _manager(ctx.settings, [SOLO])
         cleanup(manager)
         await turn(manager, "Hi.")
@@ -605,6 +608,8 @@ class TestNoConversationNoTurn:
         models = scripted(monkeypatch, solo=[ai("Hi.")])
         recorder = _Recorder()
         monkeypatch.setattr(manager_module, "logger", recorder)
+        # The base's resume template checks the record and the conversation.
+        monkeypatch.setattr(base_manager_module, "logger", recorder)
         manager = _manager(ctx.settings, [SOLO])
         cleanup(manager)
         await turn(manager, "Hi.", user="u", session="s")

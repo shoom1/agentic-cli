@@ -24,6 +24,7 @@ from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
 from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
+from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
 
@@ -60,7 +61,6 @@ from agentic_cli.workflow.outside_content import (
     JOB_RESULT,
     OUTSIDE_CONTENT_KEY,
 )
-from agentic_cli.workflow.service_registry import JOB_MANAGER
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
 
@@ -68,9 +68,9 @@ from agentic_cli.config import (
     BaseSettings,
     get_settings,
 )
-from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_notice, job_result_payload
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.sessions import SessionRef
@@ -926,11 +926,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         This method sets up a settings context so that all tools called
         during processing will use this manager's settings instance.
 
-        Holds the manager's turn lock for the whole stream: the ADK plugins'
-        event buffers are manager-scoped, so overlapping turns would drain each
-        other's events. Overlapping callers queue; the lock is released on
-        cancellation. Admission also re-verifies that the backend is still live
-        (a cleanup can land between initialization and the turn lock).
+        Runs as one turn (the base's ``_turn``), which holds the manager's
+        turn lock for the whole stream: the ADK plugins' event buffers are
+        manager-scoped, so overlapping turns would drain each other's events.
+        Overlapping callers queue; the lock is released on cancellation.
+        Admission also re-verifies that the backend is still live (a cleanup
+        can land between initialization and the turn lock).
 
         Args:
             message: User message
@@ -940,41 +941,32 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Yields:
             WorkflowEvent objects representing workflow output
         """
-        current_session_id = session_id or self.session_id
-        bind_context(session_id=current_session_id, user_id=user_id)
+        async with self._turn(session_id, user_id) as ref:
+            logger.info("processing_message", message_length=len(message))
+            session = await self._get_or_create_session(ref.user_id, ref.session_id)
+            # A crash (or an old cancel) may have left calls without a result.
+            session = await self._answer_left_open(session)
+            state_delta = {
+                **turn_state(session, message),
+                **self._seed_outside_content(ref, session),
+            }
 
-        logger.info("processing_message", message_length=len(message))
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=message)],
+            )
 
-        async with self._turn_admission():
-            # Context setup
-            with self._workflow_context(session_id=current_session_id, user_id=user_id):
-                # Session handling
-                session = await self._get_or_create_session(user_id, current_session_id)
-                # A crash (or an old cancel) may have left calls without a result.
-                session = await self._answer_left_open(session)
-                ref = self.session_ref(current_session_id, user_id)
-                state_delta = {
-                    **turn_state(session, message),
-                    **self._seed_outside_content(ref, session),
-                }
-
-                # Create message
-                new_message = types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=message)],
-                )
-
-                # aclosing: a consumer that closes this generator closes the
-                # run now, inside the turn, so its calls are answered first.
-                async with contextlib.aclosing(self._run_and_stream(
-                    session_id=current_session_id,
-                    user_id=user_id,
-                    new_message=new_message,
-                    # The conversation's row (workflow/adk/sessions.py) and its mark.
-                    state_delta=state_delta,
-                )) as events:
-                    async for event in events:
-                        yield event
+            # aclosing: a consumer that closes this generator closes the
+            # run now, inside the turn, so its calls are answered first.
+            async with contextlib.aclosing(self._run_and_stream(
+                session_id=ref.session_id,
+                user_id=ref.user_id,
+                new_message=new_message,
+                # The conversation's row (workflow/adk/sessions.py) and its mark.
+                state_delta=state_delta,
+            )) as events:
+                async for event in events:
+                    yield event
 
     async def _run_and_stream(
         self,
@@ -986,11 +978,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
-        Shared by ``process()`` (user message) and ``resume_with_job_result()``
-        (the job's notice, or a native app's function response). The caller
-        must already be inside ``_workflow_context`` with the session
-        prepared. ``state_delta`` is saved with ``new_message`` (a user
-        turn's row).
+        Shared by ``process()`` (user message) and ``_deliver_job_notice()``
+        (a job's notice, or a native app's function response). The caller
+        must already be inside the turn (the base's ``_turn``) with the
+        session prepared. ``state_delta`` is saved with ``new_message`` (a
+        user turn's row).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens
@@ -1082,124 +1074,92 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     if progress_event:
                         yield progress_event
 
-    async def can_resume(self, record) -> bool:
-        """True iff the originating ADK session still exists to resume into.
+    @property
+    def _answers_job_calls(self) -> bool:
+        """A native ADK YAML app's job answers its pending call, so its record needs the call."""
+        return bool(self._adk_config_path)
 
-        Requires the record's session and user (and, for a native ADK YAML
-        app, whose job answers its pending call, the call's id). The session
-        service is durable by default (``session_store='sqlite'``), so the
-        session normally survives a CLI restart and the job stays resumable.
-        This returns False — and the harness surfaces a notice instead of a
-        dead resume turn — when the session is genuinely gone: it was
-        deleted, the record lacks those ids, or the run used the explicitly
-        ephemeral ``session_store='memory'`` and the process restarted.
+    async def _conversation_exists(self, ref: SessionRef) -> bool:
+        """Whether ``ref``'s ADK session is stored, with events or none.
+
+        What ``can_resume`` and a job's resume ask (the base's templates).
+        The session service is durable by default (``session_store='sqlite'``),
+        so a session normally survives a CLI restart; it is gone once deleted,
+        or with ``session_store='memory'`` once the process restarted. It reads
+        none of the session's events (``num_recent_events=0``): a long
+        session read whole costs tens of milliseconds, and the status bar
+        asks again every 30 seconds.
         """
-        if not (record.session_id and record.user_id):
-            return False
-        if self._adk_config_path and not record.call_id:
-            return False
         if self._session_service is None:
             return False
         session = await self._session_service.get_session(
-            app_name=self.app_name, user_id=record.user_id, session_id=record.session_id,
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+            config=GetSessionConfig(num_recent_events=0),
         )
         return session is not None
 
-    async def resume_with_job_result(
-        self, record, result: Any = None
+    async def _deliver_job_notice(
+        self, notice: str, record: Any, result: Any, ref: SessionRef
     ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Resume the agent with a finished long-running job's result.
+        """Run the root agent on a finished job's notice (the base's ``resume_with_job_result``).
 
         In an app built from agent configs the root agent runs on one
-        user-role text, ``job_notice`` (``JOB_NOTICE_HEADER`` and the payload),
-        as on Deep Agents, whoever started the job: the call already has its
-        result (the job's id, or "pending"), and a result for the call itself
-        made ADK send the call, that result and nothing between (its
-        rearranger), so the agent answered without the turns since. A native
-        ADK YAML app's job still answers its pending call, as an ADK
-        ``FunctionResponse`` matching ``record.call_id``. The originating
-        session must still exist; if it's gone or the record lacks the ids
-        needed to resume, this yields nothing.
-
-        Args:
-            record: The terminal ``JobRecord`` to resume from.
-            result: The job's result; fetched from the JobManager if omitted.
+        user-role text, the notice, as on Deep Agents, whoever started the
+        job: the call already has its result (the job's id, or "pending"),
+        and a result for the call itself made ADK send the call, that result
+        and nothing between (its rearranger), so the agent answered without
+        the turns since. A call still open (a starter that returned nothing,
+        a crash's) is answered first. A native ADK YAML app's job still
+        answers its pending call, as an ADK ``FunctionResponse`` matching
+        ``record.call_id`` whose response is ``job_result_payload``. The
+        notice marks the conversation as having read outside content, in its
+        state too.
         """
-        session_id = record.session_id
-        user_id = record.user_id
-        native = bool(self._adk_config_path)
-        if not session_id or not user_id or (native and not record.call_id):
-            logger.warning(
-                "job_resume_missing_ids",
-                job_id=getattr(record, "job_id", None),
-                have_session=bool(session_id),
-                have_user=bool(user_id),
-                have_call_id=bool(record.call_id),
-            )
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        if session is None:  # deleted since the base looked
+            logger.warning("job_resume_session_missing", job_id=record.job_id,
+                           session_id=ref.session_id)
             return
+        native = self._answers_job_calls
+        if not native:
+            # A call still open gets its result before the notice: Claude
+            # and OpenAI refuse a call without one.
+            session = await self._answer_left_open(session)
 
-        bind_context(session_id=session_id, user_id=user_id)
+        # The job's output is outside content: its notice marks the conversation.
+        state_delta = self._seed_outside_content(ref, session)
+        if self._outside_marks.mark(ref, JOB_RESULT):
+            state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
 
-        # Same admission as process(): a resume is a turn, must not interleave
-        # with a user turn, and must not run against a released backend.
-        async with self._turn_admission():
-            with self._workflow_context(session_id=session_id, user_id=user_id):
-                # The job's conversation must exist; don't create a new empty
-                # one (it never saw the job).
-                session = await self._session_service.get_session(
-                    app_name=self.app_name, user_id=user_id, session_id=session_id,
-                )
-                if session is None:
-                    logger.warning("job_resume_session_missing", job_id=record.job_id,
-                                   session_id=session_id)
-                    return
-                if not native:
-                    # A call still open (a starter that returned nothing, a
-                    # crash's) gets its result before the notice: Claude and
-                    # OpenAI refuse a call without one.
-                    session = await self._answer_left_open(session)
+        if not native:
+            # The root is told, as on Deep Agents.
+            new_message = types.Content(
+                role="user", parts=[types.Part.from_text(text=notice)],
+            )
+        else:
+            function_response = types.FunctionResponse(
+                id=record.call_id,
+                name=record.call_name or record.tool,
+                # A summary and a pointer, not the raw result.
+                response=job_result_payload(record, result),
+            )
+            new_message = types.Content(
+                role="user",
+                parts=[types.Part(function_response=function_response)],
+            )
 
-                # The job's output is outside content: its notice marks the conversation.
-                ref = self.session_ref(session_id, user_id)
-                state_delta = self._seed_outside_content(ref, session)
-                if self._outside_marks.mark(ref, JOB_RESULT):
-                    state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
-
-                if result is None:
-                    jm = self._services.get(JOB_MANAGER)
-                    if jm is not None:
-                        result = jm.result(record.job_id)
-
-                author = _author_of_call(session, record.call_id)
-                if not native:
-                    # The root is told, as on Deep Agents.
-                    new_message = types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=job_notice(record, result))],
-                    )
-                else:
-                    function_response = types.FunctionResponse(
-                        id=record.call_id,
-                        name=record.call_name or record.tool,
-                        # A summary and a pointer, not the raw result.
-                        response=job_result_payload(record, result),
-                    )
-                    new_message = types.Content(
-                        role="user",
-                        parts=[types.Part(function_response=function_response)],
-                    )
-
-                logger.info("job_resume_started", job_id=record.job_id,
-                            call_id=record.call_id, state=record.state.value,
-                            caller=author)
-                async with contextlib.aclosing(self._run_and_stream(
-                    session_id=session_id,
-                    user_id=user_id,
-                    new_message=new_message,
-                    state_delta=state_delta or None,
-                )) as events:
-                    async for event in events:
-                        yield event
+        logger.debug("job_resume_caller", job_id=record.job_id,
+                     caller=_author_of_call(session, record.call_id))
+        async with contextlib.aclosing(self._run_and_stream(
+            session_id=ref.session_id,
+            user_id=ref.user_id,
+            new_message=new_message,
+            state_delta=state_delta or None,
+        )) as events:
+            async for event in events:
+                yield event
 
     @property
     def supports_compact(self) -> bool:
@@ -1210,73 +1170,65 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         return not self._adk_config_path
 
-    async def compact(
-        self, session: SessionRef, focus: str | None = None
+    def _no_compact_support(self) -> NotImplementedError:
+        """Why a native ADK YAML app has no ``compact``."""
+        return NotImplementedError(
+            "A native ADK YAML app (adk_config_path) cannot be summarized on "
+            "demand: its agents' context is ADK's own."
+        )
+
+    async def _compact_turn(
+        self, session: SessionRef, focus: str | None
     ) -> CompactResult | None:
-        """Summarize the main agent's conversation now (``/compact``).
+        """Summarize the main agent's conversation now (the base's ``compact``, ``/compact``).
 
         ADK's compaction runs once on a fresh read of the session
         (``compact_session``), with the main agent's summarizer asked for now
         (``manual``): written whatever the last prompt's size and the saving,
         ``focus`` spliced into its prompt. The range, the call, the event and
         what is reported are a summary's in a turn, but ``CONTEXT_TRIMMED``
-        names ``"compact"`` and comes once ADK has stored the summary. It
-        runs under turn admission, so a turn or a job's resume never writes
-        to the session between its read and the summary's append (ADK's
+        names ``"compact"`` and comes once ADK has stored the summary. The
+        base runs it as a turn, so a turn or a job's resume never writes to
+        the session between its read and the summary's append (ADK's
         ``StaleSessionError``), and nothing is written until the summary is:
-        a cancel leaves the session as it was, and says nothing was made.
-
-        Args:
-            session: The conversation.
-            focus: What the summary should keep above all, if anything.
+        a cancel leaves the session as it was, and says nothing was made. A
+        native ADK YAML app has none (``supports_compact``).
 
         Returns:
             What the summary did; None with no conversation yet, or nothing
             before the kept tail.
 
         Raises:
-            NotImplementedError: A native ADK YAML app, whose agents ADK
-                builds: the framework manages none of their context.
             Exception: Why the summary failed (the summarizer's
                 ``last_error``, the provider's error).
         """
-        if self._adk_config_path:
-            raise NotImplementedError(
-                "A native ADK YAML app (adk_config_path) cannot be summarized on "
-                "demand: its agents' context is ADK's own."
+        stored = await self._session_service.get_session(
+            app_name=session.app_name,
+            user_id=session.user_id,
+            session_id=session.session_id,
+        )
+        if stored is None:
+            return None
+        summarizer = self._summarizer(manual=True, focus=focus)
+        if await compact_session(
+            session=stored,
+            session_service=self._session_service,
+            root_agent=self._root_agent,
+            summarizer=summarizer,
+        ):
+            summarizer.report_stored()
+            result = summarizer.last_result
+            logger.info(
+                "conversation_compacted",
+                messages=result.messages_summarized,
+                tokens_before=result.tokens_before,
+                tokens_after=result.tokens_after,
+                focus=focus is not None,
             )
-        bind_context(session_id=session.session_id, user_id=session.user_id)
-        async with self._turn_admission():
-            with self._workflow_context(
-                session_id=session.session_id, user_id=session.user_id
-            ):
-                stored = await self._session_service.get_session(
-                    app_name=session.app_name,
-                    user_id=session.user_id,
-                    session_id=session.session_id,
-                )
-                if stored is None:
-                    return None
-                summarizer = self._summarizer(manual=True, focus=focus)
-                if await compact_session(
-                    session=stored,
-                    session_service=self._session_service,
-                    root_agent=self._root_agent,
-                    summarizer=summarizer,
-                ):
-                    summarizer.report_stored()
-                    result = summarizer.last_result
-                    logger.info(
-                        "conversation_compacted",
-                        messages=result.messages_summarized,
-                        tokens_before=result.tokens_before,
-                        tokens_after=result.tokens_after,
-                        focus=focus is not None,
-                    )
-                    return result
-                if summarizer.last_error is not None:
-                    raise summarizer.last_error
-                return None
+            return result
+        if summarizer.last_error is not None:
+            raise summarizer.last_error
+        return None
 
     # -------------------------------------------------------------------------
     # Sessions (native — DatabaseSessionService persists events continuously)
