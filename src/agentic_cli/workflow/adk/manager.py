@@ -428,7 +428,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Build an agent's tools: framework tools + state tools + MCP toolsets.
 
         MCP servers declared on the config are materialized into ADK
-        ``MCPToolset`` objects (ADK connects lazily) and appended after the
+        ``McpToolset`` objects (ADK connects lazily) and appended after the
         regular tools. Skills are appended as a ``SkillToolset``. The caller is
         responsible for ``_wrap_long_running`` over the result.
         """

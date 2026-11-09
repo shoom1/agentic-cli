@@ -3,7 +3,7 @@
 ``MCPServerConfig`` describes how to reach an MCP server (stdio subprocess or
 remote SSE/HTTP). Each backend materializes it its own way:
 
-- ADK: ``to_adk_toolset`` builds an ``MCPToolset`` that is appended to an
+- ADK: ``to_adk_toolset`` builds an ``McpToolset`` that is appended to an
   agent's ``tools`` list; ADK connects lazily on first use, so construction is
   synchronous.
 - Deep Agents: ``to_langchain_connection`` gives the connection
@@ -99,17 +99,14 @@ def build_connection_params(cfg: MCPServerConfig) -> Any:
 
 def to_adk_toolset(cfg: MCPServerConfig) -> Any:
     """Materialize an MCPServerConfig into an ADK ``McpToolset``."""
-    try:
-        from google.adk.tools.mcp_tool import McpToolset as _McpToolset
-    except ImportError:  # older ADK only has the (now-deprecated) MCPToolset
-        from google.adk.tools.mcp_tool import MCPToolset as _McpToolset
+    from google.adk.tools.mcp_tool import McpToolset
 
     kwargs: dict[str, Any] = {"connection_params": build_connection_params(cfg)}
     if cfg.tool_filter is not None:
         kwargs["tool_filter"] = list(cfg.tool_filter)
     if cfg.tool_name_prefix:
         kwargs["tool_name_prefix"] = cfg.tool_name_prefix
-    return _McpToolset(**kwargs)
+    return McpToolset(**kwargs)
 
 
 def to_langchain_connection(cfg: MCPServerConfig) -> dict[str, Any]:
