@@ -33,6 +33,7 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow import session_readers  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.base_manager import BaseWorkflowManager  # noqa: E402
+from agentic_cli.workflow.checkpointers import deepagents_sqlite_path  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as deepagents_manager  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
@@ -194,11 +195,25 @@ class TestBackendsWithoutOne:
     async def test_a_backend_whose_extra_is_missing_says_how_to_install_it(
         self, project, monkeypatch
     ):
+        """Its store holds something (left by an earlier install, say)."""
+        app_settings = sqlite_settings()
+        deepagents_sqlite_path(app_settings)  # made
         monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
         monkeypatch.delitem(sys.modules, "agentic_cli.workflow.deepagents.sessions", raising=False)
 
         with pytest.raises(ImportError, match=r"needs the 'deepagents' extra"):
-            await open_session_reader("deepagents", sqlite_settings())
+            await open_session_reader("deepagents", app_settings)
+
+    async def test_deep_agents_is_not_imported_to_read_a_store_never_made(
+        self, project, monkeypatch
+    ):
+        """Its import takes a second: a run that never used Deep Agents does
+        not pay it to find nothing there."""
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
+        monkeypatch.delitem(sys.modules, "agentic_cli.workflow.deepagents.sessions", raising=False)
+
+        async with await open_session_reader("deepagents", sqlite_settings()) as reader:
+            assert await reader.list() == [] and await reader.info("s1") is None
 
     async def test_an_unknown_backend_is_refused(self, project):
         with pytest.raises(ValueError):

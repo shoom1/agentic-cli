@@ -13,8 +13,10 @@ and opens nothing but the store (no store at all where none was made yet).
 
 This module sits beside the factory (``workflow/factory.py``), which builds a
 backend's manager, for the same reasons: one entry per backend, imported only
-when it is asked for (on a worker thread: a backend's import takes a while),
-and no CLI dependency. A backend whose extra is not installed has no reader;
+when it is asked for (on a worker thread: a backend's import takes a while;
+Deep Agents', which takes a second, not at all while its sqlite file is not
+made), and no CLI dependency. A backend whose extra is not installed has no
+reader;
 neither has LangGraph (deprecated: its running manager reads its own), nor
 the memory store, whose conversations live in the manager that made them.
 """
@@ -42,6 +44,14 @@ logger = Loggers.workflow()
 _OPENERS: dict[OrchestratorType, str] = {
     OrchestratorType.ADK: "agentic_cli.workflow.adk.sessions:open_sessions",
     OrchestratorType.DEEPAGENTS: "agentic_cli.workflow.deepagents.sessions:open_sessions",
+}
+
+# Orchestrator → the "module:function" that names its sqlite file from the
+# settings, without importing the backend: a file not made holds nothing, so
+# the backend is not imported to read it (Deep Agents' import takes a second).
+# ADK, the core backend, is imported to run anyway.
+_SQLITE_FILES: dict[OrchestratorType, str] = {
+    OrchestratorType.DEEPAGENTS: "agentic_cli.workflow.checkpointers:deepagents_sqlite_location",
 }
 
 
@@ -176,12 +186,13 @@ async def open_session_reader(
     Returns:
         The reader; None where there is nothing to read without the
         manager: the memory store, or a backend without a reader
-        (LangGraph).
+        (LangGraph). A sqlite store whose file is not made yet reads as
+        empty, and Deep Agents' is not imported to read it.
 
     Raises:
         ValueError: ``backend`` is no orchestrator.
-        ImportError: Its extra is not installed; the message says how to
-            install it.
+        ImportError: Its extra is not installed (and its store holds
+            something); the message says how to install it.
         Exception: What opening the store raises.
     """
     orchestrator = OrchestratorType(backend)
@@ -189,6 +200,13 @@ async def open_session_reader(
     target = _OPENERS.get(orchestrator)
     if target is None or store == "memory":
         return None
+    if store == "sqlite" and orchestrator in _SQLITE_FILES:
+        sqlite_file = _function(_SQLITE_FILES[orchestrator])
+        if not sqlite_file(settings).is_file():  # nothing stored: nothing to import
+            return SessionReader(
+                orchestrator.value, None,
+                app_name=settings.app_name, user_id=settings.default_user,
+            )
     # The backend first, as the factory imports it: a missing extra raises
     # its install hint.
     await asyncio.to_thread(check_backend, orchestrator)
@@ -201,3 +219,9 @@ async def open_session_reader(
         orchestrator.value, sessions,
         app_name=settings.app_name, user_id=settings.default_user, close=close,
     )
+
+
+def _function(target: str) -> Any:
+    """The function a light ``"module:function"`` names."""
+    module_name, _, function_name = target.partition(":")
+    return getattr(importlib.import_module(module_name), function_name)

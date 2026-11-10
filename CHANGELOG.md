@@ -548,9 +548,10 @@ the start of the entry's title.
   its store (ADK's session service, Deep Agents' checkpointer and session
   index) and builds no agent, resolves no model, builds no service, and makes
   no store that holds nothing yet; the module is imported on a worker
-  thread. None for the memory store (its conversations live in the manager
-  that made them) and for LangGraph; a backend whose extra is not installed
-  raises `ImportError` with the install hint. `reader_backends()` names the
+  thread (Deep Agents' not at all while its sqlite file is not made). None
+  for the memory store (its conversations live in the manager that made
+  them) and for LangGraph; a backend whose extra is not installed raises
+  `ImportError` with the install hint. `reader_backends()` names the
   backends that have one. The CLI reads every installed backend's
   conversations through them (see **`/resume [<id>]`…**).
 
