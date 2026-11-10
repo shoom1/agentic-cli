@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import inspect
 import warnings
@@ -57,16 +58,21 @@ from agentic_cli.workflow.sessions import (
     set_active_turn,
 )
 from agentic_cli.workflow.service_registry import (
+    get_service,
     set_service_registry,
-    ARXIV_SOURCE,
-    EMBEDDING_SERVICE,
     JOB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
-    PERMISSION_ENGINE,
     SANDBOX_MANAGER,
     WORKFLOW,
+)
+from agentic_cli.workflow.services import (
+    SERVICE_CLOSERS,
+    ServiceLoan,
+    ServiceSet,
+    close_services,
+    rebind_services,
 )
 from agentic_cli.logging import Loggers, bind_context
 
@@ -209,6 +215,32 @@ class BaseWorkflowManager(ABC):
         or ``reinitialize`` keeps its own (the deprecated LangGraph backend
         does).
 
+        A run's services (the permission engine and its session grants, the
+        sandbox kernels, the job manager and its in-process jobs, the
+        knowledge bases and the embedding model, the memory store) can move
+        to another manager, of either backend, instead of being built
+        again::
+
+            loan = old.lend_services()
+            await new.initialize_services(services=loan)  # builds only what is missing
+            await old.give_services(loan)  # new owns them now
+            await old.cleanup()  # closes none of them
+
+        Until ``give_services`` the old manager owns them: a new manager
+        that fails to initialize, is cancelled while it does, or is cleaned
+        up before they are given closes none of them, and the old one keeps
+        working with them (nothing has to hand them back). ``give_services``
+        waits for the old manager's running turn (inside one of its turns it
+        raises ``RuntimeError`` rather than wait for itself), makes the new
+        manager their owner and moves what they hold of their owner to it:
+        the permission engine's prompts and per-call say, the knowledge
+        base's summarizer. Each manager keeps its own ``WORKFLOW`` and
+        summarizer entries and builds its own service-bound tools. A manager
+        that holds services it does not own runs no turn
+        (``_turn_admission`` raises ``RuntimeError``), since the engine's
+        per-call check reads its owner's outside-content marks: the new
+        manager until the give, the old one after it, until it is released.
+
         The base also computes each agent's context numbers (``_budgets``),
         once the models are resolved and before any service is built, so a
         model too small to work in fails the start with nothing allocated: a
@@ -303,6 +335,11 @@ class BaseWorkflowManager(ABC):
     #: settings'. A class default, so it holds whatever built the manager.
     _built_for_store: str | None = None
 
+    #: Inside a release, the closes of the services it released, started on
+    #: worker threads, for the release to wait for (``_cleanup_managers``);
+    #: None outside one. A class default, as ``_keeping_store`` is.
+    _services_closing: "list[asyncio.Future[None]] | None" = None
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -381,12 +418,12 @@ class BaseWorkflowManager(ABC):
         # Auto-detect required managers from tools
         self._required_managers = self._detect_required_managers()
 
-        # Service registry — complex services (KB, sandbox, etc.)
-        # Plan/task state lives in native backend state (ToolContext.state
-        # for ADK, graph state for LangGraph), not here.
-        self._services: dict[str, Any] = {}
-        # Keys of services a reinitialize is carrying over; see _keeping().
-        self._carried_service_keys: frozenset[str] = frozenset()
+        # The services the tools declared (workflow/services.py): published
+        # for them as ``_services``; which of them a reinitialize carries over
+        # is ``_carried_service_keys`` (see _keeping()). Plan/task state lives
+        # in native backend state (ToolContext.state for ADK, graph state for
+        # LangGraph), not here.
+        self._services_held = ServiceSet()
         # Which conversations have read outside content (workflow/outside_content.py).
         self._outside_marks = OutsideContentMarks()
         # What became of the turns' tool calls: a cancelled turn answers the
@@ -475,6 +512,36 @@ class BaseWorkflowManager(ABC):
     def services(self) -> dict[str, Any]:
         """Get the service registry dict."""
         return self._services
+
+    @property
+    def _service_set(self) -> ServiceSet:
+        """The services this manager holds (``workflow/services.py``).
+
+        Made on first use too, so a manager built without the constructor
+        (a test harness's ``__new__``) has one.
+        """
+        held = vars(self).get("_services_held")
+        if held is None:
+            held = self._services_held = ServiceSet()
+        return held
+
+    @property
+    def _services(self) -> dict[str, Any]:
+        """The published services: the registry a turn's tools read (``get_service``)."""
+        return self._service_set.services
+
+    @_services.setter
+    def _services(self, services: dict[str, Any]) -> None:
+        self._service_set.reset(services)
+
+    @property
+    def _carried_service_keys(self) -> frozenset[str]:
+        """The keys of the services a reinitialize is carrying over (:meth:`_keeping`)."""
+        return self._service_set.carried
+
+    @_carried_service_keys.setter
+    def _carried_service_keys(self, keys: frozenset[str]) -> None:
+        self._service_set.carried = frozenset(keys)
 
     @property
     def knowledge_base(self) -> "KnowledgeBase | None":
@@ -613,47 +680,12 @@ class BaseWorkflowManager(ABC):
     def _get_service_tool_map(self) -> dict[str, Callable]:
         """Create service tools via factories, returning name→function map.
 
-        Only creates tools for services that have been initialized.
+        Only creates tools for services that have been initialized, from
+        the table (``ServiceSet.tool_map``); the interaction tools always.
+        A backend that adds a tool of its own overrides this, and the
+        backends build their agents from what it returns.
         """
-        from agentic_cli.tools.factories import (
-            make_memory_tools,
-            make_kb_tools,
-            make_webfetch_tool,
-            make_sandbox_tool,
-            make_interaction_tools,
-            make_arxiv_tools,
-            make_ingest_arxiv_tool,
-        )
-
-        tool_map: dict[str, Callable] = {}
-        s = self._services
-
-        if s.get(MEMORY_STORE):
-            for t in make_memory_tools(s[MEMORY_STORE]):
-                tool_map[t.__name__] = t
-        knowledge_base = s.get(KNOWLEDGE_BASE)
-        if knowledge_base is not None:
-            for t in make_kb_tools(knowledge_base):
-                tool_map[t.__name__] = t
-        if s.get(LLM_SUMMARIZER):
-            tool_map["web_fetch"] = make_webfetch_tool(s[LLM_SUMMARIZER])
-        if s.get(SANDBOX_MANAGER):
-            tool_map["sandbox_execute"] = make_sandbox_tool(s[SANDBOX_MANAGER], self)
-        if s.get(ARXIV_SOURCE):
-            for t in make_arxiv_tools(s[ARXIV_SOURCE]):
-                tool_map[t.__name__] = t
-        # ingest_arxiv_paper composes both services
-        if s.get(ARXIV_SOURCE) and knowledge_base is not None:
-            tool_map["ingest_arxiv_paper"] = make_ingest_arxiv_tool(s[ARXIV_SOURCE], knowledge_base)
-        # Workflow manager is always available for interaction tools
-        for t in make_interaction_tools(self):
-            tool_map[t.__name__] = t
-
-        # The factories bind each closure to the definition of the exact
-        # module-level tool it re-binds (see ``factories._issued``), so a
-        # variant carries identity only while the framework still owns that
-        # tool — never merely because the names match.
-        return tool_map
+        return self._service_set.tool_map(self)
 
     @abstractmethod
     def _get_state_tools(self) -> list[Callable]:
@@ -719,8 +751,7 @@ class BaseWorkflowManager(ABC):
 
     def _publish_services(self, built: dict[str, Any]) -> None:
         """Adopt constructed services without displacing anything already live."""
-        for key, service in built.items():
-            self._services.setdefault(key, service)
+        self._service_set.publish(built)
 
     def _build_services(
         self, existing: frozenset[str] = frozenset()
@@ -762,83 +793,14 @@ class BaseWorkflowManager(ABC):
     def _build_services_into(
         self, s: dict[str, Any], existing: frozenset[str]
     ) -> None:
-        """Construct the required services into ``s``. See :meth:`_build_services`."""
-        # Spelled `"<key>" in self._required_managers` for every declarable
-        # key: test_every_declarable_key_is_constructible reads this source.
-        needs_memory = "memory_store" in self._required_managers and MEMORY_STORE not in existing
-        needs_kb = "knowledge_base" in self._required_managers and KNOWLEDGE_BASE not in existing
-        embedding_service = None
-        if needs_kb:
-            # One service for both knowledge base scopes, so the model loads
-            # once. Reading the live registry here is safe: nothing publishes
-            # into it while services are being built, and a service carried
-            # over a model switch is reused rather than built again.
-            embedding_service = self._services.get(EMBEDDING_SERVICE)
-            if embedding_service is None:
-                from agentic_cli.workflow.memory_services import build_embedding_service
+        """Construct the required services into ``s``. See :meth:`_build_services`.
 
-                embedding_service = build_embedding_service(self._settings)
-                if embedding_service is not None:
-                    s[EMBEDDING_SERVICE] = embedding_service
-
-        if needs_memory:
-            from agentic_cli.workflow.memory_services import open_memory_store
-
-            store = open_memory_store(self._settings)
-            if store is not None:  # None: it cannot open, and the memory tools say so
-                s[MEMORY_STORE] = store
-
-        if needs_kb:
-            from agentic_cli.workflow.memory_services import open_knowledge_base
-
-            s[KNOWLEDGE_BASE] = open_knowledge_base(
-                self._settings, summarizer=self, embedding_service=embedding_service
-            )
-
-        if "llm_summarizer" in self._required_managers and LLM_SUMMARIZER not in existing:
-            s[LLM_SUMMARIZER] = self
-
-        if "sandbox_manager" in self._required_managers and SANDBOX_MANAGER not in existing:
-            from agentic_cli.tools.sandbox.manager import SandboxManager
-            s[SANDBOX_MANAGER] = SandboxManager(self._settings)
-
-        if "job_manager" in self._required_managers and JOB_MANAGER not in existing:
-            from pathlib import Path
-            from agentic_cli.tools.jobs import JobManager
-
-            # User-scoped so long jobs persist across projects and CLI restarts.
-            jobs_dir = Path.home() / f".{self._settings.app_name}" / "jobs"
-            s[JOB_MANAGER] = JobManager(
-                self._settings,
-                base_dir=jobs_dir,
-                max_concurrent=getattr(self._settings, "max_concurrent_jobs", 4),
-            )
-
-        if "arxiv_source" in self._required_managers and ARXIV_SOURCE not in existing:
-            from agentic_cli.tools.arxiv_source import ArxivSearchSource
-            s[ARXIV_SOURCE] = ArxivSearchSource()
-
-        # Always construct the PermissionEngine (all agents may need it)
-        if PERMISSION_ENGINE not in existing:
-            from pathlib import Path
-            from agentic_cli.tools.exec_policy import uncontained_exec_capabilities
-            from agentic_cli.workflow.permissions import PermissionContext, PermissionEngine
-            ctx = PermissionContext(
-                workdir=Path.cwd(),
-                home=Path.home(),
-                app_name=self._settings.app_name,
-            )
-            # Code that would run on the host without a sandbox is approved
-            # per call, and so is a memory write once the conversation has
-            # read outside content; the engine asks which at each check.
-            s[PERMISSION_ENGINE] = PermissionEngine(
-                settings=self._settings, workflow=self, ctx=ctx,
-                uncontained=uncontained_exec_capabilities,
-                per_call=self._per_call_capabilities,
-            )
-
-        # Always ensure workflow reference is available
-        s[WORKFLOW] = self
+        The table's services (``ServiceSet.build_into``): those the tools
+        declared, and those every manager has. A backend that builds a
+        service of its own overrides this, calls it, and adds its own to
+        ``s`` (and its closer to ``_SYNC_SERVICE_CLOSERS``).
+        """
+        self._service_set.build_into(self, s, existing)
 
     async def _construct_services(self) -> None:
         """Build services off the event loop and publish them transactionally.
@@ -861,14 +823,18 @@ class BaseWorkflowManager(ABC):
         self._publish_services(built)
 
     def _discard_built_services(self, build: "asyncio.Future[dict[str, Any]]") -> None:
-        """Release services constructed for an attempt that no longer owns init."""
+        """Release services constructed for an attempt that no longer owns init.
+
+        A done callback, on the event loop: the closes run on a worker thread
+        (:meth:`_start_closing_services`).
+        """
         if build.cancelled() or build.exception() is not None:
             return
         built = build.result()
         if not built:
             return
         logger.warning("services_discarded_after_rollback", services=sorted(built))
-        self._close_services(built)
+        self._start_closing_services(built)
 
     async def summarize(self, content: str, prompt: str) -> str:
         """Summarize content using the configured LLM.
@@ -1333,12 +1299,10 @@ class BaseWorkflowManager(ABC):
         except Exception as exc:  # noqa: BLE001 - shutdown must not fail
             logger.warning("resource_close_failed", resource=label, error=str(exc))
 
-    # Services that own OS resources, and the sync method that releases them.
-    _SYNC_SERVICE_CLOSERS = (
-        (SANDBOX_MANAGER, "cleanup"),
-        (JOB_MANAGER, "close"),
-        (KNOWLEDGE_BASE, "close"),  # a database connection per scope
-    )
+    # Services that own OS resources, and the sync method that releases
+    # them: the table's (workflow/services.py). A backend that builds a
+    # service of its own adds its closer here.
+    _SYNC_SERVICE_CLOSERS: tuple[tuple[str, str], ...] = SERVICE_CLOSERS
 
     @classmethod
     def _close_services(cls, services: dict[str, Any]) -> None:
@@ -1348,14 +1312,7 @@ class BaseWorkflowManager(ABC):
         Used both for the live registry and for services a rolled-back
         initialization constructed but never published.
         """
-        for key, method in cls._SYNC_SERVICE_CLOSERS:
-            service = services.get(key)
-            if service is None:
-                continue
-            try:
-                getattr(service, method)()
-            except Exception as exc:  # noqa: BLE001 - shutdown must not fail
-                logger.warning("resource_close_failed", resource=key, error=str(exc))
+        close_services(services, cls._SYNC_SERVICE_CLOSERS)
 
     def _cleanup_managers(self) -> None:
         """Release the synchronous resources this manager owns.
@@ -1365,21 +1322,43 @@ class BaseWorkflowManager(ABC):
         call finds nothing. The registry is cleared regardless of failures.
 
         Services a reinitialize is carrying over (:meth:`_keeping`) stay
-        published and open.
+        published and open. The release's services hook
+        (:meth:`_release_resources`): inside a release their closes start on
+        a worker thread, and the release waits for them last; outside one
+        (LangGraph's ``cleanup``, a script) they close here and now. A backend
+        that releases something of its own overrides it and calls it.
         """
-        carried = {
-            key: service
-            for key, service in self._services.items()
-            if key in self._carried_service_keys
-        }
+        services = self._service_set.release()
+        closing = self._services_closing
+        if closing is None:
+            self._close_services(services)
+            return
+        started = self._start_closing_services(services)
+        if started is not None:
+            closing.append(started)
+
+    def _start_closing_services(
+        self, services: dict[str, Any]
+    ) -> "asyncio.Future[None] | None":
+        """Start closing ``services`` on a worker thread now; what to await, or None.
+
+        Their closers block (a container removed, a kernel shut down, the
+        jobs directory's lock waited for), so they never run on the event
+        loop, where they froze the app. Started at once, they run to their
+        end whatever becomes of the caller: a thread cannot be cancelled, and
+        the loop's default executor is joined when the loop shuts down. A
+        loop whose executor is already shut down closes them here.
+        """
+        if not services:
+            return None
+        close = functools.partial(
+            contextvars.copy_context().run, self._close_services, services
+        )
         try:
-            self._close_services({
-                key: service
-                for key, service in self._services.items()
-                if key not in carried
-            })
-        finally:
-            self._services = carried
+            return asyncio.get_running_loop().run_in_executor(None, close)
+        except RuntimeError:  # no loop, or its executor is shut down
+            close()
+            return None
 
     @contextlib.contextmanager
     def _keeping(self, preserve: bool) -> Iterator[None]:
@@ -1410,6 +1389,84 @@ class BaseWorkflowManager(ABC):
     def _carrying_services(self, carry: bool) -> contextlib.AbstractContextManager[None]:
         """:meth:`_keeping` under its earlier name (LangGraph's ``reinitialize`` uses it)."""
         return self._keeping(carry)
+
+    def lend_services(self) -> ServiceLoan:
+        """Lend this manager's services to another manager, of either backend.
+
+        The services it owns, but its own ``WORKFLOW`` and summarizer
+        entries, which are the manager itself. The other manager borrows
+        them as it initializes (``initialize_services(services=loan)``) and
+        builds only what they lack; :meth:`give_services` then makes it
+        their owner. Until then this manager owns them, keeps working with
+        them and closes them when it releases: a borrower that fails, is
+        cancelled or is cleaned up closes none of them, and runs no turn.
+        """
+        return ServiceLoan(self, self._service_set.lendable(self))
+
+    async def give_services(self, loan: ServiceLoan) -> None:
+        """Give the services this manager lent to the manager that borrowed them.
+
+        Takes this manager's lifecycle lock and then its turn lock (so it
+        waits for a running turn), then the borrower's lifecycle lock (so no
+        initialization of it runs meanwhile). The borrower owns them from
+        here on and closes them when it releases; this manager's release
+        drops them unclosed. What each holds of its owner moves to the
+        borrower (``ServiceSpec.rebind``): the permission engine asks through
+        it and takes its per-call say, the knowledge base summarizes through
+        it. A service the borrower already had its own of stays this
+        manager's. This manager runs no turn after it (``_turn_admission``
+        refuses, a turn queued on its turn lock too) until it is released.
+
+        Raises:
+            ValueError: This manager did not lend them.
+            RuntimeError: It was called inside a turn of this manager (it
+                would wait for that turn, forever); they were given already;
+                no manager borrowed them (none initialized with them, or its
+                initialization failed or was cancelled, or it was released
+                since); or this manager released them while they were lent.
+        """
+        if loan.lender is not self:
+            raise ValueError(f"{type(self).__name__} did not lend these services.")
+        if get_service(WORKFLOW) is self:
+            # The turn's registry is this manager's: the give would wait for
+            # the turn lock the calling turn holds.
+            raise RuntimeError(
+                f"give_services was called inside a turn of {type(self).__name__}: "
+                "it waits for this manager's running turn. Call it between turns."
+            )
+        async with self._lifecycle_lock:
+            async with self._turn_lock:
+                if loan.given:
+                    raise RuntimeError("These services were given already.")
+                borrower = loan.borrower
+                if borrower is None:
+                    raise RuntimeError(
+                        "No manager has borrowed these services: initialize one "
+                        "with initialize_services(services=loan) first."
+                    )
+                async with borrower._lifecycle_lock:
+                    moving = borrower._service_set.borrowed(loan.services)
+                    if loan.services and not moving:
+                        raise RuntimeError(
+                            f"{type(borrower).__name__} holds none of the services it "
+                            "borrowed: its initialization failed or was cancelled, or "
+                            "it was released."
+                        )
+                    lost = sorted(
+                        key for key, s in moving.items() if not self._service_set.owns(key, s)
+                    )
+                    if lost:
+                        raise RuntimeError(
+                            f"{type(self).__name__} released {', '.join(lost)} while "
+                            "they were lent: they are closed."
+                        )
+                    self._service_set.give(moving)
+                    borrower._service_set.adopt(moving)
+                    rebind_services(moving, self, borrower)
+                    loan.given = True
+        logger.info(
+            "services_given", services=sorted(moving), to=borrower.backend_type
+        )
 
     @property
     @abstractmethod
@@ -1560,7 +1617,9 @@ class BaseWorkflowManager(ABC):
             "(compact). Check ``supports_compact`` before calling."
         )
 
-    async def initialize_services(self, validate: bool = True) -> None:
+    async def initialize_services(
+        self, validate: bool = True, *, services: ServiceLoan | None = None
+    ) -> None:
         """Initialize backend services asynchronously.
 
         Concurrency-safe, idempotent and transactional: concurrent callers
@@ -1570,19 +1629,46 @@ class BaseWorkflowManager(ABC):
 
         Args:
             validate: If True, validate settings before initialization.
+            services: Another manager's services to start with
+                (:meth:`lend_services`): published for the tools as that
+                manager's, so only what they lack is built, and closed by no
+                release of this one (a failed or cancelled attempt's rollback
+                included) until the lender gives them over
+                (:meth:`give_services`).
         Raises:
             SettingsValidationError: If settings validation fails.
+            ValueError: ``services`` are this manager's own.
+            RuntimeError: ``services`` were given already, or this manager
+                is initialized (it borrows only as it builds its services).
         """
+        if services is not None:
+            if services.lender is self:
+                raise ValueError(f"{type(self).__name__} cannot borrow its own services.")
+            if services.given:
+                raise RuntimeError("These services were given already: lend them again.")
         async with self._lifecycle_lock:
-            await self._initialize_locked(validate=validate)
+            if services is None:
+                await self._initialize_locked(validate=validate)
+                return
+            if self._initialized:
+                raise RuntimeError(
+                    f"{type(self).__name__} is initialized: it borrows services "
+                    "only as it builds its own (initialize_services(services=...) "
+                    "before anything else initializes it)."
+                )
+            await self._initialize_locked(validate=validate, services=services)
 
-    async def _initialize_locked(self, validate: bool = True) -> None:
+    async def _initialize_locked(
+        self, validate: bool = True, services: ServiceLoan | None = None
+    ) -> None:
         """Initialization body. The caller must hold ``_lifecycle_lock``.
 
         Args:
             validate: Check the model settings before anything is allocated
                 (``config.validate_settings``). Model resolution itself always
                 runs: the backend builds its agents from it.
+            services: Another manager's services to borrow before the
+                services are built (:meth:`initialize_services`).
         """
         if self._initialized:
             return
@@ -1607,6 +1693,11 @@ class BaseWorkflowManager(ABC):
             # small to work in (ContextBudgetError) fails here too, before a
             # service or a session store is built.
             self._budgets = self._compute_budgets()
+            if services is not None:
+                # Another manager's, published as its: only what they lack
+                # is built, and the rollback below drops them unclosed.
+                self._service_set.borrow(services.services)
+                services.borrower = self
             # Create services BEFORE backend init so _build_tools() can
             # produce factory-bound tools during agent/graph creation.
             # Construction is offloaded to a worker thread (heavy constructors)
@@ -1843,12 +1934,26 @@ class BaseWorkflowManager(ABC):
         retried once — anything worse fails cleanly rather than running against
         released resources.
 
+        No turn runs while the manager holds services another manager owns
+        (a hand-over: borrowed and not yet given, or given and not yet
+        released), checked under the turn lock too, so a turn that queued
+        behind ``give_services`` is refused.
+
         Raises:
-            RuntimeError: If the backend cannot be made ready.
+            RuntimeError: If the backend cannot be made ready, or the
+                manager holds services it does not own.
         """
         for attempt in (1, 2):
             await self._ensure_initialized()
             await self._turn_lock.acquire()
+            if self._service_set.not_owned:
+                self._turn_lock.release()
+                raise RuntimeError(
+                    f"{type(self).__name__} runs no turn while it holds services "
+                    "it does not own: borrowed and not given to it yet, or given "
+                    "to another manager and not released. Their permission "
+                    "checks answer for their owner's conversations."
+                )
             if self._backend_ready():
                 try:
                     yield
@@ -1908,16 +2013,25 @@ class BaseWorkflowManager(ABC):
            store), which is not called while a model switch keeps the store
            (:meth:`_keeping`). Each detaches its handles and returns their
            closers.
-        3. The services, closed now (synchronously), except those a model
-           switch carries.
+        3. The services, detached now by :meth:`_cleanup_managers`, except
+           those a model switch carries and those another manager owns (lent
+           to this one, or given away: dropped, never closed here), and their
+           closes started on a worker thread
+           (:meth:`_start_closing_services`): they block, and on the event
+           loop they froze the app.
         4. The closers, in one task of its own, in a fixed order: the
-           backend's, the store's, then the catalog's. Each is isolated (one
-           that raises is logged, and the rest still run), and the task is
-           awaited under a shield: a cancel of the caller (Ctrl+C during a
-           ``/settings`` model switch, a cancelled ``async with manager``)
-           stops only the wait, and everything still closes, once. Only an
-           event loop shutting down, which cancels the closing task itself,
-           skips the closers after the one running.
+           backend's, the store's and the catalog's, while the services
+           close on their thread, then the services' closes waited for,
+           last and under a shield of their own, so a service close that
+           hangs holds none of the others, and a cancel never cancels one
+           that has not started. Each is isolated (one that raises is
+           logged, and the rest still run), and the task is awaited under a
+           shield: a cancel of the caller (Ctrl+C during a ``/settings``
+           model switch, a cancelled ``async with manager``) stops only the
+           wait, and everything still closes, once. Only an event loop
+           shutting down, which cancels the closing task itself, skips the
+           closers after the one running; the services' closes still run,
+           on a thread the loop joins as it closes.
 
         It raises nothing a close raises. It raises ``TypeError`` for a hook
         that is not synchronous (returns an awaitable), after releasing
@@ -1965,7 +2079,17 @@ class BaseWorkflowManager(ABC):
             functools.partial(self._aclose_owned, catalog, "model_catalog"),
         ))
 
-        self._cleanup_managers()
+        # The services' hook: their closes start on worker threads now.
+        services: list[asyncio.Future[None]] = []
+        self._services_closing = services
+        try:
+            self._cleanup_managers()
+        finally:
+            self._services_closing = None
+        if services:
+            closers.append(
+                ("services", lambda: asyncio.shield(asyncio.gather(*services)))
+            )
 
         closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)
@@ -1983,12 +2107,12 @@ class BaseWorkflowManager(ABC):
         repeat release finds nothing) and return the closers of what they
         held, in the order they must run. Called on every release, a model
         switch's included. It must be synchronous (``def``, never
-        ``async def``) and must not raise. The services are already closed
-        when its closers run (the base closes them first, synchronously, so a
-        cancel cannot skip them); that is safe because no turn is in flight
-        (a release holds the turn lock, or rolls back an attempt no turn ran
-        on) and the services never reach the backend's MCP servers or its
-        store. The base holds nothing here.
+        ``async def``) and must not raise. The services may still be
+        closing when its closers run (the base starts their closes first,
+        on a worker thread, and waits for them last); that is safe because
+        no turn is in flight (a release holds the turn lock, or rolls back
+        an attempt no turn ran on) and the services never reach the
+        backend's MCP servers or its store. The base holds nothing here.
         """
         return []
 
@@ -1998,9 +2122,9 @@ class BaseWorkflowManager(ABC):
         A backend hook of the release (:meth:`_release_resources`), as
         :meth:`_detach_backend` is, for the store the conversations live in
         (a session service, a checkpointer and its connections): synchronous,
-        never raising, and its closers run after the services closed, which
-        is safe for the same reasons (no turn in flight; no service reaches
-        the store). Not called while a model switch keeps the store
+        never raising, and its closers run while the services may still be
+        closing, which is safe for the same reasons (no turn in flight; no
+        service reaches the store). Not called while a model switch keeps the store
         (:meth:`_keeping`): the backend then finds its store still attached
         when it builds again, and must reuse it rather than open another. The
         base holds nothing here.

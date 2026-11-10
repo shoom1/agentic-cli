@@ -189,8 +189,8 @@ def _validate_requires(requires: Any, tool_name: str) -> tuple[str, ...]:
 
     A key the manager cannot construct would be a silent no-op: nothing would
     be created and the tool would fail at call time with a missing service. The
-    declarable set is therefore exactly what
-    ``BaseWorkflowManager._build_services_into`` knows how to build.
+    declarable set is therefore read from the table of the services a manager
+    builds (``workflow/services.py``).
     """
     if requires is None:
         return ()
