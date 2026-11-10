@@ -346,6 +346,24 @@ class TestAnIdTwoBackendsKeep:
             "Resumed on deepagents: X on Deep Agents (x,"
         )
 
+    async def test_the_picked_twin_of_the_one_it_is_in_starts_over(self, backends):
+        """Not the open conversation moved: another one, with usage counters of
+        its own."""
+        backends.store("adk", "a1", "On ADK", 2)
+        backends.store("adk", "x", "X on ADK", 2)
+        backends.store("deepagents", "x", "X on Deep Agents", 2, hours=1)
+        app, _ = await on_adk(backends)
+        assert await app.resume_session("x")
+        app.usage_tracker.record({"prompt_tokens": 1234, "completion_tokens": 5})
+        app._conversation.written = True
+
+        assert await app.resume_session(PickedConversation("x", "deepagents"))
+
+        assert (app.session_id, app.session_backend) == ("x", "deepagents")
+        assert (app.usage_tracker.prompt_tokens, app.usage_tracker.invocation_count) == (0, 0)
+        assert app._conversation.written is False
+        assert app._conversation.fresh is False  # stored there
+
     async def test_already_in_it_names_the_other(self, backends):
         backends.store("adk", "a1", "On ADK", 2)
         backends.store("deepagents", "a1", "A1 on Deep Agents", 2, hours=1)

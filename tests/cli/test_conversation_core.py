@@ -347,6 +347,24 @@ class TestTheSwitch:
         assert held_elsewhere(there, "b") == os.getpid()
         assert around.done == ["tasks reset", "usage reset", "status"]
 
+    async def test_the_same_id_stored_on_another_backend_is_another_conversation(
+        self, tmp_path
+    ):
+        """A twin (an earlier build switched the backend under an open
+        conversation): not the one the app is in, moved. Its usage starts
+        over, and so do the flags of the one left (it was written)."""
+        core, around = self.core_in(tmp_path), Around(FakeWorkflow("a"))
+        core.written, core.opened_empty = True, True
+        there = place(tmp_path, backend="deepagents")
+
+        switched = await core.switch("a", around.parts(), place=there, stored=True)
+
+        assert switched.made and core.place == there
+        assert around.done == ["tasks reset", "usage reset", "status"]
+        assert (core.written, core.opened_empty, core.deferred) == (False, False, False)
+        assert held_elsewhere(there, "a") == os.getpid()
+        assert held_elsewhere(place(tmp_path), "a") is None
+
     async def test_a_hold_taken_before_is_the_one_kept(self, tmp_path):
         """At startup the target is held before the prompt, and opened once it is up."""
         core, around = self.core_in(tmp_path), Around(FakeWorkflow("b"))

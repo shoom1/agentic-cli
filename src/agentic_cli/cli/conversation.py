@@ -303,7 +303,9 @@ class ConversationCore:
             place: Where ``to`` is kept: the current place by default; another
                 one for a conversation on another backend or store. The same
                 conversation in another place keeps the session's usage
-                totals and forgets only the context.
+                totals and forgets only the context; the same id ``stored``
+                there is another conversation (a twin another backend
+                keeps), which starts over.
             stored: ``to`` must be in the store (``/resume``); a new
                 conversation's load finds nothing, as it should.
             propose: Propose the memories of the conversation left (not when
@@ -333,7 +335,9 @@ class ConversationCore:
                 return Switch(made=False, holder=taken)
             hold = taken
         elsewhere = hold.place != self.place
-        moved = elsewhere and to == left  # the same conversation, in another place
+        # The same conversation, in another place (one stored there is
+        # another conversation: the same id another backend keeps).
+        moved = elsewhere and to == left and not stored
         workflow = parts.workflow
         made = told = gone = False
         loaded: bool | None = None
@@ -420,8 +424,9 @@ class ConversationCore:
     ) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters. The same
-        conversation in another place keeps what it was."""
-        same = hold.session_id == self.session_id
+        conversation, here or ``moved`` to another place, keeps what it was;
+        the same id stored in another place is another conversation."""
+        same = hold.session_id == self.session_id and (moved or hold.place == self.place)
         self.commit(hold)
         self.place = hold.place
         self.session_id = hold.session_id
