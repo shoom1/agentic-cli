@@ -126,9 +126,9 @@ def _context_rows(workflow: Any, tracker: Any) -> list[tuple[str, str]]:
     The agent and its model, the model's window (or the 128k floor in use),
     the input budget, the prompt size its conversation is summarized at, and
     its last prompt. A manager with no budget for its root agent (not
-    initialized yet; LangGraph or a native ADK YAML app, which manage no
-    context; one without ``context_budget``) gives only the last prompt, once
-    there is one. Any other error is the manager's, and is not hidden here.
+    initialized yet; LangGraph, which manages no context; a native ADK YAML
+    app whose root's model did not resolve; one without ``context_budget``)
+    gives only the last prompt, once there is one. Any other error is the manager's, and is not hidden here.
     """
     from agentic_cli.cli.usage_tracker import format_tokens
     from agentic_cli.workflow.context import UNKNOWN_WINDOW

@@ -42,8 +42,9 @@ def _main_model(workflow: "BaseWorkflowManager") -> str:
 
     The root agent's own resolved model when the manager has one (the root may
     run on a model of its own, through ``AgentConfig.model`` or a role), else
-    the default model: before initialization, on LangGraph or a native ADK
-    YAML app, or for an application's manager without ``root_agent_name``.
+    the default model: before initialization, on LangGraph, for a native ADK
+    YAML app whose root's model did not resolve (its other agents' do), or
+    for an application's manager without ``root_agent_name``.
     """
     root = getattr(workflow, "root_agent_name", None)
     models = getattr(workflow, "agent_models", None) or {}
