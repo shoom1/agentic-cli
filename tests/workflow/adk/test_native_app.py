@@ -4,7 +4,10 @@ The YAML only decides how the agents are built. It is loaded when the
 manager validates its agents, before any model, service or store: a root
 that is not an ``LlmAgent``, or a task-mode agent anywhere in the tree, is
 refused there with the agent named. Agent configs passed with it are
-ignored, with a warning.
+ignored, with a warning. Each agent's model is the one ADK runs it on,
+resolved through the catalog for its budget. Once built, the app runs as
+one built from configs: what differs is read from the tree (the agents that
+reply, those with after-tool callbacks of their own).
 
 Every provider base URL points at a dead local port, and both Anthropic
 client bindings (the framework's and the one ADK's own ``AnthropicLlm``
@@ -23,11 +26,11 @@ pytest.importorskip("google.adk")
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.adk import anthropic_llm  # noqa: E402
 from agentic_cli.workflow.adk import manager as adk_manager  # noqa: E402
-from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.compaction import (  # noqa: E402
     AgentCliSummarizer,
     NoAfterTurnCompactionRunner,
 )
+from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from tests.workflow.adk import native_agents  # noqa: E402
