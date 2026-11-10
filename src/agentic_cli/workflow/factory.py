@@ -1,6 +1,8 @@
 """Workflow manager factory.
 
-Creates the workflow manager for ``settings.orchestrator``. Each orchestrator
+Creates the workflow manager for ``settings.orchestrator``, or for the
+orchestrator a caller names (a new conversation on another backend: the CLI's
+``/new <backend>``). Each orchestrator
 has one entry in ``_BACKENDS``: the ``"module:Class"`` that implements it and
 the extra that installs it. A backend is imported only when it is chosen, so
 an application never loads a backend it does not run. This module has no CLI
@@ -37,21 +39,23 @@ _BACKENDS: dict[OrchestratorType, tuple[str, str]] = {
 }
 
 
-def _langgraph_kwargs(settings: "BaseSettings") -> dict[str, Any]:
+def _langgraph_kwargs(settings: "BaseSettings", session_store: str | None) -> dict[str, Any]:
     # Durable sessions: the unified session_store (sqlite by default) selects
     # the checkpointer so LangGraph persists like ADK. "memory" stays ephemeral.
-    return {"checkpointer": getattr(settings, "session_store", "memory")}
+    return {"checkpointer": session_store or getattr(settings, "session_store", "memory")}
 
 
 # Constructor arguments that only one backend takes, by that backend's entry.
-# Deep Agents takes none: it opens its own checkpointer from the settings.
-_BACKEND_KWARGS: dict[OrchestratorType, Callable[["BaseSettings"], dict[str, Any]]] = {
+# Deep Agents takes none: it opens its own checkpointer from its session store.
+_BACKEND_KWARGS: dict[
+    OrchestratorType, Callable[["BaseSettings", str | None], dict[str, Any]]
+] = {
     OrchestratorType.LANGGRAPH: _langgraph_kwargs,
 }
 
 
-def _orchestrator(settings: "BaseSettings") -> OrchestratorType:
-    """The orchestrator ``settings`` names.
+def orchestrator_of(settings: "BaseSettings") -> OrchestratorType:
+    """The orchestrator ``settings`` names: the backend of new conversations.
 
     Settings validation allows only ``OrchestratorType`` values; a settings
     object built some other way may hold a plain string, and anything that is
@@ -90,10 +94,28 @@ def _load_backend(orchestrator: OrchestratorType) -> type["BaseWorkflowManager"]
     return getattr(module, class_name)
 
 
-def _backend_kwargs(orchestrator: OrchestratorType, settings: "BaseSettings") -> dict[str, Any]:
+def check_backend(name: "str | OrchestratorType") -> OrchestratorType:
+    """The orchestrator ``name`` names, once its backend can be imported.
+
+    For a caller that offers a choice of backend (the CLI's ``/new
+    <backend>``) and refuses one that cannot run before anything changes.
+
+    Raises:
+        ValueError: ``name`` is no orchestrator.
+        ImportError: Its extra is not installed; the message says how to
+            install it.
+    """
+    orchestrator = OrchestratorType(name)
+    _load_backend(orchestrator)
+    return orchestrator
+
+
+def _backend_kwargs(
+    orchestrator: OrchestratorType, settings: "BaseSettings", session_store: str | None = None
+) -> dict[str, Any]:
     """The constructor arguments only ``orchestrator``'s backend takes."""
     build = _BACKEND_KWARGS.get(orchestrator)
-    return build(settings) if build is not None else {}
+    return build(settings, session_store) if build is not None else {}
 
 
 def create_workflow_manager_from_settings(
@@ -103,13 +125,16 @@ def create_workflow_manager_from_settings(
     model: str | None = None,
     adk_config_path: str | None = None,
     adk_config_mode: str = "native",
+    orchestrator: "str | OrchestratorType | None" = None,
+    session_store: str | None = None,
     **kwargs,
 ) -> "BaseWorkflowManager":
     """Factory function to create the appropriate workflow manager based on settings.
 
-    Creates the manager of the backend ``settings.orchestrator`` names. The
-    backend is model-agnostic: each backend builds every agent's model from its
-    resolved model, so no model forces a backend.
+    Creates the manager of the backend ``orchestrator`` names, by default the
+    one ``settings.orchestrator`` names. The backend is model-agnostic: each
+    backend builds every agent's model from its resolved model, so no model
+    forces a backend.
 
     Args:
         agent_configs: List of agent configurations.
@@ -123,6 +148,11 @@ def create_workflow_manager_from_settings(
             runs on ADK whichever orchestrator is set; in ``translate`` mode it
             becomes ``AgentConfig``s for the configured orchestrator.
         adk_config_mode: ``"native"`` or ``"translate"``.
+        orchestrator: The backend to build, when it is not the one the
+            settings name (the backend of a new conversation, chosen for it).
+        session_store: The session store the manager keeps conversations in
+            (``BaseWorkflowManager.session_store``), when it is not the one
+            the settings name: a CLI run keeps the store it started with.
         **kwargs: Additional arguments passed to the specific manager.
 
     Returns:
@@ -130,13 +160,16 @@ def create_workflow_manager_from_settings(
 
     Raises:
         ImportError: If the orchestrator's extra is not installed.
+        ValueError: ``orchestrator`` is no orchestrator.
 
     Example:
         settings = MySettings(orchestrator="langgraph")
         configs = [AgentConfig(name="agent", prompt="...")]
         manager = create_workflow_manager_from_settings(configs, settings)
     """
-    orchestrator = _orchestrator(settings)
+    orchestrator = (
+        orchestrator_of(settings) if orchestrator is None else OrchestratorType(orchestrator)
+    )
 
     # Reuse an existing native ADK config, if provided.
     if adk_config_path:
@@ -152,21 +185,28 @@ def create_workflow_manager_from_settings(
                     reason="native ADK config requires the ADK backend",
                 )
             manager_cls = _load_backend(OrchestratorType.ADK)
-            return manager_cls(
+            return _built_for(manager_cls(
                 agent_configs=agent_configs,
                 settings=settings,
                 app_name=app_name,
                 model=model,
                 adk_config_path=adk_config_path,
                 **kwargs,
-            )
+            ), session_store)
 
     manager_cls = _load_backend(orchestrator)
-    return manager_cls(
+    return _built_for(manager_cls(
         agent_configs=agent_configs,
         settings=settings,
         app_name=app_name,
         model=model,
-        **_backend_kwargs(orchestrator, settings),
+        **_backend_kwargs(orchestrator, settings, session_store),
         **kwargs,
-    )
+    ), session_store)
+
+
+def _built_for(manager: "BaseWorkflowManager", session_store: str | None) -> "BaseWorkflowManager":
+    """``manager``, keeping conversations in ``session_store`` when one is given."""
+    if session_store is not None:
+        manager.session_store = session_store
+    return manager

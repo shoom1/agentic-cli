@@ -1111,8 +1111,7 @@ the start of the entry's title.
   neither. On a model whose window is unknown, on LangGraph and in a native
   ADK YAML app, it is the prompt alone, `ctx 45k`. A `/settings` change
   that rebuilds the agents shows the new trigger at once, not after the
-  next call; an orchestrator swap forgets the context (another backend's
-  conversation is another one). Token counts read "146k", not "146.0k".
+  next call. Token counts read "146k", not "146.0k".
   `/status` adds the main agent's rows after Services: Main Agent (its name
   and model), Context Window (or "unknown, 128k floor in use"), Input
   Budget, Summarize At and Last Prompt; a manager that manages no context
@@ -1198,8 +1197,14 @@ the start of the entry's title.
   in the old conversation still reports to it: once it has finished it
   waits until that conversation is opened (`/resume` tells it when
   `job_auto_resume` is on; the status bar's `↻N` counts it), and is never
-  told in the new one, whose `ctx` and task list it would move. `/clear`
-  is still a screen clear.
+  told in the new one, whose `ctx` and task list it would move. `/new
+  <backend>` starts the new conversation on another backend (see Changed),
+  which starts a new manager, and with it new services until a later
+  release: in-process jobs end, sandbox kernels start over and "Allow for
+  this session" grants are forgotten; and a finished job of the
+  conversation left is told in the new one as unavailable (the new backend
+  does not hold its conversation), as an orchestrator switch told it
+  before. `/clear` is still a screen clear.
 - **A session list's rows: `SessionInfo` and `session_info()`.**
   `list_sessions(*, user_id=None, limit=None)` returns one frozen
   `SessionInfo(session_id, title, turns, updated)` per stored conversation,
@@ -1282,6 +1287,44 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **A conversation keeps its backend: `orchestrator` is the backend of new
+  conversations, and `/new [backend]` picks one.** A `/settings` change of
+  `orchestrator` swapped the backend under the open conversation, which
+  went on in the new backend's store, where none of its history is. Each
+  conversation now runs on one backend for its whole life. Changed while
+  the workflow runs, `orchestrator` starts a new conversation on the new
+  backend at once, through the app's `start_new_session()`, when nothing
+  of the open one is stored (`ConversationCore.fresh`: it began in this run
+  as a new one, no turn of it ran on a ready workflow, and an id the app was
+  given was found empty; read under the turn lock): "New conversation <id>
+  on deepagents."; otherwise it is saved, and its line says "(applies to
+  the next /new)": nothing is rebuilt
+  (`settings_persistence.NEW_CONVERSATION_KEYS`, beside `REBUILD_KEYS`,
+  which no longer has it). Changed while the workflow is down and its next
+  start builds a manager afresh, the next start runs the open conversation
+  on the new backend when nothing of it is stored, held there (decided
+  again once the change has the turn lock: a workflow an app's task started
+  meanwhile is left for a new conversation, as a running one); otherwise
+  the change applies to the next /new too, and the next start revives or
+  rebuilds the conversation's own backend. A backend that cannot run is
+  refused, whatever the conversation. `/new [adk|deepagents|langgraph]` starts a
+  new conversation on the backend named, without saving it anywhere
+  (`BaseCLIApp.start_new_session(backend=None)`, an additive keyword; the
+  conversation left has its memories proposed while its backend runs, and
+  the line names the new backend, and the one that keeps the conversation
+  left); an unknown name, or a backend whose extra is not installed, is
+  refused with the reason, and nothing changes (so is a backend named to an
+  app whose `start_new_session` override takes none). After it, the exit
+  hint names the backend to set before `--resume` (and the run's store,
+  after a change of `session_store` in the run). A model switch never
+  changes the backend: `WorkflowController` runs the conversation's
+  (`backend`; `switch_backend(backend)` starts another, for a new
+  conversation), not `settings.orchestrator`, and `reinitialize` is always
+  in place. The factory builds the backend it is given
+  (`create_workflow_manager_from_settings(orchestrator=)`), says which the
+  settings name (`orchestrator_of`) and checks one can run
+  (`check_backend`).
 
 - **The services a manager builds are one table,
   `agentic_cli.workflow.services.SERVICES`.** Each service is one
@@ -2104,6 +2147,18 @@ the start of the entry's title.
 
 ### Deprecated
 
+- **Setting `BaseCLIApp.session_id`** is deprecated: switch with `await
+  app.resume_session(id)` or `await app.start_new_session()`. It moved the
+  next turn to another conversation and did nothing else. It still
+  switches, as far as a setter can, with a `DeprecationWarning`: the
+  conversation is held (one another process has open raises `RuntimeError`,
+  and nothing changes), the one before let go, and the task list and the
+  usage counters start over; the workflow is not told until the next turn
+  names the id, and the memories of the conversation left are not
+  proposed. None names no conversation, as before: the turns run in the one
+  the workflow loaded last, which is held (the ready workflow's
+  `session_id`).
+
 - **`_release_resources(keep_session_service=True)`**, which kept ADK's
   session service through a release, is deprecated and will be removed in
   0.8.0. It still keeps the session store for that release, with a
@@ -2560,18 +2615,29 @@ step; each entry says what to use instead.
   the app starts, were reported as applied too. `settings_persistence` now
   declares, beside `PROJECT_SETTABLE_KEYS`, when each key `/settings` may
   show takes effect, and `apply_settings` follows it: `REBUILD_KEYS` rebuild
-  the workflow (the retry and timeout keys now among them), `RESTART_KEYS`
-  are saved and their line says "(takes effect at the next start)", and
-  `LIVE_KEYS` apply at once. A change of `session_store` made while the
-  workflow is starting waits for that start, which reads it, as a rebuild
-  does.
+  the workflow (the retry and timeout keys now among them),
+  `NEW_CONVERSATION_KEYS` (`orchestrator`) apply to a new conversation (see
+  Changed), `RESTART_KEYS` are saved and their line says "(takes effect at
+  the next start)", and `LIVE_KEYS` apply at once. A change of
+  `orchestrator` made while the workflow is starting waits for that start,
+  as a rebuild does. The session store is fixed for the run
+  (`WorkflowController.store`): every manager the run builds (a retry, a
+  revive, `/new <backend>`) keeps the store the run started with
+  (`create_workflow_manager_from_settings(session_store=)`, an additive
+  keyword; `BaseWorkflowManager.session_store`, the store a manager was
+  built for, else the settings'), and a change of `session_store` takes
+  effect at the next app start, always. `BaseSettings.session_db_url(store=)`
+  names another store than the settings' (an additive keyword); ADK's
+  manager calls it with no argument while its store is the settings' own,
+  so an app's override with 0.6.4's signature keeps working, and with
+  `store=` only after a change of `session_store` in the run, which such an
+  override cannot follow: that rebuild fails, saying to restart the app.
 
 - **`/settings` while the workflow is still starting runs the change it
   saves.** A start resolves its models from the settings before it builds
   the rest, so a change of model (or of anything else the agents are built
   from) made while it ran was reported and saved but not run: the workflow
-  went on with the model it had resolved, and an orchestrator change was
-  left for some later rebuild to make. `apply_settings` now waits for the
+  went on with the model it had resolved. `apply_settings` now waits for the
   start in progress, as a turn does ("Waiting for initialization...";
   Ctrl+C stops the wait and changes nothing), then rebuilds as usual. When
   that start fails, the change is applied as for any workflow that is not
@@ -3022,15 +3088,16 @@ step; each entry says what to use instead.
   at a time, raised on the second: the tool got an error or, for a
   permission prompt, the call was denied without the user seeing it. The CLI
   now asks them in turn.
-- **Ctrl+C during an orchestrator switch no longer leaves the settings
-  naming the old backend.** Pressed while the old backend was being released,
-  after the new one had started, it restored the settings to the old
-  orchestrator while the new one ran, and abandoned the release halfway: the
-  old backend's MCP servers, sandbox kernels and store stayed open, and the
-  next model change switched back without a word, leaving the conversation's
+- **Ctrl+C during a switch of backend no longer leaves the settings naming
+  the old one.** Pressed while the old backend was being released, after
+  the new one had started, it restored the settings to the old orchestrator
+  while the new one ran, and abandoned the release halfway: the old
+  backend's MCP servers, sandbox kernels and store stayed open, and the next
+  model change switched back without a word, leaving the conversation's
   history behind. The release now runs to its end in the background (a later
-  restart or switch waits for it), and the switch, too late to undo, stands,
-  is saved and is reported.
+  restart or switch waits for it), and a new conversation started on the new
+  backend (see Changed: the backend no longer changes under an open one),
+  too late to undo, stands, its `orchestrator` change saved and reported.
 - **`/sessions --delete` no longer deletes a conversation open in another
   terminal.** It refused only the conversation of the process it ran in, so
   one another CLI had open was deleted, and on ADK that CLI's next turn
@@ -3192,14 +3259,6 @@ step; each entry says what to use instead.
   now asks the agent, on a line after its header, to tell the user what the
   job's result means: without it Gemini 2.5 Flash, live, said nothing in
   about one resume in five.
-- **An orchestrator switch in `/settings` says the conversation's history
-  stays behind, and keeps its id.** Sessions do not move between backends,
-  and the switch said nothing: the new backend started the conversation
-  empty, and it ran under its default session, so `/status` showed
-  `default_session` and the facts saved at exit were read from it. The new
-  backend now takes the conversation's id, and one line says: "This
-  conversation's history stays with the previous backend: switch back to
-  continue it. Here it starts empty."
 - **A conversation is open in one process at a time.** Two CLIs on one
   stored conversation lost a turn: Deep Agents kept one of two runs from the
   same checkpoint, and ADK failed the second writer with "Workflow error:
@@ -3214,7 +3273,28 @@ step; each entry says what to use instead.
   '<other>'."; several are named, past three a count), or starts a new
   conversation when none of the 50 newest is free. A switch holds
   the conversation it leaves until it is done, so a Ctrl+C or a failure
-  keeps the right one held. ADK's stale
+  keeps the right one held. The lock follows the conversation the turns
+  write to, however it changes (`cli/conversation.py`: `ConversationCore`,
+  one switch for `/new`, on any backend, `/resume` and the start): a run
+  holds a conversation it was given (`--resume`, `--continue`,
+  `session_id=`, `/resume`) from the start, also when the workflow fails to
+  start, and one it made (the start's, `/new`'s, an orchestrator change's)
+  from its first write (a turn, a job's notice, `/compact`, under the turn
+  lock): no store lists it before then, so no other process can open it,
+  and a run in which no turn runs makes no lock file (a line typed while
+  the workflow is down takes the hold before the start its turn retries;
+  a locks folder the run cannot write leaves the conversation unheld, said
+  once, and its turns run); a line typed before `--continue` or `--resume` has opened its
+  conversation waits for it and runs there. It is keyed by the backend and
+  the store the conversation runs on: the store is the run's for its whole
+  life, and the backend is recorded as the app starts, for a new
+  conversation on another backend, and when `/settings` changes the
+  orchestrator while the workflow is down and nothing of the conversation
+  is stored (a failed start, which the user fixes there and goes on: the
+  next start builds the new backend, so the conversation moves there at
+  once; when a line typed meanwhile holds it, its lock moves, and the change
+  is refused, "Settings were not changed.", when another process has it
+  open there). ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message

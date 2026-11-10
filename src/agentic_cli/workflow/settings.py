@@ -406,7 +406,8 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         default=OrchestratorType.ADK,
         title="Orchestrator",
         description=(
-            "Workflow orchestrator backend: adk (the default), deepagents "
+            "The backend new conversations run on (each stays on its own): "
+            "adk (the default), deepagents "
             "(pip install 'agentic-cli[deepagents]') or langgraph (deprecated, "
             "removed in 0.8.0)"
         ),
@@ -725,8 +726,8 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral). "
             "ADK keeps them in {workspace}/sessions/sessions.db and Deep Agents in "
             "{workspace}/sessions/checkpoints.db; sessions do not move between "
-            "backends, so after an orchestrator switch the conversation goes on "
-            "from empty under its id (its history stays with the other backend)."
+            "backends: a conversation stays on the backend it began on. Takes "
+            "effect at the next start: a run keeps one store."
         ),
         json_schema_extra={"ui_order": 145},
     )
@@ -777,14 +778,22 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         json_schema_extra={"ui_order": 148},
     )
 
-    def session_db_url(self) -> str | None:
+    def session_db_url(self, store: str | None = None) -> str | None:
         """Async SQLAlchemy URL for the session store, or None when ephemeral.
 
         Shared by both backends so ADK's DatabaseSessionService and LangGraph's
         checkpointer persist to the same place. SQLite is the zero-config
         default (``{workspace}/sessions/sessions.db``); Postgres via uri.
+
+        Args:
+            store: The store to name; ``session_store`` by default. ADK's
+                manager calls this with no argument while its store is
+                ``session_store`` (0.6.4's call, so an override without the
+                parameter keeps working), and with ``store=`` only after a
+                ``/settings`` change of ``session_store`` in the run (the run
+                keeps its store), which such an override refuses.
         """
-        store = getattr(self, "session_store", "sqlite")
+        store = store or getattr(self, "session_store", "sqlite")
         if store == "memory":
             return None
         if store == "postgres":

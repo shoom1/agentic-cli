@@ -4,8 +4,8 @@
 the main agent's own model, not the default model, when the root runs on a
 model of its own. A ``/settings`` change that rebuilds the agents (a model,
 ``context_summarize_at``, ``context_max_tokens``) shows the new trigger at
-once, before the next call; an orchestrator swap starts another manager,
-whose conversation is another one, so the context is forgotten.
+once, before the next call. (A new conversation on another backend zeroes the
+usage counters, as ``/new`` does: ``tests/cli/test_conversation_switch.py``.)
 
 The app's apply path and controller are real; so are the ADK managers,
 initialized offline.
@@ -116,35 +116,6 @@ class TestAfterASave:
             await manager.cleanup()
 
         assert " | ctx 150k/100k (150%) | " in app.statuses[-1]
-
-    async def test_an_orchestrator_swap_forgets_the_context(self):
-        settings = BaseSettings(session_store="memory", default_model=OPUS)
-        previous = SimpleNamespace(
-            model=OPUS, backend_type="adk", is_initialized=True, cleanup=AsyncMock(),
-            context_budget=lambda agent_name=None: SimpleNamespace(trigger=200_000,
-                                                                   window_known=True),
-        )
-        replacement = SimpleNamespace(
-            model=OPUS, backend_type="langgraph", is_initialized=True, cleanup=AsyncMock(),
-            initialize_services=AsyncMock(), load_session=AsyncMock(return_value=False),
-        )
-        app = app_for(solo(), settings, previous)
-        app._session_id = "s"
-        used(app, 150_000)
-
-        with patch(
-            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
-            lambda **kw: replacement,
-        ):
-            assert await app.apply_settings({"orchestrator": "langgraph"})
-
-        tracker = app._usage_tracker
-        assert app._workflow_controller.workflow is replacement
-        assert (tracker.last_prompt_tokens, tracker.context_trigger, tracker.window_known) == (
-            0, None, None
-        )
-        assert "ctx" not in app.statuses[-1]
-        assert tracker.prompt_tokens == 150_000  # the session's totals stay
 
     async def test_a_manager_without_a_budget_shows_the_prompt_alone(self):
         # An application's own manager may not have context_budget.

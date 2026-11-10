@@ -10,6 +10,7 @@ This module provides the base CLI application that:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import os
@@ -33,8 +34,13 @@ from prompt_toolkit.history import InMemoryHistory
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
-from agentic_cli.cli.conversation_lock import ConversationLock, Taken
+from agentic_cli.cli.message_processor import (
+    CANCELLED_LINE,
+    MessageProcessor,
+    TurnStatus,
+    _says_so_when_stopped,
+)
+from agentic_cli.cli.conversation import ConversationCore, Hold, Place, Switch, SwitchParts
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
     SessionStart,
@@ -55,11 +61,13 @@ from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
 from agentic_cli.settings_persistence import (
     HAND_EDITED_KEYS,
+    NEW_CONVERSATION_KEYS,
     PROJECT_SETTABLE_KEYS,
     REBUILD_KEYS,
     RESTART_KEYS,
     USER_PREFERENCE_KEYS,
 )
+from agentic_cli.workflow.factory import check_backend, orchestrator_of
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -367,23 +375,39 @@ _LANGGRAPH_DEPRECATION = (
 )
 
 
-#: What an orchestrator swap says: sessions do not move between backends.
-_SWAP_NOTE = (
-    "This conversation's history stays with the previous backend: switch back "
-    "to continue it. Here it starts empty."
+#: What setting ``BaseCLIApp.session_id`` warns, deprecated in 0.7.0: a setter
+#: cannot run the switch, which awaits the workflow.
+_SESSION_ID_SETTER_DEPRECATED = (
+    "Setting BaseCLIApp.session_id is deprecated: use `await app.resume_session(id)` "
+    "or `await app.start_new_session()`. The setter holds the conversation and starts "
+    "its task list and usage counters over, but the workflow does not load it until "
+    "the next turn names it, and the memories of the conversation left are not proposed."
 )
 
 #: How ``/settings`` reports a change of a key read only as the app starts
 #: (``settings_persistence.RESTART_KEYS``).
 _AT_NEXT_START = "(takes effect at the next start)"
 
-#: The restart-only keys the workflow's start reads: a change of one made
-#: while a start runs waits for it, as a rebuild does, or the start could take
-#: the new value and "(takes effect at the next start)" would be false. The
-#: session store is built as the workflow starts; ``log_level`` and
-#: ``log_format`` are read by the app's constructor only, so a change of them
-#: does not wait.
-_READ_BY_THE_START = frozenset({"session_store"})
+#: How ``/settings`` reports a change of the backend of new conversations
+#: (``settings_persistence.NEW_CONVERSATION_KEYS``) that the open one keeps.
+_AT_NEXT_NEW = "(applies to the next /new)"
+
+#: The keys besides the rebuild keys whose change waits for a start in
+#: progress, as a rebuild does: whether an orchestrator change starts a new
+#: conversation, or moves the run's, needs that start's outcome. The session
+#: store is fixed for the run as its first start begins
+#: (``WorkflowController.store``), and ``log_level`` and ``log_format`` are
+#: read by the app's constructor only: a change of them does not wait.
+_READ_BY_THE_START = frozenset({"orchestrator"})
+
+#: What ``_move_here`` returns when it finds, under the turn lock, that the
+#: move no longer applies, decided as for a running workflow: something of
+#: the conversation is stored by now, or the next start no longer builds
+#: afresh (it stays; the change applies to the next ``/new``) ...
+_STAYS = "stays"
+#: ... or the workflow came up meanwhile, nothing of it stored (a new
+#: conversation on the new backend, ``start_new_session``).
+_STARTS_ANEW = "starts anew"
 
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
@@ -607,11 +631,6 @@ class BaseCLIApp:
     that one reads is set before ``super().__init__()``.
     """
 
-    #: A turn ran in the current conversation since it was opened (its memories
-    #: are proposed on leaving it). A class default: an app built with
-    #: ``__new__`` (tests, an application's own construction) reads it too.
-    _turned: bool = False
-
     #: (job, conversation) pairs whose "could not be resumed now" was said:
     #: the deliveries the CLI makes on its own say it once per conversation.
     #: An immutable class default, replaced on each write, for the same reason.
@@ -620,6 +639,11 @@ class BaseCLIApp:
     #: The status bar's job monitor while ``run()`` runs (None before, and
     #: for an app built with ``__new__``).
     _job_monitor: "JobMonitor | None" = None
+
+    #: The lock on the conversation ``--continue``/``--resume`` chose, taken
+    #: before the prompt and kept by the switch to it once the prompt is up
+    #: (``_open_on_startup``); None otherwise.
+    _pending_hold: Hold | None = None
 
     def __init__(
         self,
@@ -652,13 +676,18 @@ class BaseCLIApp:
         import uuid
 
         self._resume_requested = session_id is not None
-        self._session_id = session_id or uuid.uuid4().hex[:12]
+        # The conversation the turns run in: its id, whether a turn ran in it
+        # since it was opened, and the lock held on it against another
+        # process opening it, at the place the settings keep it in (read
+        # again as run() starts the workflow: cli/conversation.py).
+        self._conversation_core = ConversationCore(
+            session_id or uuid.uuid4().hex[:12], Place.of(settings),
+            opened_empty=session_id is None,  # one given may be stored
+            deferred=session_id is None,  # held from its first write
+        )
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
         self._pending_resume: str | None = None
-        # The conversation this process has open, held against another
-        # process opening it (cli/conversation_lock.py; made on first use).
-        self._conversation_lock: ConversationLock | None = None
         # The command main() was run as, for the lines naming --resume.
         self._command: str | None = None
         #: The process's exit status after run(): 1 when the start was refused.
@@ -686,9 +715,6 @@ class BaseCLIApp:
         # a time, so it orders them against the startup resume
         # (_open_on_startup, a task of its own) and an app's own tasks.
         self._turn_lock = asyncio.Lock()
-        # Whether a turn ran in the current conversation since it was adopted:
-        # its memories are proposed on leaving it, or at exit, only then.
-        self._turned = False
         self.should_exit = False
 
         # === Commands: registered once the session exists (below) ===
@@ -785,12 +811,15 @@ class BaseCLIApp:
 
         When a Save takes effect is declared for each of those keys beside
         them in ``settings_persistence``: one in ``REBUILD_KEYS`` (the model
-        pickers, ``thinking_effort``, ``orchestrator``, the summary
-        thresholds, ``tool_result_max_chars``, the retries and
+        pickers, ``thinking_effort``, the summary thresholds,
+        ``tool_result_max_chars``, the retries and
         ``anthropic_request_timeout``) rebuilds the workflow; one in
-        ``RESTART_KEYS`` (``session_store``, ``log_level``, ``log_format``)
-        is saved, and its line says it takes effect at the next start; one
-        in ``LIVE_KEYS`` (the rest) applies at once.
+        ``NEW_CONVERSATION_KEYS`` (``orchestrator``) starts a new conversation
+        on that backend when the open one holds nothing yet, else applies to
+        the next ``/new``; one in ``RESTART_KEYS`` (``session_store``,
+        ``log_level``, ``log_format``) is saved, and its line says it takes
+        effect at the next start; one in ``LIVE_KEYS`` (the rest) applies at
+        once.
 
         Returns:
             List of field names that should appear in the settings UI
@@ -1001,14 +1030,66 @@ class BaseCLIApp:
         return self._settings
 
     @property
+    def _conversation(self) -> ConversationCore:
+        """The conversation the app is in (``cli/conversation.py``). An app
+        built with ``__new__`` (tests, an application's own construction) gets
+        one, with no id, on first use."""
+        try:
+            return self.__dict__["_conversation_core"]
+        except KeyError:
+            core = self.__dict__["_conversation_core"] = ConversationCore()
+            return core
+
+    @property
+    def _session_id(self) -> str | None:
+        """The conversation's id (``_conversation.session_id``)."""
+        return self._conversation.session_id
+
+    @_session_id.setter
+    def _session_id(self, value: str | None) -> None:
+        self._conversation.session_id = value
+
+    @property
+    def _turned(self) -> bool:
+        """A turn ran in the conversation since it was opened
+        (``_conversation.turned``): its memories are proposed on leaving it."""
+        return self._conversation.turned
+
+    @_turned.setter
+    def _turned(self, value: bool) -> None:
+        self._conversation.turned = value
+
+    @property
     def session_id(self) -> str | None:
-        """Get the persistent session ID, if any."""
+        """The id of the conversation the turns run in.
+
+        Setting it is deprecated (0.7.0): switch with ``await
+        resume_session(id)`` or ``await start_new_session()``, which the
+        workflow loads and which propose the memories of the conversation
+        left. The setter still switches, as far as a setter can (the switch
+        awaits the workflow): it holds the conversation, letting go of the
+        one before, and starts the task list and the usage counters over,
+        with a ``DeprecationWarning``. The workflow is not told until the next
+        turn names the id, and the memories of the conversation left are not
+        proposed. Set it between turns. None names no conversation: the turns
+        run in the one the workflow loaded last, which a ready workflow's
+        ``session_id`` names and which is then held (with none ready, the
+        conversation held stays held).
+
+        Raises:
+            RuntimeError: On setting an id another process has open; nothing
+                changes.
+        """
         return self._session_id
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
-        """Set the persistent session ID."""
-        self._session_id = value
+        warnings.warn(_SESSION_ID_SETTER_DEPRECATED, DeprecationWarning, stacklevel=2)
+        parts = self._switch_parts()
+        holder = self._conversation.switch_now(value, parts)
+        if holder is not None:
+            name = value if value is not None else getattr(parts.workflow, "session_id", value)
+            raise RuntimeError(f"Conversation '{name}' is open in another process ({holder}).")
 
     @property
     def session_start(self) -> SessionStart:
@@ -1095,34 +1176,55 @@ class BaseCLIApp:
         workflow is brought back on the model it was running, so nothing
         unusable stays in memory to be saved by ``/settings``. A restart
         interrupted by Ctrl+C is undone the same way, without a word, and the
-        cancel is re-raised. An orchestrator switch interrupted once the new
-        backend runs (while the old one is released, which goes on) is too
-        late to undo: the change stands and is reported as usual before the
-        cancel is re-raised (``/settings`` saves it), so the settings name
-        the backend that runs.
+        cancel is re-raised. A new conversation on another backend
+        interrupted once that backend runs (while the old one is released,
+        which goes on) is too late to undo: the change stands and is reported
+        as usual before the cancel is re-raised (``/settings`` saves it), so
+        the settings name the backend that runs.
 
         Each change is set on the settings object (``update_setting``; the
         model pickers and the thinking effort through their own setters) and
         takes effect as ``settings_persistence`` declares for its field:
 
         1. ``REBUILD_KEYS`` (read when the workflow builds its agents and
-           their models: the models, the orchestrator, the summary
-           thresholds, the result cap, the retries and request timeout)
-           reinitialize the workflow, or swap it for an orchestrator change;
-        2. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
+           their models: the models, the summary thresholds, the result cap,
+           the retries and request timeout) reinitialize the workflow in
+           place, on the backend it runs;
+        2. ``NEW_CONVERSATION_KEYS`` (``orchestrator``: the backend of new
+           conversations; a conversation never changes backend) start a new
+           conversation on the new backend at once when nothing of the open
+           one is stored (``ConversationCore.fresh``: it began in this run as
+           a new one, or a load found it empty, and no turn of it ran on a
+           ready workflow, even one cancelled or failed, which may have
+           stored its input; read under the turn lock), as ``/new <backend>``
+           does, and the line of the new conversation names its backend;
+           else they are saved, and their line says "(applies to the next
+           /new)": nothing is rebuilt;
+        3. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
            ``log_level``, ``log_format``) are applied and saved, and their
            line says "(takes effect at the next start)";
-        3. any other key (``LIVE_KEYS``, or an app's own) applies at once:
+        4. any other key (``LIVE_KEYS``, or an app's own) applies at once:
            what reads it reads the settings each time.
 
         A reinitialization keeps the sessions, as a model switch does. One
         asked for while the workflow is still starting waits for that start
         first, as a turn does ("Waiting for initialization...": the start
         resolved its models from the settings before the change), and so
-        does a change of ``session_store``, which that start reads; Ctrl+C
-        stops the wait, re-raised, and changes nothing. When that start
-        fails, the change is applied as for any workflow that is not
-        running: nothing is rebuilt, and the next start uses it. A
+        does a change of ``orchestrator``, which needs that start's outcome
+        (one of ``session_store`` does not wait: the run keeps the store its
+        first start took); Ctrl+C stops the wait, re-raised, and changes
+        nothing. When that start fails, the change is applied as for any
+        workflow that is not running: nothing is rebuilt, and the next start
+        uses it. A change of the orchestrator made while the workflow is
+        down, its next start building afresh, has that start run a
+        conversation with nothing stored on the new backend (``_move_here``,
+        decided again under the turn lock: one stored by then stays, and one
+        whose workflow came up meanwhile is left for a new conversation, as
+        on a running workflow). Held from its first write, it has no lock to
+        move; one a line typed while the workflow was down holds is refused,
+        every field restored, when another process has it open there. A
+        change of ``session_store`` moves nothing and no lock: it takes
+        effect at the next start. A
         switch to the deprecated LangGraph orchestrator ends with its
         deprecation warning. A change of ``ui_theme`` switches the session to
         ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
@@ -1139,10 +1241,10 @@ class BaseCLIApp:
             return True
 
         # When each change takes effect (settings_persistence): a key the
-        # workflow reads as it builds its agents and models rebuilds it (an
-        # orchestrator change swaps the backend); one read only as the app
-        # starts is said to take effect at the next start; the rest apply at
-        # once, read where they are used.
+        # workflow reads as it builds its agents and models rebuilds it; the
+        # backend of new conversations starts one on it, or waits for /new;
+        # one read only as the app starts is said to take effect at the next
+        # start; the rest apply at once, read where they are used.
         needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
         at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
 
@@ -1153,16 +1255,19 @@ class BaseCLIApp:
         controller = self._workflow_controller
         if read_by_the_start and controller.state is WorkflowState.INITIALIZING:
             # The start in progress read the settings as they are (its models
-            # first, its session store too): wait for it, as a turn does, so
-            # the rebuild below runs on the new values and the session store
-            # is not taken half way. Ctrl+C stops the wait before anything
-            # changed. A start that fails leaves the workflow down, and the
-            # change is applied for the next start, as for any failed workflow.
+            # first): wait for it, as a turn does, so the rebuild below runs
+            # on the new values, and whether an orchestrator change starts a
+            # new conversation or moves the open one follows its outcome.
+            # Ctrl+C stops the wait before anything changed. A start that
+            # fails leaves the workflow down, and the change is applied for
+            # the next start, as for any failed workflow.
             async with _says_so_when_stopped(self.session):
                 await controller.ensure_initialized(self.session)
 
         new_model = changes.get("model")
         snapshot = _snapshot_settings(self._settings)
+        # The backend the conversation runs on, before the change.
+        backend_before = controller.backend if "orchestrator" in changes else None
         was_langgraph = _runs_langgraph(self._settings)
         theme_before = self._settings.ui_theme
 
@@ -1175,44 +1280,101 @@ class BaseCLIApp:
                 self.session.add_error(f"Failed to set {label}: {e}")
                 return False
 
+        # The backend new conversations run on, and whether it is another than
+        # the open conversation's. A conversation never changes backend once
+        # anything of it is stored (ConversationCore.fresh), read under the
+        # turn lock: after a startup resume or an app's task that holds it.
+        # With nothing stored, a running workflow leaves it for a new
+        # conversation there at once (no rebuild first: the new manager is
+        # built on the new values), and a workflow that is down, whose next
+        # start builds afresh, has that start run it there (below); else the
+        # change waits for /new, and the conversation stays where it is.
+        target = orchestrator_of(self._settings).value
+        if "orchestrator" in changes:
+            try:  # no backend that cannot run is taken, for now or the next /new
+                check_backend(target)
+            except ImportError as error:
+                _restore_settings(self._settings, snapshot)
+                label = _setting_label("orchestrator", self._settings)
+                self.session.add_error(f"Failed to set {label}: {_first_line(error)}")
+                return False
+        moves_backend = "orchestrator" in changes and target != backend_before
+        movable = False
+        if moves_backend:
+            try:
+                async with self._turn_lock:
+                    movable = self._conversation.fresh
+            except asyncio.CancelledError:  # waiting for it: nothing changes
+                _restore_settings(self._settings, snapshot)
+                raise
+        starts_anew = movable and controller.is_ready
+        moves_here = movable and not controller.is_ready and controller.next_start_builds
+        waits_for_new = {
+            key for key in changes if _ui_key_target_field(key) in NEW_CONVERSATION_KEYS
+        }
+        at_next_new = waits_for_new if moves_backend and not (starts_anew or moves_here) else set()
+
+        # The workflow is down, its next start builds afresh, and nothing of
+        # the conversation is stored: that start runs it on the new backend,
+        # where it is held (from its first write, when nothing holds it yet).
+        # Decided again under the turn lock, which the move waits for: what
+        # it finds then is decided as for a running workflow.
+        if moves_here:
+            place = dataclasses.replace(self._place(), backend=target)
+            try:
+                moved = await self._move_here(place)
+            except asyncio.CancelledError:  # it stays where it was
+                _restore_settings(self._settings, snapshot)
+                raise
+            except Exception as error:
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Could not set Orchestrator: {str(error) or type(error).__name__}. "
+                    "Settings were not changed."
+                )
+                return False
+            if moved == _STAYS:  # a turn wrote to it meanwhile, say: it stays
+                at_next_new = waits_for_new
+            elif moved == _STARTS_ANEW:  # the workflow came up meanwhile
+                starts_anew = True
+            elif not moved.made:  # open there in another process: nothing changes
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Could not set Orchestrator: conversation '{self._session_id}' is open "
+                    f"in another process ({moved.holder}) on {place.backend} ({place.store}). "
+                    "Settings were not changed."
+                )
+                return False
+
         # Reinitialize workflow if needed
         switched: list[str] = []
-        swap_note: str | None = None
         interrupted: asyncio.CancelledError | None = None
-        if needs_reinit and controller.is_ready:
+        if needs_reinit and controller.is_ready and not starts_anew:
             previous = controller.workflow
             previous_model = previous.model
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
                 await controller.reinitialize(model=new_model)
-            except asyncio.CancelledError as cancel:
-                if not (controller.is_ready and controller.workflow is not previous):
-                    # Ctrl+C stopped /settings mid-restart. Nothing of the
-                    # Save stays, as on a failure, and nothing is said: the
-                    # session's interruption is not a cancel of the dialog.
-                    _restore_settings(self._settings, snapshot)
-                    if not controller.is_ready:
-                        try:
-                            await controller.reinitialize(model=previous_model)
-                        except Exception as restore_error:
-                            # Down, on the old model: the next request
-                            # retries, and reports a failure then.
-                            logger.warning(
-                                "settings_restore_failed", error=str(restore_error)
-                            )
-                    raise
-                # The switch was made, and Ctrl+C came while the old backend
-                # was released (which goes on): too late to undo. The change
-                # is finished and reported, then the cancel goes on.
-                interrupted = cancel
+            except asyncio.CancelledError:
+                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
+                # stays, as on a failure, and nothing is said: the session's
+                # interruption is not a cancel of the dialog.
+                _restore_settings(self._settings, snapshot)
+                if not controller.is_ready:
+                    try:
+                        await controller.reinitialize(model=previous_model)
+                    except Exception as restore_error:
+                        # Down, on the old model: the next request retries,
+                        # and reports a failure then.
+                        logger.warning("settings_restore_failed", error=str(restore_error))
+                raise
             except Exception as e:
                 _restore_settings(self._settings, snapshot)
                 self.session.add_error(
                     f"Failed to reinitialize workflow: {e}. Settings were not changed."
                 )
-                # A failed orchestrator swap leaves the old manager running; a
-                # failed in-place reinitialize leaves it down, holding the new
-                # model. Bring it back on the model it had.
+                # A failed reinitialize leaves the manager down, holding the
+                # new model. Bring it back on the model it had.
                 if not controller.is_ready:
                     try:
                         await controller.reinitialize(model=previous_model)
@@ -1222,29 +1384,44 @@ class BaseCLIApp:
                             f"{restore_error}"
                         )
                 return False
-            # An orchestrator swap starts another manager: nothing carries over.
-            if controller.workflow is previous:
-                switched = _provider_switches(
-                    previous_models, getattr(previous, "agent_models", {})
+            switched = _provider_switches(previous_models, getattr(previous, "agent_models", {}))
+            _show_new_context(controller, self.session)
+
+        if starts_anew:
+            try:
+                # The app's own /new (an override applies), on the settings'
+                # orchestrator, which names the new backend now.
+                await self.start_new_session()
+            except asyncio.CancelledError as cancel:
+                if controller.backend != target:
+                    # Stopped before the new backend ran: nothing of the Save
+                    # stays ("Operation cancelled...", as /new says it).
+                    _restore_settings(self._settings, snapshot)
+                    raise
+                # It runs, and its conversation is open: too late to undo. The
+                # change is reported (and saved), then the cancel goes on.
+                interrupted = cancel
+            except Exception as error:
+                _restore_settings(self._settings, snapshot)
+                reason = _first_line(error)
+                self.session.add_error(
+                    f"Could not start a new conversation on {target}: {reason}. "
+                    "Settings were not changed."
                 )
-            else:
-                swap_note = await self._open_here(controller.workflow)
-            _show_new_context(
-                controller, self.session, swapped=controller.workflow is not previous
-            )
+                return False
 
         # Report changes
         for key, value in changes.items():
             line = f"{_setting_label(key, self._settings)}: {value}"
             if key in at_next_start:
                 line += f" {_AT_NEXT_START}"
+            elif key in at_next_new:
+                line += f" {_AT_NEXT_NEW}"
             self.session.add_success(line)
         for notice in switched:
             self.session.add_message("system", notice)
-        if not was_langgraph:  # a switch to it, not a change made while on it
-            _warn_if_langgraph(self._settings, self.session)
-        if swap_note is not None:
-            self.session.add_message("system", swap_note)
+        if not was_langgraph and not starts_anew:  # a switch to it (the new
+            _warn_if_langgraph(self._settings, self.session)  # conversation said it)
         if self._settings.ui_theme != theme_before:
             # Repaint: text printed before would keep the old theme's colors.
             # The transcript is printed again, the lines above included.
@@ -1254,19 +1431,57 @@ class BaseCLIApp:
             raise interrupted
         return True
 
-    async def _open_here(self, workflow: Any) -> str:
-        """The conversation's id on a new backend after a swap, and what to say.
+    async def _move_here(self, place: Place) -> Switch | str:
+        """Have the next start run the conversation on ``place``'s backend.
 
-        Sessions do not move between backends (neither reads the other's
-        store), so the new one continues the id from empty; adopting it there
-        keeps ``/status`` and the memories proposed at exit on this conversation,
-        not on the manager's default session.
+        Decided again under the turn lock, which it waits for (an app's task
+        may hold it, and run a turn or start the workflow meanwhile): it
+        moves only while the workflow is down, its next start builds a
+        manager afresh, and nothing of the conversation is stored
+        (``ConversationCore.fresh``): one with anything stored never changes
+        backend. Else it returns what it found, decided as for a running
+        workflow: ``_STAYS`` (something of it is stored, or the next start
+        revives a manager kept on its backend: the change waits for
+        ``/new``) or ``_STARTS_ANEW`` (the workflow came up, nothing of it
+        stored: the caller starts a new conversation there, as on a running
+        workflow; this one stays where it ran).
+
+        One this run made is held from its first write, so mostly there is
+        no hold to move; when one holds it (a line typed while the workflow
+        was down), its lock is taken there. The controller is told the
+        backend its next start builds (``switch_backend``), then the switch
+        to the same id there is made at once (no workflow runs: no await),
+        letting go of where it was held. A cancel while it waits (for the
+        turn lock, or for the controller) leaves it where it was, on the
+        backend it had.
+
+        Returns:
+            How the switch ended: made, or refused (another process has it
+            open there, and nothing changed); else ``_STAYS`` or
+            ``_STARTS_ANEW`` (nothing changed).
         """
-        try:
-            await workflow.load_session(self._session_id)
-        except Exception:  # noqa: BLE001 - the next turn names its conversation anyway
-            logger.debug("swap_adopt_failed", session_id=self._session_id, exc_info=True)
-        return _SWAP_NOTE
+        core, controller = self._conversation, self._workflow_controller
+        async with self._turn_lock:
+            if not core.fresh:
+                return _STAYS
+            if controller.is_ready:
+                return _STARTS_ANEW
+            if not controller.next_start_builds:
+                return _STAYS
+            if core.deferred:  # nothing holds it yet: none to move
+                hold: Hold | int = Hold(self._session_id, place, None)
+            else:
+                hold = core.acquire(self._session_id, place)
+            if isinstance(hold, int):
+                return Switch(made=False, holder=hold)
+            try:
+                await controller.switch_backend(place.backend)
+            except BaseException:
+                core.abandon(hold)
+                raise
+            return await core.switch(
+                self._session_id, self._switch_parts(), place=place, propose=False, hold=hold
+            )
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
@@ -1363,20 +1578,40 @@ class BaseCLIApp:
         Args:
             message: User message to process
         """
-        # Echo user input for regular messages
-        self.session.add_message("user", message)
-
-        # Delegate to message processor (one turn at a time).
-        async with self._turn_lock:
+        # Delegate to message processor (one turn at a time). Echoed as its
+        # turn starts: a line typed while the conversation --continue/--resume
+        # asked for opens shows under its replay; one Ctrl+C stops while it
+        # waits is shown and said cancelled (it never ran), not dropped unseen.
+        try:
+            await self._turn_lock.acquire()
+        except asyncio.CancelledError:
+            self.session.add_message("user", message)
+            self.session.add_message("system", CANCELLED_LINE)
+            raise
+        try:
+            self.session.add_message("user", message)
+            if not self._held_to_write():
+                return
             self._turned = True  # the conversation now holds this message
-            await self._message_processor.process(
-                message=message,
-                workflow_controller=self._workflow_controller,
-                ui=self.session,
-                settings=self._settings,
-                usage_tracker=self._usage_tracker,
-                session_id=self._session_id,
-            )
+            reached = False  # the turn reached a ready workflow, which stores it
+            try:
+                result = await self._message_processor.process(
+                    message=message,
+                    workflow_controller=self._workflow_controller,
+                    ui=self.session,
+                    settings=self._settings,
+                    usage_tracker=self._usage_tracker,
+                    session_id=self._session_id,
+                )
+                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+            except BaseException:
+                reached = self._workflow_controller.is_ready  # it may have begun
+                raise
+            finally:
+                if reached:
+                    self._conversation.written = True
+        finally:
+            self._turn_lock.release()
 
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).
@@ -1458,12 +1693,11 @@ class BaseCLIApp:
         """Claim one job and run its resume turn, and close out its transition.
 
         Under the turn lock the job is looked at again: another conversation
-        may have become current while this waited for it (``--continue`` and
-        ``--resume`` switch once the prompt is up, as a task of their own,
-        after a turn typed ahead took the lock). A job that now waits for its
-        conversation is not claimed, nor told here, where ``ctx`` and the task
-        list are another conversation's: it stays pending until its
-        conversation is opened. The claim is durable, so an interrupted
+        may have become current while this waited for it (an app's own task
+        that called ``resume_session`` or ``start_new_session`` took the lock
+        first). A job that now waits for its conversation is not claimed, nor
+        told here, where ``ctx`` and the task list are another conversation's:
+        it stays pending until its conversation is opened. The claim is durable, so an interrupted
         delivery is recoverable and two coordinators cannot both deliver the
         same result.
 
@@ -1506,11 +1740,16 @@ class BaseCLIApp:
             claimed = await _claim_delivery(jm, record.job_id)
             if claimed and getattr(record, "session_id", None) == self._session_id:
                 self._turned = True  # the resume adds to this conversation
+                # Defensive: a job of this conversation was submitted by a
+                # turn, which stored it already (fresh was False before).
+                self._conversation.written = True
             return claimed
 
         try:
             async with self._turn_lock:
                 if not await self._told_here(record):
+                    return None
+                if not self._held_to_write():  # its notice is written here
                     return None
                 result = await self._message_processor.process_resume(
                     record=record,
@@ -1583,6 +1822,8 @@ class BaseCLIApp:
             What the summary did; None when nothing was summarized.
         """
         async with self._turn_lock:
+            if not self._held_to_write():
+                return None
             return await self._message_processor.process_compact(
                 focus,
                 workflow_controller=self._workflow_controller,
@@ -1592,17 +1833,19 @@ class BaseCLIApp:
                 session_id=self._session_id,
             )
 
-    async def start_new_session(self) -> str:
+    async def start_new_session(self, backend: str | None = None) -> str:
         """Start a new conversation in this process (``/new``), and return its id.
 
-        Waits for a running turn or job resume (the turn lock), then:
+        Waits for a running turn or job resume (the turn lock), then switches
+        as every change of conversation does (``ConversationCore.switch``):
 
         - with ``auto_extract_session_facts`` on, proposes memories from the
           conversation being left when a turn ran in it since it was opened,
           as at exit, under a status line ("Looking for memories to
           propose…"; a failure never stops it);
         - adopts a new session id once the workflow has taken it
-          (``workflow.load_session``), and every later turn targets it;
+          (``workflow.load_session``), and every later turn targets it; this
+          process holds it, and lets the one left go;
         - ends the task box and forgets its tasks, zeroes the usage counters,
           and draws the status bar again: ``ctx`` waits for the new
           conversation's first call.
@@ -1617,36 +1860,98 @@ class BaseCLIApp:
         conversation that started it (a finished job waits until that
         conversation is opened).
 
+        A conversation runs on one backend for its whole life (each keeps
+        its history in its own store), so the new one runs on ``backend``,
+        by default the settings' ``orchestrator``, the backend of new
+        conversations. On another backend than the one running, the
+        memories of the conversation left are proposed first (its backend
+        holds it), then a manager of ``backend`` is started
+        (``WorkflowController.switch_backend``: a failure there changes
+        nothing), and the line names it: ``"New conversation <new> on
+        deepagents."``, with ``" Previous: <old>, kept by adk."`` when the
+        conversation left is stored; one on LangGraph is told it is
+        deprecated. A Ctrl+C once the new backend runs (the old one is being
+        released) is too late to undo: the new conversation is opened there
+        first, then the cancel goes on. The backend chosen is not saved to
+        any settings file.
+
+        Args:
+            backend: The backend the new conversation runs on: ``adk``,
+                ``deepagents`` or ``langgraph``.
+
         Returns:
             The new session id (12 hex characters).
-        """
-        import uuid
 
+        Raises:
+            ValueError: ``backend`` is no orchestrator.
+            ImportError: Its extra is not installed (the message says how to
+                install it); nothing changed.
+        """
+        target = check_backend(backend).value if backend is not None else None
         async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
-                old = self._session_id
-                controller = self._workflow_controller
-                ready = controller.is_ready
-                if self._turned:  # memories proposed once per conversation used
-                    await self._saving_facts(old)
-                    self._turned = False
-                stored = ready and await self._is_stored(controller.workflow, old)
-                new = uuid.uuid4().hex[:12]
-                if ready:
-                    await controller.workflow.load_session(new)
-                self._hold(new)  # a new id: nobody else has it open
-                self._session_id = new
+                return await self._new_conversation(target)
+
+    async def _new_conversation(self, backend: str | None) -> str:
+        """``start_new_session``'s switch, under the turn lock: on ``backend``
+        (the settings' orchestrator when None)."""
+        import uuid
+
+        controller = self._workflow_controller
+        old, old_backend = self._session_id, controller.backend
+        target = backend or orchestrator_of(self._settings).value
+        moving = target != old_backend
+        if moving and backend is None:
+            check_backend(target)  # before anything changes
+        parts = self._switch_parts()
+        stored = parts.workflow is not None and await self._is_stored(parts.workflow, old)
+        place, interrupted = None, None
+        if moving:
+            if self._turned:  # proposed while the backend that holds them runs
+                await self._saving_facts(old)
                 self._turned = False
-                self._message_processor.reset()
-                self._usage_tracker.reset()
-                # The trigger as a /settings rebuild shows it; no prompt yet.
-                _show_new_context(controller, self.session, swapped=False)
-                logger.info("new_session_started", session_id=new, previous=old)
+            try:
+                await controller.switch_backend(target)
+            except asyncio.CancelledError as cancel:
+                if controller.backend != target:
+                    raise  # it never ran: nothing changed
+                interrupted = cancel  # it runs: its conversation is opened, then the cancel
+            parts = self._switch_parts()
+            place = dataclasses.replace(self._place(), backend=target)  # the run's store
+        new = uuid.uuid4().hex[:12]
+
+        def opened() -> None:
+            """Say where the app is now."""
+            if moving:
+                line = f"New conversation {new} on {target}."
+                if stored:
+                    line += f" Previous: {old}, kept by {old_backend}."
+            else:
                 line = f"New conversation {new}."
                 if stored:
                     line += f" Previous: {old}, listed in /sessions."
-                self.session.add_message("system", line)
-                return new
+            self.session.add_message("system", line)
+            if moving and target == OrchestratorType.LANGGRAPH.value:
+                self.session.add_warning(_LANGGRAPH_DEPRECATION)
+
+        try:
+            switched = await self._conversation.switch(
+                new, parts, place=place, propose=not moving, generated=True
+            )
+        except asyncio.CancelledError:
+            if self._session_id == new:
+                # On another backend the switch is made before the load, which
+                # the cancel stopped: the app is there, and says so.
+                opened()
+                _show_new_context(controller, self.session)
+            raise
+        if not switched.made:  # a new id: never open elsewhere in practice
+            raise RuntimeError(f"'{new}' is open in another process ({switched.holder})")
+        logger.info("new_session_started", session_id=new, previous=old, backend=target)
+        opened()
+        if interrupted is not None:
+            raise interrupted
+        return new
 
     async def resume_session(self, session_id: str) -> bool:
         """Switch to the stored conversation ``session_id`` (``/resume``), and show where it left off.
@@ -1679,13 +1984,19 @@ class BaseCLIApp:
 
     async def _resume(self, session_id: str) -> bool:
         """``resume_session`` without its "Operation cancelled..." line: at
-        startup (``_open_on_startup``) a Ctrl+C ends the app, not the switch.
+        startup (``_open_on_startup``, which holds the turn lock) a Ctrl+C
+        ends the app, not the switch. The lock the start took on
+        ``session_id`` before the prompt is the one the switch keeps.
 
         Its finished jobs are named, not run: this runs outside the input
         handler, where Ctrl+C cannot stop a turn. They are told at the first
         turn boundary (``job_auto_resume``) or by ``/jobs resume``.
         """
-        opened = await self._open_conversation(session_id)
+        hold, self._pending_hold = self._pending_hold, None
+        if hold is not None and hold.session_id != session_id:
+            self._conversation.abandon(hold)
+            hold = None
+        opened = await self._open(session_id, hold)
         if opened:
             await self._name_its_waiting_jobs()
         return opened
@@ -1726,18 +2037,30 @@ class BaseCLIApp:
             await self._resume_on_its_own()
 
     async def _open_conversation(self, session_id: str) -> bool:
-        """The switch itself, under the turn lock (``resume_session``)."""
+        """The switch to a stored conversation, under the turn lock (``resume_session``)."""
         async with self._turn_lock:
+            return await self._open(session_id)
+
+    async def _open(self, session_id: str, hold: Hold | None = None) -> bool:
+        """Open the stored conversation ``session_id``: its row and messages
+        are read first, then the switch (``ConversationCore.switch``).
+
+        The caller holds the turn lock. ``hold`` is ``session_id``'s lock,
+        taken already (at startup, before the prompt): it is kept once the
+        switch is made, and let go on every other way out.
+        """
+        switching = False
+        try:
             if session_id == self._session_id:
                 self.session.add_message("system", "Already in this conversation.")
                 return False
-            controller = self._workflow_controller
-            if not controller.is_ready:
+            parts = self._switch_parts()
+            workflow = parts.workflow
+            if workflow is None:
                 self.session.add_error(
                     f"Could not open '{session_id}': the workflow is not ready."
                 )
                 return False
-            workflow = controller.workflow
             try:
                 info = await workflow.session_info(session_id)
                 messages = (
@@ -1755,59 +2078,91 @@ class BaseCLIApp:
             line = resumed_line(info, datetime.now(timezone.utc))
             replay = replay_lines(messages)
             old = self._session_id
-            # Held beside the one it is in until the switch is done: a Ctrl+C
-            # or a failure below keeps the one it stays in, and lets this go.
-            taken = self._acquire(session_id)
-            if isinstance(taken, int):
-                self.session.add_error(
-                    f"Could not open '{session_id}': it is open in another process ({taken})."
-                )
-                return False
-            adopted = False
+            switching = True  # the switch keeps the hold or lets it go
             try:
-                if self._turned:  # memories proposed once per conversation used
-                    await self._saving_facts(old)
-                    self._turned = False  # proposed: a switch that fails now proposes none again
-                try:
-                    stored = await workflow.load_session(session_id)
-                    # Not stored now: deleted since it was read (another
-                    # process's /sessions --delete), unless it is still
-                    # listed, holding no message yet.
-                    gone = not stored and await workflow.session_info(session_id) is None
-                except Exception as error:  # noqa: BLE001 - the id is not adopted
-                    logger.debug("session_open_failed", session_id=session_id, exc_info=True)
-                    reason = str(error) or type(error).__name__
-                    self.session.add_error(f"Could not open '{session_id}': {reason}")
-                    return False
-                if gone:
-                    await self._readopt(workflow, old)
-                    self.session.add_error(f"No conversation '{session_id}' found.")
-                    return False
-                adopted = True
-            finally:
-                if adopted:
-                    self._commit(taken)
-                else:
-                    self._abandon(taken)
-            self._session_id = session_id
-            self._turned = False
-            self._message_processor.reset()
-            self._usage_tracker.reset()
-            _show_new_context(controller, self.session, swapped=False)
-            logger.info("session_resumed", session_id=session_id, previous=old)
-            self.session.add_message("system", line)
-            show_replay(self.session, replay)
-            return True
+                switched = await self._conversation.switch(
+                    session_id, parts, stored=True, hold=hold
+                )
+            except Exception as error:  # noqa: BLE001 - the id is not adopted
+                if self._session_id == session_id:
+                    raise  # opened: what failed after it is the caller's to say
+                logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+                reason = str(error) or type(error).__name__
+                self.session.add_error(f"Could not open '{session_id}': {reason}")
+                return False
+        finally:
+            if hold is not None and not switching:
+                self._conversation.abandon(hold)
+        if switched.holder is not None:
+            self.session.add_error(
+                f"Could not open '{session_id}': it is open in another process "
+                f"({switched.holder})."
+            )
+            return False
+        if switched.gone:  # deleted since it was read (another process's /sessions --delete)
+            self.session.add_error(f"No conversation '{session_id}' found.")
+            return False
+        logger.info("session_resumed", session_id=session_id, previous=old)
+        self.session.add_message("system", line)
+        show_replay(self.session, replay)
+        return True
 
-    @staticmethod
-    async def _readopt(workflow: Any, session_id: str) -> None:
-        """Give ``session_id`` back to the workflow, after a load that adopted
-        another conversation and found it gone. Never raises: the turns name
-        their conversation anyway."""
+    def _held_to_write(self) -> bool:
+        """Hold the conversation before it is written, when its id was made by
+        this run (``ConversationCore.hold_to_write``); the caller holds the
+        turn lock. False, said, when another process has it open (a collision
+        of random ids): the write must not happen.
+
+        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
+        on a postgres store) does not stop the write: the conversation runs
+        unheld, as an id given to the app does whose startup hold failed,
+        and the run says so once.
+        """
+        core = self._conversation
         try:
-            await workflow.load_session(session_id)
-        except Exception:  # noqa: BLE001 - a lookup, the next turn goes on
-            logger.debug("session_readopt_failed", session_id=session_id, exc_info=True)
+            holder = core.hold_to_write()
+        except OSError as error:
+            logger.debug(
+                "conversation_hold_failed", session_id=core.session_id, exc_info=True
+            )
+            core.deferred = False  # written unheld: not tried again
+            if not getattr(self, "_said_unheld", False):
+                self._said_unheld = True
+                reason = str(error) or type(error).__name__
+                self.session.add_warning(
+                    f"Could not hold conversation '{core.session_id}' for this "
+                    f"process: {reason}. Its turns run unheld, so another process "
+                    "could open it too."
+                )
+            return True
+        if holder is None:
+            return True
+        self.session.add_error(
+            f"Conversation '{self._session_id}' is open in another process ({holder})."
+        )
+        return False
+
+    def _switch_parts(self, *, drawn: bool = True) -> SwitchParts:
+        """What a switch acts on besides the conversation, as the app has it now.
+
+        Args:
+            drawn: Draw the status line after the switch (not before the
+                prompt: the start draws it).
+        """
+        controller = self._workflow_controller
+        self._place()  # known before anything is held (an app built with __new__)
+
+        def status() -> None:
+            if drawn:  # the trigger as a /settings rebuild shows it; no prompt yet
+                _show_new_context(controller, self.session)
+
+        return SwitchParts(
+            workflow=controller.workflow if controller.is_ready else None,
+            processor=self._message_processor,
+            tracker=self._usage_tracker,
+            propose=self._saving_facts,
+            status=status,
+        )
 
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
@@ -1829,7 +2184,7 @@ class BaseCLIApp:
             if info.session_id != self._session_id
         ][:PICK_LIMIT]
         if not rows:
-            note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+            note = "" if self._place().locked else _MEMORY_NOTE
             self.session.add_message("system", f"No other conversations to resume.{note}")
             return None
         # Drawn where the settings say now: /settings may have changed the
@@ -1916,7 +2271,12 @@ class BaseCLIApp:
 
         Runs for every startup: a fresh auto-generated id must be adopted too,
         otherwise turns fall back to the manager's ``default_session`` and
-        unnamed runs silently share one conversation. By ``session_start``:
+        unnamed runs silently share one conversation. The run's own
+        conversation is held and loaded through the switch every change of
+        conversation makes (``ConversationCore.switch``), even when the
+        workflow did not start: the turns write to it once ``/settings``
+        fixes the start, so no other process may open it meanwhile. By
+        ``session_start``:
 
         - ``"continue"`` finds the newest stored conversation no other
           process has open (``_newest_free``, among the newest ``PICK_LIMIT``
@@ -1928,6 +2288,11 @@ class BaseCLIApp:
           opens the newest, /resume in the app picks one."), ``exit_status``
           is 1, and False is returned;
         - ``"new"`` starts in the new conversation.
+
+        The conversation ``"continue"`` or ``"resume"`` chose is held from
+        here (another process asking for it is refused), beside the run's
+        own, until the switch to it once the prompt is up keeps it or lets
+        it go.
 
         A workflow that cannot start keeps the prompt, so ``/settings`` can
         fix it, and says how to resume then; a backend without sessions
@@ -1948,14 +2313,14 @@ class BaseCLIApp:
                 "The workflow did not start. Fix it with /settings; "
                 "your next message starts it again.",
             ))
-            return True
+            return await self._adopt_its_own()
 
         workflow = self._workflow_controller.workflow
         if mode != "new" and not getattr(workflow, "supports_sessions", False):
             self.session.add_error("This app's backend keeps no sessions.")
             self.exit_status = 1
             return False
-        note = _MEMORY_NOTE if self._settings.session_store == "memory" else ""
+        note = "" if self._place().locked else _MEMORY_NOTE
         try:
             if mode == "resume":
                 if await workflow.session_info(target) is None:
@@ -1968,24 +2333,26 @@ class BaseCLIApp:
                     self.session.add_error(f"No conversation '{target}' found{run}{note}")
                     self.exit_status = 1
                     return False
-                holder = self._hold(target)
-                if holder is not None:
+                taken = self._conversation.acquire(target, self._place())
+                if isinstance(taken, int):
                     self.session.add_error(
-                        f"Conversation '{target}' is open in another process ({holder})."
+                        f"Conversation '{target}' is open in another process ({taken})."
                     )
                     self.exit_status = 1
                     return False
-                self._pending_resume = target
+                self._pending_resume, self._pending_hold = target, taken
             elif mode == "continue":
                 # A listing can read whole sessions (ADK's from before the
                 # title keys): the newest alone, unless it is held.
-                self._pending_resume, passed_over = self._newest_free(
+                self._pending_hold, passed_over = self._newest_free(
                     await workflow.list_sessions(limit=1)
                 )
                 if passed_over:
-                    self._pending_resume, passed_over = self._newest_free(
+                    self._pending_hold, passed_over = self._newest_free(
                         await workflow.list_sessions(limit=PICK_LIMIT)
                     )
+                if self._pending_hold is not None:
+                    self._pending_resume = self._pending_hold.session_id
                 if passed_over:
                     self.session.add_warning(_passed_over_line(
                         passed_over, continuing=self._pending_resume
@@ -2005,42 +2372,57 @@ class BaseCLIApp:
                 f"Could not list the saved conversations: {reason}. Starting a new one."
             )
 
-        if self._pending_resume is None:  # this run's own conversation, held until it leaves
-            holder = self._hold(self._session_id)
-            if holder is not None:
-                self.session.add_error(
-                    f"Conversation '{self._session_id}' is open in another process ({holder})."
-                )
-                self.exit_status = 1
-                return False
+        return await self._adopt_its_own()
+
+    async def _adopt_its_own(self) -> bool:
+        """Load the conversation the run starts in (the switch to it, before
+        the prompt: no memories to propose, no status line yet, which the
+        start draws), holding an id given to the constructor; one this run
+        made is in no store, so it is held from its first write
+        (``ConversationCore.deferred``) and a run in which no turn runs makes
+        no lock file. False, status 1, when another process has a given id
+        open."""
+        session_id = self._session_id
         try:
-            resumed = await workflow.load_session(self._session_id)
+            switched = await self._conversation.switch(
+                session_id, self._switch_parts(drawn=False), propose=False
+            )
         except Exception as error:  # noqa: BLE001 - turns name their conversation anyway
             logger.debug("session_adopt_failed", exc_info=True)
             self.session.add_warning(
                 f"Cannot adopt session — {str(error) or type(error).__name__}"
             )
-            return True
-        if resumed:
-            self.session.add_success(f"Session '{self._session_id}' resumed.")
-        elif self._resume_requested:
+            return True  # made all the same: the switch is made before the load
+        if not switched.made:
+            if self._pending_hold is not None:
+                self._conversation.abandon(self._pending_hold)
+                self._pending_resume = self._pending_hold = None
+            self.session.add_error(
+                f"Conversation '{session_id}' is open in another process ({switched.holder})."
+            )
+            self.exit_status = 1
+            return False
+        if switched.loaded:
+            self.session.add_success(f"Session '{session_id}' resumed.")
+        elif switched.loaded is False and self._resume_requested:
             # An explicit session_id that didn't exist yet: tell the user it's new.
-            self.session.add_message("system", f"New session '{self._session_id}'.")
+            self.session.add_message("system", f"New session '{session_id}'.")
         return True
 
-    def _newest_free(self, rows: "list[SessionInfo]") -> tuple[str | None, list[tuple[str, int]]]:
-        """The newest of ``rows`` no other process has open, now held here.
+    def _newest_free(self, rows: "list[SessionInfo]") -> tuple[Hold | None, list[tuple[str, int]]]:
+        """The newest of ``rows`` no other process has open, now held here
+        (beside the conversation held; the switch to it keeps it or lets it go).
 
         Returns:
-            Its id (None when every one is open elsewhere, or there is none),
+            Its hold (None when every one is open elsewhere, or there is none),
             and the newer ones passed over, each with the process holding it.
         """
         passed_over: list[tuple[str, int]] = []
         for info in rows:
-            holder = self._hold(info.session_id)
-            if holder is None:
-                return info.session_id, passed_over
-            passed_over.append((info.session_id, holder))
+            taken = self._conversation.acquire(info.session_id, self._place())
+            if not isinstance(taken, int):
+                return taken, passed_over
+            passed_over.append((info.session_id, taken))
         return None, passed_over
 
     async def _open_on_startup(self) -> None:
@@ -2052,47 +2434,52 @@ class BaseCLIApp:
         the input handler, so a Ctrl+C here ends the app, as at an idle prompt
         (its resume, cancelled on the way out, says nothing of a cancel). A
         failure is said and logged: the new conversation goes on.
+
+        With a conversation to resume it holds the turn lock from its start,
+        which comes before the prompt can take a line (``run()`` starts it
+        first): a turn typed or pasted ahead waits for the resume and runs in
+        the conversation asked for, not in the run's new one.
         """
-        while not self.session.app.is_running:
-            await asyncio.sleep(0.02)
-        await self._name_waiting_proposals()
-        if self._pending_resume is None:
-            return
         target = self._pending_resume
-        try:
-            if not await self._resume(target):
-                self._hold(self._session_id)  # it stays in its new one: give the target back
-        except Exception as error:  # noqa: BLE001 - the new conversation goes on
-            if self._session_id != target:
-                self._hold(self._session_id)
-            logger.debug("startup_open_failed", session_id=target, exc_info=True)
-            reason = str(error) or type(error).__name__
-            if self._session_id == target:  # opened: the next turn goes there
-                self.session.add_error(
-                    f"Opened '{target}', but could not show where it left off: {reason}"
-                )
-            else:
-                self.session.add_error(f"Could not open '{target}': {reason}")
+        async with self._turn_lock if target is not None else contextlib.nullcontext():
+            while not self.session.app.is_running:
+                await asyncio.sleep(0.02)
+            await self._name_waiting_proposals()
+            if target is None:
+                return
+            try:
+                await self._resume(target)  # one not opened stays in the run's own
+            except Exception as error:  # noqa: BLE001 - the new conversation goes on
+                logger.debug("startup_open_failed", session_id=target, exc_info=True)
+                reason = str(error) or type(error).__name__
+                if self._session_id == target:  # opened: the next turn goes there
+                    self.session.add_error(
+                        f"Opened '{target}', but could not show where it left off: {reason}"
+                    )
+                else:
+                    self.session.add_error(f"Could not open '{target}': {reason}")
+
+    def _place(self) -> Place:
+        """Where the conversation is kept: its backend and store, as the
+        workflow runs them.
+
+        Recorded when the workflow starts (``run()``), for a new conversation
+        on another backend, and when ``/settings`` changes the orchestrator
+        while the workflow is down and nothing of the conversation is stored
+        (``_move_here``); never read from the settings in between. The store
+        is the run's for its whole life (a change of ``session_store`` takes
+        effect at the next app start). An app built with ``__new__`` reads
+        its settings on first use.
+        """
+        core = self._conversation
+        if core.place is None:
+            core.place = Place.of(self._settings)
+        return core.place
 
     def _conversation_key(self, session_id: str) -> tuple:
         """What names a stored conversation for its lock: the same id in
         another backend or store is another conversation."""
-        orchestrator = getattr(self._settings, "orchestrator", "")
-        return (
-            getattr(orchestrator, "value", orchestrator), self._settings.session_store,
-            self._settings.app_name, self._settings.default_user, session_id,
-        )
-
-    def _acquire(self, session_id: str) -> "Taken | int | None":
-        """``_hold``'s first half: ``session_id`` held beside the one held now.
-
-        Returns:
-            The hold to ``_commit`` or ``_abandon``; the process id holding it
-            elsewhere; None on the memory store, which locks nothing.
-        """
-        if self._settings.session_store == "memory":
-            return None
-        return self._lock().acquire(self._conversation_key(session_id))
+        return self._place().key(session_id)
 
     @contextmanager
     def conversation_held(self, session_id: str) -> Iterator[int | None]:
@@ -2107,29 +2494,16 @@ class BaseCLIApp:
             needed); else the process id that has it open (0 when unknown),
             and nothing is held.
         """
-        taken = self._acquire(session_id)
+        taken = self._conversation.acquire(session_id, self._place())
         if isinstance(taken, int):
             yield taken
             return
         try:
             yield None
         finally:
-            self._abandon(taken)
+            self._conversation.abandon(taken)
             if self._job_monitor is not None:
                 self._job_monitor.forget_conversations()
-
-    def _commit(self, taken: "Taken | None") -> None:
-        if taken is not None:
-            self._lock().commit(taken)
-
-    def _abandon(self, taken: "Taken | None") -> None:
-        if taken is not None:
-            self._lock().abandon(taken)
-
-    def _lock(self) -> ConversationLock:
-        if self._conversation_lock is None:
-            self._conversation_lock = ConversationLock(self._settings.sessions_dir / "locks")
-        return self._conversation_lock
 
     def _hold(self, session_id: str) -> int | None:
         """Hold ``session_id``'s conversation for this process, letting go of the one before.
@@ -2143,15 +2517,40 @@ class BaseCLIApp:
             None once it is held; else the process id of the one holding it
             (0 when unknown), and the conversation held before stays held.
         """
-        if self._settings.session_store == "memory":
-            return None
-        return self._lock().take(self._conversation_key(session_id))
+        return self._conversation.hold(session_id, self._place())
+
+    def _let_go(self) -> None:
+        """At exit: let go of the conversation held, and of one the start held
+        for ``--continue``/``--resume`` and did not open (an exit before it)."""
+        if self._pending_hold is not None:
+            self._conversation.abandon(self._pending_hold)
+            self._pending_hold = None
+        self._conversation.release()
 
     def _resume_hint(self) -> str:
-        """The exit line that names how to come back to the current conversation."""
+        """The exit line that names how to come back to the current conversation.
+
+        ``--resume`` (and ``/resume``) open a conversation on the settings'
+        orchestrator, the backend of new conversations, in the settings'
+        session store: one that runs on another backend (``/new
+        <backend>``), or in the store this run keeps after a change of
+        ``session_store`` (which takes effect at the next start), is found
+        once the settings name its backend and its store, and the line says
+        so.
+        """
         if self._command:
-            return f"Resume this conversation with: {self._command} --resume {self._session_id}"
-        return f"Resume this conversation with /resume {self._session_id}"
+            hint = f"Resume this conversation with: {self._command} --resume {self._session_id}"
+        else:
+            hint = f"Resume this conversation with /resume {self._session_id}"
+        place = self._place()
+        other_backend = place.backend != orchestrator_of(self._settings).value
+        settings_first = [f"orchestrator to {place.backend}"] if other_backend else []
+        if place.store != self._settings.session_store:
+            settings_first.append(f"session_store to {place.store}")
+        if settings_first:
+            why = "it runs there" if other_backend else "it is stored there"
+            hint += f" (set {' and '.join(settings_first)} first: {why})"
+        return hint
 
     async def _extract_session_facts_on_exit(self) -> None:
         """Propose memories from the session on exit (if enabled).
@@ -2181,6 +2580,8 @@ class BaseCLIApp:
         # Once, before anything waits for the workflow: a backend that cannot
         # start (its extra missing, or a key) is still deprecated.
         _warn_if_langgraph(self._settings, self.session)
+        # The place the workflow starts in keys the conversation's lock.
+        self._conversation.place = Place.of(self._settings)
 
         async with self._workflow_controller.background_init(self.session):
             # Adopt this run's session id (generated, or session_id=) so every
@@ -2189,6 +2590,7 @@ class BaseCLIApp:
             # of a conversation that is not stored ends here, before the prompt.
             if not await self._adopt_session_on_startup():
                 logger.info("app_start_refused", exit_status=self.exit_status)
+                self._let_go()
                 return
 
             # Register input handler
@@ -2219,7 +2621,7 @@ class BaseCLIApp:
             # Named at exit when a later run can resume it: stored, not in memory.
             controller = self._workflow_controller
             resumable = (
-                self._settings.session_store != "memory"
+                self._place().locked  # stored, not on the memory store
                 and controller.is_ready
                 and await self._is_stored(controller.workflow, self._session_id)
             )
@@ -2227,11 +2629,16 @@ class BaseCLIApp:
         # No save-on-exit: durable session stores persist continuously per turn.
 
         logger.info("app_ending")
-        if self._conversation_lock is not None:
-            self._conversation_lock.release()
+        self._let_go()
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")
+
+
+def _first_line(error: BaseException) -> str:
+    """What a line says of ``error``: its first line (a backend's missing extra
+    adds the import's own error after it), or its type when it has no words."""
+    return (str(error) or type(error).__name__).split("\n")[0]
 
 
 def _model_picker(key: str, choices: _ModelChoices) -> Field:
@@ -2276,30 +2683,24 @@ def _resolved_role(
         return None
 
 
-def _show_new_context(
-    controller: WorkflowController, session: Any, *, swapped: bool
-) -> None:
+def _show_new_context(controller: WorkflowController, session: Any) -> None:
     """Show ``ctx`` against the rebuilt agents' trigger now, not after the next call.
 
     A reinitialize may move the main agent's trigger (a model of another
     window, ``context_summarize_at``, ``context_max_tokens``), and the last
-    prompt may already be past the new one. The usage tracker takes the
+    prompt may already be past the new one; a switch of conversation starts
+    one whose trigger the workflow knows. The usage tracker takes the
     trigger and the window flag from ``workflow.context_budget()``: none when
     the manager manages no context (``KeyError``), has no such method, or
-    is not ready (it failed to start; the status bar then says so). An
-    orchestrator swap starts another manager, whose conversation is another
-    one: the tracker forgets the context (the session's totals stay). The
+    is not ready (it failed to start; the status bar then says so). The
     status bar is then drawn again.
 
     Args:
         controller: The app's workflow controller, after the reinitialize.
         session: The UI session whose status bar is drawn.
-        swapped: The reinitialize replaced the manager.
     """
     tracker = controller.usage_tracker
-    if tracker is not None and swapped:
-        tracker.reset_context()
-    elif tracker is not None:
+    if tracker is not None:
         budget = None
         # A workflow that is not ready (it failed to start) has no budget,
         # and the controller hands out none: the status bar says why.

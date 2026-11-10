@@ -280,7 +280,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             "services_initialized",
             model=self.model,
             root=root,
-            session_store=self._settings.session_store,
+            session_store=self.session_store,
             required_managers=list(self._required_managers),
         )
 
@@ -293,7 +293,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         store, so no conversation of it predates the index: it needs no
         backfill.
         """
-        kind = self._settings.session_store
+        kind = self.session_store
         where: dict[str, Any] = {
             "sqlite_path": (
                 deepagents_sqlite_path(self._settings) if kind == "sqlite" else None

@@ -75,9 +75,9 @@ class SettingsCommand(Command):
             if await app.apply_settings(changes) is False:
                 return  # rolled back (an override returning None is still diffed)
         except asyncio.CancelledError:
-            # Ctrl+C. Undone, unless an orchestrator switch was already made
-            # (too late to undo): what stands is saved, as any Save is, so
-            # the next start runs the backend this one does.
+            # Ctrl+C. Undone, unless a new conversation already runs on the
+            # new backend (too late to undo): what stands is saved, as any
+            # Save is, so the settings name the backend this one runs.
             await _save(app, before)
             raise
         await _save(app, before)

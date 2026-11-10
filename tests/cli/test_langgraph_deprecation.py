@@ -79,7 +79,7 @@ def home(tmp_path, monkeypatch) -> Path:
 
 
 class FakeManager:
-    """What the app's startup and an orchestrator swap touch, for any backend."""
+    """What the app's startup and a new conversation on a backend touch, for any backend."""
 
     catalog = None
 
@@ -272,8 +272,14 @@ async def test_a_settings_switch_to_langgraph_warns_again(backends):
 
     assert [m.backend_type for m in backends.built] == ["langgraph", "adk", "langgraph"]
     assert session.notices == [CLI_NOTICE, CLI_NOTICE]
-    switched = session.shown.index(("success", "Orchestrator: langgraph"))
-    assert session.shown[switched + 1] == ("warning", CLI_NOTICE)
+    # Each switch starts a new conversation there (nothing was stored), and
+    # the one on LangGraph is told at once.
+    (opened,) = [
+        i for i, (kind, text) in enumerate(session.shown)
+        if kind == "system" and text.startswith("New conversation") and "langgraph" in text
+    ]
+    assert session.shown[opened + 1] == ("warning", CLI_NOTICE)
+    assert session.shown.index(("success", "Orchestrator: langgraph")) > opened
     assert session.shown.index(("success", "Orchestrator: adk")) > session.shown.index(
         ("warning", CLI_NOTICE)
     )
@@ -308,7 +314,7 @@ async def test_a_switch_that_is_rolled_back_says_nothing(backends):
 
     assert app.settings.orchestrator is OrchestratorType.ADK
     assert any(
-        kind == "error" and text.startswith("Failed to reinitialize workflow")
+        kind == "error" and text.startswith("Could not start a new conversation on langgraph")
         for kind, text in session.shown
     )
     assert session.notices == []
@@ -331,7 +337,8 @@ def test_the_orchestrator_setting_says_langgraph_is_deprecated():
     description = BaseSettings.model_fields["orchestrator"].description
 
     assert description == (
-        "Workflow orchestrator backend: adk (the default), deepagents "
+        "The backend new conversations run on (each stays on its own): "
+        "adk (the default), deepagents "
         "(pip install 'agentic-cli[deepagents]') or langgraph (deprecated, "
         "removed in 0.8.0)"
     )

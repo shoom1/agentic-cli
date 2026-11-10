@@ -21,6 +21,8 @@ from agentic_cli.logging import Loggers
 
 # Re-export the factory for backward compatibility
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings  # noqa: F401
+from agentic_cli.workflow.factory import orchestrator_of
+from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
     from agentic_cli.cli.usage_tracker import UsageTracker
@@ -30,6 +32,9 @@ if TYPE_CHECKING:
     from thinking_prompt import ThinkingPromptSession
 
 logger = Loggers.cli()
+
+#: The backends a manager's ``backend_type`` may name.
+_ORCHESTRATORS = frozenset(o.value for o in OrchestratorType)
 
 
 def _main_model(workflow: "BaseWorkflowManager") -> str:
@@ -110,9 +115,13 @@ class WorkflowController:
     - Readiness checking (blocking and non-blocking); the manager is published
       only after ``initialize_services()`` succeeds, so ``is_ready`` implies a
       fully-initialized manager and never masks ``init_error``
-    - Reinitialization when model/settings change (an orchestrator swap
-      initializes the replacement first, swaps atomically, then cleans up the
-      old manager)
+    - Reinitialization when model/settings change, in place: a model switch
+      never changes the backend
+    - The backend it runs (``backend``): the settings' orchestrator at its
+      first start, then the one ``switch_backend`` chose (a new conversation
+      on another backend: a conversation never changes backend). A switch
+      initializes the replacement first, swaps atomically, then cleans up
+      the old manager
     - ``close()``: idempotent shutdown — cancels pending init, shuts down the
       init executor, and cleans up the live manager; invoked on app exit via
       ``background_init()``
@@ -145,6 +154,12 @@ class WorkflowController:
         self._settings = settings
         self._agent_configs = agent_configs
         self._app_name = settings.app_name
+        # The backend it runs: None until the first start takes the settings'
+        # orchestrator, or switch_backend chooses one (``backend``). The
+        # session store every manager of the run is built for: None until the
+        # first start takes the settings' (``store``).
+        self._backend: str | None = None
+        self._store: str | None = None
 
         # Closure captures agent_configs for lazy creation (used by _background_init)
         def _create_workflow() -> "BaseWorkflowManager":
@@ -152,6 +167,8 @@ class WorkflowController:
                 agent_configs=agent_configs,
                 settings=settings,
                 app_name=self._app_name,
+                orchestrator=self.backend,
+                session_store=self.store,
             )
 
         self._create_fn = _create_workflow
@@ -194,6 +211,42 @@ class WorkflowController:
         return tuple(self._agent_configs)
 
     @property
+    def backend(self) -> str:
+        """The backend it runs, or the one its next start builds: an
+        orchestrator's value (``adk``, ``deepagents``, ``langgraph``).
+
+        The settings' ``orchestrator`` until the first start takes it, then
+        the one ``switch_backend`` chose: the backend of the conversation the
+        app is in. ``settings.orchestrator`` names the backend of new
+        conversations, so a later change of it moves nothing here, and a
+        model switch (``reinitialize``) never changes it. A manager handed
+        to it without a start (``_workflow``) runs its own.
+        """
+        if self._backend is not None:
+            return self._backend
+        running = getattr(self._workflow, "backend_type", None)
+        if running in _ORCHESTRATORS:
+            return running
+        return orchestrator_of(self._settings).value
+
+    @property
+    def store(self) -> str:
+        """The session store every manager of the run is built for: the
+        settings' ``session_store`` as the first start takes it.
+
+        Fixed for the run: a later change of the setting takes effect at the
+        next app start, so a retry after a failed start, a revive and a new
+        conversation on another backend keep the store the conversations of
+        this run are in. A manager handed to it without a start keeps its own.
+        """
+        if self._store is not None:
+            return self._store
+        running = getattr(self._workflow, "session_store", None)
+        if isinstance(running, str):
+            return running
+        return self._settings.session_store
+
+    @property
     def workflow(self) -> "BaseWorkflowManager":
         """Get the workflow manager.
 
@@ -230,6 +283,17 @@ class WorkflowController:
     def is_ready(self) -> bool:
         """True only when a fully initialized manager is published."""
         return self.state is WorkflowState.READY
+
+    @property
+    def next_start_builds(self) -> bool:
+        """Whether the next start builds a new manager, from the settings as
+        they are then: none is kept (none was built yet, or the one that
+        failed to start was released). A manager a failed reinitialization
+        left is kept instead, and the next start revives it, on the backend
+        and the session store it had. False while one runs; True while a
+        revive is in progress too (the manager is taken out to be revived),
+        which is why a caller waits for a start in progress first."""
+        return self._workflow is None
 
     @property
     def init_error(self) -> Exception | None:
@@ -273,6 +337,9 @@ class WorkflowController:
                 return
             if self._init_task is not None and not self._init_task.done():
                 return
+            # The first start takes the settings' backend and store: the
+            # store for the whole run.
+            self._backend, self._store = self.backend, self.store
             revive, self._workflow = self._workflow, None
             self._init_error = None
             self._init_task = asyncio.create_task(self._background_init(revive))
@@ -491,46 +558,23 @@ class WorkflowController:
             ui.add_error(f"Initialization failed: {self._init_error}")
         return ready
 
-    def _needs_orchestrator_swap(self, new_model: str | None = None) -> bool:
-        """Check if the current manager still matches the orchestrator setting.
-
-        The backend is chosen purely by ``settings.orchestrator`` and is
-        model-agnostic (ADK runs Claude natively via ``AnthropicLlm``), so a model
-        change alone never forces a swap. A swap is needed when the live manager's
-        ``backend_type`` no longer matches the configured orchestrator — e.g. the
-        orchestrator setting was changed, leaving a stale manager in place. This
-        happens regardless of whether a new model was given.
-
-        Compares by ``backend_type`` string rather than importing a backend class,
-        so it never pulls in the optional ``langgraph`` extra on an ADK-only
-        install.
-        """
-        if self._workflow is None:
-            return False
-
-        from agentic_cli.workflow.settings import OrchestratorType
-
-        orchestrator = getattr(self._settings, "orchestrator", OrchestratorType.ADK)
-        target_backend = getattr(orchestrator, "value", str(orchestrator))
-        return getattr(self._workflow, "backend_type", None) != target_backend
-
     async def reinitialize(self, model: str | None = None) -> None:
-        """Reinitialize the workflow with optional new model.
+        """Reinitialize the workflow in place, with an optional new model.
 
-        If the live manager's backend no longer matches ``settings.orchestrator``
-        (e.g. the orchestrator setting was changed), the entire workflow manager
-        is replaced. Otherwise, the existing manager is reinitialized in place.
+        The backend stays the one it runs (``backend``), whatever
+        ``settings.orchestrator`` says: a conversation never changes backend,
+        and the backend is model-agnostic (ADK runs Claude natively through
+        ``AnthropicLlm``). Another backend is a new conversation's
+        (``switch_backend``).
 
-        Either outcome is well-defined: on success a fully initialized manager
-        is published; on failure the controller enters ``FAILED`` with
-        ``init_error`` set, so nothing can observe a READY controller wrapping
-        an uninitialized manager (``workflow`` refuses to hand it out).
-        Recovery is a fresh ``start_background_init()``
-        (``ensure_initialized()`` triggers one), which revives that same
-        manager so its preserved sessions survive.
+        On success the manager is published fully initialized; on failure
+        the controller enters ``FAILED`` with ``init_error`` set, so nothing
+        can observe a READY controller wrapping an uninitialized manager
+        (``workflow`` refuses to hand it out). Recovery is a fresh
+        ``start_background_init()`` (``ensure_initialized()`` triggers one),
+        which revives that same manager so its preserved sessions survive.
 
-        Serialized against every other lifecycle transition, so two concurrent
-        swaps cannot both publish and leak one of the replacements.
+        Serialized against every other lifecycle transition.
 
         Args:
             model: Optional new model to use
@@ -542,17 +586,56 @@ class WorkflowController:
         async with self._lifecycle_lock:
             if self._workflow is None:
                 raise RuntimeError("Cannot reinitialize - workflow not initialized")
-            # A release a cancelled swap left running ends first: a switch
+            # A release a cancelled switch left running ends first: a switch
             # back would otherwise start a manager beside the one going.
             await self._join_releases()
+            await self._reinitialize_in_place(model)
 
-            if self._needs_orchestrator_swap(model):
-                await self._swap_orchestrator(model)
-            else:
-                await self._reinitialize_in_place(model)
+    async def switch_backend(self, backend: str) -> None:
+        """Run ``backend`` from now on: the backend of a new conversation.
 
-    async def _swap_orchestrator(self, model: str | None) -> None:
-        """Replace the manager with one for the configured orchestrator.
+        A conversation never changes backend (each keeps its history in its
+        own backend's store), so this is how an app starts one on another
+        backend (the CLI's ``/new <backend>``); nothing else changes it.
+
+        While a manager runs on another backend, one for ``backend`` is built
+        and started first, then published, and the old one released: a
+        failure leaves the old one running, and a cancel once the new one is
+        published stops only the wait (the release runs on, and ``close()``
+        joins it). While none runs, the next start builds ``backend``, and a
+        manager a failed reinitialization kept (of the backend before) is
+        released. A start in progress is waited for first. For the backend it
+        runs already, nothing happens.
+
+        Args:
+            backend: An orchestrator's value: ``adk``, ``deepagents`` or
+                ``langgraph``.
+
+        Raises:
+            ValueError: ``backend`` is no orchestrator.
+            RuntimeError: The controller is closed.
+            Exception: What building or starting the new manager raises
+                (``ImportError`` when its extra is not installed).
+        """
+        target = OrchestratorType(backend).value
+        if self._init_task is not None and not self._init_task.done():
+            await asyncio.shield(self._init_task)
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("WorkflowController is closed")
+            await self._join_releases()
+            if target == self.backend:
+                return
+            if self.state is WorkflowState.READY:
+                await self._swap_orchestrator(target)
+                return
+            kept, self._workflow = self._workflow, None
+            if kept is not None:
+                self._spawn_cleanup(kept)
+            self._backend = target
+
+    async def _swap_orchestrator(self, backend: str) -> None:
+        """Replace the manager with one of ``backend`` (``switch_backend``).
 
         Initializes the replacement fully before swapping, so a failed init
         leaves the working manager in place; whichever manager ends up unused
@@ -563,13 +646,15 @@ class WorkflowController:
         the controller's (``_spawn_cleanup``), runs on, joined by ``close()``.
         """
         logger.info(
-            "orchestrator_swap", old_model=self._workflow.model, new_model=model
+            "orchestrator_swap", old_backend=self.backend, new_backend=backend,
+            model=self._workflow.model,
         )
         new_workflow = create_workflow_manager_from_settings(
             agent_configs=self._agent_configs,
             settings=self._settings,
             app_name=self._app_name,
-            model=model,
+            orchestrator=backend,
+            session_store=self.store,
         )
         try:
             await new_workflow.initialize_services()
@@ -580,6 +665,7 @@ class WorkflowController:
             await self._cleanup_manager(new_workflow)
             raise RuntimeError("WorkflowController is closed")
         old_workflow, self._workflow = self._workflow, new_workflow
+        self._backend = backend
         self._init_error = None
         cleanup = self._spawn_cleanup(old_workflow)
         if cleanup is not None:

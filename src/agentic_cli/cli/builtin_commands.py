@@ -686,20 +686,59 @@ class CompactCommand(Command):
 
 
 class NewCommand(Command):
-    """Start a new conversation; the one left stays in /sessions."""
+    """Start a new conversation, on another backend if one is named; the one
+    left stays in /sessions."""
 
     def __init__(self) -> None:
         super().__init__(
             name="new",
-            description="Start a new conversation (the current one stays in /sessions)",
-            usage="/new",
-            examples=["/new"],
+            description=(
+                "Start a new conversation (the current one stays in /sessions); "
+                "name a backend to run it there"
+            ),
+            usage="/new [adk|deepagents|langgraph]",
+            examples=["/new", "/new deepagents"],
             category=CommandCategory.SESSION,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Start a new conversation in this process (``start_new_session``)."""
-        await app.start_new_session()
+        """Start a new conversation in this process (``start_new_session``),
+        on the backend named, if any: an unknown one, or one whose extra is
+        not installed, is refused, and nothing changes."""
+        from agentic_cli.workflow.factory import check_backend
+        from agentic_cli.workflow.settings import OrchestratorType
+
+        backend = self.parse_args(args).positional.strip()
+        if not backend:
+            try:
+                await app.start_new_session()  # on the settings' orchestrator
+            except ImportError as error:  # its extra is not installed
+                app.session.add_error(str(error).split("\n")[0])
+            return
+        if not _takes_a_backend(app.start_new_session):
+            app.session.add_error("This app's /new takes no backend.")
+            return
+        try:
+            check_backend(backend)
+        except ValueError:
+            names = sorted(o.value for o in OrchestratorType)
+            app.session.add_error(
+                f"Unknown backend '{backend}': {', '.join(names[:-1])} or {names[-1]}."
+            )
+            return
+        except ImportError as error:
+            app.session.add_error(str(error).split("\n")[0])
+            return
+        await app.start_new_session(backend=backend)
+
+
+def _takes_a_backend(start_new_session: Any) -> bool:
+    """Whether an app's ``start_new_session`` takes ``backend``: one an app
+    overrode without it (0.7.0 added the keyword) is called as before."""
+    import inspect
+
+    parameters = inspect.signature(start_new_session).parameters.values()
+    return any(p.name == "backend" or p.kind is p.VAR_KEYWORD for p in parameters)
 
 
 class ModelsCommand(Command):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import inspect
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -564,8 +565,29 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return {}
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
+    def _session_db_url(self) -> str | None:
+        """``settings.session_db_url()`` for the store it was built for.
+
+        Called as 0.6.4 documented it, with no argument, while that store is
+        the settings' own, so an app's override without a ``store``
+        parameter keeps working; with ``store=`` only when they differ (a
+        ``/settings`` change of ``session_store`` in the run: the run keeps
+        its store). An override that cannot take it then fails the build
+        rather than build on the other store.
+        """
+        store = self.session_store
+        if store == self._settings.session_store:
+            return self._settings.session_db_url()
+        if not _takes_store(self._settings.session_db_url):
+            raise RuntimeError(
+                "This app's settings.session_db_url() takes no store, so this run "
+                "cannot rebuild on its session store after session_store changed: "
+                "restart the app."
+            )
+        return self._settings.session_db_url(store=store)
+
     def _make_session_service(self) -> BaseSessionService:
-        """Build the ADK session service from ``session_store`` settings.
+        """Build the ADK session service of its ``session_store``.
 
         ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
         → native ``DatabaseSessionService`` (durable across restarts, full event
@@ -573,7 +595,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         it, its directory created if missing (``private_sqlite_file``; one
         ``sqlite_uri`` names, and that exists, is left as it is).
         """
-        db_url = self._settings.session_db_url()
+        db_url = self._session_db_url()
         if db_url is None:
             logger.debug("using_in_memory_session_service")
             return InMemorySessionService()
@@ -592,7 +614,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         from google.adk.sessions import DatabaseSessionService
 
-        logger.info("using_database_session_service", store=self._settings.session_store)
+        logger.info("using_database_session_service", store=self.session_store)
         return DatabaseSessionService(db_url=db_url)
 
     async def _do_initialize(self) -> None:
@@ -1395,3 +1417,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     {"role": "user" if role == "user" else "assistant", "content": text}
                 )
         return out[-limit:]
+
+
+def _takes_store(method: Any) -> bool:
+    """Whether ``method`` (an app's ``session_db_url``, maybe overridden as
+    0.6.4 documented it) takes ``store=``."""
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):  # no signature to read: try it
+        return True
+    return any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        or (p.name == "store" and p.kind is not inspect.Parameter.POSITIONAL_ONLY)
+        for p in parameters
+    )
