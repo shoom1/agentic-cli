@@ -32,7 +32,12 @@ from tests.conftest import MockContext  # noqa: E402
 from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedModels, ai  # noqa: E402
 from tests.workflow.deepagents.test_compact import THREE, answers  # noqa: E402
-from tests.workflow.deepagents.test_context import hermetic, small, turn as deepagents_turn  # noqa: E402,F401
+from tests.workflow.deepagents.test_context import (  # noqa: E402,F401
+    SMALL,
+    hermetic,
+    small,
+    turn as deepagents_turn,
+)
 from tests.workflow.test_memory_wiring import _FakeManager  # noqa: E402
 
 ROOT = AgentConfig(name="root", prompt="p", tools=[memory_tools.read_memory, memory_tools.save_memory])
@@ -267,5 +272,45 @@ async def test_deep_agents_compact_drops_the_snapshot_through_the_forward(small,
         assert conversation not in mgr._index_snapshots
         await deepagents_turn(mgr, "Turn 4?")
         assert conversation in mgr._index_snapshots  # a new one
+    finally:
+        await mgr.cleanup()
+
+
+async def test_a_model_switch_drops_the_snapshots_and_the_next_is_taken_at_the_new_cap(
+    hermetic, turn
+):
+    """The cap follows the root's budget, so a snapshot taken for the old model
+    is dropped by the switch (the services and the store are kept)."""
+    from agentic_cli.workflow.service_registry import MEMORY_STORE
+
+    settings = BaseSettings(
+        session_store="memory", model_providers=SMALL, default_model="local:small",
+        models={"local:small": {"context_window": 20_000}, "local:big": {"context_window": 200_000}},
+    )
+    mgr = DeepAgentsWorkflowManager(
+        agent_configs=[AgentConfig(
+            name="solo", prompt="Answer.", include_state_tools=False,
+            tools=[memory_tools.search_memory],
+        )],
+        settings=settings,
+    )
+    try:
+        await mgr.initialize_services()
+        store = mgr._services[MEMORY_STORE]
+        asked: list[int] = []
+        real = store.index
+        store.index = lambda **kwargs: asked.append(kwargs["max_bytes"]) or real(**kwargs)
+        index = mgr._memory_index
+
+        mgr._memory_index_now()
+        assert list(mgr._index_snapshots) == [turn] and len(asked) == 1
+        assert asked[0] < 25_000  # a tenth of the small model's budget
+
+        await mgr.reinitialize(model="local:big", preserve_sessions=True)
+
+        assert mgr._services[MEMORY_STORE] is store  # the switch keeps the services
+        assert mgr._memory_index is index and mgr._index_snapshots == {}
+        mgr._memory_index_now()
+        assert asked == [asked[0], 25_000]  # the new model's roomy budget: the setting
     finally:
         await mgr.cleanup()
