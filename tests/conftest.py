@@ -31,6 +31,7 @@ from agentic_cli.config import (
     set_context_settings,
     set_settings,
 )
+from tests.network_guard import dead_base_urls
 
 
 class MockContext:
@@ -239,6 +240,21 @@ def _no_model_warnings_from_other_tests(monkeypatch: pytest.MonkeyPatch) -> None
     from agentic_cli.models import catalog
 
     monkeypatch.setattr(catalog, "_WARNED_MODELS", set())
+
+
+@pytest.fixture(autouse=True)
+def _dead_provider_urls(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every offline test runs with each provider SDK's host at a dead local port.
+
+    A client a test did not route to a fake then fails at once, locally,
+    instead of reaching a provider with whatever key the environment holds
+    (``tests/network_guard.py``). A live test (marked ``llm``, on itself, its
+    class or its module) keeps the real environment its keys come from. A test
+    that needs an SDK's own default host deletes the variable itself
+    (``monkeypatch.delenv``), after routing every client it builds.
+    """
+    if request.node.get_closest_marker("llm") is None:
+        dead_base_urls(monkeypatch)
 
 
 @pytest.fixture

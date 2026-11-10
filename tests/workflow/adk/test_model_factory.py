@@ -510,7 +510,9 @@ class TestNativeAdkConfig:
 
 
 class TestGpt:
-    def test_gpt_runs_on_the_responses_api_with_its_own_client(self, settings):
+    def test_gpt_runs_on_the_responses_api_with_its_own_client(self, settings, monkeypatch):
+        # The SDK's own host: the client is built, never sent.
+        monkeypatch.delenv("OPENAI_BASE_URL")
         built = build("openai:gpt-5.5", settings)
 
         assert type(built.model) is OpenAIResponsesLlm
