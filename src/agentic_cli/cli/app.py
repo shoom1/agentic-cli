@@ -2882,14 +2882,25 @@ class BaseCLIApp:
         settings' session store: one this run keeps in its store after a
         change of ``session_store`` (which takes effect at the next start)
         is found once the settings name that store, and the line says so.
+        A backend no reader reads (LangGraph) is found only while it runs:
+        one of its conversations needs the orchestrator set first, and the
+        line says so too.
         """
         if self._command:
             hint = f"Resume this conversation with: {self._command} --resume {self._session_id}"
         else:
             hint = f"Resume this conversation with /resume {self._session_id}"
-        store = self._place().store
-        if store != self._settings.session_store:
-            hint += f" (set session_store to {store} first: it is stored there)"
+        place = self._place()
+        unread = (
+            place.backend not in reader_backends()
+            and place.backend != orchestrator_of(self._settings).value
+        )
+        settings_first = [f"orchestrator to {place.backend}"] if unread else []
+        if place.store != self._settings.session_store:
+            settings_first.append(f"session_store to {place.store}")
+        if settings_first:
+            why = "it runs there" if unread else "it is stored there"
+            hint += f" (set {' and '.join(settings_first)} first: {why})"
         return hint
 
     async def _extract_session_facts_on_exit(self) -> None:

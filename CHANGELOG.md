@@ -1368,9 +1368,10 @@ the start of the entry's title.
   refused with the reason, and nothing changes (so is a backend named to an
   app whose `start_new_session` override takes none). `/resume`,
   `--resume <id>` and `--continue` open a conversation on the backend that
-  keeps it (see Added: **`/resume [<id>]`…**), so the exit hint needs no
-  backend: it names the run's store alone, after a change of
-  `session_store` in the run. A model switch never
+  keeps it (see Added: **`/resume [<id>]`…**), so the exit hint names the
+  backend only for a LangGraph conversation (no reader reads LangGraph's:
+  "(set orchestrator to langgraph first: it runs there)"), and the run's
+  store after a change of `session_store` in the run. A model switch never
   changes the backend: `WorkflowController` runs the conversation's
   (`backend`; `switch_backend(backend)` starts another, for a conversation
   started or opened there, on the run's services), not

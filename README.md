@@ -187,8 +187,9 @@ stored), a failed start runs it, and holds it, where the next start runs. The se
 A conversation belongs to the backend it began on (`orchestrator`, or
 `/new <backend>`) for its whole life, and each backend keeps its own store.
 `--continue`, `--resume <id>`, `/resume` and `/sessions` read the
-conversations of every installed backend, and one another backend keeps
-opens there: the app starts that backend ("Resumed on deepagents: …"; at
+conversations of every installed backend (a LangGraph conversation only
+while LangGraph runs: the exit line says to set `orchestrator` first), and
+one another backend keeps opens there: the app starts that backend ("Resumed on deepagents: …"; at
 startup it builds that backend in the first place), carrying this run's
 "Allow for this session" grants, background jobs, sandbox kernels and
 knowledge bases over to it; a backend that fails to start changes nothing.

@@ -1390,6 +1390,28 @@ class TestTheExitHintOnAnotherBackend:
             f"Resume this conversation with: my-app --resume {app.session_id}"
         )
 
+    async def test_on_langgraph_it_names_the_backend_to_start_with(self, home, monkeypatch):
+        """LangGraph has no reader: ``--resume`` finds its conversations only
+        while it runs, so the hint says to run it."""
+        app, _, _ = self.New.on_adk(monkeypatch)
+        await app.process_input("/new langgraph")
+        app._command = "my-app"
+
+        assert app._resume_hint() == (
+            f"Resume this conversation with: my-app --resume {app.session_id} "
+            "(set orchestrator to langgraph first: it runs there)"
+        )
+
+    async def test_on_langgraph_after_a_store_change_it_names_both(self, home, monkeypatch):
+        app, _, _ = self.New.on_adk(monkeypatch)
+        await app.process_input("/new langgraph")
+        assert await app.apply_settings({"session_store": "memory"})
+
+        assert app._resume_hint() == (
+            f"Resume this conversation with /resume {app.session_id} "
+            "(set orchestrator to langgraph and session_store to sqlite first: it runs there)"
+        )
+
     async def test_on_the_settings_backend_it_is_as_before(self, home, monkeypatch):
         app, _, _ = self.New.on_adk(monkeypatch)
         await app.process_input("/new")
