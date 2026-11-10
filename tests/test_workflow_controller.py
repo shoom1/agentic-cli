@@ -599,6 +599,141 @@ class TestOrchestratorSwapLifecycle:
         await controller.close()
 
 
+class TestTheRunsServicesMoveWithTheBackend:
+    """A switch of backend hands the run's services to the new manager.
+
+    The session grants, the jobs, the sandbox kernels, the knowledge bases
+    and the embedding model belong to the run, not to a backend: the new
+    manager is started with the running one's services lent
+    (``initialize_services(services=loan)``), the running one gives them
+    over (``give_services``), the new one is published at once, with no
+    await between the give and the publish, and the old one is released.
+    A new manager that fails to start, or a give that fails, leaves the
+    running one with its services, and nothing changes.
+    (``tests/workflow/test_service_hand_over.py`` runs the hand-over on the
+    real managers.)
+    """
+
+    _controller_needing_swap = TestOrchestratorSwapLifecycle._controller_needing_swap
+
+    async def test_the_new_manager_starts_on_the_services_lent_and_is_given_them(self):
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        steps: list[str] = []
+        loan = old.lend_services.return_value
+
+        async def start(**kwargs):
+            steps.append("start")
+
+        async def give(lent):
+            assert lent is loan
+            steps.append("give")
+            # What the loop runs next, after the give: the new manager is
+            # published by then (no await between the two).
+            asyncio.get_running_loop().call_soon(
+                lambda: steps.append(f"next: {controller._workflow.backend_type}")
+            )
+
+        async def released():
+            steps.append("old released")
+
+        new.initialize_services = AsyncMock(side_effect=start)
+        old.give_services = AsyncMock(side_effect=give)
+        old.cleanup = AsyncMock(side_effect=released)
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            await controller.switch_backend("langgraph")
+
+        new.initialize_services.assert_awaited_once_with(services=loan)
+        assert steps == ["start", "give", "next: langgraph", "old released"]
+        assert controller._workflow is new and controller.backend == "langgraph"
+
+    async def test_a_failed_start_gives_nothing_and_keeps_the_running_one(self):
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        new.initialize_services = AsyncMock(side_effect=RuntimeError("no key"))
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            with pytest.raises(RuntimeError, match="no key"):
+                await controller.switch_backend("langgraph")
+
+        old.give_services.assert_not_awaited()
+        old.cleanup.assert_not_awaited()
+        new.cleanup.assert_awaited_once()  # it closes nothing it borrowed
+        assert controller._workflow is old and controller.backend == "adk"
+
+    async def test_a_failed_give_keeps_the_running_one(self):
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        old.give_services = AsyncMock(side_effect=RuntimeError("released while lent"))
+        old.lend_services.return_value.given = False
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            with pytest.raises(RuntimeError, match="released while lent"):
+                await controller.switch_backend("langgraph")
+
+        old.cleanup.assert_not_awaited()
+        new.cleanup.assert_awaited_once()
+        assert controller._workflow is old and controller.backend == "adk"
+
+    async def test_a_ctrl_c_while_the_new_one_starts_releases_it_and_keeps_the_old(self):
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        starting = asyncio.Event()
+
+        async def hangs(**kwargs):
+            starting.set()
+            await asyncio.Event().wait()
+
+        new.initialize_services = AsyncMock(side_effect=hangs)
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            switching = asyncio.create_task(controller.switch_backend("langgraph"))
+            await asyncio.wait_for(starting.wait(), timeout=5)
+            switching.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await switching
+            await controller._join_releases()
+
+        old.give_services.assert_not_awaited()
+        new.cleanup.assert_awaited_once()
+        assert controller._workflow is old and controller.backend == "adk"
+
+    async def test_a_manager_that_lends_nothing_starts_on_its_own(self):
+        """An application's own manager, not a ``BaseWorkflowManager``: the
+        new one builds its own services, as before."""
+        controller = _make_lifecycle_controller()
+        old = SimpleNamespace(
+            backend_type="adk", model="m", is_initialized=True, cleanup=AsyncMock(),
+        )
+        controller._workflow = old
+        new = _FakeLangGraphWorkflow()
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            await controller.switch_backend("langgraph")
+
+        new.initialize_services.assert_awaited_once_with()
+        assert controller._workflow is new
+        old.cleanup.assert_awaited_once()
+
+
 class TestControllerClose:
     """close() releases the manager and is safe to call repeatedly."""
 

@@ -1965,9 +1965,11 @@ class BaseCLIApp:
     async def resume_session(self, session_id: str) -> bool:
         """Switch to the stored conversation ``session_id`` (``/resume``), and show where it left off.
 
-        Waits for a running turn or job resume (the turn lock), then reads the
-        conversation first, its row (``workflow.session_info``) and its
-        messages, and makes what it will show: one that is not stored, or
+        Waits for a running turn or job resume (the turn lock), then finds
+        the conversation on the backend that keeps it, the running one's or
+        another installed backend's (``list_conversations``'s stores; a
+        conversation belongs to one backend for its whole life), and reads
+        it first, its row and its messages: one that is not stored, or
         cannot be read, changes nothing. Then, as ``start_new_session`` does,
         it proposes memories from the conversation being left (when
         ``auto_extract_session_facts`` is on and a turn ran in it since it was
@@ -1978,15 +1980,36 @@ class BaseCLIApp:
         messages (``cli/session_resume.py``). Ctrl+C stops it like any
         request, "Operation cancelled...", once, and nothing has changed.
 
+        A conversation another backend keeps opens there: the app follows
+        the conversation. It is held there first (one another process has
+        open is refused), the memories of the one left are proposed while
+        its backend runs, then that backend starts on the run's services
+        (``WorkflowController.switch_backend``: the session grants, jobs,
+        sandbox kernels, knowledge bases and embedding model stay the same),
+        and the line says so: "Resumed on deepagents: …". A backend that
+        fails to start changes nothing ("Could not open '<id>': deepagents
+        did not start: …"); a Ctrl+C once it runs (the old one being
+        released) is too late to undo: the conversation is opened there,
+        then the cancel goes on.
+
+        An id two backends keep (left by the live switch of backend an
+        earlier version made) opens on the running backend, and the app
+        says the other has one too ("'<id>' is also a conversation on
+        deepagents: /resume lists it."); the picker's
+        (``pick_session``) names the backend it was picked on, and opens
+        there.
+
         Returns:
             True once ``session_id`` is the current conversation. False, with
             nothing changed, when it is already ("Already in this
             conversation."), is not stored ("No conversation '<id>'
-            found.", also when it is deleted while it opens), or could not
-            be read ("Could not open '<id>': ...").
+            found.", also when it is deleted while it opens, with the
+            backends that could not be read), could not be read ("Could not
+            open '<id>': ..."), or its backend did not start.
         """
+        backend = getattr(session_id, "backend", None)  # the picker's
         async with _says_so_when_stopped(self.session):
-            opened = await self._open_conversation(session_id)
+            opened = await self._open_conversation(str(session_id), backend)
         if opened:
             await self._tell_its_finished_jobs()
         return opened
@@ -2045,23 +2068,32 @@ class BaseCLIApp:
         if getattr(self._settings, "job_auto_resume", False):
             await self._resume_on_its_own()
 
-    async def _open_conversation(self, session_id: str) -> bool:
+    async def _open_conversation(self, session_id: str, backend: str | None = None) -> bool:
         """The switch to a stored conversation, under the turn lock (``resume_session``)."""
         async with self._turn_lock:
-            return await self._open(session_id)
+            return await self._open(session_id, backend=backend)
 
-    async def _open(self, session_id: str, hold: Hold | None = None) -> bool:
-        """Open the stored conversation ``session_id``: its row and messages
-        are read first, then the switch (``ConversationCore.switch``).
+    async def _open(
+        self, session_id: str, hold: Hold | None = None, *, backend: str | None = None
+    ) -> bool:
+        """Open the stored conversation ``session_id``, on the backend that
+        keeps it: its row and messages are read first, then the switch
+        (``ConversationCore.switch``). One another backend keeps opens there
+        (``_open_elsewhere``).
 
         The caller holds the turn lock. ``hold`` is ``session_id``'s lock,
-        taken already (at startup, before the prompt): it is kept once the
-        switch is made, and let go on every other way out.
+        taken already (at startup, before the prompt) where it is kept: it
+        names the backend, it is kept once the switch is made, and let go on
+        every other way out. ``backend`` names the backend otherwise (the
+        picker's row); without either, the running one's is preferred.
         """
+        if hold is not None:
+            backend = hold.place.backend
         switching = False
         try:
-            if session_id == self._session_id:
+            if session_id == self._session_id and backend in (None, self.session_backend):
                 self.session.add_message("system", "Already in this conversation.")
+                await self._name_its_twins(session_id, None)
                 return False
             parts = self._switch_parts()
             workflow = parts.workflow
@@ -2071,18 +2103,26 @@ class BaseCLIApp:
                 )
                 return False
             try:
-                info = await workflow.session_info(session_id)
-                messages = (
-                    await workflow.recent_messages(session_id, sys.maxsize) if info else []
-                )
+                async with self._stored(only=backend) as stored:
+                    rows = await stored.where(session_id, backend)
+                    notes = stored.notes()
+                if not rows:
+                    self.session.add_error(
+                        " ".join([f"No conversation '{session_id}' found.", *notes])
+                    )
+                    return False
+                info, twins = rows[0], [row.backend for row in rows[1:]]
+                elsewhere = info.backend != self._workflow_controller.backend
+                if not elsewhere:  # another backend's are read once it runs
+                    messages = await workflow.recent_messages(session_id, sys.maxsize)
             except Exception as error:  # noqa: BLE001 - a store error changes nothing
                 logger.debug("session_open_failed", session_id=session_id, exc_info=True)
                 reason = str(error) or type(error).__name__
                 self.session.add_error(f"Could not open '{session_id}': {reason}")
                 return False
-            if info is None:
-                self.session.add_error(f"No conversation '{session_id}' found.")
-                return False
+            if elsewhere:
+                switching = True  # it keeps the hold or lets it go
+                return await self._open_elsewhere(info, hold, twins)
             # Made before anything changes: a display error changes nothing.
             line = resumed_line(info, datetime.now(timezone.utc))
             replay = replay_lines(messages)
@@ -2114,7 +2154,111 @@ class BaseCLIApp:
         logger.info("session_resumed", session_id=session_id, previous=old)
         self.session.add_message("system", line)
         show_replay(self.session, replay)
+        self._say_twins(session_id, twins)
         return True
+
+    async def _open_elsewhere(
+        self, info: "SessionInfo", hold: Hold | None, twins: "list[str | None]"
+    ) -> bool:
+        """Open ``info``'s conversation, which another backend than the
+        running one keeps: that backend runs from now on (``_open``'s).
+
+        The caller holds the turn lock. In order: the conversation is held
+        where it is kept (``hold``, when the caller took it; one another
+        process has open is refused, and nothing starts); the memories of
+        the conversation left are proposed while its backend still runs; the
+        controller starts the conversation's backend on the run's services
+        (``switch_backend``); and the switch to it is made there, at once
+        (``ConversationCore.switch``, at its place: made before the load,
+        since the conversation left is not on the new backend). Its messages
+        are read from the new backend then, for the replay.
+
+        A backend that fails to start, or a Ctrl+C before it runs, changes
+        nothing (memories proposed stay proposed); a Ctrl+C once it runs
+        (the old one being released) opens the conversation there, then the
+        cancel goes on.
+        """
+        controller = self._workflow_controller
+        session_id, backend = info.session_id, info.backend
+        place = dataclasses.replace(self._place(), backend=backend)
+        if hold is None:
+            taken = self._conversation.acquire(session_id, place)
+            if isinstance(taken, int):
+                self.session.add_error(
+                    f"Could not open '{session_id}': it is open in another process ({taken})."
+                )
+                return False
+            hold = taken
+        old, interrupted = self._session_id, None
+        try:
+            if self._turned:  # proposed while the backend that holds them runs
+                await self._saving_facts(old)
+                self._turned = False
+            try:
+                await controller.switch_backend(backend)
+            except asyncio.CancelledError as cancel:
+                if controller.backend != backend:
+                    raise  # it never ran: nothing changed
+                interrupted = cancel  # it runs: its conversation is opened, then the cancel
+        except Exception as error:
+            self._conversation.abandon(hold)
+            logger.debug("session_open_failed", session_id=session_id, exc_info=True)
+            self.session.add_error(
+                f"Could not open '{session_id}': {backend} did not start: {_first_line(error)}"
+            )
+            return False
+        except BaseException:
+            self._conversation.abandon(hold)
+            raise
+        # The backend runs: the switch is made there, whatever comes next.
+        switched = await self._conversation.switch(
+            session_id, self._switch_parts(), place=place, stored=True, hold=hold, propose=False
+        )
+        logger.info("session_resumed", session_id=session_id, previous=old, backend=backend)
+        if switched.gone:  # deleted as it opened: it starts empty there
+            self.session.add_error(
+                f"Conversation '{session_id}' was deleted as it opened: it starts empty "
+                f"on {backend}."
+            )
+        else:
+            self.session.add_message(
+                "system", resumed_line(info, datetime.now(timezone.utc), backend=backend)
+            )
+            try:
+                messages = await controller.workflow.recent_messages(session_id, sys.maxsize)
+            except Exception as error:  # noqa: BLE001 - opened: the replay is a view
+                logger.debug("session_replay_failed", session_id=session_id, exc_info=True)
+                self.session.add_error(
+                    f"Opened '{session_id}', but could not show where it left off: "
+                    f"{_first_line(error)}"
+                )
+            else:
+                show_replay(self.session, replay_lines(messages))
+        self._say_twins(session_id, twins)
+        if interrupted is not None:
+            raise interrupted
+        return True
+
+    async def _name_its_twins(self, session_id: str, backend: str | None) -> None:
+        """Say which other backends keep a conversation of the app's id (it
+        is in it already): their stores alone are read. Never raises."""
+        try:
+            async with self._stored() as stored:
+                rows = await stored.where(session_id, running=False)
+        except Exception:  # noqa: BLE001 - a line, never a failure
+            logger.debug("session_twins_unread", session_id=session_id, exc_info=True)
+            return
+        self._say_twins(session_id, [row.backend for row in rows if row.backend != backend])
+
+    def _say_twins(self, session_id: str, twins: "list[str | None]") -> None:
+        """Say that other backends keep a conversation of the id just opened too."""
+        names = sorted({twin for twin in twins if twin and twin != self.session_backend})
+        if names:
+            self.session.add_message(
+                "system",
+                f"'{session_id}' is also a conversation on {' and '.join(names)}: "
+                f"/resume lists {'it' if len(names) == 1 else 'them'}.",
+            )
 
     def _held_to_write(self) -> bool:
         """Hold the conversation before it is written, when its id was made by
@@ -2399,17 +2543,24 @@ class BaseCLIApp:
         note = "" if self._place().locked else _MEMORY_NOTE
         try:
             if mode == "resume":
-                if await workflow.session_info(target) is None:
+                # On every installed backend: the running one's first.
+                async with self._stored() as stored:
+                    rows = await stored.where(target)
+                    unread = stored.notes()
+                if not rows:
                     # On the memory store there is nothing to open instead.
                     run = (
                         f": {self._command} --continue opens the newest, "
                         "/resume in the app picks one."
                         if self._command and not note else "."
                     )
-                    self.session.add_error(f"No conversation '{target}' found{run}{note}")
+                    self.session.add_error(" ".join(
+                        [f"No conversation '{target}' found{run}{note}", *unread]
+                    ))
                     self.exit_status = 1
                     return False
-                taken = self._conversation.acquire(target, self._place())
+                place = dataclasses.replace(self._place(), backend=rows[0].backend)
+                taken = self._conversation.acquire(target, place)
                 if isinstance(taken, int):
                     self.session.add_error(
                         f"Conversation '{target}' is open in another process ({taken})."
@@ -2419,13 +2570,14 @@ class BaseCLIApp:
                 self._pending_resume, self._pending_hold = target, taken
             elif mode == "continue":
                 # A listing can read whole sessions (ADK's from before the
-                # title keys): the newest alone, unless it is held.
+                # title keys): the newest alone, unless it is held. Every
+                # installed backend's.
                 self._pending_hold, passed_over = self._newest_free(
-                    await workflow.list_sessions(limit=1)
+                    await self.list_conversations(limit=1)
                 )
                 if passed_over:
                     self._pending_hold, passed_over = self._newest_free(
-                        await workflow.list_sessions(limit=PICK_LIMIT)
+                        await self.list_conversations(limit=PICK_LIMIT)
                     )
                 if self._pending_hold is not None:
                     self._pending_resume = self._pending_hold.session_id
@@ -2486,8 +2638,9 @@ class BaseCLIApp:
         return True
 
     def _newest_free(self, rows: "list[SessionInfo]") -> tuple[Hold | None, list[tuple[str, int]]]:
-        """The newest of ``rows`` no other process has open, now held here
-        (beside the conversation held; the switch to it keeps it or lets it go).
+        """The newest of ``rows`` no other process has open, now held here,
+        on the backend that keeps it (beside the conversation held; the
+        switch to it keeps it or lets it go).
 
         Returns:
             Its hold (None when every one is open elsewhere, or there is none),
@@ -2495,7 +2648,10 @@ class BaseCLIApp:
         """
         passed_over: list[tuple[str, int]] = []
         for info in rows:
-            taken = self._conversation.acquire(info.session_id, self._place())
+            place = self._place()
+            if info.backend is not None:
+                place = dataclasses.replace(place, backend=info.backend)
+            taken = self._conversation.acquire(info.session_id, place)
             if not isinstance(taken, int):
                 return taken, passed_over
             passed_over.append((info.session_id, taken))

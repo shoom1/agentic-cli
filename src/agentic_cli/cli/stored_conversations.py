@@ -122,16 +122,19 @@ class StoredConversations:
         rows.sort(key=_when, reverse=True)  # stable: the running backend's first on a tie
         return rows if limit is None else rows[:limit]
 
-    async def where(self, session_id: str, backend: str | None = None) -> list["SessionInfo"]:
+    async def where(
+        self, session_id: str, backend: str | None = None, *, running: bool = True
+    ) -> list["SessionInfo"]:
         """The rows of ``session_id``: one per backend that keeps it, the
         running one's first, then the others newest first. Only
-        ``backend``'s when one is named.
+        ``backend``'s when one is named; not the running workflow's when
+        ``running`` is False (the conversation the app is in is there).
 
         Raises:
             Exception: What the running workflow's ``session_info`` raises.
         """
         found: list["SessionInfo"] = []
-        if self._lists_its_own() and backend in (None, self._backend):
+        if running and self._lists_its_own() and backend in (None, self._backend):
             row = await self._workflow.session_info(session_id)
             if row is not None:
                 found.append(self._named([row])[0])

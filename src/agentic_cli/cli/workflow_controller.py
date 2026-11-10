@@ -592,20 +592,30 @@ class WorkflowController:
             await self._reinitialize_in_place(model)
 
     async def switch_backend(self, backend: str) -> None:
-        """Run ``backend`` from now on: the backend of a new conversation.
+        """Run ``backend`` from now on: the backend of the conversation the
+        app opens next.
 
         A conversation never changes backend (each keeps its history in its
         own backend's store), so this is how an app starts one on another
-        backend (the CLI's ``/new <backend>``); nothing else changes it.
+        backend (the CLI's ``/new <backend>``) or opens one another backend
+        keeps (``/resume``, ``--continue``, ``--resume``); nothing else
+        changes it.
 
-        While a manager runs on another backend, one for ``backend`` is built
-        and started first, then published, and the old one released: a
-        failure leaves the old one running, and a cancel once the new one is
+        While a manager runs on another backend, one for ``backend`` is
+        built and started first, on the running one's services: the session
+        grants, jobs, sandbox kernels, knowledge bases, embedding model and
+        memory store belong to the run, so the new manager borrows them
+        (``initialize_services(services=lend_services())``), the running one
+        gives them over (``give_services``), the new one is published at
+        once, and the old one is released, closing none of them. A failure
+        before the give leaves the old one running with its services, and a
+        cancel then releases the new one; a cancel once the new one is
         published stops only the wait (the release runs on, and ``close()``
-        joins it). While none runs, the next start builds ``backend``, and a
-        manager a failed reinitialization kept (of the backend before) is
-        released. A start in progress is waited for first. For the backend it
-        runs already, nothing happens.
+        joins it). A manager that lends nothing (an application's own) has
+        the new one build its own. While none runs, the next start builds
+        ``backend``, and a manager a failed reinitialization kept (of the
+        backend before) is released. A start in progress is waited for
+        first. For the backend it runs already, nothing happens.
 
         Args:
             backend: An orchestrator's value: ``adk``, ``deepagents`` or
@@ -615,7 +625,8 @@ class WorkflowController:
             ValueError: ``backend`` is no orchestrator.
             RuntimeError: The controller is closed.
             Exception: What building or starting the new manager raises
-                (``ImportError`` when its extra is not installed).
+                (``ImportError`` when its extra is not installed), or what
+                the give raises.
         """
         target = OrchestratorType(backend).value
         if self._init_task is not None and not self._init_task.done():
@@ -637,17 +648,23 @@ class WorkflowController:
     async def _swap_orchestrator(self, backend: str) -> None:
         """Replace the manager with one of ``backend`` (``switch_backend``).
 
-        Initializes the replacement fully before swapping, so a failed init
-        leaves the working manager in place; whichever manager ends up unused
-        is cleaned up. The caller holds ``_lifecycle_lock``.
+        Initializes the replacement fully, on the running manager's services
+        (lent), before anything changes: a failed or cancelled start leaves
+        the working manager in place with its services, and the replacement
+        is released, closing none of them. Then the running manager gives
+        its services over, and the replacement is published at once (no
+        await between the two: nothing sees the old manager without its
+        services), then the old one is released. The caller holds
+        ``_lifecycle_lock``.
 
         Once the replacement is published the swap is made: a cancel while
         the old manager is released stops only the wait, and the cleanup,
         the controller's (``_spawn_cleanup``), runs on, joined by ``close()``.
         """
+        old_workflow = self._workflow
         logger.info(
             "orchestrator_swap", old_backend=self.backend, new_backend=backend,
-            model=self._workflow.model,
+            model=old_workflow.model,
         )
         new_workflow = create_workflow_manager_from_settings(
             agent_configs=self._agent_configs,
@@ -656,15 +673,34 @@ class WorkflowController:
             orchestrator=backend,
             session_store=self.store,
         )
+        lend = getattr(old_workflow, "lend_services", None)
+        loan = lend() if callable(lend) else None
         try:
-            await new_workflow.initialize_services()
+            if loan is None:  # an application's own manager: none to lend
+                await new_workflow.initialize_services()
+            else:
+                await new_workflow.initialize_services(services=loan)
+        except asyncio.CancelledError:
+            self._spawn_cleanup(new_workflow)  # closes nothing it borrowed
+            raise
         except Exception:
             await self._cleanup_manager(new_workflow)
             raise
         if self._closed:
             await self._cleanup_manager(new_workflow)
             raise RuntimeError("WorkflowController is closed")
-        old_workflow, self._workflow = self._workflow, new_workflow
+        if loan is not None:
+            # Not given on a failure or a cancel (the give itself is all at
+            # once, after its locks): the old manager keeps them, and runs on.
+            try:
+                await old_workflow.give_services(loan)
+            except asyncio.CancelledError:
+                self._spawn_cleanup(new_workflow)
+                raise
+            except Exception:
+                await self._cleanup_manager(new_workflow)
+                raise
+        self._workflow = new_workflow  # at once: no await since the give
         self._backend = backend
         self._init_error = None
         cleanup = self._spawn_cleanup(old_workflow)

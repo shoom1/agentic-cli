@@ -10,8 +10,8 @@
   than a row clips its end; the backend and the id keep every option unique.
   It returns, for each option, the id it stands for as a
   ``PickedConversation``: a ``str`` that names its backend too;
-- ``resumed_line(info, now)``: "Resumed: <title> (<id>, 12 turns, last active
-  2h ago).";
+- ``resumed_line(info, now, backend=)``: "Resumed: <title> (<id>, 12 turns,
+  last active 2h ago).", "Resumed on <backend>: …" on another backend;
 - ``replay_lines(messages)`` and ``show_replay(session, lines)``: the last
   ``REPLAY_MESSAGES`` messages, the user's as typed and the main agent's as a
   turn shows them, each cut at ``REPLAY_CHARS``, after "… N earlier
@@ -75,8 +75,12 @@ def title_of(info: "SessionInfo") -> str:
     return NO_PROMPT if info.turns is not None else ""
 
 
-def resumed_line(info: "SessionInfo", now: datetime) -> str:
-    """What a resume says: "Resumed: <title> (<id>, 12 turns, last active 2h ago)."."""
+def resumed_line(info: "SessionInfo", now: datetime, *, backend: str | None = None) -> str:
+    """What a resume says: "Resumed: <title> (<id>, 12 turns, last active 2h ago).".
+
+    With ``backend`` (a conversation opened on another backend than the one
+    that ran: it runs now) it says so: "Resumed on deepagents: …".
+    """
     details = [info.session_id]
     if info.turns is not None:
         details.append(_turns(info.turns))
@@ -84,9 +88,10 @@ def resumed_line(info: "SessionInfo", now: datetime) -> str:
     if when:
         details.append(f"last active {when}")
     title = title_of(info)
+    resumed = f"Resumed on {backend}" if backend else "Resumed"
     if not title:
-        return f"Resumed: {', '.join(details)}."
-    return f"Resumed: {title} ({', '.join(details)})."
+        return f"{resumed}: {', '.join(details)}."
+    return f"{resumed}: {title} ({', '.join(details)})."
 
 
 def _text(content: Any) -> str:
