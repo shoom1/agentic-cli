@@ -119,6 +119,7 @@ class Backends:
         self.built: list[Manager] = []
         self.fails: set[str] = set()
         self.unreadable: dict[str, Exception] = {}
+        self.unreadable_once: dict[str, Exception] = {}
         self.readers: list[StoreReader] = []
         monkeypatch.setattr(
             "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
@@ -150,6 +151,8 @@ class Backends:
             return None
         if backend in self.unreadable:
             raise self.unreadable[backend]
+        if backend in self.unreadable_once:
+            raise self.unreadable_once.pop(backend)
         reader = StoreReader(backend, self.stored[backend])
         self.readers.append(reader)
         return reader
@@ -381,7 +384,8 @@ class TestAtStartup:
         await app.run()
 
         assert app.exit_status == 0
-        assert session.said("system")[0].startswith("Resumed on deepagents: On Deep Agents (d1,")
+        assert session.said("system")[0].startswith("Resumed: On Deep Agents (d1,")
+        assert app._workflow_controller.backend == "deepagents"
         deepagents = next(m for m in two.built if m.backend_type == "deepagents")
         assert deepagents.turns == ["d1"]
 
@@ -391,7 +395,7 @@ class TestAtStartup:
 
         await app.run()
 
-        assert session.said("system")[0].startswith("Resumed on deepagents: On Deep Agents (d1,")
+        assert session.said("system")[0].startswith("Resumed: On Deep Agents (d1,")
         deepagents = next(m for m in two.built if m.backend_type == "deepagents")
         assert deepagents.turns == ["d1"]
 
@@ -410,6 +414,121 @@ class TestAtStartup:
             "continuing 'a1'."
         )
         assert session.said("system")[0].startswith("Resumed: On ADK (a1,")
+
+
+class TestTheStartPicksTheBackendFirst:
+    """``--resume <id>`` and ``--continue`` find the conversation's backend
+    from every installed backend's store before the workflow is built, so
+    the run builds that backend once: not the settings', then the other."""
+
+    app = staticmethod(TestAtStartup.app)
+
+    @staticmethod
+    def built(backends: Backends) -> list[str]:
+        return [manager.backend_type for manager in backends.built]
+
+    async def test_resume_builds_its_backend_alone(self, two):
+        app, session = self.app(SessionStart("resume", "d1"))
+
+        await app.run()
+
+        assert self.built(two) == ["deepagents"]
+        assert session.said("system")[0].startswith("Resumed: On Deep Agents (d1,")
+
+    async def test_continue_builds_the_newest_ones_backend_alone(self, two):
+        app, session = self.app(SessionStart("continue"))
+
+        await app.run()
+
+        assert self.built(two) == ["deepagents"]
+        assert session.said("system")[0].startswith("Resumed: On Deep Agents (d1,")
+
+    async def test_the_runs_own_new_conversation_is_on_that_backend(self, two):
+        app, _ = self.app(SessionStart("resume", "d1"))
+        before = app.session_id
+        places: list = []
+        adopt = app._adopt_session_on_startup
+
+        async def adopting():
+            places.append(app._place())
+            return await adopt()
+
+        app._adopt_session_on_startup = adopting
+
+        await app.run()
+
+        assert places[0].backend == "deepagents" and before != "d1"
+
+    async def test_one_the_settings_backend_keeps_too_is_opened_there(self, backends):
+        backends.store("adk", "x", "X on ADK", 2)
+        backends.store("deepagents", "x", "X on Deep Agents", 2, hours=1)
+        app, session = self.app(SessionStart("resume", "x"))
+
+        await app.run()
+
+        assert self.built(backends) == ["adk"]
+        assert session.said("system")[0].startswith("Resumed: X on ADK (x,")
+        assert "'x' is also a conversation on deepagents: /resume lists it." in (
+            session.said("system")
+        )
+
+    async def test_a_target_nobody_has_starts_as_before(self, two):
+        app, session = self.app(SessionStart("resume", "zzz"))
+
+        await app.run()
+
+        assert app.exit_status == 1 and self.built(two) == ["adk"]
+        assert session.said("error") == ["No conversation 'zzz' found."]
+
+    async def test_its_backend_failing_to_start_keeps_the_prompt_and_says_how(self, two):
+        """The next start builds that backend still: fixed in /settings,
+        ``/resume`` opens the conversation there."""
+        two.fails.add("deepagents")
+        app, session = self.app(SessionStart("resume", "d1"))
+        session.until = None
+        free_after: list[bool] = []
+        adopt = app._adopt_session_on_startup
+
+        async def adopting():
+            adopted = await adopt()
+            free_after.append(free(app, held_by(app, "deepagents", "d1")))
+            return adopted
+
+        app._adopt_session_on_startup = adopting
+
+        await app.run()
+
+        assert self.built(two) == ["deepagents"]
+        assert app._workflow_controller.backend == "deepagents"
+        assert session.said("warning")[0] == (
+            "Could not open 'd1': the workflow did not start. "
+            "Fix it with /settings, then /resume d1."
+        )
+        assert free_after == [True]
+
+    async def test_a_lookup_that_fails_before_the_build_is_made_again_after_it(self, two):
+        """The start finds the target as it always did, on every backend:
+        one another backend keeps opens there once the prompt is up."""
+        two.unreadable_once["deepagents"] = RuntimeError("database is locked")
+        app, session = self.app(SessionStart("resume", "d1"))
+
+        await app.run()
+
+        assert self.built(two) == ["adk", "deepagents"]
+        assert session.said("system")[0].startswith("Resumed on deepagents: On Deep Agents (d1,")
+
+    async def test_continue_whose_backend_fails_names_the_conversation(self, two):
+        two.fails.add("deepagents")
+        app, session = self.app(SessionStart("continue"))
+        session.until = None
+
+        await app.run()
+
+        assert self.built(two) == ["deepagents"]
+        assert session.said("warning")[0] == (
+            "Could not continue 'd1': the workflow did not start. "
+            "Fix it with /settings, then /resume d1."
+        )
 
 
 # --- The real backends ---------------------------------------------------------------------

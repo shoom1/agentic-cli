@@ -69,6 +69,7 @@ from agentic_cli.settings_persistence import (
     USER_PREFERENCE_KEYS,
 )
 from agentic_cli.workflow.factory import check_backend, orchestrator_of
+from agentic_cli.workflow.session_readers import reader_backends
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
@@ -645,6 +646,11 @@ class BaseCLIApp:
     #: before the prompt and kept by the switch to it once the prompt is up
     #: (``_open_on_startup``); None otherwise.
     _pending_hold: Hold | None = None
+
+    #: What ``--continue`` chose before the workflow was built
+    #: (``_start_on_its_backend``): the hold on the conversation it opens,
+    #: and the newer ones passed over; None when it chose nothing then.
+    _chosen_at_start: "tuple[Hold | None, list[tuple[str, int]]] | None" = None
 
     def __init__(
         self,
@@ -2103,15 +2109,17 @@ class BaseCLIApp:
                 )
                 return False
             try:
-                async with self._stored(only=backend) as stored:
-                    rows = await stored.where(session_id, backend)
+                async with self._stored() as stored:
+                    rows = await stored.where(session_id)
                     notes = stored.notes()
-                if not rows:
+                found = [row for row in rows if backend in (None, row.backend)]
+                if not found:
                     self.session.add_error(
                         " ".join([f"No conversation '{session_id}' found.", *notes])
                     )
                     return False
-                info, twins = rows[0], [row.backend for row in rows[1:]]
+                info = found[0]
+                twins = [row.backend for row in rows if row is not info]
                 elsewhere = info.backend != self._workflow_controller.backend
                 if not elsewhere:  # another backend's are read once it runs
                     messages = await workflow.recent_messages(session_id, sys.maxsize)
@@ -2498,31 +2506,50 @@ class BaseCLIApp:
         fixes the start, so no other process may open it meanwhile. By
         ``session_start``:
 
-        - ``"continue"`` finds the newest stored conversation no other
-          process has open (``_newest_free``, among the newest ``PICK_LIMIT``
-          when the newest is held), which ``_open_on_startup``
-          resumes once the prompt is up, or says there is none ("No
-          conversation to continue; starting a new one.");
-        - ``"resume"`` checks its conversation is stored first: one that is
-          not is refused ("No conversation '<id>' found: <app> --continue
-          opens the newest, /resume in the app picks one."), ``exit_status``
-          is 1, and False is returned;
+        - ``"continue"`` finds the newest stored conversation of every
+          installed backend that no other process has open (``_newest_free``,
+          among the newest ``PICK_LIMIT`` when the newest is held; chosen
+          before the workflow was built, on the backend that keeps it, by
+          ``_start_on_its_backend``), which ``_open_on_startup`` resumes once
+          the prompt is up, or says there is none ("No conversation to
+          continue; starting a new one.");
+        - ``"resume"`` checks its conversation is stored first, on any
+          installed backend (the workflow runs the one that keeps it, found
+          before it was built): one that is not is refused ("No
+          conversation '<id>' found: <app> --continue opens the newest,
+          /resume in the app picks one."), ``exit_status`` is 1, and False
+          is returned;
         - ``"new"`` starts in the new conversation.
 
         The conversation ``"continue"`` or ``"resume"`` chose is held from
         here (another process asking for it is refused), beside the run's
-        own, until the switch to it once the prompt is up keeps it or lets
-        it go.
+        own, where it is kept, until the switch to it once the prompt is up
+        keeps it or lets it go. One the start found on another backend than
+        the one it runs (a look before the build that failed) opens there
+        then (``resume_session``'s switch of backend).
 
         A workflow that cannot start keeps the prompt, so ``/settings`` can
-        fix it, and says how to resume then; a backend without sessions
+        fix it, and says how to resume then (the conversation ``--continue``
+        chose named, and let go); a backend without sessions
         refuses every start but ``"new"`` (False, status 1). A store that
         fails refuses ``"resume"`` too, and starts the others in a new
         conversation, saying why. On the memory store a line says why
         nothing is stored.
         """
         mode, target = self._session_start.mode, self._session_start.session_id
+        chosen, self._chosen_at_start = self._chosen_at_start, None
+        if chosen is not None:  # --continue chose before the build (on its backend)
+            self._pending_hold = chosen[0]
         if not await self._workflow_controller.ensure_initialized(self.session):
+            if self._pending_hold is not None:  # the one --continue chose
+                continuing = self._pending_hold.session_id
+                self._conversation.abandon(self._pending_hold)
+                self._pending_hold = None
+                self.session.add_warning(
+                    f"Could not continue '{continuing}': the workflow did not start. "
+                    f"Fix it with /settings, then /resume {continuing}."
+                )
+                return await self._adopt_its_own()
             self.session.add_warning({
                 "resume": f"Could not open '{target}': the workflow did not start. "
                           f"Fix it with /settings, then /resume {target}.",
@@ -2569,16 +2596,10 @@ class BaseCLIApp:
                     return False
                 self._pending_resume, self._pending_hold = target, taken
             elif mode == "continue":
-                # A listing can read whole sessions (ADK's from before the
-                # title keys): the newest alone, unless it is held. Every
-                # installed backend's.
-                self._pending_hold, passed_over = self._newest_free(
-                    await self.list_conversations(limit=1)
-                )
-                if passed_over:
-                    self._pending_hold, passed_over = self._newest_free(
-                        await self.list_conversations(limit=PICK_LIMIT)
-                    )
+                if chosen is not None:  # chosen before the build, on its backend
+                    passed_over = chosen[1]
+                else:
+                    self._pending_hold, passed_over = await self._newest_stored()
                 if self._pending_hold is not None:
                     self._pending_resume = self._pending_hold.session_id
                 if passed_over:
@@ -2636,6 +2657,68 @@ class BaseCLIApp:
             # An explicit session_id that didn't exist yet: tell the user it's new.
             self.session.add_message("system", f"New session '{session_id}'.")
         return True
+
+    async def _newest_stored(
+        self, stored: StoredConversations | None = None
+    ) -> tuple[Hold | None, list[tuple[str, int]]]:
+        """What ``--continue`` opens: the newest stored conversation of every
+        installed backend that no other process has open (``_newest_free``),
+        read through ``stored`` (``list_conversations`` by default).
+
+        A listing can read whole sessions (ADK's from before the title
+        keys): the newest alone, unless it is held.
+        """
+        async def newest(limit: int) -> "list[SessionInfo]":
+            if stored is None:
+                return await self.list_conversations(limit=limit)
+            return await stored.rows(limit)
+
+        hold, passed_over = self._newest_free(await newest(1))
+        if passed_over:
+            hold, passed_over = self._newest_free(await newest(PICK_LIMIT))
+        return hold, passed_over
+
+    async def _start_on_its_backend(self) -> None:
+        """Before the workflow is built: find the backend that keeps the
+        conversation ``--resume <id>`` or ``--continue`` opens, so the run
+        builds that one (``WorkflowController.switch_backend`` while none
+        runs), not the settings', then the other.
+
+        Every installed backend's store is read through its reader (none
+        runs yet). ``--resume <id>`` moves to the backend that keeps it, the
+        settings' preferred when both do; ``--continue`` chooses the newest
+        no other process has open, and holds it (``_chosen_at_start``: the
+        start opens it once the workflow runs, without another look). A
+        target nobody has, a store that cannot be read, the memory store
+        (nothing to read before the workflow runs), or a settings' backend
+        whose own conversations no reader reads (LangGraph): nothing moves,
+        and the start finds the target as it always did.
+        """
+        mode, target = self._session_start.mode, self._session_start.session_id
+        controller = self._workflow_controller
+        if mode == "new" or not self._place().locked:
+            return
+        if controller.backend not in reader_backends():
+            return
+        try:
+            async with self._stored() as stored:  # nothing runs: every backend's reader
+                if mode == "resume":
+                    rows = await stored.where(target)
+                    if not rows or any(row.backend == controller.backend for row in rows):
+                        return
+                    backend = rows[0].backend
+                else:
+                    hold, passed_over = await self._newest_stored(stored)
+                    if hold is None and not passed_over:
+                        return  # nothing anywhere: the start looks again
+                    self._chosen_at_start = (hold, passed_over)
+                    backend = hold.place.backend if hold is not None else None
+        except Exception:  # noqa: BLE001 - the start looks again, as it always did
+            logger.debug("startup_backend_lookup_failed", mode=mode, exc_info=True)
+            return
+        if backend is not None and backend != controller.backend:
+            logger.info("startup_backend_chosen", backend=backend, mode=mode)
+            await controller.switch_backend(backend)
 
     def _newest_free(self, rows: "list[SessionInfo]") -> tuple[Hold | None, list[tuple[str, int]]]:
         """The newest of ``rows`` no other process has open, now held here,
@@ -2823,8 +2906,13 @@ class BaseCLIApp:
         # Once, before anything waits for the workflow: a backend that cannot
         # start (its extra missing, or a key) is still deprecated.
         _warn_if_langgraph(self._settings, self.session)
-        # The place the workflow starts in keys the conversation's lock.
+        # The place the workflow starts in keys the conversation's lock: the
+        # backend of the conversation --resume/--continue opens, found first.
         self._conversation.place = Place.of(self._settings)
+        await self._start_on_its_backend()
+        self._conversation.place = Place.of(
+            self._settings, backend=self._workflow_controller.backend
+        )
 
         async with self._workflow_controller.background_init(self.session):
             # Adopt this run's session id (generated, or session_id=) so every
