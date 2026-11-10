@@ -26,10 +26,11 @@ from agentic_cli.tools.factories import make_kb_tools
 
 TICK = 0.01
 HOLD = 0.5
-# A loop that waits for the knowledge base stalls for about the whole HOLD.
-# A shared CI runner's own hiccups reach tens of milliseconds (57 ms seen),
-# so the bound sits well between the two.
-MAX_STALL = HOLD / 4
+# A loop that waits for the knowledge base stalls for about the whole HOLD
+# (450-530 ms measured with the lookup moved back onto the loop). A shared CI
+# runner's own hiccups reach more than a tenth of a second (57 ms and 143 ms
+# seen, on paths with no work on the loop), so the bound sits between the two.
+MAX_STALL = HOLD / 2
 
 
 async def _longest_stall(work) -> tuple[float, Any]:
