@@ -188,6 +188,10 @@ the start of the entry's title.
   `memory_index_max_bytes` are new; `auto_extract_session_facts` files
   proposals. (Changed: **Memories are markdown files…**; Added: **The main
   agent gets an index…**)
+- `session_store=memory` keeps one conversation at a time in the CLI: `/new`
+  drops the one it leaves, and `/sessions`, `/resume`, `--resume` and
+  `--continue` say that conversations are not kept. (Changed: **`/sessions`
+  and `/status` on the memory store…**)
 
 #### Deprecated
 
@@ -1216,8 +1220,15 @@ the start of the entry's title.
   "New conversation <new>. Previous: <old>, listed in /sessions.", or
   "New conversation <new>." when the conversation left is in no store (no
   turn ran in it, or the workflow failed to start, which no longer stops
-  `/new`). Ctrl+C stops it like any request, "Operation cancelled...",
-  once, with nothing changed. The model and the settings, "Allow for this
+  `/new`). On `session_store=memory`, which writes no conversation to disk,
+  the app keeps one conversation at a time: the one left is dropped from the
+  store once the switch is made, after its memories are proposed (its
+  `delete_session`, shielded: a Ctrl+C stops the wait, not the drop; on
+  another backend the manager released takes it along), the line says
+  "Previous: <old>, not kept (session_store is memory).", and a finished job
+  of it is told as unavailable, as a deleted conversation's is. Ctrl+C
+  stops it like any request, "Operation cancelled...", once, with nothing
+  changed. The model and the settings, "Allow for this
   session" grants, sandbox kernels and background jobs stay. A job started
   in the old conversation still reports to it: once it has finished it
   waits until that conversation is opened (`/resume` tells it when
@@ -1259,7 +1270,10 @@ the start of the entry's title.
   held there with `conversation_held(session_id, backend=None)`), refuses an
   id two backends keep, naming both, unless `--backend=<name>` picks one, and
   refuses to delete the conversation the user is in
-  (`BaseCLIApp.session_backend` names its backend).
+  (`BaseCLIApp.session_backend` names its backend, and
+  `BaseCLIApp.session_store` the run's store; on `session_store=memory`
+  `/sessions` lists and deletes none: see Changed, **`/sessions` and
+  `/status` on the memory store…**).
 - **`/resume [<id>]` reopens a saved conversation without a restart**, and
   its public twins `BaseCLIApp.resume_session(session_id) -> bool` and
   `BaseCLIApp.pick_session() -> str | None`. `/resume` opens a picker, "Resume
@@ -1301,7 +1315,12 @@ the start of the entry's title.
   them. A conversation's memories (`auto_extract_session_facts`) are proposed
   once per conversation used: on leaving it (`/new`, `/resume`) or at exit,
   only when a turn ran in it since it was opened, so switching back and
-  forth, or resuming one and leaving it as it was, files no duplicates.
+  forth, or resuming one and leaving it as it was, files no duplicates. On
+  `session_store=memory`, which keeps one conversation at a time, `/resume`
+  is refused, picker and all, before anything is looked up
+  (`resume_session()` returns False, `pick_session()` None, with no
+  dialog), saying "session_store is memory: conversations are not kept. Set
+  it to sqlite to keep and resume them (applies at the next start)."
 - **`BaseCLIApp.main()`: every app takes `--continue` and `--resume
   [ID]`.** Point an app's console script at it (`my-app =
   "my_app.cli:MyApp.main"`): it parses the session flags
@@ -1318,8 +1337,7 @@ the start of the entry's title.
   workflow is built, so the run builds that one, once; it refuses one that
   is not saved before the prompt is
   drawn ("No conversation '<id>' found: <app> --continue opens the newest,
-  /resume in the app picks one.", status 1; on `session_store=memory`, which
-  holds none, without the pointers); a resume that fails once the prompt is
+  /resume in the app picks one.", status 1); a resume that fails once the prompt is
   up says so ("Could not open '<id>': …", or, when it opened, "Opened '<id>',
   but could not show where it left off: …"); Ctrl+C while it runs ends the
   app, as at an idle prompt (a Ctrl+C before the prompt, while the workflow
@@ -1331,8 +1349,10 @@ the start of the entry's title.
   workflow that cannot start keeps the prompt and says how to resume after
   `/settings` (the conversation `--continue` chose named); a backend without sessions refuses both (status 1); a store that fails refuses
   `--resume <id>` (status 1) and starts the others in a new conversation,
-  saying why; on `session_store=memory` the lines say that conversations
-  end with the app. At exit, a saved conversation a turn ran in is named:
+  saying why. On `session_store=memory`, which keeps no conversation,
+  `--resume <id>` is refused with the line `/resume` says (status 1) and
+  `--continue` starts a new conversation, saying why once, neither waiting
+  for the workflow. At exit, a saved conversation a turn ran in is named:
   "Resume this conversation with: <app> --resume <id>" (`python3 -m <pkg>`
   with the interpreter as it was run, `python3 <script>` for a script or a
   zipapp, path quoted, or the console script: its name when PATH finds it,
@@ -1344,6 +1364,18 @@ the start of the entry's title.
 
 ### Changed
 
+- **`/sessions` and `/status` on the memory store say the conversations are
+  not kept.** With `session_store=memory` `/sessions` listed the run's
+  conversation as a "Saved Sessions" table, and `--delete=<id>` deleted it,
+  the one the user was in included. The CLI now keeps one conversation at a
+  time there (`/new` drops the one it leaves, and `/resume`, `--resume` and
+  `--continue` are refused), so `/sessions` says "session_store is memory:
+  conversations are not kept. Set it to sqlite to keep and resume them
+  (applies at the next start)." and `--delete` is refused with it; `/status`
+  names the conversation the app is in "(not kept: session_store is memory)"
+  where it said "(persistent)". The managers still keep several
+  conversations in one in-memory store for an app's own code, and
+  `BaseCLIApp.list_conversations()` lists them.
 - **A conversation keeps its backend: `orchestrator` is the backend of new
   conversations, and `/new [backend]` picks one.** A `/settings` change of
   `orchestrator` swapped the backend under the open conversation, which

@@ -1,7 +1,8 @@
 """A CLI app for the console tests: ``BaseCLIApp`` over a scripted workflow.
 
 It runs through ``BaseCLIApp.main()``, so it takes the session flags
-(``--continue``, ``--resume <id>``) as any app does.
+(``--continue``, ``--resume <id>``) as any app does, and one of its own:
+``--store memory`` runs it on the memory store instead of sqlite.
 
 ``tests/cli/test_console_turns.py`` runs it in a child process over a pty;
 without a ``test_`` prefix, pytest does not collect it. Nothing reaches a
@@ -33,7 +34,7 @@ named ``summarized`` appears, then reports its usage and what it did: 2
 messages, 7,400 tokens before and 1,200 after. A session is stored once a
 turn ran in it (``session_exists``), as ``/new``'s line asks, and ``/resume``
 lists and reopens it: its row (the first prompt, the turns) and its messages,
-each turn's prompt and the reply it echoed.
+each turn's prompt and the reply it echoed; ``delete_session`` drops it.
 
 With a file named ``init-fails`` in the working directory at startup, the
 first initialization fails, and the next one (a turn retries it) waits until
@@ -47,6 +48,7 @@ and waits until a file named ``open-released`` appears.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -136,6 +138,11 @@ class ScriptedManager:
     async def recent_messages(self, session_id, limit=20, *, user_id=None) -> list[dict]:
         return self._messages.get(session_id, [])[-limit:]
 
+    async def delete_session(self, session_id, *, user_id=None) -> bool:
+        self._sessions.discard(session_id)
+        self._updated.pop(session_id, None)
+        return self._messages.pop(session_id, None) is not None
+
     def _said(self, session_id: str, role: str, content: str) -> None:
         self._messages.setdefault(session_id, []).append({"role": role, "content": content})
         self._updated[session_id] = datetime.now(timezone.utc)
@@ -211,14 +218,24 @@ class ScriptedManager:
 
 
 class ConsoleApp(BaseCLIApp):
-    """The console tests' app: the scripted workflow, on the memory store."""
+    """The console tests' app: the scripted workflow, on the default store
+    (sqlite; the scripted workflow writes nothing to it), or on the memory
+    store with ``--store memory``."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: str = "sqlite") -> None:
         super().__init__(
             app_info=AppInfo(name="Console test", version="0"),
             agent_configs=[AgentConfig(name="assistant", prompt="Help.")],
-            settings=BaseSettings(session_store="memory"),
+            settings=BaseSettings(session_store=store),
         )
+
+    @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--store", choices=("sqlite", "memory"), default="sqlite")
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "ConsoleApp":
+        return cls(store=args.store)
 
 
 def main() -> None:

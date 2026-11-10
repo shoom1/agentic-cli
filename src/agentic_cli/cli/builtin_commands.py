@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.conversation import NOT_KEPT
 from agentic_cli.cli.message_processor import _says_so_when_stopped
 from agentic_cli.cli.session_resume import NO_PROMPT
 
@@ -196,9 +197,11 @@ class StatusCommand(Command):
                 # As text, not markup: an error may hold brackets.
                 table.add_row("Error", Text(str(error) or type(error).__name__, style="red"))
 
-        # Persistent session info
+        # Persistent session info (none on the memory store: it is the only one)
         sid = app.session_id
-        if sid:
+        if sid and not _keeps_conversations(app):
+            table.add_row("Session", f"{sid} (not kept: session_store is memory)")
+        elif sid:
             table.add_row("Session", f"{sid} (persistent)")
         else:
             table.add_row("Session", "ephemeral (not saved)")
@@ -535,6 +538,12 @@ class PapersCommand(Command):
         app.session.add_rich(table)
 
 
+def _keeps_conversations(app: Any) -> bool:
+    """Whether the app keeps the conversations it leaves: not on the memory
+    store (``app.session_store``), where it is in one at a time."""
+    return getattr(app, "session_store", None) != "memory"
+
+
 def _session_workflow(app: Any) -> Any:
     """The app's workflow when it keeps sessions; otherwise None, and the user is told why."""
     try:
@@ -565,7 +574,9 @@ class SessionsCommand(Command):
     markup, its backend, its turns and when it last changed.
     ``--delete=<id>`` deletes one on the backend that keeps it, never the
     conversation the user is in nor one open in another process; an id two
-    backends keep needs ``--backend=<name>``.
+    backends keep needs ``--backend=<name>``. On the memory store, which
+    keeps no conversation once left, it lists none (the one the app is in,
+    ``/status`` names) and deletes none: it says why (``NOT_KEPT``).
     """
 
     def __init__(self) -> None:
@@ -585,6 +596,13 @@ class SessionsCommand(Command):
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
         backend = parsed.get_option("backend", "", str) or None
+
+        if not _keeps_conversations(app):  # said before the workflow is needed
+            if delete_id:
+                app.session.add_error(NOT_KEPT)
+            else:
+                app.session.add_message("system", NOT_KEPT)
+            return
 
         workflow = _session_workflow(app)
         if workflow is None:
@@ -684,7 +702,8 @@ class SessionsCommand(Command):
 
 
 class ResumeSessionCommand(Command):
-    """Reopen a stored conversation: from a picker, or the one named."""
+    """Reopen a stored conversation: from a picker, or the one named. On the
+    memory store, which keeps none, it is refused (``NOT_KEPT``)."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -697,6 +716,9 @@ class ResumeSessionCommand(Command):
 
     async def execute(self, args: str, app: Any) -> None:
         """Resume the conversation named, or the one picked (``pick_session``)."""
+        if not _keeps_conversations(app):  # said before the workflow is needed
+            app.session.add_error(NOT_KEPT)
+            return
         if _session_workflow(app) is None:
             return
         session_id = self.parse_args(args).positional.strip()
@@ -731,14 +753,14 @@ class CompactCommand(Command):
 
 class NewCommand(Command):
     """Start a new conversation, on another backend if one is named; the one
-    left stays in /sessions."""
+    left stays in /sessions (on the memory store it is dropped)."""
 
     def __init__(self) -> None:
         super().__init__(
             name="new",
             description=(
-                "Start a new conversation (the current one stays in /sessions); "
-                "name a backend to run it there"
+                "Start a new conversation (the current one stays in /sessions, "
+                "unless session_store is memory); name a backend to run it there"
             ),
             usage="/new [adk|deepagents|langgraph]",
             examples=["/new", "/new deepagents"],

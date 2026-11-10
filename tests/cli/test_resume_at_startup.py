@@ -13,8 +13,8 @@ builds the app (``from_args``), sets its ``session_start``, runs it and exits wi
   status is 1 (the picker is ``/resume``, in the app);
 - a workflow that cannot start keeps the prompt (``/settings`` can fix it)
   and says how to resume after; a backend without sessions refuses
-  ``--continue`` and ``--resume`` (status 1); ``session_store=memory`` says
-  why nothing is stored;
+  ``--continue`` and ``--resume`` (status 1); ``session_store=memory``,
+  which keeps no conversation, refuses both, ``--resume`` with status 1;
 - a store that fails says so: ``--resume <id>`` is refused (status 1), the
   others start a new conversation; a resume that fails once the prompt is
   up says so too, and an exit while it runs says nothing of a cancel.
@@ -50,6 +50,12 @@ from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from tests.cli.console_app import ScriptedManager  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
+
+#: What the memory store's refusals say.
+NOT_KEPT = (
+    "session_store is memory: conversations are not kept. "
+    "Set it to sqlite to keep and resume them (applies at the next start)."
+)
 
 
 class Session:
@@ -232,16 +238,16 @@ class TestContinue:
         assert app.session_id == fresh and session.prompted
         assert "No conversation to continue; starting a new one." in session.said("system")
 
-    async def test_on_the_memory_store_it_says_why(self, manager):
+    async def test_on_the_memory_store_it_starts_a_new_one_and_says_why(self, manager):
+        """Nothing is kept there (``test_memory_store_one_conversation.py``)."""
+        store(manager, "abc", "Plan the trip", "Sure.", hours=2)
         session = Session()
         app = app_with(session, SessionStart("continue"), store="memory")
 
         await app.run()
 
-        assert (
-            "No conversation to continue; starting a new one. "
-            "(session_store is memory: conversations end with the app)"
-        ) in session.said("system")
+        assert session.said("warning") == [f"{NOT_KEPT} Starting a new conversation."]
+        assert not resumed(session)
 
 
 class TestResumeById:
@@ -276,29 +282,17 @@ class TestResumeById:
             "/resume in the app picks one."
         ]
 
-    async def test_on_the_memory_store_the_refusal_offers_nothing_to_open(self, manager):
-        """Nothing is stored there: --continue and /resume would open nothing."""
+    async def test_on_the_memory_store_it_is_refused(self, manager):
+        """Nothing is kept there: --continue and /resume would open nothing,
+        so neither is offered (``test_memory_store_one_conversation.py``)."""
         session = Session()
         app = app_with(session, SessionStart("resume", "zzz"), store="memory")
         app._command = "my-app"
 
         await app.run()
 
-        assert session.said("error") == [
-            "No conversation 'zzz' found. "
-            "(session_store is memory: conversations end with the app)"
-        ]
-
-    async def test_on_the_memory_store_the_refusal_says_why(self, manager):
-        session = Session()
-        app = app_with(session, SessionStart("resume", "zzz"), store="memory")
-
-        await app.run()
-
-        assert session.said("error") == [
-            "No conversation 'zzz' found. "
-            "(session_store is memory: conversations end with the app)"
-        ]
+        assert app.exit_status == 1 and not session.prompted
+        assert session.said("error") == [NOT_KEPT]
 
 
 class TestWhenItCannot:
