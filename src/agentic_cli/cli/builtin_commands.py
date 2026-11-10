@@ -884,10 +884,13 @@ _IN_THE_LIST = "in the list"
 def _show_models(
     app: Any, catalog: "ModelCatalog", providers: Any, roles: dict[str, list[str]]
 ) -> None:
-    """The list, then each entry it leaves out with why; below, the providers in use.
+    """The list, then each model the settings name that it leaves out, with why;
+    below, the providers in use.
 
     The list is what the pickers offer: ``offered()`` with the roles'
-    models (``model_services.role_models``).
+    models (``model_services.role_models``). What it leaves out is
+    ``not_offered()``: a ``models`` entry, ``default_model``, a role's model,
+    an agent's or the manager's own, each once.
     """
     offered = catalog.offered(extra=list(roles))
     left_out = catalog.not_offered()

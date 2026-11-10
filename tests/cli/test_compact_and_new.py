@@ -80,7 +80,7 @@ SUMMARIZING = "Summarizing the earlier conversation…"
 def quiet_app(monkeypatch):
     """An app that leaves no global logging configuration or warning hook behind."""
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
 
 
 def app_on(manager, app_settings) -> BaseCLIApp:

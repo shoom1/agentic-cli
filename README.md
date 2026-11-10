@@ -970,7 +970,10 @@ called, or does not serve it (a listing this process made lacks it, or a
 listing recorded it as absent), and `/models` says why for each. A model the
 settings name that its provider does not serve, and an entry whose provider is
 not defined, is also warned of once, when a listing shows it. Listings never
-add to the list. Each model appears once. Picking writes
+add to the list. Each model appears once. A picker shows its role's model
+now; when the list leaves that model out, the picker still offers it, first,
+as `<model> (current)`, and its description says it is not offered and why, so a Save
+never changes a model you did not pick. Picking writes
 `default_model`, or the role's `model_roles` entry, to the project settings
 file and restarts the workflow on it, keeping the conversation. Before the
 workflow is ready, the pickers offer the list from the entries and the
@@ -2289,6 +2292,7 @@ agentic-cli/
 │   │   ├── memory_command.py     # /memory
 │   │   ├── settings_command.py   # /settings
 │   │   ├── settings_introspection.py
+│   │   ├── settings_ui.py        # SettingsUI: the /settings fields and pickers; a Save applied and saved
 │   │   ├── workflow_controller.py
 │   │   ├── message_processor.py
 │   │   └── usage_tracker.py      # Token / context-window accounting
@@ -2324,6 +2328,7 @@ agentic-cli/
 │   │   │   ├── anthropic_llm.py          # DirectAnthropicLlm (bare claude-* in ADK YAML)
 │   │   │   ├── event_processor.py
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
+│   │   │   ├── log_filters.py            # What ADK would print over the CLI, logged at debug (installed by run())
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
 │   │   │   ├── task_progress_plugin.py   # TaskProgressPlugin (deprecated, unused)
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)

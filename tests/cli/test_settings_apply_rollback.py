@@ -17,11 +17,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from thinking_prompt import TextField
 
+from agentic_cli.cli.message_processor import CANCELLED_LINE
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
@@ -153,8 +154,9 @@ async def _interrupt(task: asyncio.Task, restarting: asyncio.Event) -> None:
 
 class TestTheRestartIsInterrupted:
     """Ctrl+C stops ``/settings`` while the workflow restarts on the Save's
-    values. Nothing of the Save stays, as when the restart fails, and nothing
-    is said: Ctrl+C there is the session's interruption, not a cancel."""
+    values. Nothing of the Save stays, as when the restart fails, and the
+    request says it stopped, once, as a turn does
+    (``test_settings_stopped.py``: wherever the Save waits)."""
 
     async def test_settings_are_restored(self, settings):
         manager = InterruptedManager(OLD_MODEL)
@@ -180,9 +182,9 @@ class TestTheRestartIsInterrupted:
         assert app._workflow_controller.is_ready
 
     async def test_a_failed_restore_still_lets_the_interruption_through(self, settings):
-        """The cancel is what propagates, not the restore's error, and nothing
-        is said; the workflow stays down on the old model, so the next request
-        retries it (and reports a failure then)."""
+        """The cancel is what propagates, not the restore's error, which is
+        not said; the workflow stays down on the old model, so the next
+        request retries it (and reports a failure then)."""
         manager = InterruptedManager(OLD_MODEL)
         manager.broken = {OLD_MODEL}
         app = _app(settings, manager)
@@ -194,9 +196,9 @@ class TestTheRestartIsInterrupted:
         assert settings.default_model == OLD_MODEL
         assert manager.model == OLD_MODEL
         assert not app._workflow_controller.is_ready
-        assert app.session.method_calls == []
+        assert app.session.method_calls == [call.add_message("system", CANCELLED_LINE)]
 
-    async def test_nothing_is_said_or_repainted(self, settings):
+    async def test_it_says_so_once_and_repaints_nothing(self, settings):
         manager = InterruptedManager(OLD_MODEL)
         app = _app(settings, manager)
 
@@ -205,7 +207,7 @@ class TestTheRestartIsInterrupted:
             manager.restarting,
         )
 
-        assert app.session.method_calls == []
+        assert app.session.method_calls == [call.add_message("system", CANCELLED_LINE)]
 
     async def test_nothing_is_saved(self, settings):
         from agentic_cli.cli.settings_command import SettingsCommand

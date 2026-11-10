@@ -43,7 +43,7 @@ from tests.cli.dialog_fakes import autospec_session
 def quiet_app(monkeypatch):
     """No global logging configuration or warning hook left behind."""
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
 
 
 @pytest.fixture
