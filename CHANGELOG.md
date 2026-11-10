@@ -1247,10 +1247,12 @@ the start of the entry's title.
   the app keeps one conversation at a time: the one left is dropped from the
   store once the switch is made, after its memories are proposed (its
   `delete_session`, shielded: a Ctrl+C stops the wait, not the drop; on
-  another backend the manager released takes it along; one it cannot drop
-  then, the workflow being down or its delete raising, is dropped once a
-  workflow is ready, before the next turn, `/compact`, delivery of finished
-  jobs or `/new` uses it), the line says
+  another backend the manager released takes it along; one it cannot
+  confirm gone, the workflow being down or its lookup or delete raising, is
+  dropped once a workflow is ready: before the next turn, or right after
+  the turn whose own start revives the workflow, and always before that
+  turn's delivery of finished jobs, `/compact` and the next `/new`), the
+  line says
   "Previous: <old>, not kept (session_store is memory).", and a finished job
   of it is told as unavailable, as a deleted conversation's is. Ctrl+C
   stops it like any request, "Operation cancelled...", once, with nothing

@@ -1037,12 +1037,13 @@ class BaseCLIApp:
         Ctrl+C then stops the wait, not the drop), and the line says
         ``"Previous: <old>, not kept (session_store is memory)."``. A finished
         job of it is told as unavailable, as a deleted conversation's is.
-        One it cannot drop then (the workflow is down, the manager a failed
-        reinitialization kept holding it still, or its delete raises) is
-        remembered, and dropped once a workflow is ready, before the next
-        turn, ``/compact``, delivery of finished jobs or ``/new`` uses it
-        (``ConversationCore.drop_left``); its job is then told as
-        unavailable.
+        One it cannot confirm gone (the workflow is down, the manager a
+        failed reinitialization kept holding it still, or its lookup or
+        delete raises) is remembered, and dropped once a workflow is ready
+        (``ConversationCore.drop_left``): before the next turn, or right
+        after the turn whose own start revives the workflow, and always
+        before that turn's delivery of finished jobs, ``/compact`` and the
+        next ``/new``; its job is then told as unavailable.
 
         A conversation runs on one backend for its whole life (each keeps
         its history in its own store), so the new one runs on ``backend``,

@@ -271,8 +271,9 @@ class ConversationCore:
         #: Conversations ``/new`` left on the memory store that the
         #: workflow's store may still hold (the workflow was down then, or
         #: their lookup or delete raised): dropped once a workflow is ready,
-        #: before it is used (``drop_left``). Nothing lists or opens them,
-        #: and a job of one would never be told.
+        #: at the next turn, ``/compact``, delivery of finished jobs or
+        #: ``/new`` (``drop_left``). Nothing lists or opens them, and a job
+        #: of one would never be told.
         self.to_drop: list[str] = []
 
     @property
@@ -358,7 +359,9 @@ class ConversationCore:
     async def drop_left(self, parts: TurnParts) -> bool:
         """Drop the conversations ``/new`` left that the workflow's store may
         still hold (``to_drop``), once a workflow is ready; the caller holds
-        the turn lock, and nothing has used the workflow since it was ready.
+        the turn lock. Before the next turn, or right after the turn whose
+        own start revived the workflow, and always before that turn's
+        delivery of finished jobs, ``/compact`` and the next ``/new``.
 
         Each goes through ``parts.drop``, shielded: one the store has no more
         is done (dropped, or not there: the manager that kept it was

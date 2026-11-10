@@ -9,9 +9,11 @@ memories are proposed, which read it, and says so ("Previous: <id>, not kept
 backend that fails to start drops nothing. A finished job of a conversation
 dropped is told as unavailable, as a deleted conversation's is. One left
 while the workflow was down (the manager a failed reinitialization kept,
-its store with it), or whose delete raised, is dropped once a workflow is
-ready, before it is used: a turn, a delivery of finished jobs, ``/compact``
-or the next ``/new``.
+its store with it), or whose lookup or delete raised, is dropped once a
+workflow is ready: before the next turn, or right after the turn whose own
+start revives the workflow, and always before that turn's delivery of
+finished jobs, ``/compact`` and the next ``/new``; never while the app is
+in it.
 
 Nothing is kept to go back to, so ``/resume`` (with an id or the picker),
 the app's ``resume_session`` and ``pick_session``, ``--resume <id>`` and
