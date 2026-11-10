@@ -251,6 +251,20 @@ async def turn(manager, text: str) -> list:
     return [event async for event in manager.process(text, "u", session_id="s")]
 
 
+async def recorded(manager, call_id: str) -> None:
+    """Wait until the manager has recorded ``call_id``'s result.
+
+    A tool's own signal comes before its result goes through the wrappers
+    that record it (and cut and save it, past the cap), so a cancel made at
+    the signal can still find the call running.
+    """
+    async def wait() -> None:
+        while not any(call_id in calls for calls in manager._open_calls._finished.values()):
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(wait(), timeout=5)
+
+
 async def cancelled(manager, text: str, until: str = "started") -> None:
     """Start a turn, and cancel it once ``SIGNALS[until]`` is set."""
     running = asyncio.create_task(turn(manager, text))
@@ -338,7 +352,7 @@ async def test_a_call_that_finished_beside_it_keeps_its_result(hermetic, monkeyp
         running = asyncio.create_task(turn(manager, "Both, please."))
         await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
         await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
-        await asyncio.sleep(0.05)  # the fast call's result is recorded
+        await recorded(manager, "toolu_f")
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
@@ -373,7 +387,7 @@ async def test_a_call_the_cap_cut_that_finished_beside_it_keeps_its_cut_result(
         running = asyncio.create_task(turn(manager, "Both, please."))
         await asyncio.wait_for(SIGNALS["started"].wait(), timeout=5)
         await asyncio.wait_for(SIGNALS["finished"].wait(), timeout=5)
-        await asyncio.sleep(0.05)  # the long call's result is recorded
+        await recorded(manager, "toolu_f")
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
