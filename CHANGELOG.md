@@ -538,6 +538,22 @@ the start of the entry's title.
 
 ### Added
 
+- **A backend's conversations, read without its manager:
+  `agentic_cli.workflow.session_readers`.** `await
+  open_session_reader(backend, settings, store=None)` opens a
+  `SessionReader` over the conversations a backend keeps for the settings'
+  app and user (`list(limit=None)`, `info(id)`, `exists(id)`, `delete(id)`,
+  `aclose()`, or `async with`), each row naming its backend
+  (`SessionInfo.backend`). It reads with the backend's own session code over
+  its store (ADK's session service, Deep Agents' checkpointer and session
+  index) and builds no agent, resolves no model, builds no service, and makes
+  no store that holds nothing yet; the module is imported on a worker
+  thread. None for the memory store (its conversations live in the manager
+  that made them) and for LangGraph; a backend whose extra is not installed
+  raises `ImportError` with the install hint. `reader_backends()` names the
+  backends that have one. The CLI reads every installed backend's
+  conversations through them (see **`/resume [<id>]`…**).
+
 - **A manager's services can move to a manager of the other backend.**
   `loan = old.lend_services()`, then `await
   new.initialize_services(services=loan)` (the new manager publishes them and
@@ -553,8 +569,11 @@ the start of the entry's title.
   none of them, and the old one keeps working with them. A manager that holds
   services it does not own runs no turn (`RuntimeError`): the new one before
   the give, the old one after it until its release. `ServiceLoan` is in
-  `agentic_cli.workflow.services`. The CLI does not use it yet: an
-  orchestrator change still builds new services.
+  `agentic_cli.workflow.services`. The CLI's
+  `WorkflowController.switch_backend` hands them over so (lend, start, give,
+  publish the new manager at once, release the old one): a conversation
+  started or opened on another backend keeps the run's services, and a
+  failed start or give leaves the old manager with them.
 
 - **`JobManager.snapshot()`, `JobManager.release_resume(job_id)` and
   `JobRecord.awaiting_resume`.** `snapshot()` returns the jobs a manager
@@ -1199,16 +1218,16 @@ the start of the entry's title.
   `job_auto_resume` is on; the status bar's `↻N` counts it), and is never
   told in the new one, whose `ctx` and task list it would move. `/new
   <backend>` starts the new conversation on another backend (see Changed),
-  which starts a new manager, and with it new services until a later
-  release: in-process jobs end, sandbox kernels start over and "Allow for
-  this session" grants are forgotten; and a finished job of the
-  conversation left is told in the new one as unavailable (the new backend
-  does not hold its conversation), as an orchestrator switch told it
-  before. `/clear` is still a screen clear.
+  which starts a new manager on the run's services: the "Allow for this
+  session" grants, in-process jobs, sandbox kernels, knowledge bases and
+  embedding model are handed over (**A manager's services can move…**); and
+  a finished job of the conversation left is told in the new one as
+  unavailable (the new backend does not hold its conversation), as an
+  orchestrator switch told it before. `/clear` is still a screen clear.
 - **A session list's rows: `SessionInfo` and `session_info()`.**
   `list_sessions(*, user_id=None, limit=None)` returns one frozen
-  `SessionInfo(session_id, title, turns, updated)` per stored conversation,
-  newest first (`limit` keeps the newest), on every backend, and
+  `SessionInfo(session_id, title, turns, updated, backend=None)` per stored
+  conversation, newest first (`limit` keeps the newest), on every backend, and
   `session_info(session_id, *, user_id=None)` one conversation's, or None
   when it is not stored (`SessionInfo` is exported from `agentic_cli`). The title is the
   first prompt on one line (`agentic_cli.workflow.sessions.session_title`:
@@ -1222,19 +1241,46 @@ the start of the entry's title.
   listing reads no events; a conversation stored before them is read from
   its events, for the rows returned (one that cannot be read is listed by
   its id alone), and nothing is written back (its place in the list stays). Deep Agents reads both from each conversation's newest
-  checkpoint; LangGraph knows only the id. `/sessions` shows the title (as
+  checkpoint; LangGraph knows only the id. `backend` names the backend that
+  keeps the conversation in a `SessionReader`'s rows and the CLI's listings
+  (None in a manager's own). `/sessions` lists every installed backend's
+  conversations (`BaseCLIApp.list_conversations()`) and shows the backend,
+  the title (as
   typed, neither Rich markup nor emoji codes, as the id is; "(no prompt
   yet)" for a stored one without, nothing where the backend cannot tell, as
-  on LangGraph) and the turns, and refuses to delete the conversation the
-  user is in.
+  on LangGraph) and the turns; `--delete=<id>` deletes on the backend that
+  keeps it (`BaseCLIApp.delete_conversation(session_id, backend=None)`,
+  held there with `conversation_held(session_id, backend=None)`), refuses an
+  id two backends keep, naming both, unless `--backend=<name>` picks one, and
+  refuses to delete the conversation the user is in
+  (`BaseCLIApp.session_backend` names its backend).
 - **`/resume [<id>]` reopens a saved conversation without a restart**, and
   its public twins `BaseCLIApp.resume_session(session_id) -> bool` and
   `BaseCLIApp.pick_session() -> str | None`. `/resume` opens a picker, "Resume
-  a conversation": the 50 newest other conversations, newest first, each
-  with how long ago, its turns, its title and its id (in that order, so a
+  a conversation": the 50 newest other conversations of every installed
+  backend, newest first, each
+  with how long ago, its turns, its backend (once a row is on another
+  backend than the running one), its title and its id (in that order, so a
   narrow terminal clips the title, not what tells rows apart); Enter opens one, Esc
   keeps the current one ("No other conversations to resume." when there are
-  none). `/resume <id>` opens that one. Under the turn lock it reads the
+  none); the id it returns is a `PickedConversation`
+  (`agentic_cli.cli.session_resume`), a `str` naming its backend. `/resume
+  <id>` opens that one. A conversation belongs to one backend for its whole
+  life, and one another backend keeps opens there: it is held there (one
+  another process has open is refused before anything starts), the
+  memories of the one left are proposed while its backend runs, that
+  backend starts on the run's services (`WorkflowController.switch_backend`),
+  and the line says "Resumed on deepagents: …"; a backend that fails to
+  start changes nothing ("Could not open '<id>': deepagents did not start:
+  …"), and a Ctrl+C once it runs opens the conversation, then goes on. Each
+  other backend's store is read through its `SessionReader`, opened for the
+  look and closed after it (`agentic_cli.cli.stored_conversations`): a
+  backend whose store fails is left out (logged, and named when an id is
+  not found), and so is one whose extra is not installed. An id two
+  backends keep (an earlier build switched the backend under an open
+  conversation) opens on the running backend, and "'<id>' is also a
+  conversation on deepagents: /resume lists it." says so; the picker opens
+  the row picked. Under the turn lock it reads the
   conversation first, so one that is not stored ("No conversation '<id>'
   found.", also when another process deletes it while it opens), already
   open ("Already in this conversation.") or unreadable
@@ -1258,9 +1304,13 @@ the start of the entry's title.
   own (`add_arguments(parser)`), builds the app with `from_args(args)` (by
   default `cls()`; it returns `Self`), sets its
   `session_start`, runs it and exits with its `exit_status`. `-c`/`--continue`
-  resumes the newest saved conversation once the prompt is up, or says "No
+  resumes the newest saved conversation of every installed backend once the
+  prompt is up, or says "No
   conversation to continue; starting a new one."; `-r`/`--resume <id>`
-  resumes that one, and refuses one that is not saved before the prompt is
+  resumes that one, on the backend that keeps it (the settings' when both
+  do): the backend is found from each installed backend's store before the
+  workflow is built, so the run builds that one, once; it refuses one that
+  is not saved before the prompt is
   drawn ("No conversation '<id>' found: <app> --continue opens the newest,
   /resume in the app picks one.", status 1; on `session_store=memory`, which
   holds none, without the pointers); a resume that fails once the prompt is
@@ -1273,7 +1323,7 @@ the start of the entry's title.
   one" (status 2; `session_args.SessionArgumentParser`, the parser `main()`
   builds). A
   workflow that cannot start keeps the prompt and says how to resume after
-  `/settings`; a backend without sessions refuses both (status 1); a store that fails refuses
+  `/settings` (the conversation `--continue` chose named); a backend without sessions refuses both (status 1); a store that fails refuses
   `--resume <id>` (status 1) and starts the others in a new conversation,
   saying why; on `session_store=memory` the lines say that conversations
   end with the app. At exit, a saved conversation a turn ran in is named:
@@ -1315,12 +1365,15 @@ the start of the entry's title.
   the line names the new backend, and the one that keeps the conversation
   left); an unknown name, or a backend whose extra is not installed, is
   refused with the reason, and nothing changes (so is a backend named to an
-  app whose `start_new_session` override takes none). After it, the exit
-  hint names the backend to set before `--resume` (and the run's store,
-  after a change of `session_store` in the run). A model switch never
+  app whose `start_new_session` override takes none). `/resume`,
+  `--resume <id>` and `--continue` open a conversation on the backend that
+  keeps it (see Added: **`/resume [<id>]`…**), so the exit hint needs no
+  backend: it names the run's store alone, after a change of
+  `session_store` in the run. A model switch never
   changes the backend: `WorkflowController` runs the conversation's
-  (`backend`; `switch_backend(backend)` starts another, for a new
-  conversation), not `settings.orchestrator`, and `reinitialize` is always
+  (`backend`; `switch_backend(backend)` starts another, for a conversation
+  started or opened there, on the run's services), not
+  `settings.orchestrator`, and `reinitialize` is always
   in place. The factory builds the backend it is given
   (`create_workflow_manager_from_settings(orchestrator=)`), says which the
   settings name (`orchestrator_of`) and checks one can run

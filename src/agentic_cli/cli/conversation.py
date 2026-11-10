@@ -10,9 +10,10 @@ same id in another backend or store is another conversation).
 
 Every change of conversation goes through one protocol, ``switch``: ``/new``
 (on the running backend or another: a conversation never changes backend),
-``/resume``, the conversation a run starts in (``--continue``, ``--resume``, a
-new one), and the same id in another place, while the workflow is down and
-its next start builds on another backend or store.
+``/resume`` (on the backend that keeps the conversation, which runs then),
+the conversation a run starts in (``--continue``, ``--resume``, a new one),
+and the same id in another place, while the workflow is down and its next
+start builds on another backend or store.
 So the conversation the turns write to is always the one held and loaded,
 whichever way it changed and wherever a Ctrl+C lands.
 """
