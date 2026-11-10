@@ -306,6 +306,41 @@ class TestResumeOnAnotherBackend:
         assert two.built[0].turns == ["d1"]
         await app._workflow_controller.close()
 
+    async def test_ctrl_c_during_its_load_there_says_where_the_app_is(self, two, monkeypatch):
+        """The switch is made before the load (the conversation left is not
+        on the new backend): a Ctrl+C there leaves the app in it, and it says
+        so, and draws the status line, before the cancel goes on."""
+        app, _ = await on_adk(two)
+        gate, built = asyncio.Event(), []
+        build = two.manager
+
+        def manager(backend):
+            made = build(backend)
+            made.load_gate = gate
+            built.append(made)
+            return made
+
+        monkeypatch.setattr(two, "manager", manager)
+        resuming = asyncio.create_task(app.process_input("/resume d1"))
+        for _ in range(500):
+            if built and built[0].loading.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert built[0].loading.is_set()
+        app.session.set_status.reset_mock()
+        resuming.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await resuming
+
+        assert (app.session_id, app.session_backend) == ("d1", "deepagents")
+        assert said(app.session, "add_message")[-2:] == [
+            "Resumed on deepagents: On Deep Agents (d1, 2 turns, last active 1h ago).",
+            "Operation cancelled...",
+        ]
+        assert app.session.set_status.called
+        gate.set()
+        await app._workflow_controller.close()
+
     async def test_not_found_anywhere_says_which_backends_were_not_read(self, two):
         two.unreadable["deepagents"] = RuntimeError("database is locked")
         app, _ = await on_adk(two)

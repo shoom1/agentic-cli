@@ -2205,7 +2205,9 @@ class BaseCLIApp:
         A backend that fails to start, or a Ctrl+C before it runs, changes
         nothing (memories proposed stay proposed); a Ctrl+C once it runs
         (the old one being released) opens the conversation there, then the
-        cancel goes on.
+        cancel goes on. A Ctrl+C during the load there, the switch made, says
+        where the app is ("Resumed on <backend>: …", no replay) and draws the
+        status line before it goes on.
         """
         controller = self._workflow_controller
         session_id, backend = info.session_id, info.backend
@@ -2240,9 +2242,21 @@ class BaseCLIApp:
             self._conversation.abandon(hold)
             raise
         # The backend runs: the switch is made there, whatever comes next.
-        switched = await self._conversation.switch(
-            session_id, self._switch_parts(), place=place, stored=True, hold=hold, propose=False
-        )
+        core = self._conversation
+        try:
+            switched = await core.switch(
+                session_id, self._switch_parts(), place=place, stored=True, hold=hold,
+                propose=False,
+            )
+        except asyncio.CancelledError:
+            if (core.session_id, core.place) == (session_id, place):
+                # Made before the load, which the cancel stopped: the app is
+                # there, and says so (no replay), as /new <backend> does.
+                self.session.add_message(
+                    "system", resumed_line(info, datetime.now(timezone.utc), backend=backend)
+                )
+                _show_new_context(controller, self.session)
+            raise
         logger.info("session_resumed", session_id=session_id, previous=old, backend=backend)
         if switched.gone:  # deleted as it opened: it starts empty there
             self.session.add_error(
