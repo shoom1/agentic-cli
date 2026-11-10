@@ -162,6 +162,9 @@ the start of the entry's title.
 - On ADK a failed turn is shown as `<the error> [<its type>]`, as on Deep
   Agents, where it was `Workflow error: <the error>`; a rate limit is said
   as before. (Changed: **A failed ADK turn yields…**)
+- On ADK `TASK_PROGRESS` comes only when a tool call changed the task list,
+  and a list whose tasks are all done stays: `get_tasks` answers it, where
+  0.6 cleared it. (Changed: **On ADK, task progress is reported…**)
 
 #### Settings that moved or changed meaning
 
@@ -1376,27 +1379,25 @@ the start of the entry's title.
 
 - **A failed ADK turn yields one `ERROR` event instead of raising.** On ADK
   `process()` and `resume_with_job_result()` raised what failed a turn (a
-  provider's error, a rate limit, a session another process changed as
-  `ConversationChangedError`), where Deep Agents yielded one `ERROR`. On both
-  backends a turn that fails now yields one `ERROR` that is not recoverable,
-  last, and returns: its `content` is the error's text, its `error_code` the
-  exception's type (or `CONTEXT_OVERFLOW`), and its `metadata` says whether a
-  provider rate-limited the turn (`rate_limited`) and names the exception's
-  type, or the code where none ended the turn (`error_type`), ADK's overflow
-  answer and "returned no answer" included; `WorkflowEvent.turn_failed` builds
-  it. An `ERROR` the turn already yielded that is not recoverable (the
-  overflow handler's) is its only one. A cancel still raises
-  `asyncio.CancelledError`, and a turn that cannot start (the backend not
-  initialized or admitted, or its conversation unreadable before the run)
-  still raises. The CLI says a rate limit from the event with the line it said
-  for the raise ("Rate limited: … Send the request again once the limit
-  resets."), a changed conversation with "Send your message again…", and any
-  other failure as `<the error> [<its type>]`, where on ADK it said `Workflow
-  error: <the error>`; a manager that raises (an app's own, LangGraph) is said
-  as before. The backends log the failure at info, its traceback at debug, and
-  the CLI its record of it (`workflow_error_event`, `turn_rate_limited`) at
-  info, so at the default log level the error is all that is printed over the
-  prompt.
+  provider's error, a rate limit), where Deep Agents yielded one `ERROR`. On
+  both backends a turn that fails now yields one `ERROR` that is not
+  recoverable, last, and returns: its `content` is the error's text, its
+  `error_code` the exception's type (or `CONTEXT_OVERFLOW`), and its
+  `metadata` says whether a provider rate-limited the turn (`rate_limited`)
+  and names the exception's type, or the code where none ended the turn
+  (`error_type`), ADK's overflow answer and "returned no answer" included;
+  `WorkflowEvent.turn_failed` builds it. An `ERROR` the turn already yielded
+  that is not recoverable (the overflow handler's) is its only one. A cancel
+  still raises `asyncio.CancelledError`, and a turn that cannot start (the
+  backend not initialized or admitted, or its conversation unreadable before
+  the run) still raises. The CLI says a rate limit from the event with the
+  line it said for the raise ("Rate limited: … Send the request again once the
+  limit resets."), and any other failure as `<the error> [<its type>]`, where
+  on ADK it said `Workflow error: <the error>`; a manager that raises (an
+  app's own, LangGraph) is said as before. The backends log the failure at
+  info, its traceback at debug, and the CLI its record of it
+  (`workflow_error_event`, `turn_rate_limited`) at info, so at the default log
+  level the error is all that is printed over the prompt.
 - **On ADK, task progress is reported when the task list changes, and a
   finished list stays.** ADK's `TaskProgressPlugin` reported the list after
   every tool call while there was one, and cleared it once every task was
@@ -1718,8 +1719,8 @@ the start of the entry's title.
   <model>'s context window. Use /compact or /new.", as on Deep Agents, and
   no reply is stored; a sub-agent tells its coordinator it could not do the
   task, and the user gets one warning, "<agent>: the request no longer fits
-  <model>'s context window.". Any other model error is ADK's as before,
-  and one that fails the retry is the turn's error, the provider's own. The
+  <model>'s context window.". Any other model error, and one that fails
+  the retry, is the turn's one `ERROR`, the provider's own. The
   tracebacks ADK logs for a failed summary, model call or retry are logged
   at debug by the CLI, since the user is told otherwise: on ADK's
   compaction (`adk_compaction_failed`), node (`adk_node_failed`), runner
@@ -3435,10 +3436,12 @@ step; each entry says what to use instead.
   once; when a line typed meanwhile holds it, its lock moves, and the change
   is refused, "Settings were not changed.", when another process has it
   open there). ADK's stale
-  session (a writer without the lock) is now
-  `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
-  '<id>' was changed by another process during this turn. Send your message
-  again to go on from what it holds now."
+  session (a writer without the lock) now ends the turn with its one
+  `ERROR`, whose `error_code` is `ConversationChangedError` (raised as
+  `workflow.sessions.ConversationChangedError` when the turn finds it before
+  the run starts), said plainly: "Conversation '<id>' was changed by another
+  process during this turn. Send your message again to go on from what it
+  holds now."
 - **`/sessions` shows a session id as typed.** Rich turned an emoji code
   in an id (":x:") into an emoji, so the id could not be copied back into
   `--delete=`.
