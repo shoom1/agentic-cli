@@ -34,8 +34,12 @@ from prompt_toolkit.history import InMemoryHistory
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
-from agentic_cli.cli.conversation import ConversationCore, Hold, Place, SwitchParts
+from agentic_cli.cli.message_processor import (
+    MessageProcessor,
+    TurnStatus,
+    _says_so_when_stopped,
+)
+from agentic_cli.cli.conversation import ConversationCore, Hold, Place, Switch, SwitchParts
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
     SessionStart,
@@ -667,7 +671,8 @@ class BaseCLIApp:
         # process opening it, at the place the settings keep it in (read
         # again as run() starts the workflow: cli/conversation.py).
         self._conversation_core = ConversationCore(
-            session_id or uuid.uuid4().hex[:12], Place.of(settings)
+            session_id or uuid.uuid4().hex[:12], Place.of(settings),
+            opened_empty=session_id is None,  # one given may be stored
         )
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
@@ -1252,20 +1257,30 @@ class BaseCLIApp:
                 return False
 
         # The backend new conversations run on, and whether it is another than
-        # the open conversation's. A conversation never changes backend: one
-        # with nothing stored yet is left for a new conversation there at once
-        # (no rebuild first: the new manager is built on the new values);
-        # else the change waits for /new, and while the workflow is down and
-        # its next start builds from the settings, that start runs it (below).
+        # the open conversation's. A conversation never changes backend once
+        # anything of it is stored (ConversationCore.fresh), read under the
+        # turn lock: after a startup resume or an app's task that holds it.
+        # With nothing stored, a running workflow leaves it for a new
+        # conversation there at once (no rebuild first: the new manager is
+        # built on the new values), and a workflow that is down, whose next
+        # start builds afresh, has that start run it there (below); else the
+        # change waits for /new, and the conversation stays where it is.
         target = orchestrator_of(self._settings).value
         moves_backend = "orchestrator" in changes and target != backend_before
-        down = not controller.is_ready
-        starts_anew = moves_backend and not down and self._conversation.fresh
-        at_next_new = (
-            {key for key in changes if _ui_key_target_field(key) in NEW_CONVERSATION_KEYS}
-            if moves_backend and not starts_anew
-            and not (down and controller.next_start_builds) else set()
-        )
+        movable = False
+        if moves_backend:
+            try:
+                async with self._turn_lock:
+                    movable = self._conversation.fresh
+            except asyncio.CancelledError:  # waiting for it: nothing changes
+                _restore_settings(self._settings, snapshot)
+                raise
+        starts_anew = movable and controller.is_ready
+        moves_here = movable and not controller.is_ready and controller.next_start_builds
+        waits_for_new = {
+            key for key in changes if _ui_key_target_field(key) in NEW_CONVERSATION_KEYS
+        }
+        at_next_new = waits_for_new if moves_backend and not (starts_anew or moves_here) else set()
 
         # Reinitialize workflow if needed
         switched: list[str] = []
@@ -1330,23 +1345,33 @@ class BaseCLIApp:
                 )
                 return False
 
-        # Where conversations are kept changed while the workflow is down, and
-        # its next start builds a manager from the settings as they are now
-        # (no manager is kept to revive): the conversation is held there from
-        # now on, before a turn writes there (nothing of it is stored yet).
-        if moves_backend and not controller.is_ready and controller.next_start_builds:
+        # The workflow is down, its next start builds afresh, and nothing of
+        # the conversation is stored: that start runs it on the new backend,
+        # which holds it from now on.
+        if moves_here:
             place = dataclasses.replace(self._place(), backend=target)
-            holder = await self._hold_it_at(place)
-            if holder is not None:  # open there in another process: nothing changes
+            try:
+                moved = await self._move_here(place)
+            except asyncio.CancelledError:  # it stays where it was
                 _restore_settings(self._settings, snapshot)
-                labels = _setting_label("orchestrator", self._settings)
+                raise
+            except Exception as error:
+                _restore_settings(self._settings, snapshot)
                 self.session.add_error(
-                    f"Could not set {labels}: conversation '{self._session_id}' is open "
-                    f"in another process ({holder}) on {place.backend} ({place.store}). "
+                    f"Could not set Orchestrator: {str(error) or type(error).__name__}. "
                     "Settings were not changed."
                 )
                 return False
-            await controller.switch_backend(target)  # the next start builds it
+            if moved is None:  # a turn wrote to it meanwhile: it stays
+                at_next_new = waits_for_new
+            elif not moved.made:  # open there in another process: nothing changes
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Could not set Orchestrator: conversation '{self._session_id}' is open "
+                    f"in another process ({moved.holder}) on {place.backend} ({place.store}). "
+                    "Settings were not changed."
+                )
+                return False
 
         # Report changes
         for key, value in changes.items():
@@ -1369,24 +1394,39 @@ class BaseCLIApp:
             raise interrupted
         return True
 
-    async def _hold_it_at(self, place: Place) -> int | None:
-        """Hold the conversation at ``place`` (another backend or session
-        store), letting go of where it was held, before the workflow runs
-        there: the switch to the same id in another place, with no workflow
-        to load it (the next start builds from the settings). Only while the
-        workflow is down: nothing of the conversation is stored anywhere yet.
+    async def _move_here(self, place: Place) -> Switch | None:
+        """Have the next start run the conversation on ``place``'s backend.
+
+        Only while the workflow is down and its next start builds a manager
+        afresh, and only for a conversation with nothing stored
+        (``ConversationCore.fresh``, checked again under the turn lock): one
+        with anything stored never changes backend. Its lock is taken there,
+        the controller is told the backend its next start builds
+        (``switch_backend``), then the switch to the same id there is made at
+        once (no workflow runs: no await), letting go of where it was held.
+        A cancel while it waits (for the turn lock, or for the controller)
+        leaves it held where it was, on the backend it had.
 
         Returns:
-            None once it is held there (or was); else the process id of
-            another process that has it open there, and nothing changed.
+            None when something of it is stored by now (nothing changed);
+            else how the switch ended: made, or refused (another process has
+            it open there, and nothing changed).
         """
-        if place == self._place():
-            return None
+        core = self._conversation
         async with self._turn_lock:
-            switched = await self._conversation.switch(
-                self._session_id, self._switch_parts(), place=place, propose=False
+            if not core.fresh:
+                return None
+            hold = core.acquire(self._session_id, place)
+            if isinstance(hold, int):
+                return Switch(made=False, holder=hold)
+            try:
+                await self._workflow_controller.switch_backend(place.backend)
+            except BaseException:
+                core.abandon(hold)
+                raise
+            return await core.switch(
+                self._session_id, self._switch_parts(), place=place, propose=False, hold=hold
             )
-        return switched.holder
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
@@ -1489,14 +1529,23 @@ class BaseCLIApp:
             # --continue/--resume asked for opens shows under its replay.
             self.session.add_message("user", message)
             self._turned = True  # the conversation now holds this message
-            await self._message_processor.process(
-                message=message,
-                workflow_controller=self._workflow_controller,
-                ui=self.session,
-                settings=self._settings,
-                usage_tracker=self._usage_tracker,
-                session_id=self._session_id,
-            )
+            reached = False  # the turn reached a ready workflow, which stores it
+            try:
+                result = await self._message_processor.process(
+                    message=message,
+                    workflow_controller=self._workflow_controller,
+                    ui=self.session,
+                    settings=self._settings,
+                    usage_tracker=self._usage_tracker,
+                    session_id=self._session_id,
+                )
+                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+            except BaseException:
+                reached = self._workflow_controller.is_ready  # it may have begun
+                raise
+            finally:
+                if reached:
+                    self._conversation.written = True
 
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).
@@ -1625,6 +1674,7 @@ class BaseCLIApp:
             claimed = await _claim_delivery(jm, record.job_id)
             if claimed and getattr(record, "session_id", None) == self._session_id:
                 self._turned = True  # the resume adds to this conversation
+                self._conversation.written = True
             return claimed
 
         try:

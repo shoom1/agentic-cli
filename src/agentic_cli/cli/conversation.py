@@ -140,30 +140,40 @@ class ConversationCore:
     Args:
         session_id: The conversation's id.
         place: Where it is kept; an app sets it before it holds anything.
+        opened_empty: Nothing of it was stored when it was opened: an id this
+            run made (an id given to the app is not, until a load finds it
+            empty).
     """
 
-    def __init__(self, session_id: str | None = None, place: Place | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str | None = None,
+        place: Place | None = None,
+        *,
+        opened_empty: bool = False,
+    ) -> None:
         self.session_id = session_id
-        #: Nothing of it is stored yet: it began in this run, and no turn ran
-        #: in it (one opened from the store is not, nor one a turn ran in).
-        #: A change of the backend of new conversations then starts a new one
-        #: there at once, instead of waiting for the next one.
-        self.fresh = True
-        self._turned = False
+        #: A turn ran in it since it was opened: its memories are proposed on
+        #: leaving it, or at exit, only then.
+        self.turned = False
+        #: Nothing of it was stored when it was opened (``fresh``).
+        self.opened_empty = opened_empty
+        #: A turn of it ran on a ready workflow, which stores it: the app says
+        #: so (a turn the workflow was not up for stores nothing).
+        self.written = False
         self.place = place
         self._lock: ConversationLock | None = None
 
     @property
-    def turned(self) -> bool:
-        """A turn ran in it since it was opened: its memories are proposed on
-        leaving it, or at exit, only then. Set, it is no longer ``fresh``."""
-        return self._turned
+    def fresh(self) -> bool:
+        """Nothing of it is stored: it began in this run as a new one (or a
+        load found it empty), and no turn of it ran on a ready workflow.
 
-    @turned.setter
-    def turned(self, value: bool) -> None:
-        self._turned = value
-        if value:
-            self.fresh = False
+        The one condition under which it may run on another backend: a
+        conversation never changes backend once anything of it is stored,
+        since its history is in that backend's store alone.
+        """
+        return self.opened_empty and not self.written
 
     def acquire(self, session_id: str, place: Place | None = None) -> Hold | int:
         """Hold ``session_id``'s conversation beside the one held now.
@@ -287,8 +297,7 @@ class ConversationCore:
         loaded: bool | None = None
         try:
             if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
-                fresh = self.fresh if to == left else not stored
-                self._make(hold, parts, moved=moved, fresh=fresh)
+                self._make(hold, parts, moved=moved, opened_empty=not stored)
                 made = True
             elif propose and self.turned:
                 await parts.propose(left)
@@ -299,9 +308,11 @@ class ConversationCore:
                 if stored and not loaded and await workflow.session_info(to) is None:
                     return Switch(made=False, gone=True)
                 if loaded:  # it holds what an earlier run stored
-                    self.fresh = False
+                    self.opened_empty = False
+                elif to == left and not stored:  # an id given to the app, found empty
+                    self.opened_empty = True
             if not made:
-                self._make(hold, parts, moved=moved, fresh=not (stored or loaded))
+                self._make(hold, parts, moved=moved, opened_empty=not (stored or loaded))
                 made = True
         finally:
             if not made:
@@ -339,18 +350,23 @@ class ConversationCore:
         taken = self.acquire(to)
         if isinstance(taken, int):
             return taken
-        self._make(taken, parts, moved=False, fresh=False)  # what it holds is unknown
+        self._make(taken, parts, moved=False, opened_empty=False)  # what it holds is unknown
         parts.status()
         return None
 
-    def _make(self, hold: Hold, parts: SwitchParts, *, moved: bool, fresh: bool) -> None:
+    def _make(
+        self, hold: Hold, parts: SwitchParts, *, moved: bool, opened_empty: bool
+    ) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
-        the conversation's task list and usage counters."""
+        the conversation's task list and usage counters. The same
+        conversation in another place keeps what it was."""
+        same = hold.session_id == self.session_id
         self.commit(hold)
         self.place = hold.place
         self.session_id = hold.session_id
         self.turned = False
-        self.fresh = fresh
+        if not same:
+            self.opened_empty, self.written = opened_empty, False
         _start_over(parts, moved=moved)
 
     def _at(self, place: Place | None) -> Place:

@@ -366,6 +366,47 @@ class TestTheSwitch:
         assert "tasks reset" not in around.done
 
 
+class TestNothingStored:
+    """``fresh``: nothing of the conversation is stored. It began in this run
+    as a new one (or a load found it empty), and no turn of it ran on a ready
+    workflow (``written``). ``turned`` (its memories to propose) is apart."""
+
+    def test_a_new_id_is_fresh_and_a_given_one_is_not(self, tmp_path):
+        assert ConversationCore("a", place(tmp_path), opened_empty=True).fresh
+        assert not ConversationCore("a", place(tmp_path)).fresh
+
+    def test_a_turn_written_ends_it_and_a_turn_proposed_alone_does_not(self, tmp_path):
+        core = ConversationCore("a", place(tmp_path), opened_empty=True)
+
+        core.turned = True
+        assert core.fresh
+        core.written = True
+        assert not core.fresh
+
+    async def test_a_load_that_finds_it_stored_ends_it(self, tmp_path):
+        core = ConversationCore("a", place(tmp_path), opened_empty=True)
+
+        await core.switch("a", Around(FakeWorkflow("a")).parts())
+
+        assert not core.fresh
+
+    async def test_a_load_that_finds_a_given_id_empty_makes_it(self, tmp_path):
+        core = ConversationCore("a", place(tmp_path))
+
+        await core.switch("a", Around(FakeWorkflow()).parts())
+
+        assert core.fresh
+
+    async def test_a_new_conversation_is_and_an_opened_one_is_not(self, tmp_path):
+        core = TestTheSwitch.core_in(tmp_path)
+        core.written = True
+
+        await core.switch("b", Around(FakeWorkflow()).parts())
+        assert core.fresh and not core.written
+        await core.switch("c", Around(FakeWorkflow("c")).parts(), stored=True)
+        assert not core.fresh
+
+
 class TestTheSwitchAtOnce:
     """``switch_now``: what the switch does without an await (the deprecated
     ``session_id`` setter)."""
