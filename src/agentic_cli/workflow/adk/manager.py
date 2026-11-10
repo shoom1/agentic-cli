@@ -77,7 +77,7 @@ from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from agentic_cli.models import Provider
+    from agentic_cli.models import Provider, ResolvedModel, RoleMap
     from agentic_cli.workflow.adk.build import ADKBuild
     from agentic_cli.workflow.sessions import SessionRef
 
@@ -653,8 +653,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Each agent's model reference, by name.
 
         Every agent built from a config, and each of a native ADK YAML app's
-        agents whose model resolved (``_resolve_models``); usage and the raw
-        log name the default model for any other.
+        agents whose model resolved (``_resolve_extra_models``); usage and the
+        raw log name the default model for any other.
         """
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
@@ -760,7 +760,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``event_retention_size`` 0: the summarizer picks the range itself.
         ADK marks the config experimental; the CLI logs that notice at debug.
         A main agent whose model did not resolve (a native ADK YAML app's,
-        ``_resolve_models``) has no budget, and is not summarized.
+        ``_resolve_extra_models``) has no budget, and is not summarized.
         """
         if self._root_agent.name not in self._budgets:
             return None
@@ -818,9 +818,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ADK caches for every agent of an app through one config, so it is set
         when ``prompt_caching_enabled`` is on and any agent's model caches (an
         agent without a model is resolved to the default; a native ADK YAML
-        app's agent to the model ADK runs it on, ``_resolve_models``, and one
-        whose model did not resolve is not counted). ADK then marks cache
-        breakpoints on every Claude request, and
+        app's agent to the model ADK runs it on, ``_resolve_extra_models``,
+        and one whose model did not resolve is not counted). ADK then marks
+        cache breakpoints on every Claude request, and
         keeps a server-side cache per Gemini agent from its second turn
         (Google bills its storage while it lives); GPT and the configured
         providers' models are untouched.
@@ -857,7 +857,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """True: each agent with a resolved model is summarized and trimmed by its budget.
 
         A native ADK YAML app's agents too: each is resolved by the model ADK
-        runs it on (``_resolve_models``), and one whose model does not
+        runs it on (``_resolve_extra_models``), and one whose model does not
         resolve has no budget, so the fit guard and the overflow handler
         leave it alone.
         """
@@ -886,24 +886,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     required.update(definition.requires)
         return required
 
-    def _resolve_models(self, providers: "Mapping[str, Provider]") -> None:
-        """The default model and every agent's (the base's), then a native app's agents'.
+    def _resolve_extra_models(
+        self, roles: "RoleMap", providers: "Mapping[str, Provider]"
+    ) -> "dict[str, ResolvedModel]":
+        """A native ADK YAML app's agents' models (the base's hook), by name.
 
-        A native ADK YAML app's agents run on the models ADK resolves for
-        them: the one its YAML names (a model string or ``model_code``),
-        else its parent's, else ADK's default. Each is resolved through the
-        catalog by that model's name, as an agent config naming it would
-        be. Leniently: an agent whose model ADK or the catalog cannot
-        resolve is left out with a warning, and has no context budget.
+        Its agents run on the models ADK resolves for them: the one its YAML
+        names (a model string or ``model_code``), else its parent's, else
+        ADK's default. Each is resolved through the catalog by that model's
+        name, as an agent config naming it would be. Leniently: an agent
+        whose model ADK or the catalog cannot resolve is left out with a
+        warning, and has no context budget.
         """
-        super()._resolve_models(providers)
         root = self._loaded_native_root
         if root is None:
-            return
-        from agentic_cli.workflow import model_services
+            return {}
         from agentic_cli.workflow.adk.build import walk
 
-        roles = model_services.role_map_from_settings(self._settings, self._model_override)
+        resolved: dict[str, ResolvedModel] = {}
         for agent in walk(root):
             if not isinstance(agent, LlmAgent):
                 continue
@@ -911,13 +911,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             try:
                 spec = agent.canonical_model.model
                 config = AgentConfig(name=agent.name, prompt="", model=spec)
-                model = self._resolve_for(config, roles, self._catalog, providers)
+                resolved[agent.name] = self._resolve_for(config, roles, self._catalog, providers)
             except (ValueError, ImportError) as exc:
                 logger.warning(
                     "adk_agent_model_unresolved", agent=agent.name, model=spec, error=str(exc)
                 )
-                continue
-            self._resolved_models[agent.name] = model
+        return resolved
 
     def _root_memory_tools(self, root: str | None = None) -> tuple[str, ...]:
         """The memory tools the main agent has, by name: the built root's.

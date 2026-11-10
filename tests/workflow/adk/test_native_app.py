@@ -365,6 +365,19 @@ class TestItsAgentsRunOnTheirOwnModels:
         assert set(budgets) == {"root", "helper", "chatter"}
         assert main == budgets["root"] and main.window == 1_048_576
 
+    async def test_the_models_resolved_log_names_them(self, project, monkeypatch):
+        from agentic_cli.workflow import base_manager
+
+        recorder = _LogRecorder()
+        monkeypatch.setattr(base_manager, "logger", recorder)
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+        manager = native(root_yaml(project, model="gemini-2.5-flash"))
+        await manager.initialize_services()
+        await manager.cleanup()
+
+        (resolved,) = [e for e in recorder.events if e["event"] == "models_resolved"]
+        assert resolved["agents"] == {"root": "google:gemini-2.5-flash"}
+
     async def test_an_agent_whose_model_does_not_resolve_gets_no_budget(self, project, logged):
         write(project, "helper.yaml", """
             agent_class: LlmAgent

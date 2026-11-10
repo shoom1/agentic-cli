@@ -1841,6 +1841,7 @@ class BaseWorkflowManager(ABC):
                 resolved[config.name] = model
         if errors:
             raise SettingsValidationError("\n".join(dict.fromkeys(errors)))
+        resolved.update(self._resolve_extra_models(roles, providers))
 
         self._default_model, self._resolved_models = default, resolved
         logger.info(
@@ -1848,6 +1849,18 @@ class BaseWorkflowManager(ABC):
             default=str(default.ref),
             agents={name: str(model.ref) for name, model in resolved.items()},
         )
+
+    def _resolve_extra_models(
+        self, roles: RoleMap, providers: Mapping[str, Provider]
+    ) -> dict[str, ResolvedModel]:
+        """The models of agents a backend built without configs, by name (none here).
+
+        A backend hook of ``_resolve_models``, after every config's model
+        resolved: ADK's for a native ADK YAML app's agents. Leniently: an
+        agent left out has no model and no context budget. ``_catalog`` is
+        loaded by then.
+        """
+        return {}
 
     def _resolve_for(
         self,
