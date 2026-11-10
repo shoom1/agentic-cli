@@ -331,6 +331,11 @@ class BaseWorkflowManager(ABC):
     #: called). A class default, so it holds for a manager whatever built it.
     _keeping_store: bool = False
 
+    #: Inside a release, the closes of the services it released, started on
+    #: worker threads, for the release to wait for (``_cleanup_managers``);
+    #: None outside one. A class default, as ``_keeping_store`` is.
+    _services_closing: "list[asyncio.Future[None]] | None" = None
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -1306,19 +1311,27 @@ class BaseWorkflowManager(ABC):
         close_services(services, cls._SYNC_SERVICE_CLOSERS)
 
     def _cleanup_managers(self) -> None:
-        """Release the synchronous resources this manager owns, here and now.
+        """Release the synchronous resources this manager owns.
 
         Only services this manager created are released (see
         ``_build_services``). Idempotent: the registry is emptied, so a second
         call finds nothing. The registry is cleared regardless of failures.
 
         Services a reinitialize is carrying over (:meth:`_keeping`) stay
-        published and open. The closers block, so this runs them on the
-        calling thread: the base's release does not call it, it closes them
-        on a worker thread (:meth:`_release_resources`); LangGraph's
-        ``cleanup`` does.
+        published and open. The release's services hook
+        (:meth:`_release_resources`): inside a release their closes start on
+        a worker thread, and the release waits for them last; outside one
+        (LangGraph's ``cleanup``, a script) they close here and now. A backend
+        that releases something of its own overrides it and calls it.
         """
-        self._close_services(self._service_set.release())
+        services = self._service_set.release()
+        closing = self._services_closing
+        if closing is None:
+            self._close_services(services)
+            return
+        started = self._start_closing_services(services)
+        if started is not None:
+            closing.append(started)
 
     def _start_closing_services(
         self, services: dict[str, Any]
@@ -1996,11 +2009,12 @@ class BaseWorkflowManager(ABC):
            store), which is not called while a model switch keeps the store
            (:meth:`_keeping`). Each detaches its handles and returns their
            closers.
-        3. The services, detached now, except those a model switch carries
-           and those another manager owns (lent to this one, or given
-           away: dropped, never closed here), and their closes started on a
-           worker thread (:meth:`_start_closing_services`): they block, and
-           on the event loop they froze the app.
+        3. The services, detached now by :meth:`_cleanup_managers`, except
+           those a model switch carries and those another manager owns (lent
+           to this one, or given away: dropped, never closed here), and their
+           closes started on a worker thread
+           (:meth:`_start_closing_services`): they block, and on the event
+           loop they froze the app.
         4. The closers, in one task of its own, in a fixed order: the
            backend's, the store's and the catalog's, while the services
            close on their thread, then the services' closes waited for,
@@ -2061,9 +2075,17 @@ class BaseWorkflowManager(ABC):
             functools.partial(self._aclose_owned, catalog, "model_catalog"),
         ))
 
-        services = self._start_closing_services(self._service_set.release())
-        if services is not None:
-            closers.append(("services", lambda: asyncio.shield(services)))
+        # The services' hook: their closes start on worker threads now.
+        services: list[asyncio.Future[None]] = []
+        self._services_closing = services
+        try:
+            self._cleanup_managers()
+        finally:
+            self._services_closing = None
+        if services:
+            closers.append(
+                ("services", lambda: asyncio.shield(asyncio.gather(*services)))
+            )
 
         closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)

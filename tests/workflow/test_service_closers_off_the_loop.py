@@ -342,3 +342,26 @@ def test_the_helper_that_builds_without_a_loop_still_closes_in_place(ctx):
 
     assert closed == ["sandbox"]
     assert manager.services == {}
+
+
+class TestTheReleaseGoesThroughItsServicesHook:
+    async def test_an_override_of_cleanup_managers_still_runs(self, ctx, build):
+        """A backend that overrides ``_cleanup_managers`` to release something
+        of its own, then the base's services, is run by every release; the
+        services still close off the loop."""
+        held = _Held(build, ctx.settings)
+        calls: list[str] = []
+        base = held.manager._cleanup_managers
+
+        def _cleanup_managers() -> None:
+            calls.append("its own")
+            base()
+
+        held.manager._cleanup_managers = _cleanup_managers
+
+        with no_blocking_calls():
+            await held.manager.cleanup()
+
+        assert calls == ["its own"]
+        assert _each_once(held.closed), held.closed
+        assert held.threads() and threading.main_thread() not in held.threads()
