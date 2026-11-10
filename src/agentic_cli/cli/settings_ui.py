@@ -100,11 +100,14 @@ class _ModelChoices:
             when nothing can fill it.
         thinking: What the thinking effort means for the default model, as
             ``high → provider:model: <label>``; None when it cannot be said.
+        left_out: Why the list leaves out each model the settings name that
+            it leaves out (``ModelCatalog.not_offered``), by reference.
     """
 
     options: list[str]
     current: Mapping[str, str | None]
     thinking: str | None
+    left_out: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
 
 # === Deprecated orchestrators ===
@@ -294,10 +297,12 @@ class SettingsUI:
         # Every role's model, whichever pickers the app shows: /models offers
         # the same list.
         role_models = model_services.role_models(settings, catalog, providers, default)
+        not_offered = getattr(catalog, "not_offered", None)  # an app's own catalog may lack it
         return _ModelChoices(
             options=catalog.offered(extra=list(role_models)),
             current=current,
             thinking=self._thinking_meaning(default, catalog, providers),
+            left_out=not_offered() if not_offered is not None else {},
         )
 
     def _thinking_meaning(
@@ -605,7 +610,18 @@ def _first_line(error: BaseException) -> str:
 
 
 def _model_picker(key: str, choices: _ModelChoices) -> Field:
-    """The dialog field of one model picker: ``model`` or ``model_role:<role>``."""
+    """The dialog field of one model picker: ``model`` or ``model_role:<role>``.
+
+    It offers the list, and shows its role's model now. When the list leaves
+    that model out (its provider is not defined, has no key, or does not
+    serve it), the picker still offers it, first, as ``<ref> (current; not
+    offered)``, and its description starts with why: the field's value is
+    then that option, so a Save that leaves the picker as it opened, or picks
+    it again, changes nothing (``SettingsCommand`` passes on only a value
+    that differs from the field's own), and a user who moved off it can come
+    back to it. The reason is in the description, not the option: the
+    option would not fit the dialog's row beside its label.
+    """
     from pydantic.fields import FieldInfo
 
     from agentic_cli.cli.settings_introspection import field_to_ui_item
@@ -617,14 +633,25 @@ def _model_picker(key: str, choices: _ModelChoices) -> Field:
         role = key.removeprefix(MODEL_ROLE_KEY_PREFIX)
         title = _role_picker_label(key)
         description = f"Agents whose model is {role!r} run on it"
+    current, options = choices.current.get(role), choices.options
+    if current is not None and current not in options:
+        why = choices.left_out.get(current)
+        if why is not None:
+            description = f"Not offered ({why}); {description[0].lower()}{description[1:]}"
+        current = _NOT_OFFERED.format(current)
+        options = [current, *options]
     field = FieldInfo(default=None, title=title, description=description)
     return field_to_ui_item(
         key=key,
         field=field,
-        current_value=choices.current.get(role),
-        dynamic_options=choices.options,
+        current_value=current,
+        dynamic_options=options,
         max_width=_MODEL_PICKER_MAX_WIDTH,
     )
+
+
+#: How a model picker offers its role's model when the list leaves it out.
+_NOT_OFFERED = "{} (current; not offered)"
 
 
 # The widest a model picker's dropdown grows: a reference and its padding. A
