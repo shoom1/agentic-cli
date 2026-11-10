@@ -688,6 +688,66 @@ class TestDroppedOnceTheWorkflowIsBack:
 
         assert deletes.asked == [old]
 
+    @staticmethod
+    async def stopped_at_its_drop(app, workflow, old, line: str) -> None:
+        """Run ``line``, Ctrl+C it while the drop waits for its delete, then
+        let the delete end."""
+        workflow.delete_gate = asyncio.Event()
+        workflow.deleting.clear()
+        running = asyncio.create_task(app.process_input(line))
+        await asyncio.wait_for(workflow.deleting.wait(), 5)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, 5)
+        workflow.delete_gate.set()
+        for _ in range(100):
+            if old not in workflow.stored:
+                break
+            await asyncio.sleep(0.01)
+
+    async def test_ctrl_c_at_the_drop_before_a_turn(self, project):
+        """It stops the turn, said once, before anything is turned; the
+        shielded delete ends all the same, and the next point is done with it."""
+        app, workflow, _, old = await left_while_down()
+        new = app.session_id
+        workflow.is_initialized = True
+
+        await self.stopped_at_its_drop(app, workflow, old, "Hello.")
+
+        assert not app._conversation.turned and not app._conversation.written
+        assert old not in workflow.stored  # the delete ran to its end
+        assert f"turn {new}" not in workflow.calls
+
+        await app.process_input("Again.")
+
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
+        assert app._conversation.to_drop == []
+        assert workflow.calls.count(f"turn {new}") == 1
+
+    async def test_ctrl_c_at_the_drop_after_a_turn(self, project):
+        """The turn's start revived the workflow and the turn ran: a Ctrl+C
+        at the drop after it is said once, and the delete ends all the same."""
+        app, workflow, _, old = await left_while_down()
+        new = app.session_id
+
+        await self.stopped_at_its_drop(app, workflow, old, "Hello.")
+
+        assert workflow.calls.count(f"turn {new}") == 1
+        assert old not in workflow.stored
+
+        await app.process_input("Again.")
+
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
+        assert app._conversation.to_drop == []
+
+    async def test_a_delivery_with_none_to_drop_waits_for_no_turn(self, project):
+        """Nothing to drop: no turn lock is taken for it."""
+        app, _, jobs, _ = await with_a_finished_job()
+        jobs.records.clear()
+
+        async with app._turn_lock:  # a turn runs
+            assert await asyncio.wait_for(app.resume_finished_jobs(), 1) == 0
+
     async def test_the_conversation_open_now_is_never_dropped(self, project):
         """The deprecated ``session_id`` setter can go back to a conversation
         ``/new`` left: it is not dropped under the app, and the next ``/new``
