@@ -1258,8 +1258,9 @@ class BaseCLIApp:
             # first): wait for it, as a turn does, so the rebuild below runs
             # on the new values, and whether an orchestrator change starts a
             # new conversation or moves the open one follows its outcome.
-            # Ctrl+C stops the wait before anything changed. A start that fails leaves the workflow down, and the
-            # change is applied for the next start, as for any failed workflow.
+            # Ctrl+C stops the wait before anything changed. A start that
+            # fails leaves the workflow down, and the change is applied for
+            # the next start, as for any failed workflow.
             async with _says_so_when_stopped(self.session):
                 await controller.ensure_initialized(self.session)
 
