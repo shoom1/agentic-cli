@@ -14,6 +14,8 @@ It also provides shared implementations for:
 - User input handling (callback-based)
 - Models: the model catalog, and every agent's model resolved at startup
 - Context: each agent's context numbers (``context_budget``), for a UI
+- The memory index the root agent's requests carry, one snapshot per
+  conversation (``memory_index.py``)
 """
 
 from __future__ import annotations
@@ -41,12 +43,19 @@ from agentic_cli.models import (
     ModelResolutionError,
     ModelSpecError,
     Provider,
+    ProviderKind,
     ResolvedModel,
     RoleMap,
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.interrupts import OpenCalls
+# The two limits are still importable from here.
+from agentic_cli.workflow.memory_index import (  # noqa: F401
+    MEMORY_INDEX_BUDGET_SHARE,
+    MEMORY_INDEX_MIN_BYTES,
+    MemoryIndex,
+)
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_content_note
 from agentic_cli.workflow.sessions import (
@@ -85,11 +94,6 @@ if TYPE_CHECKING:
     from agentic_cli.tools.sandbox.manager import SandboxManager
 
 logger = Loggers.workflow()
-
-#: The share of the root's input budget the memory index may take at most.
-MEMORY_INDEX_BUDGET_SHARE = 0.1
-#: The least the memory index is given, whatever the budget.
-MEMORY_INDEX_MIN_BYTES = 1_000
 
 #: Where the backends' tool classes live.
 _TOOL_CLASS_MODULES = ("google.adk.tools", "langchain_core.tools")
@@ -265,6 +269,18 @@ class BaseWorkflowManager(ABC):
         ``supports_compact`` are derived from them; one that overrides a
         template keeps its own.
 
+    Memory index:
+        The root agent's requests carry an index of the saved memories, one
+        snapshot per conversation, which the manager holds as a
+        ``MemoryIndex`` (``memory_index.py``). A backend that carries it asks
+        ``_memory_index_wanted(root)`` (the setting is on and the root has a
+        memory tool) and gives the root ``_memory_index_now`` (the snapshot,
+        taken the first time; it reads files, so off the event loop),
+        ``_memory_index_cached`` (never reads) and ``_forget_memory_index``
+        (a summary written, ``/resume``, ``/compact``). Each is the manager's
+        own method, which forwards to the index, so a subclass may override
+        one. The release clears the snapshots.
+
     Example:
         A minimal backend: it builds its engine in ``_do_initialize`` and
         hands it to the release in ``_detach_backend``; everything else of
@@ -434,8 +450,8 @@ class BaseWorkflowManager(ABC):
         if "_open_calls" not in vars(self) and not hasattr(type(self), "_open_calls"):
             self._open_calls = OpenCalls()
         # The memory index each conversation's main agent gets (spec §11.1):
-        # taken once, so the prompt prefix stays cached.
-        self._index_snapshots: dict[SessionRef, str] = {}
+        # taken once, so the prompt prefix stays cached (workflow/memory_index.py).
+        self._memory_index_held = self._new_memory_index()
         # The (agent, tool) pairs already named as unregistered: once each.
         self._unregistered_named: set[tuple[str, str]] = set()
 
@@ -542,6 +558,27 @@ class BaseWorkflowManager(ABC):
     @_carried_service_keys.setter
     def _carried_service_keys(self, keys: frozenset[str]) -> None:
         self._service_set.carried = frozenset(keys)
+
+    @property
+    def _memory_index(self) -> MemoryIndex:
+        """The memory index each conversation's main agent gets (``workflow/memory_index.py``).
+
+        Made on first use too, so a manager built without the constructor (a
+        test harness's ``__new__``) has one.
+        """
+        held = vars(self).get("_memory_index_held")
+        if held is None:
+            held = self._memory_index_held = self._new_memory_index()
+        return held
+
+    @property
+    def _index_snapshots(self) -> dict[SessionRef, str]:
+        """The memory index each conversation took, by conversation."""
+        return self._memory_index.snapshots
+
+    @_index_snapshots.setter
+    def _index_snapshots(self, snapshots: dict[SessionRef, str]) -> None:
+        self._memory_index.snapshots = snapshots
 
     @property
     def knowledge_base(self) -> "KnowledgeBase | None":
@@ -981,65 +1018,43 @@ class BaseWorkflowManager(ABC):
             self._root_memory_tools(root)
         )
 
+    def _new_memory_index(self) -> MemoryIndex:
+        """A memory index over what this manager holds, read as it is when a snapshot is taken."""
+
+        def room() -> tuple[int, ProviderKind] | None:
+            budget = self._budgets.get(self._root_agent_name)
+            model = self._resolved_models.get(self._root_agent_name)
+            if budget is None or model is None:
+                return None
+            return budget.budget, model.record.kind
+
+        return MemoryIndex(
+            settings=lambda: self._settings,
+            store=lambda: self._services.get(MEMORY_STORE),
+            tools=lambda: self._root_memory_tools(),
+            room=room,
+            # Asked through the forward, so a subclass's cap is the one a snapshot takes.
+            limit=lambda: self._memory_index_cap(),
+        )
+
     def _memory_index_now(self) -> str:
         """The index the turn's conversation carries, taken the first time it is
         asked for; ``""`` for none. It reads the memory files: call it off the
         event loop."""
-        ref = get_active_turn()
-        if ref is None:
-            return ""
-        text = self._index_snapshots.get(ref)
-        if text is None:
-            text = self._render_memory_index()
-            self._index_snapshots[ref] = text
-        return text
+        return self._memory_index.now()
 
     def _memory_index_cached(self) -> str:
         """The turn's conversation's snapshot if one was taken, else ``""``; reads nothing."""
-        ref = get_active_turn()
-        return self._index_snapshots.get(ref, "") if ref is not None else ""
-
-    def _render_memory_index(self) -> str:
-        store = self._services.get(MEMORY_STORE)
-        tools = self._root_memory_tools()
-        if store is None or not tools or not getattr(self._settings, "memory_index_enabled", True):
-            return ""
-        try:
-            return store.index(max_bytes=self._memory_index_cap(), tools=tools)
-        except Exception as e:  # the turn goes on without it
-            logger.warning("memory_index_unavailable", error=f"{type(e).__name__}: {e}")
-            return ""
+        return self._memory_index.cached()
 
     def _memory_index_cap(self) -> int:
         """How many bytes the memory index may take: ``memory_index_max_bytes``, or,
-        on a root whose budget it would crowd, a tenth of that budget.
-
-        Nothing drops the index from a request (the fit guard keeps it, the
-        summarization counts it), so it must not be the part of a small budget
-        that leaves no room for the conversation. The tenth is the root's input
-        budget in characters, as the fit guard estimates a request (the
-        provider's characters per token, plus its margin), and at least
-        ``MEMORY_INDEX_MIN_BYTES``. Without a budget (a backend that manages
-        none), the setting alone.
-        """
-        from agentic_cli.workflow.context import ESTIMATE_MARGIN, chars_per_token
-
-        cap = self._settings.memory_index_max_bytes
-        budget = self._budgets.get(self._root_agent_name)
-        model = self._resolved_models.get(self._root_agent_name)
-        if budget is None or model is None:
-            return cap
-        share = int(
-            budget.budget * MEMORY_INDEX_BUDGET_SHARE
-            * chars_per_token(model.record.kind) / ESTIMATE_MARGIN
-        )
-        return max(MEMORY_INDEX_MIN_BYTES, min(cap, share))
+        on a root whose budget it would crowd, a tenth of that budget."""
+        return self._memory_index.cap()
 
     def _forget_memory_index(self, ref: SessionRef | None = None) -> None:
         """Drop a conversation's snapshot (the turn's by default): its next request takes a new one."""
-        ref = ref or get_active_turn()
-        if ref is not None:
-            self._index_snapshots.pop(ref, None)
+        self._memory_index.forget(ref)
 
     def _outside_content_mark(self, ref: SessionRef) -> str | None:
         """The tool that brought outside content into ``ref``'s conversation, or None."""
@@ -2067,7 +2082,7 @@ class BaseWorkflowManager(ABC):
 
         self._initialized = False
         self._budgets = {}
-        self._index_snapshots.clear()
+        self._memory_index.clear()
         catalog, self._catalog = self._catalog, None
 
         not_synchronous: list[TypeError] = []
