@@ -931,6 +931,7 @@ class BaseCLIApp:
             settings=self._settings,
             tracker=self._usage_tracker,
             kept_elsewhere=self._kept_elsewhere,
+            drop=self._drop,
         )
 
     async def _resume_on_its_own(self) -> None:
@@ -1081,12 +1082,18 @@ class BaseCLIApp:
         moving = target != old_backend
         if moving and backend is None:
             check_backend(target)  # before anything changes
+        # Those an earlier /new could not drop go before the workflow is used.
+        await self._conversation.drop_left(self._turn_parts())
         parts = self._switch_parts()
         stored = parts.workflow is not None and await self._is_stored(parts.workflow, old)
         kept = self._place().kept
         # On the memory store the conversation left is dropped once the switch
         # is made: on another backend its manager goes, and its store with it.
-        dropping = parts.workflow if stored and not kept and not moving else None
+        # While the workflow is down (the manager a failed reinitialization
+        # kept, its store with it) it is dropped once a workflow is ready.
+        leaving = not kept and not moving
+        dropping = parts.workflow if stored and leaving else None
+        later = leaving and parts.workflow is None and old is not None
         place, interrupted = None, None
         if moving:
             if self._turned:  # proposed while the backend that holds them runs
@@ -1124,6 +1131,8 @@ class BaseCLIApp:
             )
             if switched.made and dropping is not None:
                 await self._drop(dropping, old)
+            elif switched.made and later:
+                self._conversation.to_drop.append(old)
         except asyncio.CancelledError:
             if self._session_id == new:
                 # On another backend the switch is made before the load, which
@@ -1639,30 +1648,39 @@ class BaseCLIApp:
         if line:
             self.session.add_message("system", line)
 
-    async def _drop(self, workflow: Any, session_id: str) -> None:
+    async def _drop(self, workflow: Any, session_id: str) -> bool:
         """Delete ``session_id``'s conversation from ``workflow``'s store: on
         the memory store the CLI keeps one conversation at a time, and
         ``/new`` drops the one it left, once the switch is made (its memories
-        were proposed by then).
+        were proposed by then). One it left while the workflow was down is
+        dropped through this too, once a workflow is ready, before it is used
+        (``ConversationCore.drop_left``).
 
         Shielded: a Ctrl+C stops the wait, not the delete, so no conversation
-        is left half deleted. Never raises but that cancel: a conversation a
-        failed delete leaves is one no command lists or opens (logged). The
-        status bar's job monitor then forgets what it knew of jobs'
-        conversations: one of this conversation's jobs is told as
+        is left half deleted. Never raises but that cancel: a failed delete
+        is logged. The status bar's job monitor then forgets what it knew of
+        jobs' conversations: one of this conversation's jobs is told as
         unavailable now.
+
+        Returns:
+            Whether the store has it no more: dropped, or not there (the
+            manager that kept it was released since); False when the delete
+            raised.
         """
-        async def drop() -> None:
+        async def drop() -> bool:
             try:
-                await workflow.delete_session(session_id)
+                held = await workflow.delete_session(session_id)
             except Exception:  # noqa: BLE001 - the new conversation goes on
                 logger.debug("conversation_drop_failed", session_id=session_id, exc_info=True)
+                gone = False
             else:
-                logger.info("conversation_dropped", session_id=session_id)
+                logger.info("conversation_dropped", session_id=session_id, held=bool(held))
+                gone = True
             if self._job_monitor is not None:
                 self._job_monitor.forget_conversations()
+            return gone
 
-        await asyncio.shield(asyncio.ensure_future(drop()))
+        return await asyncio.shield(asyncio.ensure_future(drop()))
 
     @staticmethod
     async def _is_stored(workflow: Any, session_id: str) -> bool:

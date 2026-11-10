@@ -24,13 +24,16 @@ job that waits for the conversation (``deliver_finished_jobs``, by
 ``cli/waiting_jobs.py``'s rule, which ``waiting_jobs`` names them by), each
 held to write first (an id this run made is held from its first write).
 ``BaseCLIApp`` forwards to them, on its parts as they are (``TurnParts``).
+Each drops first the conversations ``/new`` left on the memory store while
+the workflow was down (``to_drop``, ``drop_left``), whose store may still
+hold them.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,6 +176,10 @@ class TurnParts:
             asked when the workflow's ``can_resume`` says no: such a job
             waits for it (``waiting_jobs.opens_anywhere``). None: the
             workflow's answer alone.
+        drop: Drops a conversation from a workflow's store, shielded
+            (``BaseCLIApp._drop``): ``drop(workflow, session_id)``, whether
+            the store has it no more. What ``drop_left`` drops with; None:
+            nothing is dropped.
     """
 
     controller: Any
@@ -181,6 +188,7 @@ class TurnParts:
     settings: Any
     tracker: Any
     kept_elsewhere: KeptElsewhere | None = None
+    drop: Callable[[Any, str], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +268,12 @@ class ConversationCore:
         #: said: the deliveries the CLI makes on its own say it once per
         #: conversation.
         self._said_not_told: set[tuple[str, str | None]] = set()
+        #: Conversations ``/new`` left on the memory store that the
+        #: workflow's store may still hold, its workflow being down then:
+        #: dropped once a workflow is ready, before it is used
+        #: (``drop_left``). Nothing lists or opens them, and a job of one
+        #: would never be told.
+        self.to_drop: list[str] = []
 
     @property
     def fresh(self) -> bool:
@@ -340,6 +354,48 @@ class ConversationCore:
         """Let go of the conversation held (at exit)."""
         if self._lock is not None:
             self._lock.release()
+
+    async def drop_left(self, parts: TurnParts) -> bool:
+        """Drop the conversations ``/new`` left that the workflow's store may
+        still hold (``to_drop``), once a workflow is ready; the caller holds
+        the turn lock, and nothing has used the workflow since it was ready.
+
+        Each goes through ``parts.drop``, shielded: one the store has no more
+        is done (dropped, or not there: the manager that kept it was
+        released since), and one whose delete raised stays for the next
+        point. Each is tried once a call, so a delete that keeps failing
+        costs one try at each point (a turn, ``/compact``, a delivery of
+        finished jobs, ``/new``), never a loop.
+
+        Args:
+            parts: The app's parts: the controller and ``drop``.
+
+        Returns:
+            Whether they were tried: False when none is left to drop, or no
+            workflow is ready.
+        """
+        controller = parts.controller
+        if not self.to_drop or parts.drop is None or not controller.is_ready:
+            return False
+        workflow = controller.workflow
+        for session_id in list(self.to_drop):
+            if await parts.drop(workflow, session_id):
+                self.to_drop.remove(session_id)
+        return True
+
+    @asynccontextmanager
+    async def _dropping_left(self, parts: TurnParts) -> AsyncIterator[None]:
+        """Around a write that starts the workflow when it is down (a turn,
+        ``/compact``): the conversations ``/new`` left are dropped before
+        it when a workflow is ready, else after it, once it started one
+        (``drop_left``), before the jobs that wait are told. A Ctrl+C there
+        stops the request: said once."""
+        async with _says_so_when_stopped(parts.ui):
+            tried = await self.drop_left(parts)
+        yield
+        if not tried:
+            async with _says_so_when_stopped(parts.ui):
+                await self.drop_left(parts)
 
     async def switch(
         self,
@@ -509,7 +565,10 @@ class ConversationCore:
         (its memories are proposed on leaving it), and ``written`` once the
         turn reached a ready workflow, which stores it (a turn the workflow
         was not up for stores nothing; one that raised or was cancelled
-        counts when the workflow was ready: it may have begun).
+        counts when the workflow was ready: it may have begun). The
+        conversations ``/new`` left that the store may still hold go first
+        (``drop_left``), or once the turn is done when it started the
+        workflow.
 
         Args:
             message: What the user typed.
@@ -535,24 +594,25 @@ class ConversationCore:
             ui.add_message("user", message)
             if not self._held_to_write(ui):
                 return False
-            self.turned = True  # the conversation now holds this message
-            reached = False  # the turn reached a ready workflow, which stores it
-            try:
-                result = await parts.processor.process(
-                    message=message,
-                    workflow_controller=parts.controller,
-                    ui=ui,
-                    settings=parts.settings,
-                    usage_tracker=parts.tracker,
-                    session_id=self.session_id,
-                )
-                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
-            except BaseException:
-                reached = parts.controller.is_ready  # it may have begun
-                raise
-            finally:
-                if reached:
-                    self.written = True
+            async with self._dropping_left(parts):
+                self.turned = True  # the conversation now holds this message
+                reached = False  # the turn reached a ready workflow, which stores it
+                try:
+                    result = await parts.processor.process(
+                        message=message,
+                        workflow_controller=parts.controller,
+                        ui=ui,
+                        settings=parts.settings,
+                        usage_tracker=parts.tracker,
+                        session_id=self.session_id,
+                    )
+                    reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+                except BaseException:
+                    reached = parts.controller.is_ready  # it may have begun
+                    raise
+                finally:
+                    if reached:
+                        self.written = True
             return True
         finally:
             self.turn_lock.release()
@@ -563,7 +623,8 @@ class ConversationCore:
         Under the turn lock, held to write first: the workflow's ``compact``
         runs with a turn's events box, status line, token counts and Ctrl+C
         (``MessageProcessor.process_compact``), which says what it did, or
-        why nothing was.
+        why nothing was. The conversations ``/new`` left that the store may
+        still hold go first, as for a turn (``drop_left``).
 
         Args:
             focus: What the summary should keep above all, if anything.
@@ -576,14 +637,15 @@ class ConversationCore:
         async with self.turn_lock:
             if not self._held_to_write(parts.ui):
                 return None
-            return await parts.processor.process_compact(
-                focus,
-                workflow_controller=parts.controller,
-                ui=parts.ui,
-                settings=parts.settings,
-                usage_tracker=parts.tracker,
-                session_id=self.session_id,
-            )
+            async with self._dropping_left(parts):
+                return await parts.processor.process_compact(
+                    focus,
+                    workflow_controller=parts.controller,
+                    ui=parts.ui,
+                    settings=parts.settings,
+                    usage_tracker=parts.tracker,
+                    session_id=self.session_id,
+                )
 
     async def deliver_finished_jobs(self, parts: TurnParts) -> int:
         """Tell the agent of each finished, resume-flagged background job that waits here.
@@ -604,7 +666,9 @@ class ConversationCore:
         the turn actually completed — a failed or cancelled resume is
         recorded as such instead of being dropped. The check above is made
         again under the lock (``run_job_resume``): the conversation may have
-        changed while the delivery waited for it.
+        changed while the delivery waited for it. The conversations ``/new``
+        left that the store may still hold are dropped first, under the turn
+        lock (``drop_left``): a job of one is then told it is unavailable.
 
         Args:
             parts: The app's parts it runs on.
@@ -626,6 +690,9 @@ class ConversationCore:
         attempted = 0
         # Ctrl+C stops these waits with no box open: they say so themselves.
         async with _says_so_when_stopped(parts.ui):
+            if self.to_drop:  # gone before the rule asks whether a job's conversation is
+                async with self.turn_lock:
+                    await self.drop_left(parts)
             records = await asyncio.to_thread(jm.awaiting_resume)
         for record in records:
             if not await self._told_here(record, parts):
