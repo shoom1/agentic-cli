@@ -1,6 +1,9 @@
-"""Tests for ADK TaskProgressPlugin.
+"""Tests for ADK TaskProgressPlugin, deprecated (removed in 0.8.0).
 
-Uses mock ToolContext with state containing tasks.
+The ADK manager no longer uses it: its event processor reports task progress
+(``tests/workflow/test_task_progress.py``). The class keeps working for an app
+that built it, with a ``DeprecationWarning``. Uses mock ToolContext with state
+containing tasks.
 """
 
 import pytest
@@ -33,7 +36,12 @@ class TestTaskProgressPlugin:
 
     @pytest.fixture
     def plugin(self):
-        return TaskProgressPlugin()
+        with pytest.warns(DeprecationWarning, match="TaskProgressPlugin is deprecated"):
+            return TaskProgressPlugin()
+
+    def test_it_is_deprecated(self):
+        with pytest.warns(DeprecationWarning, match="removed in 0.8.0"):
+            TaskProgressPlugin()
 
     async def test_no_tasks_no_events(self, plugin):
         ctx = MockToolContext()
@@ -160,7 +168,8 @@ class TestTaskProgressPlugin:
 
     async def test_max_events_cap(self):
         """Plugin respects max_events limit."""
-        plugin = TaskProgressPlugin(max_events=3)
+        with pytest.warns(DeprecationWarning):
+            plugin = TaskProgressPlugin(max_events=3)
         tasks = [
             {"id": "1", "description": "Task", "status": "pending", "priority": "medium", "tags": [], "created_at": "", "completed_at": ""},
         ]

@@ -226,10 +226,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             on_event=on_event,
         )
 
-        # Plugins (initialized lazily in _init_plugins, but we need the
-        # reference to exist before process() is called)
+        # The raw LLM log's plugin (made in _init_plugins), whose buffer a
+        # turn drains: the reference exists before process() is called.
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
-        self._task_progress_plugin: "TaskProgressPlugin | None" = None
 
         # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
         # configs) to the direct-API DirectAnthropicLlm instead of Vertex
@@ -508,10 +507,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _init_plugins(self) -> list:
         """The head of the app's plugin chain, not the whole of it.
 
-        The permission gate, the tool-error answer, task progress and, with
-        ``raw_llm_logging``, the raw LLM log, in that order; the task
-        progress and logging plugins are kept, since the manager drains
-        their buffers. ``_do_initialize`` adds the rest: for an app built
+        The permission gate, the tool-error answer and, with
+        ``raw_llm_logging``, the raw LLM log, in that order; the logging
+        plugin is kept, since the manager drains its buffer. Task progress
+        is the event processor's (``ADKEventProcessor``, from each event's
+        state delta). ``_do_initialize`` adds the rest: for an app built
         from agent configs, ``MainAgentPlugin`` before them, and after them
         the foreign reasoning filter, ``ContextCachePlugin`` when the app
         caches, the interrupted calls, the result cap, the memory index, the
@@ -523,7 +523,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Returns:
             Those plugins, in chain order.
         """
-        from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
@@ -537,10 +536,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             ),
             ToolErrorPlugin(self._open_calls),
         ]
-
-        # Task progress tracking via ToolContext.state
-        self._task_progress_plugin = TaskProgressPlugin()
-        plugins.append(self._task_progress_plugin)
 
         if self._settings.raw_llm_logging:
             self._llm_logging_plugin = LLMLoggingPlugin(
@@ -635,10 +630,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # One Gemini cache attempt a turn, not one per tool step.
             plugins.append(ContextCachePlugin())
         if not self._adk_config_path:
-            # Every tool result over the limit is cut. After the task progress
-            # plugin: ADK stops at the first plugin whose after_tool_callback
-            # returns a value, and this one returns the cut. Not for a native
-            # ADK app, whose agents' own after_tool_callbacks it would skip.
+            # Every tool result over the limit is cut. ADK stops at the first
+            # plugin whose after_tool_callback returns a value, and this one
+            # returns the cut. Not for a native ADK app, whose agents' own
+            # after_tool_callbacks it would skip.
             cap = ToolResultCapPlugin(
                 self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
             )
@@ -994,6 +989,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         second one.
         """
         event_count = 0
+        # Each turn reports the task list it first sees.
+        self._event_processor.start_turn()
         # An ERROR the turn has yielded that is not recoverable: its one.
         reported_failure = False
         failure: BaseException | None = None
@@ -1042,14 +1039,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # ADK stores with its result, is gone.
                 self._open_calls.clear(self.session_ref(session_id, user_id))
 
-        # Final drain — catches progress from the last tool call
-        if self._task_progress_plugin:
-            for progress_event in self._task_progress_plugin.drain_events():
-                progress_event = self._apply_event_hook(progress_event)
-                if progress_event:
-                    event_count += 1
-                    yield progress_event
-
         # Drain any remaining LLM events after processing completes
         if self._llm_logging_plugin:
             for llm_event in self._llm_logging_plugin.drain_events():
@@ -1088,13 +1077,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         async for workflow_event in self._event_processor.process_event(adk_event, session_id):
             yield workflow_event
-
-            # Task progress the plugin buffered for this tool's result.
-            if workflow_event.type == EventType.TOOL_RESULT and self._task_progress_plugin:
-                for progress_event in self._task_progress_plugin.drain_events():
-                    progress_event = self._apply_event_hook(progress_event)
-                    if progress_event:
-                        yield progress_event
 
     @property
     def _answers_job_calls(self) -> bool:

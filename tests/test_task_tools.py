@@ -222,8 +222,8 @@ class TestEmitTaskProgressEvent:
     """Tests for task progress data (formerly _emit_task_progress_event).
 
     The base manager no longer has this method — task progress is handled
-    per-backend (ADK plugin, LangGraph graph state).  See:
-    - tests/workflow/test_task_progress_plugin.py (ADK)
+    per-backend (each backend's event processor, LangGraph graph state).  See:
+    - tests/workflow/test_task_progress.py (ADK and Deep Agents)
     - tests/tools/test_core_tasks.py (shared task_progress_data)
     """
 

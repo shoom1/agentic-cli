@@ -429,7 +429,8 @@ class TestIsRateLimitError:
 
 
 class TestTaskProgressAutoClean:
-    """Tests for auto-clear via TaskProgressPlugin (replaces _emit_task_progress_event)."""
+    """Tests for auto-clear via TaskProgressPlugin (deprecated: the ADK manager
+    no longer uses it, and keeps a finished list)."""
 
     async def test_auto_clears_when_all_done(self):
         """Plugin clears tasks from tool_context.state when all done."""
@@ -443,7 +444,8 @@ class TestTaskProgressAutoClean:
 
         state = {"tasks": normalized}
         mock_ctx = type("MockCtx", (), {"state": state})()
-        plugin = TaskProgressPlugin()
+        with pytest.warns(DeprecationWarning):
+            plugin = TaskProgressPlugin()
 
         await plugin.after_tool_callback(
             tool=None, tool_args={}, tool_context=mock_ctx, result={},
@@ -469,7 +471,8 @@ class TestTaskProgressAutoClean:
 
         state = {"tasks": normalized}
         mock_ctx = type("MockCtx", (), {"state": state})()
-        plugin = TaskProgressPlugin()
+        with pytest.warns(DeprecationWarning):
+            plugin = TaskProgressPlugin()
 
         await plugin.after_tool_callback(
             tool=None, tool_args={}, tool_context=mock_ctx, result={},

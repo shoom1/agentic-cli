@@ -8,8 +8,8 @@ Deep Agents' cap does the same
 (``workflow/deepagents/middleware.py::ToolResultCapMiddleware``).
 
 ADK stops at the first plugin whose ``after_tool_callback`` returns a value,
-so the manager registers this one after ``TaskProgressPlugin``, which reads
-the task list after every call and returns nothing. For the same reason a
+so the manager registers this one after ``InterruptedCallsPlugin``, which
+records every finished result and returns nothing. For the same reason a
 native ADK YAML app gets none: its agents' own ``after_tool_callback``s would
 be skipped for every cut result.
 
