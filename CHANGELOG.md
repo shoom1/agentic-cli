@@ -1402,6 +1402,11 @@ the start of the entry's title.
     `ParallelAgent`, a workflow or another class at the root raises
     `AgentGraphError` naming it: make an `LlmAgent` the root, with the other
     agent as its sub-agent.
+  - A YAML ADK cannot load raises `AgentGraphError` (a `ValueError`), "cannot
+    load the native ADK app <path>: <type>: <ADK's message>", ADK's error as
+    its cause, where 0.6 raised ADK's own (`FileNotFoundError`, a YAML
+    `ParserError`, pydantic's `ValidationError`, `ModuleNotFoundError`).
+    Catch `AgentGraphError`, as for a config-built graph.
   - Agent names must be unique across the tree, as in a config-built graph
     (ADK requires it only among siblings): a name used twice raises
     `AgentGraphError` ("Duplicate agent name(s): …"). Rename one.

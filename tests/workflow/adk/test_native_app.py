@@ -157,6 +157,28 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
         )
         assert manager._session_service is None
 
+    @pytest.mark.parametrize("case, error", [
+        ("missing", "FileNotFoundError"),
+        ("unknown key", "ValidationError"),
+        ("no such module", "ModuleNotFoundError"),
+    ])
+    async def test_a_yaml_that_cannot_be_loaded_is_refused_naming_it(self, project, case, error):
+        """Whatever ADK raised, as an ``AgentGraphError`` naming the file and
+        ADK's error, as a config-built graph's errors are."""
+        path = str(project / "root_agent.yaml")
+        if case == "unknown key":
+            root_yaml(project, extra="colour: red\n")
+        elif case == "no such module":
+            root_yaml(project, extra="sub_agents:\n  - code: no_such_module.agent\n")
+        manager = native(path)
+
+        with pytest.raises(AgentGraphError) as raised:
+            await manager.initialize_services()
+
+        assert str(raised.value).startswith(f"cannot load the native ADK app {path}: {error}: ")
+        assert type(raised.value.__cause__).__name__ == error
+        assert manager._session_service is None
+
     async def test_a_name_used_twice_in_the_tree_is_refused(self, project):
         """ADK requires unique names only among siblings, but the run reads
         every agent by name (its model, budget, the agents that reply), and

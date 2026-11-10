@@ -102,14 +102,25 @@ def load_native_root(path: str | Path) -> LlmAgent:
     (``anthropic_llm.ensure_direct_anthropic``).
 
     Raises:
-        AgentGraphError: The root is not an ``LlmAgent``, a name is used
-            twice in the tree, or an agent is in task mode.
+        AgentGraphError: The YAML cannot be loaded (ADK's error, a missing
+            file, a malformed one, a field ADK does not know, a module it
+            names that does not import, as the cause, the file named), the
+            root is not an ``LlmAgent``, a name is used twice in the tree, or
+            an agent is in task mode.
     """
     from agentic_cli.workflow.adk.anthropic_llm import ensure_direct_anthropic
     from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
 
     ensure_direct_anthropic()
-    root = load_adk_agent_native(path)
+    try:
+        root = load_adk_agent_native(path)
+    except AgentGraphError:
+        raise
+    except Exception as exc:
+        # As a config-built graph's errors are: one type, naming the file.
+        raise AgentGraphError(
+            f"cannot load the native ADK app {path}: {type(exc).__name__}: {exc}"
+        ) from exc
     if not isinstance(root, LlmAgent):
         raise AgentGraphError(
             f"the root agent {getattr(root, 'name', None)!r} is a {type(root).__name__}, "

@@ -1366,7 +1366,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
     then. It is loaded once per manager: a retry and a model switch build
     on the same agents (ADK gives an agent one parent, so a module-level
     `code:` agent cannot be loaded twice), and an edit of the YAML takes
-    effect in a new manager. A root that is not an `LlmAgent` (a workflow or
+    effect in a new manager. A YAML that cannot be loaded raises
+    `AgentGraphError` naming the file and ADK's error. A root that is not
+    an `LlmAgent` (a workflow or
     another agent class) is refused there, and so is a name used twice in
     the tree (ADK requires unique names only among siblings) and a
     task-mode agent anywhere in the tree: `AgentGraphError`, naming the
