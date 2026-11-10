@@ -121,6 +121,8 @@ def hermetic(tmp_path, monkeypatch) -> Path:
     for variable in ("GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(variable, raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+    # A request no fake serves fails here, never over the network.
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9")
     return tmp_path
 
 
@@ -133,24 +135,26 @@ def serve(monkeypatch, script: Script, backend: str) -> Script:
     return script
 
 
-def solo(backend: str, *tools):
+def solo(backend: str, *tools, **values):
     """A main agent alone, on Claude, its client retrying nothing."""
     configs = [AgentConfig(
         name="solo", prompt="Answer.", tools=list(tools), include_state_tools=False,
     )]
     settings = BaseSettings(
         default_model=CLAUDE, session_store="memory", retry_max_attempts=0,
-        prompt_caching_enabled=False,
+        prompt_caching_enabled=False, **values,
     )
     if backend == "adk":
         return GoogleADKWorkflowManager(agent_configs=configs, settings=settings)
     return DeepAgentsWorkflowManager(agent_configs=configs, settings=settings)
 
 
-async def turn_on(monkeypatch, backend: str, *answers, tools=()) -> list[WorkflowEvent]:
+async def turn_on(
+    monkeypatch, backend: str, *answers, tools=(), **values
+) -> list[WorkflowEvent]:
     """One turn of ``solo`` on ``answers``; what ``process()`` yields, raising nothing."""
     serve(monkeypatch, Script(*answers), backend)
-    manager = solo(backend, *tools)
+    manager = solo(backend, *tools, **values)
     try:
         return [event async for event in manager.process("Hello.", "u", session_id="s")]
     finally:
@@ -221,6 +225,54 @@ async def test_a_model_error_after_a_tool_ran_is_one_error_last(hermetic, monkey
     assert kinds == [EventType.TOOL_CALL, EventType.TOOL_RESULT, EventType.ERROR]
     (error,) = errors(events)
     assert_failed(error, backend, UNAVAILABLE)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_the_raw_llm_log_of_a_failed_turn_comes_before_its_error(
+    hermetic, monkeypatch, backend
+):
+    """With ``raw_llm_logging`` the failed call's records reach the stream,
+    and the turn's one error is still the last event."""
+    events = await turn_on(
+        monkeypatch, backend, calls("ft_lookup", {"topic": "X"}, "toolu_1"), BAD_REQUEST,
+        tools=[ft_lookup], raw_llm_logging=True,
+    )
+
+    kinds = [event.type for event in events]
+    # Both calls' requests are logged, the failed one's included, then the error.
+    assert kinds.count(EventType.LLM_REQUEST) == 2
+    assert kinds[-1] is EventType.ERROR
+    assert len(errors(events)) == 1
+
+
+async def test_on_adk_a_failure_no_event_reported_still_drains_the_raw_llm_log(
+    hermetic, monkeypatch
+):
+    """A model call ADK logged whose event never reached the stream (the
+    store refused it as stale): its records still come, before the error."""
+    from google.adk.errors import StaleSessionError
+
+    serve(monkeypatch, Script(say("First."), say("Second.")), "adk")
+    manager = solo("adk", raw_llm_logging=True)
+    try:
+        [e async for e in manager.process("Hello.", "u", session_id="s")]
+        service = manager._session_service
+        real = service.append_event
+
+        async def stale(session, event):
+            if event.author != "user":
+                raise StaleSessionError("The session has been modified in storage.")
+            return await real(session, event)
+
+        monkeypatch.setattr(service, "append_event", stale)
+        events = [e async for e in manager.process("Again.", "u", session_id="s")]
+    finally:
+        await manager.cleanup()
+
+    assert [event.type for event in events] == [
+        EventType.LLM_REQUEST, EventType.LLM_RESPONSE, EventType.ERROR,
+    ]
+    assert events[-1].metadata["error_code"] == "ConversationChangedError"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
