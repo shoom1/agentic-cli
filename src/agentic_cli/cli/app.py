@@ -387,18 +387,13 @@ _AT_NEXT_START = "(takes effect at the next start)"
 #: (``settings_persistence.NEW_CONVERSATION_KEYS``) that the open one keeps.
 _AT_NEXT_NEW = "(applies to the next /new)"
 
-#: The keys besides the rebuild keys that the workflow's start reads: a change
-#: of one made while a start runs waits for it, as a rebuild does, or the
-#: start could take the new value and its line would be false. The session
-#: store is built as the workflow starts, and the orchestrator chooses what it
-#: builds (whether the change starts a new conversation needs the start's
-#: outcome); ``log_level`` and ``log_format`` are read by the app's
-#: constructor only, so a change of them does not wait.
-_READ_BY_THE_START = frozenset({"session_store", "orchestrator"})
-
-#: The settings that say where conversations are kept: the backend and the
-#: session store (``Place``), which key a conversation's lock.
-_PLACE_KEYS = frozenset({"orchestrator", "session_store"})
+#: The keys besides the rebuild keys whose change waits for a start in
+#: progress, as a rebuild does: whether an orchestrator change starts a new
+#: conversation, or moves the run's, needs that start's outcome. The session
+#: store is fixed for the run as its first start begins
+#: (``WorkflowController.store``), and ``log_level`` and ``log_format`` are
+#: read by the app's constructor only: a change of them does not wait.
+_READ_BY_THE_START = frozenset({"orchestrator"})
 
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
@@ -1339,23 +1334,19 @@ class BaseCLIApp:
         # its next start builds a manager from the settings as they are now
         # (no manager is kept to revive): the conversation is held there from
         # now on, before a turn writes there (nothing of it is stored yet).
-        moved = [key for key in changes if _ui_key_target_field(key) in _PLACE_KEYS]
-        if moved and not controller.is_ready and controller.next_start_builds:
-            place = Place.of(
-                self._settings, backend=target if moves_backend else controller.backend
-            )
+        if moves_backend and not controller.is_ready and controller.next_start_builds:
+            place = dataclasses.replace(self._place(), backend=target)
             holder = await self._hold_it_at(place)
             if holder is not None:  # open there in another process: nothing changes
                 _restore_settings(self._settings, snapshot)
-                labels = ", ".join(_setting_label(key, self._settings) for key in moved)
+                labels = _setting_label("orchestrator", self._settings)
                 self.session.add_error(
                     f"Could not set {labels}: conversation '{self._session_id}' is open "
                     f"in another process ({holder}) on {place.backend} ({place.store}). "
                     "Settings were not changed."
                 )
                 return False
-            if moves_backend:  # the next start builds it
-                await controller.switch_backend(target)
+            await controller.switch_backend(target)  # the next start builds it
 
         # Report changes
         for key, value in changes.items():
@@ -1805,7 +1796,7 @@ class BaseCLIApp:
                     raise  # it never ran: nothing changed
                 interrupted = cancel  # it runs: its conversation is opened, then the cancel
             parts = self._switch_parts()
-            place = Place.of(self._settings, backend=target)
+            place = dataclasses.replace(self._place(), backend=target)  # the run's store
         new = uuid.uuid4().hex[:12]
         switched = await self._conversation.switch(new, parts, place=place, propose=not moving)
         if not switched.made:  # a new id: never open elsewhere in practice

@@ -359,9 +359,11 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
         backend)`` says so (n: how many were built before)."""
         built: list = []
 
-        def create(agent_configs, settings, app_name=None, model=None, orchestrator=None):
+        def create(agent_configs, settings, app_name=None, model=None, orchestrator=None,
+                   session_store=None):
             backend = orchestrator or getattr(settings.orchestrator, "value", settings.orchestrator)
             manager = cls.Manager(backend, fails(len(built), backend))
+            manager.session_store = session_store  # the store it was built for
             built.append(manager)
             return manager
 
@@ -410,16 +412,23 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
         assert not free(app, self.key_where(app, "adk", "sqlite"))
         assert free(app, self.key_where(app, "deepagents", "sqlite"))
 
-    async def test_a_store_change_moves_the_lock_where_the_turns_run(self, home, monkeypatch):
+    async def test_a_store_change_takes_effect_at_the_next_app_start(self, home, monkeypatch):
+        """The session store is fixed for the run: the retry builds on the
+        store the run started with, the turns run there, and the lock stays."""
         built = self.builds(monkeypatch, lambda n, backend: n == 0)
-        app = await self.started(BaseSettings(session_store="memory", orchestrator="adk"))
+        app = await self.started(BaseSettings(session_store="sqlite", orchestrator="adk"))
+        key = app._conversation_key(app.session_id)
 
-        assert await app.apply_settings({"session_store": "sqlite"})
+        assert await app.apply_settings({"session_store": "memory"})
         await app.process_input("hello")
         await app._workflow_controller.close()
 
+        assert said(app.session, "add_success") == [
+            "Session Store: memory (takes effect at the next start)"
+        ]
+        assert [m.session_store for m in built] == ["sqlite", "sqlite"]
         assert built[-1].turns == [app.session_id]
-        assert not free(app, self.key_where(app, "adk", "sqlite"))
+        assert app._conversation_key(app.session_id) == key and not free(app, key)
 
     async def test_one_open_there_elsewhere_refuses_the_change(self, home, monkeypatch):
         self.builds(monkeypatch, lambda n, backend: backend == "deepagents")
@@ -473,6 +482,7 @@ class TestANewConversationOnAnotherBackend:
         built = TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: False)
         adk = cls.Manager("adk", fails=False)
         adk.is_initialized = True
+        adk.session_store = "sqlite"  # the store it was built for
         app = app_on(adk, app_settings or BaseSettings(session_store="sqlite"))
         assert app._hold(app.session_id) is None  # as the start does
         return app, adk, built
@@ -500,6 +510,18 @@ class TestANewConversationOnAnotherBackend:
         assert app.usage_tracker.invocation_count == 0
         assert said(app.session, "add_message")[-1] == f"New conversation {new} on deepagents."
         assert app.settings.orchestrator.value == "adk"  # the setting stays
+
+    async def test_it_keeps_the_store_the_run_started_with(self, home, monkeypatch):
+        """A ``session_store`` change takes effect at the next app start, not
+        at a new conversation on another backend."""
+        app, _, built = self.on_adk(monkeypatch)
+        assert await app.apply_settings({"session_store": "memory"})
+
+        await app.process_input("/new deepagents")
+
+        assert self.running(app) == "deepagents" and built[0].session_store == "sqlite"
+        assert app._conversation.place.store == "sqlite"
+        assert not free(app, app._conversation_key(app.session_id))
 
     async def test_a_model_switch_then_keeps_that_backend(self, home, monkeypatch):
         app, _, built = self.on_adk(monkeypatch)

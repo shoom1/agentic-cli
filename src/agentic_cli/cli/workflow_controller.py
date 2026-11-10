@@ -155,8 +155,11 @@ class WorkflowController:
         self._agent_configs = agent_configs
         self._app_name = settings.app_name
         # The backend it runs: None until the first start takes the settings'
-        # orchestrator, or switch_backend chooses one (``backend``).
+        # orchestrator, or switch_backend chooses one (``backend``). The
+        # session store every manager of the run is built for: None until the
+        # first start takes the settings' (``store``).
         self._backend: str | None = None
+        self._store: str | None = None
 
         # Closure captures agent_configs for lazy creation (used by _background_init)
         def _create_workflow() -> "BaseWorkflowManager":
@@ -165,6 +168,7 @@ class WorkflowController:
                 settings=settings,
                 app_name=self._app_name,
                 orchestrator=self.backend,
+                session_store=self.store,
             )
 
         self._create_fn = _create_workflow
@@ -224,6 +228,23 @@ class WorkflowController:
         if running in _ORCHESTRATORS:
             return running
         return orchestrator_of(self._settings).value
+
+    @property
+    def store(self) -> str:
+        """The session store every manager of the run is built for: the
+        settings' ``session_store`` as the first start takes it.
+
+        Fixed for the run: a later change of the setting takes effect at the
+        next app start, so a retry after a failed start, a revive and a new
+        conversation on another backend keep the store the conversations of
+        this run are in. A manager handed to it without a start keeps its own.
+        """
+        if self._store is not None:
+            return self._store
+        running = getattr(self._workflow, "session_store", None)
+        if isinstance(running, str):
+            return running
+        return self._settings.session_store
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
@@ -314,7 +335,9 @@ class WorkflowController:
                 return
             if self._init_task is not None and not self._init_task.done():
                 return
-            self._backend = self.backend  # the first start takes the settings'
+            # The first start takes the settings' backend and store: the
+            # store for the whole run.
+            self._backend, self._store = self.backend, self.store
             revive, self._workflow = self._workflow, None
             self._init_error = None
             self._init_task = asyncio.create_task(self._background_init(revive))
@@ -629,6 +652,7 @@ class WorkflowController:
             settings=self._settings,
             app_name=self._app_name,
             orchestrator=backend,
+            session_store=self.store,
         )
         try:
             await new_workflow.initialize_services()

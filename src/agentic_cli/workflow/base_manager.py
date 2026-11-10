@@ -299,6 +299,10 @@ class BaseWorkflowManager(ABC):
     #: called). A class default, so it holds for a manager whatever built it.
     _keeping_store: bool = False
 
+    #: The session store it was built for (``session_store``); None: its
+    #: settings'. A class default, so it holds whatever built the manager.
+    _built_for_store: str | None = None
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -2257,6 +2261,23 @@ class BaseWorkflowManager(ABC):
         silently serviced as the default user.
         """
         return user_id is None or user_id == self._settings.default_user
+
+    @property
+    def session_store(self) -> str:
+        """The session store it keeps conversations in: the one it was built
+        for, else ``settings.session_store``.
+
+        A CLI run keeps one store for its whole life (a change of
+        ``session_store`` takes effect at the next start), so the factory
+        builds every manager of the run for that store
+        (``create_workflow_manager_from_settings(session_store=)``). Set it
+        before ``initialize_services``, which opens the store.
+        """
+        return self._built_for_store or self._settings.session_store
+
+    @session_store.setter
+    def session_store(self, store: str) -> None:
+        self._built_for_store = store
 
     def session_ref(
         self, session_id: str | None = None, user_id: str | None = None

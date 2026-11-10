@@ -175,26 +175,15 @@ class TestARestartKey:
             "Max Retry Attempts: 4", f"Log Level: info {AT_THE_NEXT_START}",
         ]
 
-    async def test_the_session_store_waits_for_a_start_in_progress(self, settings, monkeypatch):
-        """The start reads it: once it is over, the line is true."""
-        starts = Starts()
-        app = starting_app(settings, monkeypatch, starts)
-
-        applying = await apply_while_starting(app, starts, {"session_store": "memory"})
-        assert not applying.done()
-        starts.release()
-        assert await applying is True
-
-        assert waited(app)
-        assert successes(app) == [f"Session Store: memory {AT_THE_NEXT_START}"]
-        await app._workflow_controller.close()
-
-
-    @pytest.mark.parametrize("key, value", [("log_level", "debug"), ("log_format", "json")])
-    async def test_logging_does_not_wait_for_a_start_in_progress(
+    @pytest.mark.parametrize("key, value", [
+        ("session_store", "memory"), ("log_level", "debug"), ("log_format", "json"),
+    ])
+    async def test_it_does_not_wait_for_a_start_in_progress(
         self, settings, monkeypatch, key, value
     ):
-        """Read by the app's constructor only: the start does not read it."""
+        """Logging is read by the app's constructor only, and the session
+        store is fixed for the run as its first start begins: no start in
+        progress takes the new value."""
         starts = Starts()
         app = starting_app(settings, monkeypatch, starts)
 

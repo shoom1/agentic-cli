@@ -565,7 +565,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
     def _make_session_service(self) -> BaseSessionService:
-        """Build the ADK session service from ``session_store`` settings.
+        """Build the ADK session service of its ``session_store``.
 
         ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
         → native ``DatabaseSessionService`` (durable across restarts, full event
@@ -573,7 +573,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         it, its directory created if missing (``private_sqlite_file``; one
         ``sqlite_uri`` names, and that exists, is left as it is).
         """
-        db_url = self._settings.session_db_url()
+        db_url = self._settings.session_db_url(self.session_store)
         if db_url is None:
             logger.debug("using_in_memory_session_service")
             return InMemorySessionService()
@@ -592,7 +592,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         from google.adk.sessions import DatabaseSessionService
 
-        logger.info("using_database_session_service", store=self._settings.session_store)
+        logger.info("using_database_session_service", store=self.session_store)
         return DatabaseSessionService(db_url=db_url)
 
     async def _do_initialize(self) -> None:

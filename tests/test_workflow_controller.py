@@ -289,6 +289,35 @@ class TestTheBackend:
         assert builds == ["langgraph", "langgraph"]
         await controller.close()
 
+    async def test_every_manager_of_the_run_is_built_on_its_store(self):
+        """The session store is fixed for the run: a retry after a failed
+        start, and a new conversation on another backend, are built on the
+        store the run started with, whatever ``/settings`` changed since."""
+        controller = self._make_controller(OrchestratorType.LANGGRAPH)  # memory
+        builds: list = []
+
+        def create(**kwargs):
+            builds.append(kwargs["session_store"])
+            manager = _FakeLangGraphWorkflow()
+            if len(builds) == 1:
+                manager.initialize_services = AsyncMock(side_effect=RuntimeError("no key"))
+            manager.is_initialized = True
+            return manager
+
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            side_effect=create,
+        ):
+            await controller.start_background_init()
+            assert await controller.ensure_initialized() is False
+            controller._settings.session_store = "sqlite"  # /settings: the next app start
+            assert await controller.ensure_initialized() is True
+            await controller.switch_backend("adk")
+
+        assert builds == ["memory", "memory", "memory"]
+        assert controller.store == "memory"
+        await controller.close()
+
     async def test_an_unknown_backend_is_refused(self):
         controller = self._make_controller()
 

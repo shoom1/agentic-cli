@@ -777,14 +777,18 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         json_schema_extra={"ui_order": 148},
     )
 
-    def session_db_url(self) -> str | None:
+    def session_db_url(self, store: str | None = None) -> str | None:
         """Async SQLAlchemy URL for the session store, or None when ephemeral.
 
         Shared by both backends so ADK's DatabaseSessionService and LangGraph's
         checkpointer persist to the same place. SQLite is the zero-config
         default (``{workspace}/sessions/sessions.db``); Postgres via uri.
+
+        Args:
+            store: The store to name (a manager's own, ``session_store`` on
+                it); ``session_store`` by default.
         """
-        store = getattr(self, "session_store", "sqlite")
+        store = store or getattr(self, "session_store", "sqlite")
         if store == "memory":
             return None
         if store == "postgres":
