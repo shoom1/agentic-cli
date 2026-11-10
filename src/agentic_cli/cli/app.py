@@ -2099,7 +2099,7 @@ class BaseCLIApp:
         try:
             if session_id == self._session_id and backend in (None, self.session_backend):
                 self.session.add_message("system", "Already in this conversation.")
-                await self._name_its_twins(session_id, None)
+                await self._name_its_twins(session_id)
                 return False
             parts = self._switch_parts()
             workflow = parts.workflow
@@ -2247,7 +2247,7 @@ class BaseCLIApp:
             raise interrupted
         return True
 
-    async def _name_its_twins(self, session_id: str, backend: str | None) -> None:
+    async def _name_its_twins(self, session_id: str) -> None:
         """Say which other backends keep a conversation of the app's id (it
         is in it already): their stores alone are read. Never raises."""
         try:
@@ -2256,7 +2256,7 @@ class BaseCLIApp:
         except Exception:  # noqa: BLE001 - a line, never a failure
             logger.debug("session_twins_unread", session_id=session_id, exc_info=True)
             return
-        self._say_twins(session_id, [row.backend for row in rows if row.backend != backend])
+        self._say_twins(session_id, [row.backend for row in rows])
 
     def _say_twins(self, session_id: str, twins: "list[str | None]") -> None:
         """Say that other backends keep a conversation of the id just opened too."""

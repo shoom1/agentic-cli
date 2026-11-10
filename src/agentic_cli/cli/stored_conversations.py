@@ -101,12 +101,6 @@ class StoredConversations:
         for reader in readers:
             await reader.aclose()
 
-    @property
-    def backends(self) -> tuple[str, ...]:
-        """The backends looked at: the running one first, then those read."""
-        running = (self._backend,) if self._backend is not None else ()
-        return running + tuple(reader.backend for reader in self._readers)
-
     async def rows(self, limit: int | None = None) -> list["SessionInfo"]:
         """Every backend's conversations, newest first, each naming its
         backend; ``limit`` keeps the newest this many.
@@ -116,7 +110,8 @@ class StoredConversations:
         """
         rows: list["SessionInfo"] = []
         if self._lists_its_own():
-            rows += self._named(await self._workflow.list_sessions(limit=limit))
+            listing = self._workflow.list_sessions
+            rows += self._named(await (listing() if limit is None else listing(limit=limit)))
         for reader in self._readers:
             rows += await self._read(reader, reader.list(limit), [])
         rows.sort(key=_when, reverse=True)  # stable: the running backend's first on a tie
