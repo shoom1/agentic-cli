@@ -732,6 +732,44 @@ class TestOnTheRealBackends:
             release.set()
             await app._workflow_controller.close()
 
+    async def test_after_a_failed_model_switch_a_new_backend_keeps_the_runs_services(
+        self, real, monkeypatch
+    ):
+        """The model switch failed: its manager is kept, holding the run's
+        services, and the workflow is down. ``/new deepagents`` then: the next
+        start builds Deep Agents on those services, given over."""
+        app = await self.started()
+        controller = app._workflow_controller
+        release = threading.Event()
+        try:
+            await app.process_input("One on ADK.")
+            held = self.services(app)
+            job = held[JOB_MANAGER].submit(
+                tool="t", backend="inprocess", spec={"target": functools.partial(release.wait, 10)},
+            )
+
+            async def fails(self) -> None:
+                raise RuntimeError("model switch failed")
+
+            with monkeypatch.context() as patched:
+                patched.setattr(GoogleADKWorkflowManager, "_do_initialize", fails)
+                with pytest.raises(RuntimeError, match="model switch failed"):
+                    await controller.reinitialize(model="claude-opus-4-6")
+            assert not controller.is_ready
+
+            await app.process_input("/new deepagents")
+            assert await controller.ensure_initialized() is True
+            await controller._join_releases()
+
+            assert controller.backend == "deepagents"
+            assert all(self.services(app)[k] is held[k] for k in KEPT), "rebuilt on Deep Agents"
+            jobs = held[JOB_MANAGER]
+            assert (await asyncio.to_thread(jobs.get, job.job_id)).state is JobState.RUNNING
+            assert len(real) == 1, "the embedding model loaded again"
+        finally:
+            release.set()
+            await controller.close()
+
     async def test_a_failed_start_of_the_other_backend_changes_nothing(self, real, monkeypatch):
         app = await self.started()
         release = threading.Event()

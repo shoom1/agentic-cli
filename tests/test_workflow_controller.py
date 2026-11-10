@@ -281,6 +281,7 @@ class TestTheBackend:
             return_value=built,
         ):
             assert await controller.ensure_initialized() is True
+            await controller._join_releases()
 
         kept.cleanup.assert_awaited_once()
         kept.initialize_services.assert_not_awaited()
@@ -712,6 +713,77 @@ class TestTheRunsServicesMoveWithTheBackend:
         old.give_services.assert_not_awaited()
         new.cleanup.assert_awaited_once()
         assert controller._workflow is old and controller.backend == "adk"
+
+    async def test_a_manager_kept_after_a_failed_model_switch_lends_to_the_next_build(self):
+        """The workflow is down, its manager kept for a revive (a failed
+        reinitialization: it still holds the run's services), and a
+        conversation starts or opens on another backend: the next start
+        builds that backend on the kept manager's services, which are given
+        over, then releases it. Nothing restarts there either."""
+        controller = _make_lifecycle_controller()
+        kept = _FakeADKWorkflow()
+        kept.is_initialized = False
+        controller._workflow = kept
+        controller._init_error = RuntimeError("reinitialize failed")
+        built = _FakeLangGraphWorkflow()
+        loan = kept.lend_services.return_value
+        steps: list[str] = []
+        kept.give_services = AsyncMock(side_effect=lambda lent: steps.append("give"))
+        kept.cleanup = AsyncMock(side_effect=lambda: steps.append("kept released"))
+        built.initialize_services = AsyncMock(side_effect=lambda **kw: steps.append("start"))
+
+        await controller.switch_backend("langgraph")
+        kept.cleanup.assert_not_awaited()  # it holds the services until they are given
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=built,
+        ):
+            assert await controller.ensure_initialized() is True
+            await controller._join_releases()
+
+        built.initialize_services.assert_awaited_once_with(services=loan)
+        kept.give_services.assert_awaited_once_with(loan)
+        assert steps == ["start", "give", "kept released"]
+        assert controller._workflow is built and controller.backend == "langgraph"
+        await controller.close()
+
+    async def test_a_build_that_fails_on_the_kept_services_keeps_them_for_a_retry(self):
+        controller = _make_lifecycle_controller()
+        kept = _FakeADKWorkflow()
+        kept.is_initialized = False
+        controller._workflow = kept
+        controller._init_error = RuntimeError("reinitialize failed")
+        failing, working = _FakeLangGraphWorkflow(), _FakeLangGraphWorkflow()
+        failing.initialize_services = AsyncMock(side_effect=RuntimeError("no key"))
+
+        await controller.switch_backend("langgraph")
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            side_effect=[failing, working],
+        ):
+            assert await controller.ensure_initialized() is False
+            kept.give_services.assert_not_awaited()
+            kept.cleanup.assert_not_awaited()
+            failing.cleanup.assert_awaited_once()
+            assert await controller.ensure_initialized() is True
+            await controller._join_releases()
+
+        working.initialize_services.assert_awaited_once_with(
+            services=kept.lend_services.return_value
+        )
+        kept.cleanup.assert_awaited_once()
+        await controller.close()
+
+    async def test_close_releases_a_kept_manager_no_build_took(self):
+        controller = _make_lifecycle_controller()
+        kept = _FakeADKWorkflow()
+        kept.is_initialized = False
+        controller._workflow = kept
+
+        await controller.switch_backend("langgraph")
+        await controller.close()
+
+        kept.cleanup.assert_awaited_once()
 
     async def test_a_manager_that_lends_nothing_starts_on_its_own(self):
         """An application's own manager, not a ``BaseWorkflowManager``: the

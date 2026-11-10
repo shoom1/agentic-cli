@@ -578,7 +578,8 @@ the start of the entry's title.
   `WorkflowController.switch_backend` hands them over so (lend, start, give,
   publish the new manager at once, release the old one): a conversation
   started or opened on another backend keeps the run's services, and a
-  failed start or give leaves the old manager with them.
+  failed start or give leaves the old manager with them; one a failed model
+  switch kept, with the workflow down, lends them to the next build there.
 
 - **`JobManager.snapshot()`, `JobManager.release_resume(job_id)` and
   `JobRecord.awaiting_resume`.** `snapshot()` returns the jobs a manager

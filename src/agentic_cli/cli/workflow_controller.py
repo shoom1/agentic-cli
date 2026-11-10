@@ -197,6 +197,11 @@ class WorkflowController:
         # worker thread nor an unreachable manager's cleanup can be abandoned.
         self._construction: "_Construction | None" = None
         self._orphan_cleanups: set[asyncio.Task] = set()
+        # A manager a failed reinitialization kept, still holding the run's
+        # services, left behind by a switch to another backend while the
+        # workflow was down: the next build borrows its services, has them
+        # given over, then releases it (``switch_backend``).
+        self._lender: "BaseWorkflowManager | None" = None
         # Single-flight shutdown, owned by the controller so a cancelled caller
         # cannot abandon it half-done (see close()).
         self._close_task: asyncio.Task[None] | None = None
@@ -370,6 +375,9 @@ class WorkflowController:
             return self._create_fn()
 
         manager: "BaseWorkflowManager | None" = revive
+        lender = self._lender if revive is None else None
+        lend = getattr(lender, "lend_services", None)
+        loan = lend() if callable(lend) else None
         try:
             logger.debug("background_init_starting", reviving=revive is not None)
 
@@ -377,8 +385,12 @@ class WorkflowController:
             if manager is None:
                 manager = await self._construct_manager(loop, _create_workflow)
 
-            # Step 2: Initialize services (async - builds graph, loads LLM, etc.)
-            await manager.initialize_services()
+            # Step 2: Initialize services (async - builds graph, loads LLM,
+            # etc.), on the services a kept manager lends (switch_backend).
+            if loan is None:
+                await manager.initialize_services()
+            else:
+                await manager.initialize_services(services=loan)
 
             if self._closed:
                 # close() ran while we were initializing; it has already taken
@@ -388,7 +400,12 @@ class WorkflowController:
                 logger.debug("background_init_discarded_after_close")
                 return
 
-            self._workflow = manager
+            if loan is not None:
+                await lender.give_services(loan)
+            self._workflow = manager  # at once after the give
+            if lender is not None and self._lender is lender:
+                self._lender = None
+                self._spawn_cleanup(lender)
             # A recorded failure must not outlive its recovery: state,
             # ensure_initialized() and the status bar all read this field.
             self._init_error = None
@@ -613,9 +630,12 @@ class WorkflowController:
         published stops only the wait (the release runs on, and ``close()``
         joins it). A manager that lends nothing (an application's own) has
         the new one build its own. While none runs, the next start builds
-        ``backend``, and a manager a failed reinitialization kept (of the
-        backend before) is released. A start in progress is waited for
-        first. For the backend it runs already, nothing happens.
+        ``backend``; a manager a failed reinitialization kept (of the backend
+        before, still holding the run's services) lends them to that build,
+        gives them over, and is released then (or by ``close()``, when no
+        build takes them; a build that fails leaves them with it for the
+        retry). A start in progress is waited for first. For the backend it
+        runs already, nothing happens.
 
         Args:
             backend: An orchestrator's value: ``adk``, ``deepagents`` or
@@ -642,7 +662,10 @@ class WorkflowController:
                 return
             kept, self._workflow = self._workflow, None
             if kept is not None:
-                self._spawn_cleanup(kept)
+                if callable(getattr(kept, "lend_services", None)) and self._lender is None:
+                    self._lender = kept  # the next build borrows its services
+                else:
+                    self._spawn_cleanup(kept)
             self._backend = target
 
     async def _swap_orchestrator(self, backend: str) -> None:
@@ -788,6 +811,9 @@ class WorkflowController:
             manager, self._workflow = self._workflow, None
             if manager is not None:
                 await self._cleanup_manager(manager)
+            lender, self._lender = self._lender, None
+            if lender is not None:  # no build took its services
+                await self._cleanup_manager(lender)
 
     def update_status_bar(self, ui: "ThinkingPromptSession") -> None:
         """Update UI status bar with current workflow status.
