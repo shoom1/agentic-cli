@@ -1391,8 +1391,10 @@ the start of the entry's title.
   changed conversation with "Send your message again…", and any other
   failure as `<the error> [<its type>]`, where on ADK it said `Workflow
   error: <the error>`; a manager that raises (an app's own, LangGraph) is
-  said as before. The failure is logged at info, its traceback at debug, so nothing
-  but the error is printed over the prompt.
+  said as before. The backends log the failure at info, its traceback at
+  debug, and the CLI its record of it (`workflow_error_event`,
+  `turn_rate_limited`) at info, so at the default log level the error is all
+  that is printed over the prompt.
 - **On ADK, task progress is reported when the task list changes, and a
   finished list stays.** ADK's `TaskProgressPlugin` reported the list after
   every tool call while there was one, and cleared it once every task was

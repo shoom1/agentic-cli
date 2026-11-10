@@ -5,8 +5,9 @@ A turn that fails yields one ``ERROR`` (the base ``process()``'s contract).
 (``metadata["rate_limited"]``) as the line the CLI said when the turn raised
 one ("Rate limited: … Send the request again once the limit resets."), a
 conversation another process changed with what to do next, any other error
-as itself. The turn is ``FAILED`` and nothing else says it. A manager that
-still raises (an app's own) is handled as before
+as itself. The turn is ``FAILED`` and nothing else says it: at the default
+log level no log line is printed over the prompt beside the error. A manager
+that still raises (an app's own) is handled as before
 (``tests/cli/test_turn_retry_safety.py``).
 
 The real managers run on Anthropic's API faked offline
@@ -23,6 +24,7 @@ pytest.importorskip("google.adk")
 pytest.importorskip("deepagents")
 
 from agentic_cli.cli.message_processor import MessageProcessor, TurnStatus  # noqa: E402
+from agentic_cli.logging import log_lines_to  # noqa: E402
 from tests.cli.dialog_fakes import autospec_session, opening_boxes  # noqa: E402
 from tests.event_replay import ReplayController  # noqa: E402
 from tests.workflow.test_failed_turn import (  # noqa: E402, F401
@@ -75,6 +77,28 @@ async def test_a_rate_limit_is_said_once_as_before(hermetic, monkeypatch, backen
     assert result.status is TurnStatus.FAILED
     assert not result.delivered
     assert "429" in result.error
+
+
+@pytest.mark.parametrize("answer", [BAD_REQUEST, RATE_LIMITED], ids=["400", "429"])
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_no_log_line_is_printed_beside_the_error(
+    hermetic, monkeypatch, logging_configured, backend, answer
+):
+    """At the default log level (warning) every log line prints over the
+    prompt (``cli/app.py::_log_lines_above_prompt``): the error box is the
+    report, and nothing logs the failure again there."""
+    serve(monkeypatch, Script(answer), backend)
+    manager = solo(backend)
+    lines: list[str] = []
+    try:
+        with log_lines_to(lines.append):
+            result, ui = await said_on(manager)
+    finally:
+        await manager.cleanup()
+
+    assert len(errors_said(ui)) == 1
+    assert result.status is TurnStatus.FAILED
+    assert lines == []
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

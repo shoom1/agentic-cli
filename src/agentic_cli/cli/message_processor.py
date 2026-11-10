@@ -819,7 +819,7 @@ class MessageProcessor:
                 from agentic_cli.workflow.retry import is_rate_limit_error
 
                 if is_rate_limit_error(e):
-                    logger.warning("turn_rate_limited", partial=state.side_effects_seen)
+                    logger.info("turn_rate_limited", partial=state.side_effects_seen)
                     ui.add_error(_rate_limited(str(e)))
                 elif isinstance(e, ConversationChangedError):
                     ui.add_error(_conversation_changed(str(e)))
@@ -1007,15 +1007,17 @@ class MessageProcessor:
             logger.warning("workflow_error_event", recoverable=True, code=code)
             return
 
+        # The error box is the report: the log records it at info, since a
+        # line at the default level (warning) prints over the prompt beside it.
         if event.metadata.get("rate_limited"):
             ui.add_error(_rate_limited(event.content))
-            logger.warning("turn_rate_limited", partial=state.side_effects_seen)
+            logger.info("turn_rate_limited", partial=state.side_effects_seen)
         else:
             if code == ConversationChangedError.__name__:
                 ui.add_error(_conversation_changed(event.content))
             else:
                 ui.add_error(f"{event.content}{suffix}")
-            logger.error(
+            logger.info(
                 "workflow_error_event",
                 recoverable=False,
                 code=code,
