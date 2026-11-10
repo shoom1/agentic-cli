@@ -3,10 +3,13 @@
 ``BaseCLIApp.pick_session`` asks which conversation to open and
 ``BaseCLIApp.resume_session`` opens it; this module holds what they show:
 
-- ``picker(rows, now, placement=)``: the dialog listing the conversations,
-  newest first, one option each: how long ago, its turns, its title and its
+- ``picker(rows, now, placement=, backends=)``: the dialog listing the
+  conversations, newest first, one option each: how long ago, its turns, its
+  backend (when the rows are not all the running one's), its title and its
   id. The parts that tell rows apart come first, since a terminal narrower
-  than a row clips its end; the id last keeps every option unique;
+  than a row clips its end; the backend and the id keep every option unique.
+  It returns, for each option, the id it stands for as a
+  ``PickedConversation``: a ``str`` that names its backend too;
 - ``resumed_line(info, now)``: "Resumed: <title> (<id>, 12 turns, last active
   2h ago).";
 - ``replay_lines(messages)`` and ``show_replay(session, lines)``: the last
@@ -133,22 +136,45 @@ def show_replay(session: "ThinkingPromptSession", lines: list[tuple[str, str]]) 
             session.add_message(role, text)
 
 
+class PickedConversation(str):
+    """A conversation's id as the picker returns it: a ``str``, whose
+    ``backend`` names the backend that keeps it (None when the row did not
+    say). ``BaseCLIApp.resume_session`` opens it there: an id two backends
+    keep is two rows, and the one picked is the one opened."""
+
+    backend: str | None
+
+    def __new__(cls, session_id: str, backend: str | None = None) -> "PickedConversation":
+        picked = super().__new__(cls, session_id)
+        picked.backend = backend
+        return picked
+
+
 def picker(
-    rows: list["SessionInfo"], now: datetime, *, placement: "Placement | None" = None
+    rows: list["SessionInfo"],
+    now: datetime,
+    *,
+    placement: "Placement | None" = None,
+    backends: bool = False,
 ) -> tuple[Dialog, dict[str, str]]:
     """The dialog that lists ``rows``, and the id each of its options stands for.
 
     Its only field is a choice list, so Enter on an option closes it with
     that option, and Esc with None. ``placement`` is where it is drawn
     (the ``dialog_placement`` setting now: the session's own is the one it
-    started with); None for the session's.
+    started with); None for the session's. With ``backends`` each option
+    names its row's backend (``SessionInfo.backend``), after its turns. Each
+    id is a ``PickedConversation``, naming its row's backend.
     """
     ids: dict[str, str] = {}
+    width = max((len(info.backend or "") for info in rows), default=0)
     for info in rows:
         when, turns = ago(info.updated, now).ljust(8), _turns(info.turns).ljust(9)
         title = title_of(info)
         middle = f" · {title}" if title else ""
-        ids[f"{when} · {turns}{middle} · {info.session_id}"] = info.session_id
+        backend = f" · {(info.backend or '').ljust(width)}" if backends else ""
+        label = f"{when} · {turns}{backend}{middle} · {info.session_id}"
+        ids[label] = PickedConversation(info.session_id, info.backend)
     dialog = Dialog(
         "Resume a conversation",
         fields=[ChoiceField("session", "", options=list(ids))],

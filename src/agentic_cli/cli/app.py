@@ -54,6 +54,7 @@ from agentic_cli.cli.session_resume import (
     resumed_line,
     show_replay,
 )
+from agentic_cli.cli.stored_conversations import StoredConversations
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.waiting_jobs import Here, told_here, waiting_here
 from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
@@ -1090,6 +1091,14 @@ class BaseCLIApp:
         if holder is not None:
             name = value if value is not None else getattr(parts.workflow, "session_id", value)
             raise RuntimeError(f"Conversation '{name}' is open in another process ({holder}).")
+
+    @property
+    def session_backend(self) -> str:
+        """The backend that keeps the conversation the turns run in (``adk``,
+        ``deepagents``, ...): the one the workflow runs, which a conversation
+        never changes (``/new <backend>`` and ``/resume`` of another
+        backend's conversation start that backend)."""
+        return self._place().backend
 
     @property
     def session_start(self) -> SessionStart:
@@ -2167,21 +2176,30 @@ class BaseCLIApp:
     async def pick_session(self) -> str | None:
         """Ask which stored conversation to open: the newest ``PICK_LIMIT`` but this one.
 
-        Not under the turn lock: it waits on a dialog (``resume_session``
-        takes the lock).
+        Every installed backend's (``list_conversations``): once a row is on
+        another backend than the running one, each row names its backend,
+        and an id two backends keep is two rows (the conversation the app is
+        in, its id on its backend, is left out). Not under the turn lock: it
+        waits on a dialog (``resume_session`` takes the lock).
 
         Returns:
             The id picked, or None: Esc, or no other conversation is stored
-            ("No other conversations to resume.").
+            ("No other conversations to resume."). The id is a
+            ``PickedConversation`` (``cli/session_resume.py``): a ``str``
+            whose ``backend`` names the backend that keeps it, which
+            ``resume_session`` opens it on.
 
         Raises:
             RuntimeError: The workflow is not ready, or the session is not
                 running (a dialog needs it); ``/resume`` checks both.
         """
-        workflow = self._workflow_controller.workflow
+        if not self._workflow_controller.is_ready:
+            raise RuntimeError("Workflow not initialized yet")
+        running = self._workflow_controller.backend
+        here = (self._session_id, self.session_backend)
         rows = [
-            info for info in await workflow.list_sessions(limit=PICK_LIMIT + 1)
-            if info.session_id != self._session_id
+            info for info in await self.list_conversations(limit=PICK_LIMIT + 1)
+            if (info.session_id, info.backend) != here
         ][:PICK_LIMIT]
         if not rows:
             note = "" if self._place().locked else _MEMORY_NOTE
@@ -2190,10 +2208,68 @@ class BaseCLIApp:
         # Drawn where the settings say now: /settings may have changed the
         # placement since the session started with its own.
         dialog, ids = picker(
-            rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement
+            rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement,
+            backends=any(info.backend != running for info in rows),
         )
         picked = await self.session.show_dialog(dialog)
         return None if picked is None else ids.get(picked)
+
+    async def list_conversations(self, limit: int | None = None) -> "list[SessionInfo]":
+        """The stored conversations of every installed backend, newest first.
+
+        A conversation belongs to one backend for its whole life, and each
+        keeps its own store: the running workflow lists its own backend's
+        (all of them while it does not run: each installed backend's reader
+        does), and each other installed backend's ``SessionReader``
+        (``workflow/session_readers.py``) its own, read in the run's session
+        store (``cli/stored_conversations.py``). Each row names its backend
+        (``SessionInfo.backend``): an id two backends keep is two rows. A
+        backend whose store cannot be read is left out (logged), and so is
+        one whose extra is not installed.
+
+        Args:
+            limit: Only the newest this many (None: all of them).
+
+        Raises:
+            Exception: What the running workflow's listing raises.
+        """
+        async with self._stored() as stored:
+            return await stored.rows(limit)
+
+    async def delete_conversation(self, session_id: str, backend: str | None = None) -> bool:
+        """Delete the stored conversation ``session_id`` on ``backend``.
+
+        On the running workflow's backend (the default) its
+        ``delete_session`` deletes it; on another, that backend's reader
+        does. Nothing is held here: hold it first (``conversation_held``),
+        so no other process has it open (``/sessions --delete`` does).
+
+        Args:
+            session_id: The conversation.
+            backend: The backend that keeps it: the running one by default.
+
+        Returns:
+            Whether it was stored there.
+
+        Raises:
+            ValueError: ``backend``'s conversations cannot be read (its extra
+                is not installed, or no reader reads them).
+            Exception: What the backend's delete raises.
+        """
+        backend = backend or self._workflow_controller.backend
+        async with self._stored(only=backend) as stored:
+            return await stored.delete(session_id, backend)
+
+    def _stored(self, *, only: str | None = None) -> StoredConversations:
+        """One look at the stored conversations of every installed backend
+        (``only``'s alone, when named), in the run's store: the running
+        workflow answers for its own backend while it is ready."""
+        controller = self._workflow_controller
+        return StoredConversations(
+            self._settings, self._place().store,
+            workflow=controller.workflow if controller.is_ready else None,
+            backend=controller.backend, only=only,
+        )
 
     async def _saving_facts(self, session_id: str) -> None:
         """Propose memories from ``session_id``'s conversation (if enabled) under a
@@ -2482,19 +2558,30 @@ class BaseCLIApp:
         return self._place().key(session_id)
 
     @contextmanager
-    def conversation_held(self, session_id: str) -> Iterator[int | None]:
+    def conversation_held(
+        self, session_id: str, backend: str | None = None
+    ) -> Iterator[int | None]:
         """Hold ``session_id``'s conversation for the block, beside the one
         this process is in, so no other process opens it meanwhile
         (``/sessions --delete``). When the block ends, the status bar's
         job monitor forgets what it knew of jobs' conversations: one may be
         gone, and its jobs told here.
 
+        Args:
+            session_id: The conversation.
+            backend: The backend that keeps it (the same id on another
+                backend is another conversation): the running one by
+                default.
+
         Yields:
             None while it is held (on the memory store nothing is held, nor
             needed); else the process id that has it open (0 when unknown),
             and nothing is held.
         """
-        taken = self._conversation.acquire(session_id, self._place())
+        place = self._place()
+        if backend is not None:
+            place = dataclasses.replace(place, backend=backend)
+        taken = self._conversation.acquire(session_id, place)
         if isinstance(taken, int):
             yield taken
             return

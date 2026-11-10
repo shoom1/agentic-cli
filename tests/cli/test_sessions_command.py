@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -62,6 +63,11 @@ class _SessionlessWorkflow:
 
 
 class _App:
+    """The app the command reads: its running workflow's conversations alone
+    (every backend's: ``test_conversations_across_backends.py``)."""
+
+    session_backend = "adk"
+
     def __init__(self, workflow, session_id: str = "cur") -> None:
         self._wf = workflow
         self.session = _Screen()
@@ -73,8 +79,15 @@ class _App:
             raise RuntimeError("workflow not initialized")
         return self._wf
 
+    async def list_conversations(self, limit=None) -> list[SessionInfo]:
+        rows = await self.workflow.list_sessions(limit=limit)
+        return [replace(row, backend=self.workflow.backend_type) for row in rows]
+
+    async def delete_conversation(self, session_id: str, backend=None) -> bool:
+        return await self.workflow.delete_session(session_id)
+
     @contextmanager
-    def conversation_held(self, session_id: str):
+    def conversation_held(self, session_id: str, backend=None):
         yield None  # no other process has it open (see test_resume_session.py)
 
 
