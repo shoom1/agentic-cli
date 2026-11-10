@@ -11,6 +11,9 @@ from typing import Any
 
 from google.adk.agents import LlmAgent
 
+from agentic_cli.tools.registry import ToolCategory, register_tool
+from agentic_cli.workflow.permissions import EXEMPT
+
 MODEL = "claude-sonnet-4-6"
 
 #: What the agents' own callbacks were given, in order: (callback, agent or tool, size).
@@ -35,3 +38,9 @@ def after_tool(tool, args, tool_context, tool_response):
     """An agent's own after-tool callback: it records the result's size."""
     SEEN.append(("after_tool", tool.name, len(str(tool_response))))
     return None
+
+
+@register_tool(category=ToolCategory.OTHER, capabilities=EXEMPT, description="A long report.")
+def native_app_report() -> str:
+    """A report far over the tool result cap."""
+    return "x" * 50_000

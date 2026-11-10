@@ -250,13 +250,17 @@ class TestCompactCommand:
 
         assert said(app.session, "add_error") == ["Could not summarize: TimeoutError"]
 
-    async def test_a_native_adk_app_says_so_and_opens_no_box(self, project, monkeypatch, tmp_path):
+    async def test_an_app_whose_main_agent_has_no_budget_says_so_and_opens_no_box(
+        self, project, monkeypatch, tmp_path
+    ):
+        # A native ADK YAML app whose root's model does not resolve through
+        # the catalog: it has no context budget, and no summary.
         from tests.workflow.test_adk_context_cache import _native_yaml
 
         serve(monkeypatch, Claude())
         manager = GoogleADKWorkflowManager(
             agent_configs=[], settings=settings(),
-            adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-6"),
+            adk_config_path=_native_yaml(tmp_path, "local-model"),
         )
         await manager.initialize_services()
         app = app_on(manager, manager._settings)

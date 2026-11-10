@@ -41,8 +41,8 @@ class ForeignReasoningPlugin(BasePlugin):
 
     Args:
         providers: Each agent's provider (``ProviderKind`` value), by agent
-            name. An agent not named here (a native ADK YAML app's) is left
-            as ADK sends it.
+            name. An agent not named here (a native ADK YAML app's whose
+            model did not resolve) is left as ADK sends it.
     """
 
     def __init__(self, providers: Mapping[str, str]) -> None:

@@ -9,9 +9,9 @@ on in place of the turns it covers. The current turn is never summarized. The
 summary is reported live while the turn waits on it (``CONTEXT_SUMMARIZING``,
 its usage, ``CONTEXT_TRIMMED``). A sub-agent past its trigger never compacts
 the shared session; ADK's pass after each turn does not run; a model whose
-budget is too small fails initialization. A native ADK YAML app gets none of
-this. ``compact()`` (``/compact``) summarizes the same way now, whatever the
-last prompt's size.
+budget is too small fails initialization. A native ADK YAML app gets the
+same: only the building of its agents differs. ``compact()`` (``/compact``)
+summarizes the same way now, whatever the last prompt's size.
 
 Turns run the real manager on ``FakeAPI`` (Claude, ``context_max_tokens`` at
 16,000 so the trigger is small); usage is scripted per call, since ADK reads
@@ -33,7 +33,6 @@ import pytest
 
 pytest.importorskip("google.adk")
 
-from google.adk import Runner  # noqa: E402
 from google.adk.apps import compaction as adk_compaction  # noqa: E402
 
 from agentic_cli.cli.message_processor import CANCELLED_LINE, MessageProcessor  # noqa: E402
@@ -63,7 +62,13 @@ from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.cli.dialog_fakes import autospec_session, opening_boxes  # noqa: E402
 from tests.event_replay import ReplayController  # noqa: E402
-from tests.workflow.adk.fakes import FakeAPI, anthropic_message, openai_response  # noqa: E402
+from tests.workflow.adk.fakes import (  # noqa: E402
+    FakeAPI,
+    anthropic_message,
+    dead_base_urls,
+    openai_response,
+    route_anthropic,
+)
 from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.workflow.test_adk_context_cache import _native_yaml  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
@@ -506,21 +511,28 @@ class TestTheApp:
         assert summarizer.model.max_tokens == SUMMARY_MAX_TOKENS
         assert isinstance(app.plugins[0], MainAgentPlugin)
 
-    async def test_a_native_adk_app_gets_none_of_it(self, project, monkeypatch, tmp_path):
-        serve(monkeypatch, Claude())
+    async def test_a_native_adk_app_gets_the_same(self, project, monkeypatch, tmp_path):
+        """Only the building of its agents differs: its main agent, the YAML's
+        root, is summarized on the model ADK runs it on."""
+        dead_base_urls(monkeypatch)
         manager = GoogleADKWorkflowManager(
             agent_configs=[], settings=settings(),
             adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-6"),
         )
         try:
             await manager.initialize_services()
-            runner, budgets = manager._runner, manager._budgets
+            runner, budgets = manager._runner, dict(manager._budgets)
+            models = dict(manager.agent_models)
         finally:
             await manager.cleanup()
 
-        assert type(runner) is Runner
-        assert runner.app.events_compaction_config is None
-        assert not any(isinstance(p, MainAgentPlugin) for p in runner.app.plugins)
+        assert type(runner) is NoAfterTurnCompactionRunner
+        config = runner.app.events_compaction_config
+        assert config.token_threshold == budgets["root"].trigger
+        summarizer = config.summarizer
+        assert (summarizer.root, summarizer.budget) == ("root", budgets["root"])
+        assert summarizer.model.ref == models["root"].ref
+        assert isinstance(runner.app.plugins[0], MainAgentPlugin)
 
 
 def team(context: str | None) -> list[AgentConfig]:
@@ -1220,17 +1232,31 @@ class TestCompactNow:
         assert "First summary." not in json.dumps(last)
         assert json.dumps(last).count(SUMMARY_PREFIX) == 1
 
-    async def test_a_native_adk_app_has_none(self, project, monkeypatch, tmp_path):
-        serve(monkeypatch, Claude())
+    async def test_a_native_adk_app_is_summarized_now_too(self, project, monkeypatch, tmp_path):
+        """Its main agent's earlier turns, as an app built from configs has
+        them summarized. Both Anthropic clients are routed: a native app's
+        bare ``claude-*`` model is built by ADK."""
+        dead_base_urls(monkeypatch)
+        answers = three_turns()
+        route_anthropic(monkeypatch, FakeAPI(answers))
+        path = tmp_path / "root_agent.yaml"
+        path.write_text(
+            "agent_class: LlmAgent\nname: solo\nmodel: claude-sonnet-4-6\n"
+            f"instruction: {PROMPTS['solo']}\n",
+            encoding="utf-8",
+        )
         manager = GoogleADKWorkflowManager(
-            agent_configs=[], settings=settings(),
-            adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-6"),
+            agent_configs=[], settings=settings(), adk_config_path=str(path)
         )
         try:
-            supports = manager.supports_compact
-            with pytest.raises(NotImplementedError, match="native ADK"):
-                await manager.compact(manager.session_ref("s", "u"))
+            for text in THREE:
+                await turn(manager, text)
+            result, _ = await compact_now(manager)
+            events = await stored(manager)
         finally:
             await manager.cleanup()
 
-        assert supports is False
+        assert answers.asked == ["solo"] * 3 + ["summary"]
+        (summary,) = summaries_in(events)
+        assert summary.actions.compaction.compacted_content.role == "user"
+        assert result.messages_summarized == 2

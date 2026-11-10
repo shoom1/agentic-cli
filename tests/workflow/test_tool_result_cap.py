@@ -333,13 +333,20 @@ class TestTheApp:
         (cap,) = [p for p in plugins if isinstance(p, ToolResultCapPlugin)]
         assert (cap.max_chars, cap.folder) == (30_000, folder())
 
-    async def test_a_native_adk_app_has_no_cap(self, project, tmp_path):
-        # A plugin's value would skip the app's own after_tool_callbacks, and
-        # a native app is otherwise left as ADK builds it.
+    async def test_a_native_adk_app_has_the_cap_but_for_agents_with_their_own_callbacks(
+        self, project, tmp_path
+    ):
+        # A plugin's value would skip an agent's own after_tool_callbacks: the
+        # cap leaves those agents' results whole (adk/test_native_app.py runs
+        # it), and cuts every other agent's.
+        path = _native_yaml(tmp_path, "claude-sonnet-4-5")
+        with open(path, "a", encoding="utf-8") as yaml:
+            yaml.write("after_tool_callbacks:\n"
+                       "  - name: tests.workflow.adk.native_agents.after_tool\n")
         manager = GoogleADKWorkflowManager(
             agent_configs=[],
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-5"),
-            adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-5"),
+            adk_config_path=path,
         )
         try:
             await manager.initialize_services()
@@ -347,7 +354,8 @@ class TestTheApp:
         finally:
             await manager.cleanup()
 
-        assert not any(isinstance(p, ToolResultCapPlugin) for p in plugins)
+        (cap,) = [p for p in plugins if isinstance(p, ToolResultCapPlugin)]
+        assert cap.skip_agents == {"root"}
 
 
 def plugin(max_chars: int = 20_000) -> ToolResultCapPlugin:

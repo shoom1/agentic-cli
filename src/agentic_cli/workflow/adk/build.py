@@ -30,11 +30,14 @@ pipeline and keeps open across turns until the agent calls ``finish_task``.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.context_cache_config import ContextCacheConfig
+from google.adk.apps.app import EventsCompactionConfig
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.config import AgentGraphError
@@ -44,6 +47,35 @@ logger = Loggers.workflow()
 #: ADK's agent modes (``google.adk.utils._agent_mode.AgentMode``), as values.
 _TASK = "task"
 _SINGLE_TURN = "single_turn"
+
+
+@dataclass(frozen=True)
+class ADKBuild:
+    """What one initialization built an ADK app from: the tree and what the run reads of it.
+
+    ``GoogleADKWorkflowManager._build_app`` makes it from the root agent
+    alone, whoever built the tree, through the manager's hooks
+    (``_plugin_chain`` and ``_init_plugins``, ``_compaction_config``,
+    ``_context_cache_config``, ``_agent_model_refs``), so a subclass's
+    override of any of them applies to every app.
+
+    Attributes:
+        root: The root agent, the main agent.
+        reply_agents: The agents that reply to the user (``reply_agents``).
+        plugins: The app's whole plugin chain, in order.
+        compaction: How the main agent's conversation is summarized; None
+            when its model has no context budget.
+        cache: The app's context cache; None for no caching.
+        models: Each agent's model reference, by name: what its usage and
+            the raw log name.
+    """
+
+    root: LlmAgent
+    reply_agents: frozenset[str]
+    plugins: tuple[Any, ...]
+    compaction: EventsCompactionConfig | None
+    cache: ContextCacheConfig | None
+    models: Mapping[str, str]
 
 
 def walk(agent: Any) -> Iterator[Any]:
