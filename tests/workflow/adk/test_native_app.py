@@ -222,6 +222,61 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
         assert calls == ["registered"]
 
 
+class TestItsAgentsAreLoadedOncePerManager:
+    """ADK gives an agent one parent, so a YAML naming a module-level agent
+    (``code:``, ADK's usual form) cannot be loaded twice in a process. The
+    tree is loaded once per manager and outlives its runner, which closes its
+    toolsets and leaves them reusable: a retry and a model switch build the
+    app on it again."""
+
+    SHARED = """
+        from google.adk.agents import LlmAgent
+
+        shared = LlmAgent(name="shared", model="claude-sonnet-4-6", instruction="You share.")
+    """
+
+    async def test_a_retry_after_a_failed_start_builds_on_the_same_agents(
+        self, project, monkeypatch
+    ):
+        app_module(project, monkeypatch, "shared_agents", self.SHARED)
+        manager = native(root_yaml(project, extra=(
+            "sub_agents:\n  - code: shared_agents.shared\n"
+        )))
+        construct = manager._construct_services
+        attempts: list[int] = []
+
+        async def fails_once() -> None:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("transient: a service did not start")
+            await construct()
+
+        monkeypatch.setattr(manager, "_construct_services", fails_once)
+        with pytest.raises(RuntimeError, match="transient"):
+            await manager.initialize_services()
+        try:
+            await manager.initialize_services()
+            (shared,) = manager._root_agent.sub_agents
+        finally:
+            await manager.cleanup()
+
+        assert shared is sys.modules["shared_agents"].shared
+
+    async def test_a_model_switch_builds_the_app_on_the_same_agents(self, project, monkeypatch):
+        app_module(project, monkeypatch, "switched_agents", self.SHARED)
+        manager = native(root_yaml(project, extra=(
+            "sub_agents:\n  - code: switched_agents.shared\n"
+        )))
+        await manager.initialize_services()
+        try:
+            first, runner = manager._root_agent, manager._runner
+            await manager.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
+            assert manager._root_agent is first
+            assert manager._runner is not runner
+        finally:
+            await manager.cleanup()
+
+
 class TestItsAgentsRunOnTheirOwnModels:
     """Each agent's model is the one ADK resolves for it (its YAML's, else its
     parent's), resolved through the catalog for its context budget, as an

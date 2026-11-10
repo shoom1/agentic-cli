@@ -1392,8 +1392,12 @@ the start of the entry's title.
   tree, whoever built it (`workflow/adk/build.py`). Its YAML is loaded, and
   the code it names imported, when the manager validates its agents, before
   any model, service or store (the settings' API keys already exported, so
-  a module that reads one as it is imported finds it). What changes for an
-  app moving from 0.6:
+  a module that reads one as it is imported finds it), and once per
+  manager: a retry after a failed start and a model switch build on the
+  same agents, where 0.6 loaded the YAML again and ADK refused a
+  module-level `code:` agent ("already has a parent agent"). An edit of the
+  YAML takes effect in a new manager. What changes for an app moving from
+  0.6:
   - The root must be an `LlmAgent`. A `SequentialAgent`, `LoopAgent`,
     `ParallelAgent`, a workflow or another class at the root raises
     `AgentGraphError` naming it: make an `LlmAgent` the root, with the other

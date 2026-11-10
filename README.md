@@ -1363,7 +1363,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   - **Loaded at validation.** The YAML is loaded, and the code it names
     imported, when the manager validates its agents, before any model,
     service or store; the settings' API keys are in the environment by
-    then. A root that is not an `LlmAgent` (a workflow or
+    then. It is loaded once per manager: a retry and a model switch build
+    on the same agents (ADK gives an agent one parent, so a module-level
+    `code:` agent cannot be loaded twice), and an edit of the YAML takes
+    effect in a new manager. A root that is not an `LlmAgent` (a workflow or
     another agent class) is refused there, and so is a task-mode agent
     anywhere in the tree: `AgentGraphError`, naming the agent ("agent 'x'
     is in task mode, which is not supported; use single_turn or chat").
