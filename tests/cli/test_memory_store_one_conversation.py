@@ -688,6 +688,30 @@ class TestDroppedOnceTheWorkflowIsBack:
 
         assert deletes.asked == [old]
 
+    async def test_the_conversation_open_now_is_never_dropped(self, project):
+        """The deprecated ``session_id`` setter can go back to a conversation
+        ``/new`` left: it is not dropped under the app, and the next ``/new``
+        drops it once."""
+        import warnings
+
+        app, workflow, _, old = await left_while_down()
+        workflow.is_initialized = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            app.session_id = old
+
+        await app.process_input("Back in the old one.")
+
+        assert app.session_id == old and old in workflow.stored
+        assert not any(c.startswith("delete_session") for c in workflow.calls)
+
+        await app.process_input("/new")
+
+        assert old not in workflow.stored and app._conversation.to_drop == []
+        assert [c for c in workflow.calls if c.startswith("delete_session")] == [
+            f"delete_session {old}"
+        ]
+
     async def test_a_persistent_store_drops_nothing(self, project):
         """sqlite keeps the conversation left: nothing is dropped later either."""
         app, workflow, jobs, old = await left_while_down("sqlite", job_auto_resume=True)

@@ -365,7 +365,9 @@ class ConversationCore:
         released since), and one whose delete raised stays for the next
         point. Each is tried once a call, so a delete that keeps failing
         costs one try at each point (a turn, ``/compact``, a delivery of
-        finished jobs, ``/new``), never a loop.
+        finished jobs, ``/new``), never a loop. The conversation open now is
+        never dropped (the deprecated ``session_id`` setter can go back to
+        one): it waits until the app leaves it.
 
         Args:
             parts: The app's parts: the controller and ``drop``.
@@ -379,6 +381,8 @@ class ConversationCore:
             return False
         workflow = controller.workflow
         for session_id in list(self.to_drop):
+            if session_id == self.session_id:
+                continue  # the app is in it again
             if await parts.drop(workflow, session_id):
                 self.to_drop.remove(session_id)
         return True

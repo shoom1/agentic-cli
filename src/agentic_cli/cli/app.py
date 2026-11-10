@@ -1140,7 +1140,8 @@ class BaseCLIApp:
                 # Kept until the store has it no more: a delete that raises,
                 # even after a Ctrl+C stopped the wait, leaves it to the next
                 # point (ConversationCore.drop_left).
-                self._conversation.to_drop.append(old)
+                if old not in self._conversation.to_drop:
+                    self._conversation.to_drop.append(old)
                 if dropping is not None and await self._drop(dropping, old):
                     self._conversation.to_drop.remove(old)
         except asyncio.CancelledError:
