@@ -514,6 +514,37 @@ def results_sent(body: dict) -> list[str]:
     return [content if isinstance(content, str) else json.dumps(content) for content in contents]
 
 
+class TestTheBuild:
+    """``_build_app`` builds from the root agent the manager holds, and every
+    part of it reads the same reply set: the one computed for the build."""
+
+    async def test_its_parts_share_one_reply_set(self, project, monkeypatch):
+        from agentic_cli.workflow.adk import build as adk_build
+        from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
+
+        helper_yaml(project)
+        manager = native(root_yaml(project, extra="sub_agents:\n  - config_path: helper.yaml\n"))
+        await manager.initialize_services()
+        try:
+            asked: list[str] = []  # the agents whose reply set was asked for
+            real = adk_build.reply_agents
+
+            def counted(agent):
+                asked.append(agent.name)
+                return real(agent)
+
+            monkeypatch.setattr(adk_build, "reply_agents", counted)
+            build = manager._build_app()
+        finally:
+            await manager.cleanup()
+
+        assert build.root.name == "root"
+        assert build.reply_agents == {"root", "helper"}
+        assert asked.count("root") == 1  # once for the build, not again for the gate
+        (gate,) = [p for p in build.plugins if isinstance(p, PermissionPlugin)]
+        assert gate._writers == build.reply_agents
+
+
 class TestItRunsAsAnyApp:
     """The run is the one an app built from configs gets: its whole plugin
     chain (pinned by ``test_plugin_chain.py``), the main agent summarized,

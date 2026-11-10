@@ -189,6 +189,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     #: What the live app was built from (``_build_app``), None while there is
     #: none. A class default, as above.
     _build: "ADKBuild | None" = None
+    #: The reply set of the build ``_build_app`` is making, or made last, for
+    #: the parts it builds through hooks (the gate, ``_init_plugins``).
+    _reply_agents: frozenset[str] | None = None
 
     def __init__(
         self,
@@ -297,6 +300,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         runner, self._runner = self._runner, None
         self._root_agent = None
         self._build = None
+        self._reply_agents = None
         # A native app's agents stay (_native_root): ADK gives an agent one
         # parent, so a YAML naming a module-level agent cannot be loaded
         # again, and the runner's close leaves their toolsets reusable.
@@ -529,8 +533,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``raw_llm_logging``, the raw LLM log of each call as the model
         answers it, in that order; the logging plugin is kept, since the
         manager drains its buffer. The gate writes the outside-content mark
-        into the session state at the model calls of the agents that reply
-        (``build.reply_agents``). Task progress is the event processor's
+        into the session state at the model calls of the agents that reply:
+        the build's (``_build_app``), else the root's tree's. Task progress is the event processor's
         (``ADKEventProcessor``, from each event's state delta). The whole
         order is pinned by ``tests/workflow/adk/test_plugin_chain.py``.
 
@@ -541,6 +545,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
         root = self._root_agent
+        replies = self._reply_agents
+        if replies is None:
+            replies = reply_agents(root) if root else frozenset()
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
         # exception into an error result the model can read. It records its
         # answer to an unknown tool, whose after-tool callbacks ADK skips.
@@ -549,7 +556,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 self._open_calls,
                 marks=self._outside_marks,
                 root=root.name if root else None,
-                reply_agents=reply_agents(root) if root else (),
+                reply_agents=replies,
             ),
             ToolErrorPlugin(self._open_calls),
         ]
@@ -700,7 +707,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         else:
             self._root_agent = self._create_agents()
 
-        build = self._build = self._build_app(self._root_agent)
+        build = self._build = self._build_app()
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
         app = App(
             name=self.app_name,
@@ -731,18 +738,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             summarized=build.compaction is not None,
         )
 
-    def _build_app(self, root: LlmAgent) -> ADKBuild:
-        """What the app is built from: ``root``'s tree and what the run reads of it.
+    def _build_app(self) -> ADKBuild:
+        """What the app is built from: the root agent's tree and what the run reads of it.
 
-        From the tree alone, whoever built it, through the hooks a subclass
-        may override (``_plugin_chain``, ``_compaction_config``,
-        ``_context_cache_config``, ``_agent_model_refs``).
+        From the tree alone (``_root_agent``, set first), whoever built it,
+        through the hooks a subclass may override (``_plugin_chain``,
+        ``_compaction_config``, ``_context_cache_config``,
+        ``_agent_model_refs``). The reply set is computed once, and every
+        part reads it: the gate through ``_reply_agents``.
         """
-        from agentic_cli.workflow.adk.build import ADKBuild, reply_agents
+        from agentic_cli.workflow.adk import build as adk_build
 
-        replies = reply_agents(root)
+        root = self._root_agent
+        replies = self._reply_agents = adk_build.reply_agents(root)
         cache = self._context_cache_config()
-        return ADKBuild(
+        return adk_build.ADKBuild(
             root=root,
             reply_agents=replies,
             plugins=tuple(self._plugin_chain(replies, cache)),
