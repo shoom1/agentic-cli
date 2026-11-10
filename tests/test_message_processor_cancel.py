@@ -335,7 +335,9 @@ async def test_a_cancelled_resume_turn_says_so_once_records_the_failure_and_re_r
     jm = JobManager()
     record = SimpleNamespace(job_id="j1", name="build", state=SimpleNamespace(value="succeeded"))
 
-    turn = asyncio.create_task(app._deliver_resume(jm, record))
+    turn = asyncio.create_task(
+        app._conversation.run_job_resume(jm, record, app._turn_parts())
+    )
     await _cancel_once_streaming(workflow, turn)
 
     assert _cancelled_lines(ui) == [call("system", CANCELLED_LINE)]

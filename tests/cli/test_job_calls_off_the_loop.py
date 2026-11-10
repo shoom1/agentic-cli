@@ -254,7 +254,9 @@ class TestAStopWhileTheClaimIsTaken:
             app._usage_tracker = None
             app._session_id = "s"
 
-            delivery = asyncio.create_task(app._deliver_resume(jobs, record))
+            delivery = asyncio.create_task(
+                app._conversation.run_job_resume(jobs, record, app._turn_parts())
+            )
             assert await asyncio.to_thread(taking.wait, 5)
             delivery.cancel()
             with pytest.raises(asyncio.CancelledError):
