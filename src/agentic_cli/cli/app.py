@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import logging
 import os
 import re
 import shlex
@@ -20,10 +19,8 @@ import shutil
 import sys
 import threading
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, NoReturn, Self
 
@@ -34,19 +31,15 @@ from prompt_toolkit.history import InMemoryHistory
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import (
-    CANCELLED_LINE,
-    MessageProcessor,
-    TurnStatus,
-    _says_so_when_stopped,
-)
+from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
     NOT_KEPT,
     ConversationCore,
     Hold,
     Place,
-    Switch,
     SwitchParts,
+    TurnParts,
+    telling_on_its_own,
 )
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
@@ -61,20 +54,19 @@ from agentic_cli.cli.session_resume import (
     resumed_line,
     show_replay,
 )
+from agentic_cli.cli.settings_ui import (
+    _LANGGRAPH_DEPRECATION,
+    SettingsUI,
+    _first_line,
+    _show_new_context,
+    _warn_if_langgraph,
+)
 from agentic_cli.cli.stored_conversations import StoredConversations
 from agentic_cli.cli.usage_tracker import UsageTracker
-from agentic_cli.cli.waiting_jobs import Here, opens_anywhere, told_here, waiting_here
-from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
-from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
-from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
-from agentic_cli.settings_persistence import (
-    HAND_EDITED_KEYS,
-    NEW_CONVERSATION_KEYS,
-    PROJECT_SETTABLE_KEYS,
-    REBUILD_KEYS,
-    RESTART_KEYS,
-    USER_PREFERENCE_KEYS,
-)
+from agentic_cli.cli.workflow_controller import WorkflowController
+from agentic_cli.config import BaseSettings
+from agentic_cli.logging import Loggers, configure_logging, log_lines_to
+from agentic_cli.workflow.adk.log_filters import install_log_filters
 from agentic_cli.workflow.factory import check_backend, orchestrator_of
 from agentic_cli.workflow.session_readers import reader_backends
 from agentic_cli.workflow.settings import OrchestratorType
@@ -86,7 +78,6 @@ if TYPE_CHECKING:
     from thinking_prompt import Field
 
     from agentic_cli.cli.job_monitor import JobMonitor
-    from agentic_cli.models import CatalogView, ModelRef, Provider, ResolvedModel, RoleMap
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
@@ -95,173 +86,6 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
-
-# Synthetic dialog keys → the settings field their setter actually writes.
-# "model" is not a field; update_setting() routes it via set_model() to
-# default_model. Every "model_role:<role>" key (a role's model picker) writes
-# model_roles, through set_model_role() (see _ui_key_target_field). A
-# synthetic key without an entry here is treated as writing a field of the
-# same name.
-_UI_KEY_TARGET_FIELDS = {"model": "default_model"}
-
-
-def _ui_key_target_field(key: str) -> str:
-    """The settings field a ``/settings`` dialog key writes."""
-    if key.startswith(MODEL_ROLE_KEY_PREFIX):
-        return "model_roles"
-    return _UI_KEY_TARGET_FIELDS.get(key, key)
-
-
-def _is_model_picker(key: str) -> bool:
-    return key == "model" or key.startswith(MODEL_ROLE_KEY_PREFIX)
-
-
-def _setting_label(key: str, settings: BaseSettings) -> str:
-    """How messages name a dialog key, as the dialog labels it: by the field's
-    title (``UI Theme``, ``Max Retry Attempts``), ``Fast Model`` for a role's
-    model picker, and otherwise by the key title-cased (``Model``)."""
-    if key.startswith(MODEL_ROLE_KEY_PREFIX):
-        return _role_picker_label(key)
-    field = type(settings).model_fields.get(key)
-    if field is not None and field.title:
-        return field.title
-    return key.replace("_", " ").title()
-
-
-def _role_picker_label(key: str) -> str:
-    """A role's model picker, ``model_role:fast``, is ``Fast Model``."""
-    return f"{key.removeprefix(MODEL_ROLE_KEY_PREFIX).title()} Model"
-
-
-@dataclass(frozen=True)
-class _ModelChoices:
-    """What the ``/settings`` model pickers offer and show, from one catalog.
-
-    Attributes:
-        options: The runnable references every model picker offers.
-        current: Each role's model now, by role (``default`` included); None
-            when nothing can fill it.
-        thinking: What the thinking effort means for the default model, as
-            ``high → provider:model: <label>``; None when it cannot be said.
-    """
-
-    options: list[str]
-    current: Mapping[str, str | None]
-    thinking: str | None
-
-
-# === ADK notices ===
-
-# ADK 2 announces each experimental feature it uses with a UserWarning, in one
-# of two forms: a feature flag ("[EXPERIMENTAL] feature
-# FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."), or a class or function
-# marked experimental ("[EXPERIMENTAL] GeminiContextCacheManager: This feature
-# is experimental and may change ...", from a Gemini agent's first turn while
-# prompt caching is on).
-_ADK_EXPERIMENTAL_NOTICE = re.compile(
-    r"\[EXPERIMENTAL\] (?:feature (?P<feature>\S+) is enabled|(?P<name>\w+): )"
-)
-
-# ADK 2's runner warns, through stdlib logging, that an app whose agents can
-# transfer to each other has no context_cache_config: a native ADK YAML app
-# with sub-agents (agents built from configs delegate and never transfer). The
-# ADK manager sets one while prompt caching is on and a model caches, so the
-# advice comes only when the user turned caching off or no model caches: it
-# has nothing left to tell them.
-_ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
-_ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
-
-
-class _AdkUncachedTransferFilter(logging.Filter):
-    """Turns ADK's context-cache advice into a debug log entry."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if _ADK_UNCACHED_TRANSFER not in message:
-            return True
-        logger.debug("adk_uncached_agent_transfer", message=message)
-        return False
-
-
-# While prompt caching is on, ADK's Gemini context cache warns through stdlib
-# logging when it cannot create a cache or delete an old one (an expired cache
-# is already gone on Google's side). The turn goes on uncached, so the warning
-# has nothing for the user mid-conversation.
-_ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
-_ADK_CACHE_FAILURES = (
-    ("Failed to create cache", "adk_cache_create_failed"),
-    ("Failed to cleanup cache", "adk_cache_cleanup_failed"),
-)
-
-
-class _AdkCacheFailureFilter(logging.Filter):
-    """Turns ADK's context-cache failure warnings into debug log entries."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        for prefix, event in _ADK_CACHE_FAILURES:
-            if message.startswith(prefix):
-                logger.debug(event, message=message)
-                return False
-        return True
-
-
-# ADK logs a failure's traceback through stdlib logging where the user is
-# told otherwise. A summary that failed: ADK goes on with the whole history,
-# and the summarizer itself warns the user once a turn (it never lets its own
-# failure reach ADK, so this is a backstop). A model call that failed: the
-# user reads its error as an ERROR event or as the turn's error. ADK logs one
-# twice for the main agent, from the node and from the runner ("Root node %s
-# failed.", matched exactly: "Root node %s was cancelled …" passes), and a
-# failed overflow retry once more, from the plugin manager. ADK also warns on
-# every request of a session holding a call without a result, which it drops:
-# the next turn answers such a call (workflow/adk/interrupted_calls_plugin.py),
-# so the warning has nothing for the user either. Each entry: the logger, what
-# a record's message starts with or (``msg=``) its exact format, and the debug
-# event it becomes.
-_ADK_FAILURES = (
-    ("google_adk.google.adk.apps.compaction", {"prefix": "Event compaction failed"},
-     "adk_compaction_failed"),
-    ("google_adk.google.adk.workflow._node_runner", {"prefix": "Node execution failed"},
-     "adk_node_failed"),
-    ("google_adk.google.adk.runners", {"msg": "Root node %s failed."}, "adk_root_node_failed"),
-    ("google_adk.google.adk.plugins.plugin_manager",
-     {"prefix": "Error in plugin 'context_overflow'"}, "adk_overflow_plugin_failed"),
-    ("google_adk.google.adk.flows.llm_flows.tools._rearranger",
-     {"prefix": "Dropping function calls with no matching function response"},
-     "adk_dropped_open_calls"),
-)
-
-
-class _AdkFailureFilter(logging.Filter):
-    """Turns ADK's failure tracebacks on one logger into a debug log entry.
-
-    A record is matched by the start of its message (``prefix``) or by its
-    format string itself (``msg``).
-    """
-
-    def __init__(self, event: str, *, prefix: str | None = None, msg: str | None = None) -> None:
-        super().__init__()
-        self._event = event
-        self._prefix = prefix
-        self._msg = msg
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if self._msg is not None:
-            matched = record.msg == self._msg
-        else:
-            matched = self._prefix is not None and message.startswith(self._prefix)
-        if not matched:
-            return True
-        error = record.exc_info[1] if record.exc_info else None
-        logger.debug(
-            self._event,
-            message=message,
-            error_type=type(error).__name__ if error is not None else None,
-            error=str(error) if error is not None else None,
-        )
-        return False
 
 
 def _stderr_is_terminal() -> bool:
@@ -286,7 +110,7 @@ def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
     handed to the loop. A line logged while one is being shown goes to
     stderr, so showing never recurses. With stderr redirected (``2>file``),
     the lines stay on it. Python's warnings go the same way
-    (``_install_adk_notice_hook``).
+    (``workflow/adk/log_filters.py::install_log_filters``).
     """
     if not _stderr_is_terminal():
         yield
@@ -324,66 +148,6 @@ def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
         yield
 
 
-def _install_adk_notice_hook() -> None:
-    """Log ADK's notices instead of printing them.
-
-    While the prompt runs, the log lines ``configure_logging`` sets up print
-    above it (``_log_lines_above_prompt``), and so do Python's warnings: this
-    hook has Python's own hook write them to the same stream (another hook,
-    such as logging's ``captureWarnings``, gets them as given). The hook logs ADK's
-    experimental-feature notices at debug and passes every other warning to
-    the hook it replaced; a filter on ADK's runner logger does the same for
-    its context-cache advice, one on its context-cache logger for a cache it
-    could not create or delete, one each on its compaction, node, runner
-    and plugin-manager loggers for the traceback of a summary, a model call or
-    an overflow retry that failed, and one on its rearranger for a call
-    without a result it drops. Only
-    the CLI installs them, so library users and the test suite keep Python's
-    own handling. Installing twice changes nothing.
-    """
-    for name, kind in (
-        (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),
-        (_ADK_CACHE_LOGGER, _AdkCacheFailureFilter),
-    ):
-        adk_logger = logging.getLogger(name)
-        if not any(isinstance(f, kind) for f in adk_logger.filters):
-            adk_logger.addFilter(kind())
-    for name, match, event in _ADK_FAILURES:
-        adk_logger = logging.getLogger(name)
-        if not any(isinstance(f, _AdkFailureFilter) for f in adk_logger.filters):
-            adk_logger.addFilter(_AdkFailureFilter(event, **match))
-
-    previous = warnings.showwarning
-    if getattr(previous, "_logs_adk_notices", False):
-        return
-
-    def showwarning(message, category, filename, lineno, file=None, line=None):
-        notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
-        if notice and issubclass(category, UserWarning):
-            feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
-            logger.debug("adk_experimental_feature", feature=feature)
-            return
-        if file is None and previous is warnings._showwarning_orig:
-            file = LOG_STREAM
-        previous(message, category, filename, lineno, file, line)
-
-    showwarning._logs_adk_notices = True
-    warnings.showwarning = showwarning
-
-
-# === Deprecated orchestrators ===
-
-# What the CLI tells a user of the LangGraph backend, deprecated in 0.7.0: once
-# at startup, and again on a /settings switch to it. The manager's own
-# DeprecationWarning is for library users; Python's default filters keep it off
-# the terminal, so this is what a CLI user reads.
-_LANGGRAPH_DEPRECATION = (
-    "The LangGraph backend is deprecated and will be removed in 0.8.0. Set "
-    "orchestrator to deepagents (pip install 'agentic-cli[deepagents]'); "
-    "sessions saved by LangGraph do not carry over."
-)
-
-
 #: What setting ``BaseCLIApp.session_id`` warns, deprecated in 0.7.0: a setter
 #: cannot run the switch, which awaits the workflow.
 _SESSION_ID_SETTER_DEPRECATED = (
@@ -392,31 +156,6 @@ _SESSION_ID_SETTER_DEPRECATED = (
     "its task list and usage counters over, but the workflow does not load it until "
     "the next turn names it, and the memories of the conversation left are not proposed."
 )
-
-#: How ``/settings`` reports a change of a key read only as the app starts
-#: (``settings_persistence.RESTART_KEYS``).
-_AT_NEXT_START = "(takes effect at the next start)"
-
-#: How ``/settings`` reports a change of the backend of new conversations
-#: (``settings_persistence.NEW_CONVERSATION_KEYS``) that the open one keeps.
-_AT_NEXT_NEW = "(applies to the next /new)"
-
-#: The keys besides the rebuild keys whose change waits for a start in
-#: progress, as a rebuild does: whether an orchestrator change starts a new
-#: conversation, or moves the run's, needs that start's outcome. The session
-#: store is fixed for the run as its first start begins
-#: (``WorkflowController.store``), and ``log_level`` and ``log_format`` are
-#: read by the app's constructor only: a change of them does not wait.
-_READ_BY_THE_START = frozenset({"orchestrator"})
-
-#: What ``_move_here`` returns when it finds, under the turn lock, that the
-#: move no longer applies, decided as for a running workflow: something of
-#: the conversation is stored by now, or the next start no longer builds
-#: afresh (it stays; the change applies to the next ``/new``) ...
-_STAYS = "stays"
-#: ... or the workflow came up meanwhile, nothing of it stored (a new
-#: conversation on the new backend, ``start_new_session``).
-_STARTS_ANEW = "starts anew"
 
 #: Where ``/new``'s line says the conversation left is on the memory store.
 _NOT_KEPT_LEFT = "not kept (session_store is memory)"
@@ -472,64 +211,6 @@ def _same_program(found: str, script: str) -> bool:
     return key(found) == key(script) or key(os.path.realpath(found)) == key(
         os.path.realpath(script)
     )
-
-
-def _runs_langgraph(settings: BaseSettings) -> bool:
-    """Whether ``settings`` choose the LangGraph backend.
-
-    Read as the factory reads it: an ``OrchestratorType``, or its plain value
-    on a settings class that declares ``orchestrator: str``.
-    """
-    return getattr(settings, "orchestrator", None) == OrchestratorType.LANGGRAPH
-
-
-def _warn_if_langgraph(settings: BaseSettings, session: ThinkingPromptSession) -> None:
-    """Warn, through the session, when ``settings`` choose the LangGraph backend."""
-    if _runs_langgraph(settings):
-        session.add_warning(_LANGGRAPH_DEPRECATION)
-
-
-# === A finished job's delivery ===
-
-#: Set while the CLI tells finished jobs on its own (a turn's end, a
-#: conversation opened), not because the user asked (``/jobs resume``).
-_TELLING_ON_ITS_OWN: ContextVar[bool] = ContextVar("telling_on_its_own", default=False)
-
-
-async def _claim_delivery(jm: Any, job_id: str) -> bool:
-    """Claim the job's delivery (``jm.begin_resume``) on a worker thread.
-
-    The claim takes the jobs directory's lock, which another CLI of the app
-    may hold, so it runs off the event loop. A Ctrl+C while it is taken stops
-    the wait, not the claim, which its thread may still take: a claim taken
-    then is handed back (``JobManager.release_resume``), never left
-    ``RESUMING``, and the job waits for a later delivery, nothing having
-    reached the agent.
-
-    Returns:
-        True if this process now delivers the job.
-    """
-    claim = asyncio.ensure_future(asyncio.to_thread(jm.begin_resume, job_id))
-    try:
-        return await asyncio.shield(claim)
-    except asyncio.CancelledError:
-        claim.add_done_callback(lambda done: _release_abandoned_claim(jm, job_id, done))
-        raise
-
-
-def _release_abandoned_claim(jm: Any, job_id: str, claim: "asyncio.Future[bool]") -> None:
-    """Hand back, on a worker thread, a claim taken for a delivery Ctrl+C stopped."""
-    if claim.cancelled() or claim.exception() is not None or not claim.result():
-        return
-    logger.info("job_resume_claim_released", job_id=job_id)
-
-    def release() -> None:
-        try:
-            jm.release_resume(job_id)
-        except Exception:  # noqa: BLE001 - startup recovery fails it once we are gone
-            logger.warning("job_resume_release_failed", job_id=job_id, exc_info=True)
-
-    asyncio.get_running_loop().run_in_executor(None, release)
 
 
 # === Slash Command Completer ===
@@ -640,11 +321,6 @@ class BaseCLIApp:
     that one reads is set before ``super().__init__()``.
     """
 
-    #: (job, conversation) pairs whose "could not be resumed now" was said:
-    #: the deliveries the CLI makes on its own say it once per conversation.
-    #: An immutable class default, replaced on each write, for the same reason.
-    _said_not_told: frozenset[tuple[str, str]] = frozenset()
-
     #: The status bar's job monitor while ``run()`` runs (None before, and
     #: for an app built with ``__new__``).
     _job_monitor: "JobMonitor | None" = None
@@ -710,7 +386,6 @@ class BaseCLIApp:
         self._app_info = app_info
         self._settings = settings
         configure_logging(self._settings)
-        _install_adk_notice_hook()
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
@@ -722,13 +397,6 @@ class BaseCLIApp:
         )
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
-
-        # Serializes what writes to the conversation: a turn, a job's resume,
-        # /compact, /new and /resume (not /settings, nor the /resume picker,
-        # which waits on a dialog). thinking-prompt runs one input handler at
-        # a time, so it orders them against the startup resume
-        # (_open_on_startup, a task of its own) and an app's own tasks.
-        self._turn_lock = asyncio.Lock()
         self.should_exit = False
 
         # === Commands: registered once the session exists (below) ===
@@ -841,150 +509,20 @@ class BaseCLIApp:
         return ["model", "model_role:fast", "model_role:strong", "thinking_effort"]
 
     def _build_ui_items(self) -> list[Field]:
-        """Build the settings dialog's fields using introspection.
+        """Build the settings dialog's fields (``cli/settings_ui.py``:
+        ``SettingsUI.fields``).
 
-        Uses get_ui_setting_keys() to determine which fields to show,
-        then converts each field to an appropriate form field using
-        the field's type annotation and metadata. The model pickers come
-        from the model catalog (``_model_choices``), and the thinking
-        effort's description says what it means for the default model.
-        thinking_prompt's fields are frozen, so each is built complete.
+        ``get_ui_setting_keys()`` says which fields to show; each is
+        converted to a form field from its settings field's type annotation
+        and metadata. The model pickers come from the model catalog, and the
+        thinking effort's description says what it means for the default
+        model. ``/settings`` builds its dialog from this method, so an
+        override applies.
 
         Returns:
             List of thinking_prompt form fields sorted by ui_order
         """
-        from agentic_cli.cli.settings_introspection import field_to_ui_item, get_ui_order
-
-        keys = self.get_ui_setting_keys()
-        roles = [
-            key.removeprefix(MODEL_ROLE_KEY_PREFIX)
-            for key in keys
-            if key.startswith(MODEL_ROLE_KEY_PREFIX)
-        ]
-        choices: _ModelChoices | None = None  # one catalog for every picker
-        items: list[tuple[int, Field]] = []
-        shown = (PROJECT_SETTABLE_KEYS | USER_PREFERENCE_KEYS) - HAND_EDITED_KEYS
-
-        for key in keys:
-            # Project-scope guard: the dialog may only expose settings the
-            # project file can persist (PROJECT_SETTABLE_KEYS), and the user's
-            # preferences (USER_PREFERENCE_KEYS), which are meant to apply in
-            # every project. Any other user-scoped key would save to the user
-            # ~/.{app}/settings.json and leak the change across all projects
-            # of the app. Nor does it expose a hand-edited key
-            # (HAND_EDITED_KEYS: models, and model_providers, which holds the
-            # addresses a key is sent to): no save writes one, so an edit
-            # would be gone at the next start.
-            target = _ui_key_target_field(key)
-            if target not in shown:
-                if target in HAND_EDITED_KEYS:
-                    logger.warning("hand_edited_setting_excluded_from_ui", key=key)
-                else:
-                    logger.warning("user_scoped_setting_excluded_from_ui", key=key)
-                continue
-
-            if _is_model_picker(key):
-                choices = choices or self._model_choices(roles)
-                if not choices.options:
-                    continue  # no provider to pick from
-                # The default model first, then the roles in the app's order.
-                items.append((10 if key == "model" else 11, _model_picker(key, choices)))
-                continue
-
-            # Handle regular fields from settings
-            # Access model_fields from class to avoid Pydantic deprecation warning
-            settings_cls = type(self._settings)
-            if key in settings_cls.model_fields:
-                field = settings_cls.model_fields[key]
-                current = getattr(self._settings, key, None)
-                description = None  # the field's own
-                if key == "thinking_effort":
-                    choices = choices or self._model_choices(roles)
-                    description = choices.thinking or None
-                item = field_to_ui_item(key, field, current, description=description)
-                order = get_ui_order(field)
-                items.append((order, item))
-
-        # Sort by order and return items only
-        return [item for _, item in sorted(items, key=lambda x: x[0])]
-
-    def _model_choices(self, roles: "Sequence[str]" = ()) -> _ModelChoices:
-        """The model pickers' options, each role's model, and the thinking description.
-
-        The options are the list (``ModelCatalog.offered``), with each role's
-        model (``model_services.role_models``, as ``/models`` has it). Once
-        the workflow is ready, from its catalog (listings
-        included) and its default model; before that, from the catalog it
-        would load, unloaded (the entries and the shipped table), and the
-        default model the settings name (or compute). A role shows the model
-        it maps, else the one it resolves to (an app's own role runs on the
-        default model).
-
-        Args:
-            roles: The roles other than ``default`` whose model to show.
-        """
-        from agentic_cli.models import BUILTIN_ROLES
-        from agentic_cli.workflow import model_services
-
-        try:
-            role_map = model_services.role_map_from_settings(self._settings)
-        except ValueError:
-            return _ModelChoices(options=[], current={}, thinking=None)
-        providers = model_services.providers_from_settings(self._settings)
-        controller = self._workflow_controller
-        workflow = controller.workflow if controller.is_ready else None
-        if workflow is not None and workflow.catalog is not None:
-            catalog, default = workflow.catalog, workflow.model
-        else:
-            # Not loaded: the entries, what the settings and agents name, and
-            # the shipped table.
-            catalog = model_services.build_catalog(
-                self._settings, providers, agent_configs=self.agent_configs
-            )
-            default = _resolved_role(role_map, "default", catalog, providers)
-
-        current: dict[str, str | None] = {"default": default}
-        for role in roles:
-            mapped = role_map.spec_for(role)
-            if mapped is not None:
-                current[role] = str(mapped)
-            elif role in BUILTIN_ROLES:
-                current[role] = _resolved_role(role_map, role, catalog, providers)
-            else:
-                current[role] = default
-        # Every role's model, whichever pickers the app shows: /models offers
-        # the same list.
-        role_models = model_services.role_models(self._settings, catalog, providers, default)
-        return _ModelChoices(
-            options=catalog.offered(extra=list(role_models)),
-            current=current,
-            thinking=self._thinking_meaning(default, catalog, providers),
-        )
-
-    def _thinking_meaning(
-        self, model: str | None, catalog: "CatalogView", providers: "Mapping[str, Provider]"
-    ) -> str | None:
-        """``high → anthropic:claude-sonnet-5-5: adaptive, effort high``: the
-        thinking effort, resolved on ``model`` as the workflow resolves it."""
-        from agentic_cli.models import ModelResolutionError, RoleMap, resolve_model
-
-        if model is None:
-            return None
-        effort = self._settings.thinking_effort
-        try:
-            resolved = resolve_model(
-                agent=None,
-                spec=model,
-                generation=None,
-                thinking_effort=effort,
-                roles=RoleMap(default_model=None, model_roles={}),  # a reference needs none
-                catalog=catalog,
-                providers=providers,
-            )
-        except ModelResolutionError:
-            return None
-        meaning = resolved.thinking.label if resolved.thinking else "ignored (no thinking knob)"
-        return f"{effort} → {resolved.ref}: {meaning}"
+        return SettingsUI(self).fields()
 
     async def save_settings(self, keys: "Iterable[str]") -> "SettingsSaveResult":
         """Save the settings ``keys`` name, split by trust.
@@ -997,7 +535,7 @@ class BaseCLIApp:
         (~/.{app_name}/settings.json), where the loader trusts them — the
         project file may only carry allowlisted keys since P0-1. Secrets
         (API keys) are never saved. The files are read and written on a
-        worker thread, off the event loop.
+        worker thread, off the event loop (``SettingsUI.save``).
 
         Returns:
             SettingsSaveResult with the written path(s)
@@ -1006,10 +544,7 @@ class BaseCLIApp:
             TypeError: ``keys`` is None (an override that passes its own
                 ``keys=None`` default on has no keys to write).
         """
-        from agentic_cli.settings_persistence import SettingsPersistence
-
-        persistence = SettingsPersistence(self._settings.app_name)
-        return await asyncio.to_thread(persistence.save, self._settings, keys=keys)
+        return await SettingsUI(self).save(keys)
 
     @property
     def workflow(self) -> "BaseWorkflowManager":
@@ -1053,6 +588,12 @@ class BaseCLIApp:
         except KeyError:
             core = self.__dict__["_conversation_core"] = ConversationCore()
             return core
+
+    @property
+    def _turn_lock(self) -> asyncio.Lock:
+        """The conversation's turn lock (``_conversation.turn_lock``): a turn,
+        a job's notice, ``/compact``, ``/new`` and ``/resume`` take it."""
+        return self._conversation.turn_lock
 
     @property
     def _session_id(self) -> str | None:
@@ -1203,18 +744,24 @@ class BaseCLIApp:
         self.session.exit()
 
     async def apply_settings(self, changes: dict[str, Any]) -> bool:
-        """Apply changed settings and reinitialize workflow if needed.
+        """Apply changed settings and reinitialize workflow if needed
+        (``cli/settings_ui.py``: ``SettingsUI.apply``). ``/settings`` applies
+        a Save through this method, so an override applies.
 
         All or nothing: if any value is invalid, or the workflow cannot be
         reinitialized with the new values, every field is restored and the
         workflow is brought back on the model it was running, so nothing
-        unusable stays in memory to be saved by ``/settings``. A restart
-        interrupted by Ctrl+C is undone the same way, without a word, and the
-        cancel is re-raised. A new conversation on another backend
-        interrupted once that backend runs (while the old one is released,
-        which goes on) is too late to undo: the change stands and is reported
-        as usual before the cancel is re-raised (``/settings`` saves it), so
-        the settings name the backend that runs.
+        unusable stays in memory to be saved by ``/settings``. Ctrl+C stops
+        it wherever it waits (for a start in progress, the turn lock, the
+        rebuild, the restart on the old model after a failed one, a new
+        conversation's backend) as it stops a turn: "Operation cancelled..."
+        is said once, the Save is undone the same way (one stopped in that
+        restart leaves the workflow down on the old model, for the next
+        request to start), and the cancel is re-raised. A new conversation on another
+        backend interrupted once that backend runs (while the old one is
+        released, which goes on) is too late to undo: the change stands and
+        is reported as usual before the cancel is re-raised (``/settings``
+        saves it), so the settings name the backend that runs.
 
         Each change is set on the settings object (``update_setting``; the
         model pickers and the thinking effort through their own setters) and
@@ -1246,15 +793,15 @@ class BaseCLIApp:
         resolved its models from the settings before the change), and so
         does a change of ``orchestrator``, which needs that start's outcome
         (one of ``session_store`` does not wait: the run keeps the store its
-        first start took); Ctrl+C stops the wait, re-raised, and changes
-        nothing. When that start fails, the change is applied as for any
-        workflow that is not running: nothing is rebuilt, and the next start
-        uses it. A change of the orchestrator made while the workflow is
-        down, its next start building afresh, has that start run a
-        conversation with nothing stored on the new backend (``_move_here``,
-        decided again under the turn lock: one stored by then stays, and one
-        whose workflow came up meanwhile is left for a new conversation, as
-        on a running workflow). Held from its first write, it has no lock to
+        first start took); Ctrl+C stops the wait, and changes nothing. When
+        that start fails, the change is applied as for any workflow that is
+        not running: nothing is rebuilt, and the next start uses it. A change
+        of the orchestrator made while the workflow is down, its next start
+        building afresh, has that start run a conversation with nothing
+        stored on the new backend (``SettingsUI._move_here``, decided again
+        under the turn lock: one stored by then stays, and one whose workflow
+        came up meanwhile is left for a new conversation, as on a running
+        workflow). Held from its first write, it has no lock to
         move; one a line typed while the workflow was down holds is refused,
         every field restored, when another process has it open there. A
         change of ``session_store`` moves nothing and no lock: it takes
@@ -1270,252 +817,7 @@ class BaseCLIApp:
         Returns:
             True if the changes were applied, False if they were rolled back.
         """
-        if not changes:
-            self.session.add_message("system", "No changes made.")
-            return True
-
-        # When each change takes effect (settings_persistence): a key the
-        # workflow reads as it builds its agents and models rebuilds it; the
-        # backend of new conversations starts one on it, or waits for /new;
-        # one read only as the app starts is said to take effect at the next
-        # start; the rest apply at once, read where they are used.
-        needs_reinit = any(_ui_key_target_field(key) in REBUILD_KEYS for key in changes)
-        at_next_start = {key for key in changes if _ui_key_target_field(key) in RESTART_KEYS}
-
-        read_by_the_start = needs_reinit or any(
-            _ui_key_target_field(key) in _READ_BY_THE_START for key in changes
-        )
-
-        controller = self._workflow_controller
-        if read_by_the_start and controller.state is WorkflowState.INITIALIZING:
-            # The start in progress read the settings as they are (its models
-            # first): wait for it, as a turn does, so the rebuild below runs
-            # on the new values, and whether an orchestrator change starts a
-            # new conversation or moves the open one follows its outcome.
-            # Ctrl+C stops the wait before anything changed. A start that
-            # fails leaves the workflow down, and the change is applied for
-            # the next start, as for any failed workflow.
-            async with _says_so_when_stopped(self.session):
-                await controller.ensure_initialized(self.session)
-
-        new_model = changes.get("model")
-        snapshot = _snapshot_settings(self._settings)
-        # The backend the conversation runs on, before the change.
-        backend_before = controller.backend if "orchestrator" in changes else None
-        was_langgraph = _runs_langgraph(self._settings)
-        theme_before = self._settings.ui_theme
-
-        for key, value in changes.items():
-            try:
-                self._settings.update_setting(key, value)
-            except ValueError as e:
-                _restore_settings(self._settings, snapshot)
-                label = _setting_label(key, self._settings)
-                self.session.add_error(f"Failed to set {label}: {e}")
-                return False
-
-        # The backend new conversations run on, and whether it is another than
-        # the open conversation's. A conversation never changes backend once
-        # anything of it is stored (ConversationCore.fresh), read under the
-        # turn lock: after a startup resume or an app's task that holds it.
-        # With nothing stored, a running workflow leaves it for a new
-        # conversation there at once (no rebuild first: the new manager is
-        # built on the new values), and a workflow that is down, whose next
-        # start builds afresh, has that start run it there (below); else the
-        # change waits for /new, and the conversation stays where it is.
-        target = orchestrator_of(self._settings).value
-        if "orchestrator" in changes:
-            try:  # no backend that cannot run is taken, for now or the next /new
-                check_backend(target)
-            except ImportError as error:
-                _restore_settings(self._settings, snapshot)
-                label = _setting_label("orchestrator", self._settings)
-                self.session.add_error(f"Failed to set {label}: {_first_line(error)}")
-                return False
-        moves_backend = "orchestrator" in changes and target != backend_before
-        movable = False
-        if moves_backend:
-            try:
-                async with self._turn_lock:
-                    movable = self._conversation.fresh
-            except asyncio.CancelledError:  # waiting for it: nothing changes
-                _restore_settings(self._settings, snapshot)
-                raise
-        starts_anew = movable and controller.is_ready
-        moves_here = movable and not controller.is_ready and controller.next_start_builds
-        waits_for_new = {
-            key for key in changes if _ui_key_target_field(key) in NEW_CONVERSATION_KEYS
-        }
-        at_next_new = waits_for_new if moves_backend and not (starts_anew or moves_here) else set()
-
-        # The workflow is down, its next start builds afresh, and nothing of
-        # the conversation is stored: that start runs it on the new backend,
-        # where it is held (from its first write, when nothing holds it yet).
-        # Decided again under the turn lock, which the move waits for: what
-        # it finds then is decided as for a running workflow.
-        if moves_here:
-            place = dataclasses.replace(self._place(), backend=target)
-            try:
-                moved = await self._move_here(place)
-            except asyncio.CancelledError:  # it stays where it was
-                _restore_settings(self._settings, snapshot)
-                raise
-            except Exception as error:
-                _restore_settings(self._settings, snapshot)
-                self.session.add_error(
-                    f"Could not set Orchestrator: {str(error) or type(error).__name__}. "
-                    "Settings were not changed."
-                )
-                return False
-            if moved == _STAYS:  # a turn wrote to it meanwhile, say: it stays
-                at_next_new = waits_for_new
-            elif moved == _STARTS_ANEW:  # the workflow came up meanwhile
-                starts_anew = True
-            elif not moved.made:  # open there in another process: nothing changes
-                _restore_settings(self._settings, snapshot)
-                self.session.add_error(
-                    f"Could not set Orchestrator: conversation '{self._session_id}' is open "
-                    f"in another process ({moved.holder}) on {place.backend} ({place.store}). "
-                    "Settings were not changed."
-                )
-                return False
-
-        # Reinitialize workflow if needed
-        switched: list[str] = []
-        interrupted: asyncio.CancelledError | None = None
-        if needs_reinit and controller.is_ready and not starts_anew:
-            previous = controller.workflow
-            previous_model = previous.model
-            previous_models = dict(getattr(previous, "agent_models", {}))
-            try:
-                await controller.reinitialize(model=new_model)
-            except asyncio.CancelledError:
-                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
-                # stays, as on a failure, and nothing is said: the session's
-                # interruption is not a cancel of the dialog.
-                _restore_settings(self._settings, snapshot)
-                if not controller.is_ready:
-                    try:
-                        await controller.reinitialize(model=previous_model)
-                    except Exception as restore_error:
-                        # Down, on the old model: the next request retries,
-                        # and reports a failure then.
-                        logger.warning("settings_restore_failed", error=str(restore_error))
-                raise
-            except Exception as e:
-                _restore_settings(self._settings, snapshot)
-                self.session.add_error(
-                    f"Failed to reinitialize workflow: {e}. Settings were not changed."
-                )
-                # A failed reinitialize leaves the manager down, holding the
-                # new model. Bring it back on the model it had.
-                if not controller.is_ready:
-                    try:
-                        await controller.reinitialize(model=previous_model)
-                    except Exception as restore_error:
-                        self.session.add_error(
-                            f"Could not restart the workflow on {previous_model}: "
-                            f"{restore_error}"
-                        )
-                return False
-            switched = _provider_switches(previous_models, getattr(previous, "agent_models", {}))
-            _show_new_context(controller, self.session)
-
-        if starts_anew:
-            try:
-                # The app's own /new (an override applies), on the settings'
-                # orchestrator, which names the new backend now.
-                await self.start_new_session()
-            except asyncio.CancelledError as cancel:
-                if controller.backend != target:
-                    # Stopped before the new backend ran: nothing of the Save
-                    # stays ("Operation cancelled...", as /new says it).
-                    _restore_settings(self._settings, snapshot)
-                    raise
-                # It runs, and its conversation is open: too late to undo. The
-                # change is reported (and saved), then the cancel goes on.
-                interrupted = cancel
-            except Exception as error:
-                _restore_settings(self._settings, snapshot)
-                reason = _first_line(error)
-                self.session.add_error(
-                    f"Could not start a new conversation on {target}: {reason}. "
-                    "Settings were not changed."
-                )
-                return False
-
-        # Report changes
-        for key, value in changes.items():
-            line = f"{_setting_label(key, self._settings)}: {value}"
-            if key in at_next_start:
-                line += f" {_AT_NEXT_START}"
-            elif key in at_next_new:
-                line += f" {_AT_NEXT_NEW}"
-            self.session.add_success(line)
-        for notice in switched:
-            self.session.add_message("system", notice)
-        if not was_langgraph and not starts_anew:  # a switch to it (the new
-            _warn_if_langgraph(self._settings, self.session)  # conversation said it)
-        if self._settings.ui_theme != theme_before:
-            # Repaint: text printed before would keep the old theme's colors.
-            # The transcript is printed again, the lines above included.
-            theme = self.get_theme(self._settings.ui_theme)
-            self.session.set_theme(theme, repaint=True)
-        if interrupted is not None:
-            raise interrupted
-        return True
-
-    async def _move_here(self, place: Place) -> Switch | str:
-        """Have the next start run the conversation on ``place``'s backend.
-
-        Decided again under the turn lock, which it waits for (an app's task
-        may hold it, and run a turn or start the workflow meanwhile): it
-        moves only while the workflow is down, its next start builds a
-        manager afresh, and nothing of the conversation is stored
-        (``ConversationCore.fresh``): one with anything stored never changes
-        backend. Else it returns what it found, decided as for a running
-        workflow: ``_STAYS`` (something of it is stored, or the next start
-        revives a manager kept on its backend: the change waits for
-        ``/new``) or ``_STARTS_ANEW`` (the workflow came up, nothing of it
-        stored: the caller starts a new conversation there, as on a running
-        workflow; this one stays where it ran).
-
-        One this run made is held from its first write, so mostly there is
-        no hold to move; when one holds it (a line typed while the workflow
-        was down), its lock is taken there. The controller is told the
-        backend its next start builds (``switch_backend``), then the switch
-        to the same id there is made at once (no workflow runs: no await),
-        letting go of where it was held. A cancel while it waits (for the
-        turn lock, or for the controller) leaves it where it was, on the
-        backend it had.
-
-        Returns:
-            How the switch ended: made, or refused (another process has it
-            open there, and nothing changed); else ``_STAYS`` or
-            ``_STARTS_ANEW`` (nothing changed).
-        """
-        core, controller = self._conversation, self._workflow_controller
-        async with self._turn_lock:
-            if not core.fresh:
-                return _STAYS
-            if controller.is_ready:
-                return _STARTS_ANEW
-            if not controller.next_start_builds:
-                return _STAYS
-            if core.deferred:  # nothing holds it yet: none to move
-                hold: Hold | int = Hold(self._session_id, place, None)
-            else:
-                hold = core.acquire(self._session_id, place)
-            if isinstance(hold, int):
-                return Switch(made=False, holder=hold)
-            try:
-                await controller.switch_backend(place.backend)
-            except BaseException:
-                core.abandon(hold)
-                raise
-            return await core.switch(
-                self._session_id, self._switch_parts(), place=place, propose=False, hold=hold
-            )
+        return await SettingsUI(self).apply(changes)
 
     def _register_builtin_commands(self) -> None:
         """Register built-in commands."""
@@ -1605,60 +907,36 @@ class BaseCLIApp:
             self.session.add_message("system", "Type /help to see available commands")
 
     async def _handle_message(self, message: str) -> None:
-        """Route message through agentic workflow.
-
-        Delegates to MessageProcessor for event stream handling.
+        """Run the user's ``message`` as a turn of the conversation
+        (``ConversationCore.run_turn``: one at a time, under the turn lock),
+        then, at the turn boundary, tell the finished jobs that wait for it
+        (``job_auto_resume``) through the app's ``resume_finished_jobs``.
 
         Args:
             message: User message to process
         """
-        # Delegate to message processor (one turn at a time). Echoed as its
-        # turn starts: a line typed while the conversation --continue/--resume
-        # asked for opens shows under its replay; one Ctrl+C stops while it
-        # waits is shown and said cancelled (it never ran), not dropped unseen.
-        try:
-            await self._turn_lock.acquire()
-        except asyncio.CancelledError:
-            self.session.add_message("user", message)
-            self.session.add_message("system", CANCELLED_LINE)
-            raise
-        try:
-            self.session.add_message("user", message)
-            if not self._held_to_write():
-                return
-            self._turned = True  # the conversation now holds this message
-            reached = False  # the turn reached a ready workflow, which stores it
-            try:
-                result = await self._message_processor.process(
-                    message=message,
-                    workflow_controller=self._workflow_controller,
-                    ui=self.session,
-                    settings=self._settings,
-                    usage_tracker=self._usage_tracker,
-                    session_id=self._session_id,
-                )
-                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
-            except BaseException:
-                reached = self._workflow_controller.is_ready  # it may have begun
-                raise
-            finally:
-                if reached:
-                    self._conversation.written = True
-        finally:
-            self._turn_lock.release()
-
+        if not await self._conversation.run_turn(message, self._turn_parts()):
+            return  # open in another process: nothing ran
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).
         if getattr(self._settings, "job_auto_resume", False):
             await self._resume_on_its_own()
 
+    def _turn_parts(self) -> TurnParts:
+        """What a write to the conversation runs on besides it, as the app has it now."""
+        return TurnParts(
+            controller=self._workflow_controller,
+            processor=self._message_processor,
+            ui=self.session,
+            settings=self._settings,
+            tracker=self._usage_tracker,
+            kept_elsewhere=self._kept_elsewhere,
+        )
+
     async def _resume_on_its_own(self) -> None:
-        """``resume_finished_jobs``, as the CLI runs it unasked (``_TELLING_ON_ITS_OWN``)."""
-        token = _TELLING_ON_ITS_OWN.set(True)
-        try:
+        """``resume_finished_jobs``, as the CLI runs it unasked (``telling_on_its_own``)."""
+        with telling_on_its_own():
             await self.resume_finished_jobs()
-        finally:
-            _TELLING_ON_ITS_OWN.reset(token)
 
     async def resume_finished_jobs(self) -> int:
         """Resume the agent for each finished, resume-flagged background job.
@@ -1669,20 +947,14 @@ class BaseCLIApp:
         status bar's ``↻N`` and the line an opened conversation says count
         them: another conversation's job waits until that conversation is
         opened (``resume_session``, or at startup), instead of answering in
-        this one's transcript. Each resume is a
-        serialized turn (via the turn lock) so it never overlaps a user turn
-        or another resume. Used at turn boundaries (auto, gated), when a
-        conversation is opened (gated) and by ``/jobs resume`` (explicit,
-        ungated).
+        this one's transcript. Each resume is a serialized turn (via the turn
+        lock) so it never overlaps a user turn or another resume. Used at
+        turn boundaries (auto, gated), when a conversation is opened (gated)
+        and by ``/jobs resume`` (explicit, ungated).
 
-        Delivery follows the job's resume lifecycle: the job is *claimed*
-        (pending → resuming) once the turn lock is held, the workflow found
-        ready and the conversation looked up, and before the turn runs, so a
-        crash cannot silently re-deliver it, and only recorded
-        delivered once the turn actually completed — a failed or cancelled
-        resume is recorded as such instead of being dropped. The check above
-        is made again under the lock (``_deliver_resume``): the conversation
-        may have changed while the delivery waited for it.
+        A job is claimed only once its result can reach the agent, and its
+        delivery recorded as it ended: delivered, failed, or cancelled
+        (``ConversationCore.deliver_finished_jobs``, which runs it).
 
         Returns:
             The number of jobs picked up: a resume turn run for it, or, for
@@ -1691,41 +963,7 @@ class BaseCLIApp:
             delivered is recorded on the job and reported by ``/jobs``; a
             failed delivery is surfaced to the user by the turn itself.
         """
-        if not self._workflow_controller.is_ready:
-            return 0
-        jm = getattr(self._workflow_controller.workflow, "job_manager", None)
-        if jm is None:
-            return 0
-
-        attempted = 0
-        # Ctrl+C stops these waits with no box open: they say so themselves.
-        async with _says_so_when_stopped(self.session):
-            records = await asyncio.to_thread(jm.awaiting_resume)
-        for record in records:
-            if not await self._told_here(record):
-                continue  # told when its conversation is opened
-            if await self._deliver_resume(jm, record) is not None:
-                attempted += 1
-        return attempted
-
-    def _here(self) -> Here:
-        """The current conversation, as ``cli/waiting_jobs.py`` names it: (user, session)."""
-        return getattr(self._settings, "default_user", None), self._session_id
-
-    async def _told_here(self, record: Any) -> bool:
-        """Whether ``record``, a job waiting for delivery, is told in this conversation.
-
-        A Ctrl+C during the conversation's lookup says the request stopped.
-        """
-        workflow = self._workflow_controller.workflow
-        async with _says_so_when_stopped(self.session):
-            return await told_here(record, self._here(), self._opens_anywhere(workflow))
-
-    def _opens_anywhere(self, workflow: Any) -> Any:
-        """Whether a job's conversation can be opened, on any installed
-        backend (``waiting_jobs.opens_anywhere``): the running ``workflow``'s
-        ``can_resume``, then ``_kept_elsewhere``."""
-        return opens_anywhere(getattr(workflow, "can_resume", None), self._kept_elsewhere)
+        return await self._conversation.deliver_finished_jobs(self._turn_parts())
 
     async def _kept_elsewhere(self, record: Any) -> bool:
         """Whether another installed backend than the running one keeps
@@ -1747,131 +985,14 @@ class BaseCLIApp:
             logger.debug("job_conversation_lookup_failed", session_id=session_id, exc_info=True)
             return True
 
-    async def _deliver_resume(self, jm, record) -> bool | None:
-        """Claim one job and run its resume turn, and close out its transition.
-
-        Under the turn lock the job is looked at again: another conversation
-        may have become current while this waited for it (an app's own task
-        that called ``resume_session`` or ``start_new_session`` took the lock
-        first). A job that now waits for its conversation is not claimed, nor
-        told here, where ``ctx`` and the task list are another conversation's:
-        it stays pending until its conversation is opened. The claim is durable, so an interrupted
-        delivery is recoverable and two coordinators cannot both deliver the
-        same result.
-
-        The job is claimed only once its result can reach the agent:
-        ``process_resume`` calls ``claim`` after it found the workflow ready
-        and looked the conversation up, before it says anything. A delivery
-        stopped before then (the workflow not started, Ctrl+C or a failure
-        during the lookup) claims nothing, and the job stays pending for a
-        later one. A failure is said: each time the user asks (``/jobs
-        resume``), and once per job and conversation when the CLI tells
-        jobs on its own (``_TELLING_ON_ITS_OWN``: a turn's end, a
-        conversation opened), not at every turn.
-
-        Every exit path closes a claim, so no record can be left ``RESUMING``
-        in this process: a normal outcome records delivered/failed, an
-        exception records failed with the reason, and a cancellation records
-        failed before re-raising (cancellation still propagates): the turn
-        may have written the job's notice to the conversation already.
-
-        The job manager is called on a worker thread (``_claim_delivery``,
-        ``complete_resume``): it takes the jobs directory's lock, which
-        another CLI of the app may hold. Each call is awaited before the next
-        step, and one a second Ctrl+C stops waiting for still finishes.
-
-        Args:
-            jm: The JobManager.
-            record: The job record.
-
-        Returns:
-            True if the result was delivered to the agent; False if it was
-            not (claimed and not delivered, or a failure before the claim,
-            said); None if it was not claimed and nothing was said (it
-            waits for its conversation, the workflow was not ready, or
-            another coordinator has it).
-        """
-        claimed = False
-
-        async def claim() -> bool:
-            nonlocal claimed
-            claimed = await _claim_delivery(jm, record.job_id)
-            if claimed and getattr(record, "session_id", None) == self._session_id:
-                self._turned = True  # the resume adds to this conversation
-                # Defensive: a job of this conversation was submitted by a
-                # turn, which stored it already (fresh was False before).
-                self._conversation.written = True
-            return claimed
-
-        try:
-            async with self._turn_lock:
-                if not await self._told_here(record):
-                    return None
-                if not self._held_to_write():  # its notice is written here
-                    return None
-                result = await self._message_processor.process_resume(
-                    record=record,
-                    workflow_controller=self._workflow_controller,
-                    ui=self.session,
-                    settings=self._settings,
-                    usage_tracker=self._usage_tracker,
-                    claim=claim,
-                )
-        except asyncio.CancelledError:
-            if claimed:
-                logger.info("job_resume_cancelled", job_id=record.job_id)
-                await asyncio.to_thread(
-                    jm.complete_resume, record.job_id, delivered=False,
-                    error="resume cancelled",
-                )
-            raise
-        except Exception as exc:  # noqa: BLE001 - the claim must always close
-            if not claimed:
-                # Before the claim (the conversation's lookup, say): nothing
-                # reached the agent, and a later delivery tells it.
-                logger.warning(
-                    "job_resume_unclaimed_failure", job_id=record.job_id, error=str(exc)
-                )
-                said = (record.job_id, self._session_id)
-                if not (_TELLING_ON_ITS_OWN.get() and said in self._said_not_told):
-                    self.session.add_error(
-                        f"Background job '{record.name}' could not be resumed now: {exc}"
-                    )
-                    self._said_not_told = self._said_not_told | {said}
-                return False
-            await asyncio.to_thread(
-                jm.complete_resume, record.job_id, delivered=False, error=str(exc)
-            )
-            logger.warning(
-                "job_resume_raised", job_id=record.job_id, error=str(exc)
-            )
-            self.session.add_error(
-                f"Background job '{record.name}' could not be resumed: {exc}"
-            )
-            return False
-
-        if not claimed:
-            return None  # stopped before its result could reach the agent
-        await asyncio.to_thread(
-            jm.complete_resume, record.job_id, delivered=result.delivered,
-            error=result.error,
-        )
-        if not result.delivered:
-            logger.info(
-                "job_resume_not_delivered",
-                job_id=record.job_id,
-                status=result.status.value,
-                error=result.error,
-            )
-        return result.delivered
-
     async def compact(self, focus: str | None = None) -> "CompactResult | None":
         """Summarize the conversation now (``/compact [focus]``), as a turn runs.
 
         The public twin of ``start_new_session()``: under the turn lock, the
         workflow's ``compact`` runs with the turn's events box, status line,
         token counts and Ctrl+C (``MessageProcessor.process_compact``), and
-        what it did, or why nothing was, is said as ``/compact`` says it.
+        what it did, or why nothing was, is said as ``/compact`` says it
+        (``ConversationCore.compact``).
 
         Args:
             focus: What the summary should keep above all, if anything.
@@ -1879,17 +1000,7 @@ class BaseCLIApp:
         Returns:
             What the summary did; None when nothing was summarized.
         """
-        async with self._turn_lock:
-            if not self._held_to_write():
-                return None
-            return await self._message_processor.process_compact(
-                focus,
-                workflow_controller=self._workflow_controller,
-                ui=self.session,
-                settings=self._settings,
-                usage_tracker=self._usage_tracker,
-                session_id=self._session_id,
-            )
+        return await self._conversation.compact(focus, self._turn_parts())
 
     async def start_new_session(self, backend: str | None = None) -> str:
         """Start a new conversation in this process (``/new``), and return its id.
@@ -2112,18 +1223,9 @@ class BaseCLIApp:
         """Say how many finished jobs wait for this conversation, and how to tell them.
 
         Counted as the status bar's ``↻N`` and ``/jobs resume`` count them
-        (``cli/waiting_jobs.py``). The job manager is asked on a worker
-        thread: it takes the jobs directory's lock, which another CLI of the
-        app may hold.
+        (``cli/waiting_jobs.py``, through ``ConversationCore.waiting_jobs``).
         """
-        workflow = self._workflow_controller.workflow
-        jm = getattr(workflow, "job_manager", None)
-        if jm is None:
-            return
-        waiting = await waiting_here(
-            await asyncio.to_thread(jm.awaiting_resume), self._here(),
-            self._opens_anywhere(workflow),
-        )
+        waiting = await self._conversation.waiting_jobs(self._turn_parts())
         if len(waiting) == 1:
             self.session.add_message(
                 "system", "A finished job waits for this conversation: /jobs resume tells it now."
@@ -2372,41 +1474,6 @@ class BaseCLIApp:
                 f"'{session_id}' is also a conversation on {' and '.join(names)}: "
                 f"/resume lists {'it' if len(names) == 1 else 'them'}.",
             )
-
-    def _held_to_write(self) -> bool:
-        """Hold the conversation before it is written, when its id was made by
-        this run (``ConversationCore.hold_to_write``); the caller holds the
-        turn lock. False, said, when another process has it open (a collision
-        of random ids): the write must not happen.
-
-        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
-        on a postgres store) does not stop the write: the conversation runs
-        unheld, as an id given to the app does whose startup hold failed,
-        and the run says so once.
-        """
-        core = self._conversation
-        try:
-            holder = core.hold_to_write()
-        except OSError as error:
-            logger.debug(
-                "conversation_hold_failed", session_id=core.session_id, exc_info=True
-            )
-            core.deferred = False  # written unheld: not tried again
-            if not getattr(self, "_said_unheld", False):
-                self._said_unheld = True
-                reason = str(error) or type(error).__name__
-                self.session.add_warning(
-                    f"Could not hold conversation '{core.session_id}' for this "
-                    f"process: {reason}. Its turns run unheld, so another process "
-                    "could open it too."
-                )
-            return True
-        if holder is None:
-            return True
-        self.session.add_error(
-            f"Conversation '{self._session_id}' is open in another process ({holder})."
-        )
-        return False
 
     def _switch_parts(self, *, drawn: bool = True) -> SwitchParts:
         """What a switch acts on besides the conversation, as the app has it now.
@@ -2937,10 +2004,10 @@ class BaseCLIApp:
         Recorded when the workflow starts (``run()``), for a new conversation
         on another backend, and when ``/settings`` changes the orchestrator
         while the workflow is down and nothing of the conversation is stored
-        (``_move_here``); never read from the settings in between. The store
-        is the run's for its whole life (a change of ``session_store`` takes
-        effect at the next app start). An app built with ``__new__`` reads
-        its settings on first use.
+        (``SettingsUI._move_here``); never read from the settings in
+        between. The store is the run's for its whole life (a change of
+        ``session_store`` takes effect at the next app start). An app built
+        with ``__new__`` reads its settings on first use.
         """
         core = self._conversation
         if core.place is None:
@@ -3064,8 +2131,14 @@ class BaseCLIApp:
         )
 
     async def run(self) -> None:
-        """Run the main application loop."""
+        """Run the main application loop.
+
+        It installs the filters that log what ADK would print over the
+        prompt (``workflow/adk/log_filters.py``) first: an app that is built
+        but never run, as a library user's, keeps Python's own handling.
+        """
         logger.info("repl_starting")
+        install_log_filters()
 
         job_monitor = self._new_job_monitor()
         self._job_monitor = job_monitor  # told when a conversation is deleted
@@ -3131,125 +2204,3 @@ class BaseCLIApp:
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")
-
-
-def _first_line(error: BaseException) -> str:
-    """What a line says of ``error``: its first line (a backend's missing extra
-    adds the import's own error after it), or its type when it has no words."""
-    return (str(error) or type(error).__name__).split("\n")[0]
-
-
-def _model_picker(key: str, choices: _ModelChoices) -> Field:
-    """The dialog field of one model picker: ``model`` or ``model_role:<role>``."""
-    from pydantic.fields import FieldInfo
-
-    from agentic_cli.cli.settings_introspection import field_to_ui_item
-
-    if key == "model":
-        role, title = "default", "Default Model"
-        description = "Agents without a model of their own run on it"
-    else:
-        role = key.removeprefix(MODEL_ROLE_KEY_PREFIX)
-        title = _role_picker_label(key)
-        description = f"Agents whose model is {role!r} run on it"
-    field = FieldInfo(default=None, title=title, description=description)
-    return field_to_ui_item(
-        key=key,
-        field=field,
-        current_value=choices.current.get(role),
-        dynamic_options=choices.options,
-        max_width=_MODEL_PICKER_MAX_WIDTH,
-    )
-
-
-# The widest a model picker's dropdown grows: a reference and its padding. A
-# dropdown's default width cuts a reference to its first 14 characters
-# ("google:gemini-"), so the models could not be told apart. SettingsCommand's
-# dialog leaves room for it beside the longest label.
-_MODEL_PICKER_MAX_WIDTH = 48
-
-
-def _resolved_role(
-    roles: "RoleMap", role: str, catalog: "CatalogView", providers: "Mapping[str, Provider]"
-) -> str | None:
-    """The reference ``role`` resolves to, or None when nothing can fill it."""
-    from agentic_cli.models import ModelResolutionError
-
-    try:
-        return str(roles.resolve(role, catalog=catalog, providers=providers))
-    except ModelResolutionError:
-        return None
-
-
-def _show_new_context(controller: WorkflowController, session: Any) -> None:
-    """Show ``ctx`` against the rebuilt agents' trigger now, not after the next call.
-
-    A reinitialize may move the main agent's trigger (a model of another
-    window, ``context_summarize_at``, ``context_max_tokens``), and the last
-    prompt may already be past the new one; a switch of conversation starts
-    one whose trigger the workflow knows. The usage tracker takes the
-    trigger and the window flag from ``workflow.context_budget()``: none when
-    the manager manages no context (``KeyError``), has no such method, or
-    is not ready (it failed to start; the status bar then says so). The
-    status bar is then drawn again.
-
-    Args:
-        controller: The app's workflow controller, after the reinitialize.
-        session: The UI session whose status bar is drawn.
-    """
-    tracker = controller.usage_tracker
-    if tracker is not None:
-        budget = None
-        # A workflow that is not ready (it failed to start) has no budget,
-        # and the controller hands out none: the status bar says why.
-        if controller.is_ready:
-            context_budget = getattr(controller.workflow, "context_budget", None)
-            try:
-                budget = context_budget() if context_budget is not None else None
-            except (KeyError, RuntimeError):
-                budget = None
-        tracker.context_trigger = budget.trigger if budget is not None else None
-        tracker.window_known = budget.window_known if budget is not None else None
-    controller.update_status_bar(session)
-
-
-def _provider_switches(
-    before: Mapping[str, ResolvedModel], after: Mapping[str, ResolvedModel]
-) -> list[str]:
-    """What each switch to another provider's model costs, one line per switch.
-
-    The conversation is kept, but no model is sent another provider's
-    reasoning (both backends leave it out), and the new provider has none of
-    the old one's prompt cache. A switch within one provider loses neither.
-    """
-    agents: dict[tuple[ModelRef, ModelRef], list[str]] = {}
-    for name, model in after.items():
-        old = before.get(name)
-        if old is not None and old.record.kind is not model.record.kind:
-            agents.setdefault((old.ref, model.ref), []).append(name)
-    return [
-        f"{', '.join(names)}: {old} → {new}. The conversation is kept, but earlier "
-        f"reasoning from {old.provider} is not sent to the new model, and the prompt "
-        "cache starts over."
-        for (old, new), names in agents.items()
-    ]
-
-
-def _snapshot_settings(settings: BaseSettings) -> tuple[dict[str, Any], set[str]]:
-    """Capture every field value (and which were set) so a change can be undone."""
-    return dict(settings.__dict__), set(settings.__pydantic_fields_set__)
-
-
-def _restore_settings(
-    settings: BaseSettings, snapshot: tuple[dict[str, Any], set[str]]
-) -> None:
-    """Put back the values captured by :func:`_snapshot_settings`.
-
-    Written directly, like the dedicated setters do: they were valid when
-    captured, and revalidating could itself fail.
-    """
-    values, fields_set = snapshot
-    for key, value in values.items():
-        if settings.__dict__.get(key) is not value:
-            object.__setattr__(settings, key, value)
-    object.__setattr__(settings, "__pydantic_fields_set__", fields_set)

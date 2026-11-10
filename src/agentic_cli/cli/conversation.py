@@ -16,18 +16,44 @@ and the same id in another place, while the workflow is down and its next
 start builds on another backend or store.
 So the conversation the turns write to is always the one held and loaded,
 whichever way it changed and wherever a Ctrl+C lands.
+
+What writes to the conversation runs here too, under the core's turn lock,
+which every switch takes as well: a turn (``run_turn``), ``/compact``
+(``compact``), and a finished job's notice (``run_job_resume``), for each
+job that waits for the conversation (``deliver_finished_jobs``, by
+``cli/waiting_jobs.py``'s rule, which ``waiting_jobs`` names them by), each
+held to write first (an id this run made is held from its first write).
+``BaseCLIApp`` forwards to them, on its parts as they are (``TurnParts``).
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentic_cli.cli.conversation_lock import ConversationLock, Taken
+from agentic_cli.cli.message_processor import (
+    CANCELLED_LINE,
+    TurnStatus,
+    _says_so_when_stopped,
+)
+from agentic_cli.cli.waiting_jobs import (
+    CanResume,
+    Here,
+    KeptElsewhere,
+    opens_anywhere,
+    told_here,
+    waiting_here,
+)
 from agentic_cli.logging import Loggers
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.context import CompactResult
 
 logger = Loggers.cli()
 
@@ -132,6 +158,32 @@ class SwitchParts:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnParts:
+    """What a write to the conversation runs on besides it: the app's parts as they are.
+
+    Attributes:
+        controller: The workflow controller (``ensure_initialized``,
+            ``is_ready``, ``workflow``).
+        processor: The message processor, which runs the turn and draws it.
+        ui: The session the turn is drawn in.
+        settings: The app's settings.
+        tracker: The usage tracker the turn's token counts go to; None for none.
+        kept_elsewhere: Whether another installed backend than the running
+            one keeps a job's conversation (``BaseCLIApp._kept_elsewhere``),
+            asked when the workflow's ``can_resume`` says no: such a job
+            waits for it (``waiting_jobs.opens_anywhere``). None: the
+            workflow's answer alone.
+    """
+
+    controller: Any
+    processor: Any
+    ui: Any
+    settings: Any
+    tracker: Any
+    kept_elsewhere: KeptElsewhere | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Switch:
     """How a switch ended.
 
@@ -154,7 +206,9 @@ class Switch:
 
 
 class ConversationCore:
-    """The conversation the app is in: its id, ``turned``, and its lock.
+    """The conversation the app is in: its id, ``turned``, its lock, and its
+    turn lock, under which what writes to it runs (a turn, ``/compact``, a
+    finished job's notice).
 
     Args:
         session_id: The conversation's id.
@@ -191,7 +245,21 @@ class ConversationCore:
         #: id the app was given is held from the start.
         self.deferred = deferred
         self.place = place
+        #: Serializes what writes to the conversation and every change of
+        #: it: a turn, a job's notice, ``/compact``, ``/new`` and ``/resume``
+        #: (not ``/settings``, nor the ``/resume`` picker, which waits on a
+        #: dialog). thinking-prompt runs one input handler at a time, so it
+        #: orders them against the startup resume (a task of its own) and an
+        #: app's own tasks.
+        self.turn_lock = asyncio.Lock()
         self._lock: ConversationLock | None = None
+        #: The run said its conversation runs unheld (a lock that could not be
+        #: taken): said once a run.
+        self._said_unheld = False
+        #: (job, conversation) pairs whose "could not be resumed now" was
+        #: said: the deliveries the CLI makes on its own say it once per
+        #: conversation.
+        self._said_not_told: set[tuple[str, str | None]] = set()
 
     @property
     def fresh(self) -> bool:
@@ -429,6 +497,332 @@ class ConversationCore:
         parts.status()
         return None
 
+    async def run_turn(self, message: str, parts: TurnParts) -> bool:
+        """Run a turn of the user's ``message`` in the conversation, under the turn lock.
+
+        The line is echoed as its turn starts: one typed while the
+        conversation ``--continue``/``--resume`` asked for opens shows under
+        its replay; one Ctrl+C stops while it waits is shown and said
+        cancelled (it never ran), not dropped unseen. The conversation is
+        held to write first, then the message processor runs the turn
+        (``MessageProcessor.process``) in it. It is ``turned`` from then on
+        (its memories are proposed on leaving it), and ``written`` once the
+        turn reached a ready workflow, which stores it (a turn the workflow
+        was not up for stores nothing; one that raised or was cancelled
+        counts when the workflow was ready: it may have begun).
+
+        Args:
+            message: What the user typed.
+            parts: The app's parts it runs on.
+
+        Returns:
+            Whether the turn ran: False when another process has the
+            conversation open (said), and nothing ran. The core says so, not
+            the processor's result: an app's processor may return none.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor
+                says, or while it waited for the turn lock.
+        """
+        ui = parts.ui
+        try:
+            await self.turn_lock.acquire()
+        except asyncio.CancelledError:
+            ui.add_message("user", message)
+            ui.add_message("system", CANCELLED_LINE)
+            raise
+        try:
+            ui.add_message("user", message)
+            if not self._held_to_write(ui):
+                return False
+            self.turned = True  # the conversation now holds this message
+            reached = False  # the turn reached a ready workflow, which stores it
+            try:
+                result = await parts.processor.process(
+                    message=message,
+                    workflow_controller=parts.controller,
+                    ui=ui,
+                    settings=parts.settings,
+                    usage_tracker=parts.tracker,
+                    session_id=self.session_id,
+                )
+                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+            except BaseException:
+                reached = parts.controller.is_ready  # it may have begun
+                raise
+            finally:
+                if reached:
+                    self.written = True
+            return True
+        finally:
+            self.turn_lock.release()
+
+    async def compact(self, focus: str | None, parts: TurnParts) -> "CompactResult | None":
+        """Summarize the conversation now (``/compact [focus]``), as a turn runs.
+
+        Under the turn lock, held to write first: the workflow's ``compact``
+        runs with a turn's events box, status line, token counts and Ctrl+C
+        (``MessageProcessor.process_compact``), which says what it did, or
+        why nothing was.
+
+        Args:
+            focus: What the summary should keep above all, if anything.
+            parts: The app's parts it runs on.
+
+        Returns:
+            What the summary did; None when nothing was summarized (or the
+            conversation is open in another process, said).
+        """
+        async with self.turn_lock:
+            if not self._held_to_write(parts.ui):
+                return None
+            return await parts.processor.process_compact(
+                focus,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            )
+
+    async def deliver_finished_jobs(self, parts: TurnParts) -> int:
+        """Tell the agent of each finished, resume-flagged background job that waits here.
+
+        Only the jobs that wait for this conversation
+        (``cli/waiting_jobs.py``: its own, and those with no conversation or
+        whose conversation is gone, which are told it is unavailable), as the
+        status bar's ``↻N`` and the line an opened conversation says count
+        them: another conversation's job waits until that conversation is
+        opened, instead of answering in this one's transcript. Each notice is
+        a turn of its own (``run_job_resume``, under the turn lock), so it
+        never overlaps a user turn or another notice.
+
+        Delivery follows the job's resume lifecycle: the job is *claimed*
+        (pending → resuming) once the turn lock is held, the workflow found
+        ready and the conversation looked up, and before the turn runs, so a
+        crash cannot silently re-deliver it, and only recorded delivered once
+        the turn actually completed — a failed or cancelled resume is
+        recorded as such instead of being dropped. The check above is made
+        again under the lock (``run_job_resume``): the conversation may have
+        changed while the delivery waited for it.
+
+        Args:
+            parts: The app's parts it runs on.
+
+        Returns:
+            The number of jobs picked up: a resume turn run for it, or, for
+            one that could not be told now (its conversation's lookup failed,
+            before any claim), the failure said. Whether each one was
+            delivered is recorded on the job and reported by ``/jobs``; a
+            failed delivery is surfaced to the user by the turn itself.
+        """
+        controller = parts.controller
+        if not controller.is_ready:
+            return 0
+        jm = getattr(controller.workflow, "job_manager", None)
+        if jm is None:
+            return 0
+
+        attempted = 0
+        # Ctrl+C stops these waits with no box open: they say so themselves.
+        async with _says_so_when_stopped(parts.ui):
+            records = await asyncio.to_thread(jm.awaiting_resume)
+        for record in records:
+            if not await self._told_here(record, parts):
+                continue  # told when its conversation is opened
+            if await self.run_job_resume(jm, record, parts) is not None:
+                attempted += 1
+        return attempted
+
+    async def waiting_jobs(self, parts: TurnParts) -> list[Any]:
+        """The finished jobs that wait for this conversation, in their order,
+        by the rule the deliveries follow (``cli/waiting_jobs.py``): what the
+        line an opened conversation says counts.
+
+        The job manager is asked on a worker thread: it takes the jobs
+        directory's lock, which another CLI of the app may hold.
+        """
+        workflow = parts.controller.workflow
+        jm = getattr(workflow, "job_manager", None)
+        if jm is None:
+            return []
+        return await waiting_here(
+            await asyncio.to_thread(jm.awaiting_resume), self._here(parts.settings),
+            _opens_anywhere(workflow, parts.kept_elsewhere),
+        )
+
+    async def run_job_resume(self, jm: Any, record: Any, parts: TurnParts) -> bool | None:
+        """Claim one job and run its notice as a turn, and close out its transition.
+
+        Under the turn lock the job is looked at again: another conversation
+        may have become current while this waited for it (an app's own task
+        that called ``resume_session`` or ``start_new_session`` took the lock
+        first). A job that now waits for its conversation is not claimed, nor
+        told here, where ``ctx`` and the task list are another conversation's:
+        it stays pending until its conversation is opened. The conversation is
+        held to write first: the notice is written to it. The claim is
+        durable, so an interrupted delivery is recoverable and two
+        coordinators cannot both deliver the same result.
+
+        The job is claimed only once its result can reach the agent:
+        ``process_resume`` calls ``claim`` after it found the workflow ready
+        and looked the conversation up, before it says anything. A delivery
+        stopped before then (the workflow not started, Ctrl+C or a failure
+        during the lookup) claims nothing, and the job stays pending for a
+        later one. A failure is said: each time the user asks (``/jobs
+        resume``), and once per job and conversation when the CLI tells
+        jobs on its own (``telling_on_its_own``: a turn's end, a
+        conversation opened), not at every turn.
+
+        Every exit path closes a claim, so no record can be left ``RESUMING``
+        in this process: a normal outcome records delivered/failed, an
+        exception records failed with the reason, and a cancellation records
+        failed before re-raising (cancellation still propagates): the turn
+        may have written the job's notice to the conversation already.
+
+        The job manager is called on a worker thread (``_claim_delivery``,
+        ``complete_resume``): it takes the jobs directory's lock, which
+        another CLI of the app may hold. Each call is awaited before the next
+        step, and one a second Ctrl+C stops waiting for still finishes.
+
+        Args:
+            jm: The JobManager.
+            record: The job record.
+            parts: The app's parts it runs on.
+
+        Returns:
+            True if the result was delivered to the agent; False if it was
+            not (claimed and not delivered, or a failure before the claim,
+            said); None if it was not claimed and nothing was said (it
+            waits for its conversation, the workflow was not ready, the
+            conversation is open in another process, or another coordinator
+            has it).
+        """
+        claimed = False
+
+        async def claim() -> bool:
+            nonlocal claimed
+            claimed = await _claim_delivery(jm, record.job_id)
+            if claimed and getattr(record, "session_id", None) == self.session_id:
+                self.turned = True  # the resume adds to this conversation
+                # Defensive: a job of this conversation was submitted by a
+                # turn, which stored it already (fresh was False before).
+                self.written = True
+            return claimed
+
+        ui = parts.ui
+        try:
+            async with self.turn_lock:
+                if not await self._told_here(record, parts):
+                    return None
+                if not self._held_to_write(ui):  # its notice is written here
+                    return None
+                result = await parts.processor.process_resume(
+                    record=record,
+                    workflow_controller=parts.controller,
+                    ui=ui,
+                    settings=parts.settings,
+                    usage_tracker=parts.tracker,
+                    claim=claim,
+                )
+        except asyncio.CancelledError:
+            if claimed:
+                logger.info("job_resume_cancelled", job_id=record.job_id)
+                await asyncio.to_thread(
+                    jm.complete_resume, record.job_id, delivered=False,
+                    error="resume cancelled",
+                )
+            raise
+        except Exception as exc:  # noqa: BLE001 - the claim must always close
+            if not claimed:
+                # Before the claim (the conversation's lookup, say): nothing
+                # reached the agent, and a later delivery tells it.
+                logger.warning(
+                    "job_resume_unclaimed_failure", job_id=record.job_id, error=str(exc)
+                )
+                said = (record.job_id, self.session_id)
+                if not (_TELLING_ON_ITS_OWN.get() and said in self._said_not_told):
+                    ui.add_error(
+                        f"Background job '{record.name}' could not be resumed now: {exc}"
+                    )
+                    self._said_not_told.add(said)
+                return False
+            await asyncio.to_thread(
+                jm.complete_resume, record.job_id, delivered=False, error=str(exc)
+            )
+            logger.warning(
+                "job_resume_raised", job_id=record.job_id, error=str(exc)
+            )
+            ui.add_error(
+                f"Background job '{record.name}' could not be resumed: {exc}"
+            )
+            return False
+
+        if not claimed:
+            return None  # stopped before its result could reach the agent
+        await asyncio.to_thread(
+            jm.complete_resume, record.job_id, delivered=result.delivered,
+            error=result.error,
+        )
+        if not result.delivered:
+            logger.info(
+                "job_resume_not_delivered",
+                job_id=record.job_id,
+                status=result.status.value,
+                error=result.error,
+            )
+        return result.delivered
+
+    def _here(self, settings: Any) -> Here:
+        """The conversation, as ``cli/waiting_jobs.py`` names it: (user, session)."""
+        return getattr(settings, "default_user", None), self.session_id
+
+    async def _told_here(self, record: Any, parts: TurnParts) -> bool:
+        """Whether ``record``, a job waiting for delivery, is told in this conversation.
+
+        A Ctrl+C during the conversation's lookup says the request stopped.
+        """
+        workflow = parts.controller.workflow
+        async with _says_so_when_stopped(parts.ui):
+            return await told_here(
+                record, self._here(parts.settings),
+                _opens_anywhere(workflow, parts.kept_elsewhere),
+            )
+
+    def _held_to_write(self, ui: Any) -> bool:
+        """Hold the conversation before it is written, when its id was made by
+        this run (``hold_to_write``); the caller holds the turn lock. False,
+        said, when another process has it open (a collision of random ids):
+        the write must not happen.
+
+        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
+        on a postgres store) does not stop the write: the conversation runs
+        unheld, as an id given to the app does whose startup hold failed,
+        and the run says so once.
+        """
+        try:
+            holder = self.hold_to_write()
+        except OSError as error:
+            logger.debug(
+                "conversation_hold_failed", session_id=self.session_id, exc_info=True
+            )
+            self.deferred = False  # written unheld: not tried again
+            if not self._said_unheld:
+                self._said_unheld = True
+                reason = str(error) or type(error).__name__
+                ui.add_warning(
+                    f"Could not hold conversation '{self.session_id}' for this "
+                    f"process: {reason}. Its turns run unheld, so another process "
+                    "could open it too."
+                )
+            return True
+        if holder is None:
+            return True
+        ui.add_error(
+            f"Conversation '{self.session_id}' is open in another process ({holder})."
+        )
+        return False
+
     def _make(
         self,
         hold: Hold,
@@ -464,6 +858,66 @@ class ConversationCore:
         if self._lock is None:
             self._lock = ConversationLock(place.locks)
         return self._lock
+
+
+#: Set while the CLI tells finished jobs on its own (at a turn's end, or a
+#: conversation opened), not because the user asked (``/jobs resume``).
+_TELLING_ON_ITS_OWN: ContextVar[bool] = ContextVar("telling_on_its_own", default=False)
+
+
+@contextmanager
+def telling_on_its_own() -> Iterator[None]:
+    """The deliveries inside are the CLI's own (a turn's end, a conversation
+    opened), not the user's ask (``/jobs resume``): a job that cannot be told
+    now is said once per job and conversation (``run_job_resume``)."""
+    token = _TELLING_ON_ITS_OWN.set(True)
+    try:
+        yield
+    finally:
+        _TELLING_ON_ITS_OWN.reset(token)
+
+
+def _opens_anywhere(workflow: Any, kept_elsewhere: KeptElsewhere | None) -> CanResume | None:
+    """Whether a job's conversation can be opened, on any installed backend
+    (``waiting_jobs.opens_anywhere``): the running ``workflow``'s
+    ``can_resume``, then ``kept_elsewhere``."""
+    return opens_anywhere(getattr(workflow, "can_resume", None), kept_elsewhere)
+
+
+async def _claim_delivery(jm: Any, job_id: str) -> bool:
+    """Claim the job's delivery (``jm.begin_resume``) on a worker thread.
+
+    The claim takes the jobs directory's lock, which another CLI of the app
+    may hold, so it runs off the event loop. A Ctrl+C while it is taken stops
+    the wait, not the claim, which its thread may still take: a claim taken
+    then is handed back (``JobManager.release_resume``), never left
+    ``RESUMING``, and the job waits for a later delivery, nothing having
+    reached the agent.
+
+    Returns:
+        True if this process now delivers the job.
+    """
+    claim = asyncio.ensure_future(asyncio.to_thread(jm.begin_resume, job_id))
+    try:
+        return await asyncio.shield(claim)
+    except asyncio.CancelledError:
+        claim.add_done_callback(lambda done: _release_abandoned_claim(jm, job_id, done))
+        raise
+
+
+def _release_abandoned_claim(jm: Any, job_id: str, claim: "asyncio.Future[bool]") -> None:
+    """Hand back, on a worker thread, a claim taken for a delivery Ctrl+C stopped."""
+    if claim.cancelled() or claim.exception() is not None or not claim.result():
+        return
+    logger.info("job_resume_claim_released", job_id=job_id)
+
+    def release() -> None:
+        try:
+            jm.release_resume(job_id)
+        except Exception:  # noqa: BLE001 - startup recovery fails it once we are gone
+            logger.warning("job_resume_release_failed", job_id=job_id, exc_info=True)
+
+    asyncio.get_running_loop().run_in_executor(None, release)
 
 
 async def _give_back(workflow: Any, session_id: str) -> None:

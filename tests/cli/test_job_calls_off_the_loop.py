@@ -248,14 +248,15 @@ class TestAStopWhileTheClaimIsTaken:
             record = finished(jobs, "s", "u")
             app = BaseCLIApp.__new__(BaseCLIApp)
             app._workflow_controller = ReplayController(HangingWorkflow())
-            app._turn_lock = asyncio.Lock()
             app._message_processor = MessageProcessor()
             app.session = opening_boxes(autospec_session())
             app._settings = SETTINGS
             app._usage_tracker = None
             app._session_id = "s"
 
-            delivery = asyncio.create_task(app._deliver_resume(jobs, record))
+            delivery = asyncio.create_task(
+                app._conversation.run_job_resume(jobs, record, app._turn_parts())
+            )
             assert await asyncio.to_thread(taking.wait, 5)
             delivery.cancel()
             with pytest.raises(asyncio.CancelledError):
