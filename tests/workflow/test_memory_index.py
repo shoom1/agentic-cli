@@ -178,8 +178,9 @@ def test_clearing_drops_every_snapshot():
     for session in ("a", "b"):
         with turn(ref(session)):
             index.now()
+    held = index.snapshots
     index.clear()
-    assert index.snapshots == {}
+    assert index.snapshots == {} and index.snapshots is held  # in place: whoever holds the dict sees it
     for session in ("a", "b"):
         with turn(ref(session)):
             assert index.cached() == ""

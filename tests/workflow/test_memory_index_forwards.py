@@ -29,7 +29,10 @@ from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  #
 from agentic_cli.workflow.service_registry import MEMORY_STORE  # noqa: E402
 from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
+from tests.workflow.compacting import compact_now  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedModels, ai  # noqa: E402
+from tests.workflow.deepagents.test_compact import THREE, answers  # noqa: E402
+from tests.workflow.deepagents.test_context import hermetic, small, turn as deepagents_turn  # noqa: E402,F401
 from tests.workflow.test_memory_wiring import _FakeManager  # noqa: E402
 
 ROOT = AgentConfig(name="root", prompt="p", tools=[memory_tools.read_memory, memory_tools.save_memory])
@@ -41,15 +44,6 @@ def turn():
     token = set_active_turn(REF)
     yield REF
     reset_active_turn(token)
-
-
-@pytest.fixture
-def hermetic(tmp_path, monkeypatch):
-    (tmp_path / "home").mkdir()
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    return tmp_path
 
 
 def _manager(tmp_path, cls=_FakeManager, **values):
@@ -238,3 +232,40 @@ async def test_deep_agents_asks_a_subclass_for_the_index(hermetic, monkeypatch):
             assert forgotten == ["forgotten"]
         finally:
             await mgr.cleanup()
+
+
+async def test_deep_agents_compact_drops_the_snapshot_through_the_forward(small, monkeypatch):
+    """``/compact`` changes the prompt prefix, so the conversation takes a new
+    index: the manager's ``_forget_memory_index``, whichever class it is."""
+    forgotten: list[SessionRef | None] = []
+
+    class Forgetting(DeepAgentsWorkflowManager):
+        def _forget_memory_index(self, ref=None) -> None:
+            forgotten.append(ref)
+            super()._forget_memory_index(ref)
+
+    monkeypatch.setattr(
+        deepagents_module, "build_chat_model",
+        ScriptedModels(solo=[*answers(3), ai("A summary."), ai("Answer 4.")]),
+    )
+    mgr = Forgetting(
+        agent_configs=[AgentConfig(
+            name="solo", prompt="Answer.", include_state_tools=False,
+            tools=[memory_tools.search_memory],
+        )],
+        settings=small,
+    )
+    conversation = mgr.session_ref("s", "u")
+    try:
+        for text in THREE:
+            await deepagents_turn(mgr, text)
+        assert conversation in mgr._index_snapshots  # taken with its first request
+
+        await compact_now(mgr)
+
+        assert forgotten == [conversation]
+        assert conversation not in mgr._index_snapshots
+        await deepagents_turn(mgr, "Turn 4?")
+        assert conversation in mgr._index_snapshots  # a new one
+    finally:
+        await mgr.cleanup()
