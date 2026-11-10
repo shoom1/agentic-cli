@@ -659,7 +659,11 @@ the start of the entry's title.
   none. On ADK it is the first user content (the fit guard never drops it and
   folds it into the first user text; the overflow retry keeps it), on Deep
   Agents the first text of the first human message (the summarization counts
-  it). Settings: `memory_index_enabled` (default on) and
+  it). A manager holds it as a `MemoryIndex`
+  (`agentic_cli.workflow.memory_index`), and a backend or a subclass reaches
+  it through the manager's `_memory_index_now`, `_memory_index_cached`,
+  `_forget_memory_index` and `_memory_index_cap`. Settings:
+  `memory_index_enabled` (default on) and
   `memory_index_max_bytes` (25,000, 1,000 to 100,000; at most 200 lines, and
   never more than a tenth of the main agent's input budget, so a model with a
   small window gets a shorter index). An app without memory tools is
