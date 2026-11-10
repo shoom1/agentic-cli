@@ -533,6 +533,8 @@ class TestError:
         assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
         assert event.metadata["recoverable"] is False
         assert event.metadata["agent"] == "researcher"
+        assert event.metadata["error_type"] == "ContextOverflowError"
+        assert event.metadata["rate_limited"] is False
 
     def test_a_providers_overflow_at_the_root(self):
         request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")

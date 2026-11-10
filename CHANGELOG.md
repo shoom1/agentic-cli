@@ -102,6 +102,10 @@ the start of the entry's title.
   `survives_restart = True`; with the default, False, a queued job runs only
   in the app that submitted it, and is failed if that app closes before
   starting it. (Fixed: **A queued in-process job runs…**)
+- On ADK, `process()` and `resume_with_job_result()` yield a failed turn's
+  one `ERROR` (not recoverable; `rate_limited`, `error_type`) and return,
+  where they raised: read the event instead of catching the exception.
+  (Changed: **A failed ADK turn yields…**)
 - Gone: `agentic_cli.tools.shell` (the OS sandbox is
   `agentic_cli.tools.os_sandbox`), `ExecutionTimeoutError`,
   `WorkflowEvent.tool_result(duration_ms=)`, `UsageTracker.record()`'s
@@ -155,6 +159,12 @@ the start of the entry's title.
   conversation's end now files; `/compact` and `/new` are new. (Changed:
   **`/resume` reopens…**, **`/help` lists…**; Added: **`/memory`, to
   review…**, **`/compact [focus]`…**)
+- On ADK a failed turn is shown as `<the error> [<its type>]`, as on Deep
+  Agents, where it was `Workflow error: <the error>`; a rate limit is said
+  as before. (Changed: **A failed ADK turn yields…**)
+- On ADK `TASK_PROGRESS` comes only when a tool call changed the task list,
+  and a list whose tasks are all done stays: `get_tasks` answers it, where
+  0.6 cleared it. (Changed: **On ADK, task progress is reported…**)
 
 #### Settings that moved or changed meaning
 
@@ -198,6 +208,9 @@ the start of the entry's title.
 - The LangGraph backend (`orchestrator="langgraph"`) is removed in 0.8.0:
   install `agentic-cli[deepagents]` and set `orchestrator` to `deepagents`.
   Its sessions do not carry over. (Deprecated: **The LangGraph backend**)
+- `TaskProgressPlugin` is unused and removed in 0.8.0: the ADK manager
+  reports task progress itself. (Deprecated:
+  **`agentic_cli.workflow.adk.task_progress_plugin.TaskProgressPlugin`**)
 - A backend's `_release_resources(keep_session_service=True)` keeps working
   until 0.8.0, with a warning: release inside `_keeping(True)`. Nothing else
   is deprecated. (Deprecated: **`_release_resources(keep_session_service=True)`**)
@@ -840,10 +853,10 @@ the start of the entry's title.
     carries cache reads and writes and thinking tokens, and `TASK_PROGRESS`
     comes in the same step as the `save_tasks` call. A model call inside a
     tool (the `generate_simple` summaries) never shows as text. A turn that
-    fails (a provider error, a context overflow) ends with one `ERROR`; the
-    next turn continues after the user's message, and a tool call that a
-    cancelled or failed turn left open is answered first, so the provider
-    accepts the request.
+    fails (a provider error, a context overflow) ends with one `ERROR`, as on
+    ADK (`rate_limited`, `error_type`); the next turn continues after the
+    user's message, and a tool call that a cancelled or failed turn left
+    open is answered first, so the provider accepts the request.
   - **Sessions.** Each conversation is the thread of its whole
     `(app_name, user_id, session_id)`, so two users, or two apps sharing a
     database, never share a conversation through one session id.
@@ -1368,6 +1381,35 @@ the start of the entry's title.
 
 ### Changed
 
+- **A failed ADK turn yields one `ERROR` event instead of raising.** On ADK
+  `process()` and `resume_with_job_result()` raised what failed a turn (a
+  provider's error, a rate limit), where Deep Agents yielded one `ERROR`. On
+  both backends a turn that fails now yields one `ERROR` that is not
+  recoverable, last, and returns: its `content` is the error's text, its
+  `error_code` the exception's type (or `CONTEXT_OVERFLOW`), and its
+  `metadata` says whether a provider rate-limited the turn (`rate_limited`)
+  and names the exception's type, or the code where none ended the turn
+  (`error_type`), ADK's overflow answer and "returned no answer" included;
+  `WorkflowEvent.turn_failed` builds it. An `ERROR` the turn already yielded
+  that is not recoverable (the overflow handler's) is its only one. A cancel
+  still raises `asyncio.CancelledError`, and a turn that cannot start (the
+  backend not initialized or admitted, or its conversation unreadable before
+  the run) still raises. The CLI says a rate limit from the event with the
+  line it said for the raise ("Rate limited: … Send the request again once the
+  limit resets."), and any other failure as `<the error> [<its type>]`, where
+  on ADK it said `Workflow error: <the error>`; a manager that raises (an
+  app's own, LangGraph) is said as before. The backends log the failure at
+  info, its traceback at debug, and the CLI its record of it
+  (`workflow_error_event`, `turn_rate_limited`) at info, so at the default log
+  level the error is all that is printed over the prompt.
+- **On ADK, task progress is reported when the task list changes, and a
+  finished list stays.** ADK's `TaskProgressPlugin` reported the list after
+  every tool call while there was one, and cleared it once every task was
+  done, so `get_tasks` then answered an empty list. The event processor now
+  reports `TASK_PROGRESS` after a tool call that wrote a changed list (from
+  the call's state delta; a turn reports the first list it sees), as Deep
+  Agents does, and the list stays until the model writes another. The plugin
+  is no longer in the app's chain.
 - **`/sessions` and `/status` on the memory store say the conversations are
   not kept.** With `session_store=memory` `/sessions` listed the run's
   conversation as a "Saved Sessions" table, and `--delete=<id>` deleted it,
@@ -1681,8 +1723,8 @@ the start of the entry's title.
   <model>'s context window. Use /compact or /new.", as on Deep Agents, and
   no reply is stored; a sub-agent tells its coordinator it could not do the
   task, and the user gets one warning, "<agent>: the request no longer fits
-  <model>'s context window.". Any other model error is ADK's as before,
-  and one that fails the retry is the turn's error, the provider's own. The
+  <model>'s context window.". Any other model error, and one that fails
+  the retry, is the turn's one `ERROR`, the provider's own. The
   tracebacks ADK logs for a failed summary, model call or retry are logged
   at debug by the CLI, since the user is told otherwise: on ADK's
   compaction (`adk_compaction_failed`), node (`adk_node_failed`), runner
@@ -2242,6 +2284,12 @@ the start of the entry's title.
   the README now say so.
 
 ### Deprecated
+
+- **`agentic_cli.workflow.adk.task_progress_plugin.TaskProgressPlugin`** is
+  deprecated and will be removed in 0.8.0: the ADK manager no longer uses
+  it, and its event processor reports task progress itself. Constructing it
+  issues a `DeprecationWarning`; it still reports after every tool call and
+  clears a finished list, but nothing drains its events.
 
 - **Setting `BaseCLIApp.session_id`** is deprecated: switch with `await
   app.resume_session(id)` or `await app.start_new_session()`. It moved the
@@ -3392,10 +3440,12 @@ step; each entry says what to use instead.
   once; when a line typed meanwhile holds it, its lock moves, and the change
   is refused, "Settings were not changed.", when another process has it
   open there). ADK's stale
-  session (a writer without the lock) is now
-  `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
-  '<id>' was changed by another process during this turn. Send your message
-  again to go on from what it holds now."
+  session (a writer without the lock) now ends the turn with its one
+  `ERROR`, whose `error_code` is `ConversationChangedError` (raised as
+  `workflow.sessions.ConversationChangedError` when the turn finds it before
+  the run starts), said plainly: "Conversation '<id>' was changed by another
+  process during this turn. Send your message again to go on from what it
+  holds now."
 - **`/sessions` shows a session id as typed.** Rich turned an emoji code
   in an id (":x:") into an emoji, so the id could not be copied back into
   `--delete=`.

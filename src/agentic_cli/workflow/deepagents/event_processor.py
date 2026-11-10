@@ -144,9 +144,10 @@ class DeepAgentsEventProcessor:
         return events
 
     def turn_failed(self, error: BaseException) -> WorkflowEvent:
-        """The ``ERROR`` that ends a turn whose stream raised ``error``.
+        """The one ``ERROR`` that ends a turn whose stream raised ``error``.
 
-        Attributed to the agent whose task failed first, the innermost: a
+        ``WorkflowEvent.turn_failed``'s (the base ``process()``'s contract),
+        attributed to the agent whose task failed first, the innermost: a
         sub-agent's failure fails its coordinator's ``task`` call after it.
         A context overflow (a provider's, or Deep Agents' own when a summary
         still does not fit) is told in one sentence naming that agent's
@@ -155,14 +156,13 @@ class DeepAgentsEventProcessor:
         agent = self._failed_agent or self._root
         if is_context_overflow(error):
             model = self._agent_models.get(agent) or self._agent_models.get(self._root)
-            event = WorkflowEvent.error(
+            event = WorkflowEvent.turn_failed(
+                error,
                 overflow_message(str(model.ref) if model is not None else "the model"),
                 error_code=OVERFLOW_ERROR_CODE,
             )
         else:
-            event = WorkflowEvent.error(
-                str(error) or type(error).__name__, error_code=type(error).__name__
-            )
+            event = WorkflowEvent.turn_failed(error)
         return self._attributed(event, agent)
 
     # -- the tasks mode --------------------------------------------------------

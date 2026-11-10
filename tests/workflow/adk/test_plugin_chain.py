@@ -11,8 +11,6 @@ rest), and these tests pin it whole, so a move anywhere fails one of them:
 - ``permission`` before every other tool callback: a denial is the call's
   answer;
 - ``tool_error`` answers a call that raised (and one to an unknown tool);
-- ``task_progress`` before the cap: it reads the task list after every call
-  and returns nothing;
 - ``llm_logging`` records each call as the model answers it;
 - ``foreign_reasoning`` drops the thoughts another provider wrote, before
   the request is measured;
@@ -82,7 +80,6 @@ async def test_a_config_built_app_with_every_option(project):
         "main_agent",
         "permission",
         "tool_error",
-        "task_progress",
         "llm_logging",
         "foreign_reasoning",
         "context_cache",
@@ -105,7 +102,6 @@ async def test_a_plain_config_built_app(project):
         "main_agent",
         "permission",
         "tool_error",
-        "task_progress",
         "foreign_reasoning",
         "interrupted_calls",
         "tool_result_cap",
@@ -120,7 +116,7 @@ async def test_a_native_adk_yaml_app(project):
         adk_config_path=_native_yaml(project, MODEL, helper=True),
     )
 
-    assert await _chain(manager) == ["permission", "tool_error", "task_progress"]
+    assert await _chain(manager) == ["permission", "tool_error"]
 
 
 async def test_a_native_adk_yaml_app_with_the_raw_log_and_caching(project):
@@ -130,5 +126,5 @@ async def test_a_native_adk_yaml_app_with_the_raw_log_and_caching(project):
     )
 
     assert await _chain(manager) == [
-        "permission", "tool_error", "task_progress", "llm_logging", "context_cache",
+        "permission", "tool_error", "llm_logging", "context_cache",
     ]

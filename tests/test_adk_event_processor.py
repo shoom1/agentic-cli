@@ -219,7 +219,10 @@ class TestAContextOverflow:
             "This conversation no longer fits anthropic:claude-sonnet-4-6's context window. "
             "Use /compact or /new."
         )
-        assert event.metadata == {"recoverable": False, "error_code": "CONTEXT_OVERFLOW"}
+        assert event.metadata == {
+            "recoverable": False, "error_code": "CONTEXT_OVERFLOW",
+            "rate_limited": False, "error_type": "CONTEXT_OVERFLOW",
+        }
 
     async def test_no_failed_calls_error_code(self):
         # ADK records one (an API status, an exception's class name) for an

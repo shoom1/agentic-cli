@@ -247,6 +247,48 @@ class WorkflowEvent:
         return cls(type=EventType.ERROR, content=message, metadata=metadata)
 
     @classmethod
+    def turn_failed(
+        cls,
+        error: BaseException | None = None,
+        message: str | None = None,
+        error_code: str | None = None,
+    ) -> "WorkflowEvent":
+        """A failed turn's one ``ERROR`` (``process()``'s contract).
+
+        Not recoverable. Its text is ``message``, else the error's own (its
+        type's name when it has none), and its ``error_code`` is
+        ``error_code``, else the error's type name. ``metadata`` also says
+        whether a provider rate-limited the turn (``rate_limited``,
+        ``workflow/retry.py::is_rate_limit_error``), which the CLI reports in
+        its own words, and names what ended it (``error_type``), for logs:
+        the error's type, or, for a turn no exception ended (ADK's overflow
+        handler answering the call, a reply that is no answer), its code.
+
+        Args:
+            error: What the turn failed with; None when no exception ended
+                it, and then ``message`` and ``error_code`` say what did.
+            message: What to say instead of the error's text (a context
+                overflow's sentence).
+            error_code: The code instead of the type's name.
+
+        Raises:
+            ValueError: No ``error``, and no ``message`` or ``error_code``.
+        """
+        from agentic_cli.workflow.retry import is_rate_limit_error
+
+        if error is None:
+            if not (message and error_code):
+                raise ValueError("A turn no exception ended needs a message and a code.")
+            event = cls.error(message, error_code=error_code)
+            event.metadata.update(rate_limited=False, error_type=error_code)
+            return event
+        name = type(error).__name__
+        event = cls.error(message or str(error) or name, error_code=error_code or name)
+        event.metadata["rate_limited"] = is_rate_limit_error(error)
+        event.metadata["error_type"] = name
+        return event
+
+    @classmethod
     def task_progress(
         cls,
         display: str,

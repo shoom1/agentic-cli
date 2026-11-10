@@ -3,8 +3,8 @@
 ADK deprecates ``Runner(plugins=...)``: plugins belong to an ``App``, and the
 runner is built from it. Both ways the manager builds its agent tree (from
 ``AgentConfig``s, or natively from an ADK ``root_agent.yaml``) must end with a
-runner whose app carries the permission, tool-error, task-progress and
-LLM-logging plugins, without ADK's deprecation warning.
+runner whose app carries the permission, tool-error and LLM-logging
+plugins, without ADK's deprecation warning.
 """
 
 from __future__ import annotations
@@ -19,12 +19,11 @@ pytest.importorskip("google.adk")
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin  # noqa: E402
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin  # noqa: E402
-from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin  # noqa: E402
 from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 
-PLUGIN_TYPES = (PermissionPlugin, ToolErrorPlugin, TaskProgressPlugin, LLMLoggingPlugin)
+PLUGIN_TYPES = (PermissionPlugin, ToolErrorPlugin, LLMLoggingPlugin)
 DEPRECATED_PLUGINS = "`plugins` argument is deprecated"
 
 

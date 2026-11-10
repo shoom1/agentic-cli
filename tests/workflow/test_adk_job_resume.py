@@ -101,12 +101,13 @@ def _resume_manager(
     mgr._runner = runner
     mgr._root_agent = SimpleNamespace(name="root")
     mgr._llm_logging_plugin = None
-    mgr._task_progress_plugin = None
 
     async def _process_event(adk_event, session_id):
         yield WorkflowEvent(type=EventType.TEXT, content=str(adk_event))
 
-    mgr._event_processor = SimpleNamespace(model=None, process_event=_process_event)
+    mgr._event_processor = SimpleNamespace(
+        model=None, process_event=_process_event, start_turn=lambda: None
+    )
 
     async def _ensure_initialized():
         return None

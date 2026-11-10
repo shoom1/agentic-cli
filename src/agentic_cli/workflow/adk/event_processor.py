@@ -11,6 +11,7 @@ from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 
+from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.logging import Loggers
@@ -63,6 +64,13 @@ class ADKEventProcessor:
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
     its error in ``metadata["error"]``, as on Deep Agents.
 
+    A tool that wrote the session's task list (``save_tasks``: ``tasks`` in
+    the event's state delta) is followed by ``TASK_PROGRESS``, after its
+    result, when the list differs from the one this turn last reported
+    (``start_turn`` forgets it), as on Deep Agents: a call that changed
+    nothing reports nothing, and a list whose tasks are all done stays in the
+    session for ``get_tasks``.
+
     A conversation the main agent's model no longer takes ends its turn with
     an error response from the overflow handler
     (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
@@ -73,9 +81,11 @@ class ADKEventProcessor:
     with no error code, a finish reason other than STOP: a Claude refusal, a
     reply cut at its token limit) ends the turn too, raising nothing: it
     becomes the turn's ``ERROR``, "<model> returned no answer", its code
-    the error code or finish reason. No other error code of the main agent
+    the error code or finish reason. Both are the turn's one ``ERROR``, with
+    a failed turn's fields (``WorkflowEvent.turn_failed``: ``rate_limited``
+    false, the code as ``error_type``). No other error code of the main agent
     is mapped: ADK records one for an exception that then leaves the run,
-    which reports it.
+    which the manager reports as the turn's one ``ERROR``.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -102,6 +112,8 @@ class ADKEventProcessor:
         self.root = root
         self.models: Mapping[str, str] = models or {}
         self.budgets: Mapping[str, ContextBudget] = budgets or {}
+        # The task list this turn last reported, None before any.
+        self._reported_tasks: list | None = None
 
     @property
     def model(self) -> str:
@@ -118,6 +130,10 @@ class ADKEventProcessor:
     @on_event.setter
     def on_event(self, value: Callable[[WorkflowEvent], WorkflowEvent | None] | None) -> None:
         self._on_event = value
+
+    def start_turn(self) -> None:
+        """Forget the task list reported: a turn reports the first one it sees."""
+        self._reported_tasks = None
 
     async def process_event(
         self,
@@ -137,8 +153,8 @@ class ADKEventProcessor:
 
         error_code = getattr(adk_event, "error_code", None)
         if subagent is not None and error_code:
-            # The root's own failure leaves the run, which reports it; this
-            # one never does.
+            # The root's own failure leaves the run, which the manager
+            # reports as the turn's ERROR; this one never does.
             error = WorkflowEvent.error(
                 f"{subagent} failed: {adk_event.error_message or error_code}",
                 error_code=error_code,
@@ -149,8 +165,11 @@ class ADKEventProcessor:
             if error:
                 yield error
         elif error_code == OVERFLOW_ERROR_CODE:
-            error = self._apply_hook(WorkflowEvent.error(
-                adk_event.error_message or error_code, error_code=OVERFLOW_ERROR_CODE
+            # The turn's one ERROR (the base process()'s contract), though
+            # no exception ended it: the overflow handler answered the call.
+            error = self._apply_hook(WorkflowEvent.turn_failed(
+                message=adk_event.error_message or error_code,
+                error_code=OVERFLOW_ERROR_CODE,
             ))
             if error:
                 yield error
@@ -159,8 +178,8 @@ class ADKEventProcessor:
             message = adk_event.error_message
             # ADK's own message for an empty reply says no more than the code.
             said = f": {message}" if message and code != "MODEL_RETURNED_NO_CONTENT" else ""
-            error = self._apply_hook(WorkflowEvent.error(
-                f"{model} returned no answer{said}", error_code=code
+            error = self._apply_hook(WorkflowEvent.turn_failed(
+                message=f"{model} returned no answer{said}", error_code=code
             ))
             if error:
                 yield error
@@ -189,10 +208,8 @@ class ADKEventProcessor:
             if usage_event:
                 yield usage_event
 
-        if not adk_event.content or not adk_event.content.parts:
-            return
-
-        for part in adk_event.content.parts:
+        parts = adk_event.content.parts if adk_event.content else None
+        for part in parts or ():
             workflow_event = self.process_part(part, session_id)
             if workflow_event:
                 if subagent is not None and workflow_event.type is EventType.TEXT:
@@ -200,6 +217,33 @@ class ADKEventProcessor:
                 workflow_event = self._apply_hook(workflow_event)
                 if workflow_event:
                     yield workflow_event
+
+        progress = self._progress(adk_event)
+        if progress is not None:
+            progress = self._apply_hook(progress)
+            if progress:
+                yield progress
+
+    def _progress(self, adk_event: Any) -> WorkflowEvent | None:
+        """``TASK_PROGRESS`` for a task list ``adk_event`` wrote, when it changed.
+
+        A sub-agent's list is the session's too: the coordinator reads it,
+        and reporting it again would say nothing new.
+        """
+        delta = getattr(getattr(adk_event, "actions", None), "state_delta", None) or {}
+        tasks = delta.get("tasks")
+        if not isinstance(tasks, list) or tasks == self._reported_tasks:
+            return None
+        self._reported_tasks = tasks
+        progress = task_progress_data(tasks)
+        if progress is None:
+            return None
+        return WorkflowEvent.task_progress(
+            display=progress["display"],
+            progress=progress["progress"],
+            current_task_id=progress["current_task_id"],
+            current_task_description=progress["current_task_description"],
+        )
 
     def _subagent(self, adk_event: Any) -> str | None:
         """The sub-agent that wrote ``adk_event``, or None (the root, the user)."""

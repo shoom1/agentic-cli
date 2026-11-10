@@ -3,9 +3,9 @@
 ADK's ``ToolResultCapPlugin`` gives every tool result to
 ``workflow/tool_output.py::cap_tool_result`` in its ``after_tool_callback``:
 registered tools, MCP and skill tools, whatever the tool object. It is
-registered after ``TaskProgressPlugin``, since ADK stops at the first plugin
-whose ``after_tool_callback`` returns a value, and only for apps built from
-agent configs. ADK's Claude and OpenAI Responses adapters send a result's
+registered after ``InterruptedCallsPlugin``, since ADK stops at the first
+plugin whose ``after_tool_callback`` returns a value, and only for apps built
+from agent configs. ADK's Claude and OpenAI Responses adapters send a result's
 ``content`` alone when it has one, else (OpenAI Responses) its ``result``, so
 the note is put there too. A ``read_file`` of a saved output (by the tool's
 identity) is cut again without a second file, and needs no permission prompt.
@@ -42,7 +42,6 @@ from agentic_cli.tools.registry import get_registry  # noqa: E402
 from agentic_cli.tools.skills import SkillStore, make_skill_toolset  # noqa: E402
 from agentic_cli.workflow.adk import tool_result_cap_plugin  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.adk.task_progress_plugin import TaskProgressPlugin  # noqa: E402
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
@@ -321,7 +320,8 @@ class TestTurns:
 
 
 class TestTheApp:
-    async def test_the_cap_runs_after_task_progress_on_the_settings(self, project):
+    async def test_the_cap_runs_on_the_settings(self, project):
+        """Its place in the chain is pinned by ``adk/test_plugin_chain.py``."""
         manager = adk([cap_probe_report], tool_result_max_chars=30_000)
         try:
             await manager.initialize_services()
@@ -330,8 +330,6 @@ class TestTheApp:
             await manager.cleanup()
 
         (cap,) = [p for p in plugins if isinstance(p, ToolResultCapPlugin)]
-        (progress,) = [p for p in plugins if isinstance(p, TaskProgressPlugin)]
-        assert plugins.index(cap) > plugins.index(progress)
         assert (cap.max_chars, cap.folder) == (30_000, folder())
 
     async def test_a_native_adk_app_has_no_cap(self, project, tmp_path):

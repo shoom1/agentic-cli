@@ -10,7 +10,8 @@ overflows too, or a request with nothing to leave out, ends the main agent's
 turn with one ``ERROR`` (``CONTEXT_OVERFLOW``): "This conversation no longer
 fits <model>'s context window. Use /compact or /new.", and no reply is
 stored. A sub-agent answers its coordinator that it could not do the task,
-and the user gets one warning. Any other error is ADK's as before.
+and the user gets one warning. Any other error is the turn's one ``ERROR``,
+as any failed call's is.
 
 Turns run the real manager on ``FakeAPI``, one test per provider's way of
 saying it: Claude's 400 and 413, OpenAI's ``context_length_exceeded``,
@@ -213,23 +214,29 @@ class TestEachProvidersOverflow:
         (error,) = errors(third)
         assert error.content == overflow_message(model)
         assert error.content.endswith("Use /compact or /new.")
-        assert error.metadata == {"recoverable": False, "error_code": OVERFLOW_ERROR_CODE}
+        assert error.metadata == {
+            "recoverable": False, "error_code": OVERFLOW_ERROR_CODE,
+            "rate_limited": False, "error_type": OVERFLOW_ERROR_CODE,
+        }
         # The main agent's last event is the error, holding no reply.
         last = [e for e in events if e.author == "solo"][-1]
         assert (last.error_code, last.content) == (OVERFLOW_ERROR_CODE, None)
 
 
 class TestOtherErrors:
-    async def test_a_400_that_is_no_overflow_raises_as_before(self, project, monkeypatch):
+    async def test_a_400_that_is_no_overflow_is_the_turns_error(self, project, monkeypatch):
         refused = httpx.Response(400, json={"type": "error", "error": {
             "type": "invalid_request_error", "message": "max_tokens: 100000 > 64000"}})
         api, manager = on(monkeypatch, "anthropic", refused)
         try:
-            with pytest.raises(anthropic.BadRequestError, match="max_tokens"):
-                await turn(manager, "One.")
+            events = await turn(manager, "One.")
         finally:
             await manager.cleanup()
 
+        (error,) = errors(events)
+        assert "max_tokens: 100000 > 64000" in error.content
+        assert error.metadata["error_type"] == "BadRequestError"
+        assert error.metadata["error_code"] == "BadRequestError"
         assert len(api.requests) == 1  # no retry
 
     async def test_a_retry_that_fails_otherwise_is_the_turns_error(self, project, monkeypatch):
@@ -242,11 +249,14 @@ class TestOtherErrors:
                           httpx.Response(status, json=body), unavailable)
         try:
             await turn(manager, "One.")
-            with pytest.raises(anthropic.BadRequestError, match="max_tokens"):
-                await turn(manager, "Two?")
+            events = await turn(manager, "Two?")
         finally:
             await manager.cleanup()
 
+        (error,) = errors(events)
+        assert "max_tokens: 100000 > 64000" in error.content
+        assert error.metadata["error_type"] == "BadRequestError"
+        assert "Error in plugin" not in error.content
         assert len(api.requests) == 3
 
     def test_only_the_overflow_handlers_wrapper_is_unwrapped(self):
@@ -782,11 +792,11 @@ class TestNothingPrintsOverTheUI:
         _, manager = on(monkeypatch, "anthropic", refused)
         try:
             with caplog.at_level(logging.DEBUG):
-                with pytest.raises(anthropic.BadRequestError):
-                    await turn(manager, "One.")
+                events = await turn(manager, "One.")
         finally:
             await manager.cleanup()
 
+        assert len(errors(events)) == 1
         assert over_the_ui(caplog) == []
 
     async def test_a_retry_that_fails_otherwise(self, project, monkeypatch, caplog, notice_hook):
@@ -800,11 +810,11 @@ class TestNothingPrintsOverTheUI:
         try:
             await turn(manager, "One.")
             with caplog.at_level(logging.DEBUG):
-                with pytest.raises(anthropic.BadRequestError):
-                    await turn(manager, "Two?")
+                events = await turn(manager, "Two?")
         finally:
             await manager.cleanup()
 
+        assert len(errors(events)) == 1
         assert over_the_ui(caplog) == []
 
 

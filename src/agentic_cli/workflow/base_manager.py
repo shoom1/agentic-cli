@@ -259,7 +259,8 @@ class BaseWorkflowManager(ABC):
         lock taken with a live backend behind it (``_turn_admission``), and
         the settings, the services and the active turn set for the block
         (``_workflow_context``). A backend's ``process`` runs its agents
-        inside it. The rest of the turn protocol is the base's, over hooks:
+        inside it, and a turn that fails yields one ``ERROR`` (``process``
+        says what it holds). The rest of the turn protocol is the base's, over hooks:
         ``resume_with_job_result`` (the record's checks, the turn, the job's
         result read on a worker thread, the notice) runs the backend's
         ``_deliver_job_notice`` in the conversation ``_conversation_exists``
@@ -1163,9 +1164,10 @@ class BaseWorkflowManager(ABC):
         which on the event loop froze the app while another process held
         it. The notice is ``tools/jobs/resume.py::job_notice`` (the header,
         what the agent is asked, the payload), and the backend tells it
-        (:meth:`_deliver_job_notice`), whose events this yields. A record
-        that names too little, or a conversation that is not there, runs
-        nothing and yields nothing (logged).
+        (:meth:`_deliver_job_notice`), whose events this yields; a turn that
+        fails yields one ``ERROR``, as ``process`` documents. A record that
+        names too little, or a conversation that is not there, runs nothing
+        and yields nothing (logged).
 
         Args:
             record: The finished ``JobRecord``.
@@ -2225,6 +2227,27 @@ class BaseWorkflowManager(ABC):
         2. Set up appropriate context for tools
         3. Process the message through the backend
         4. Yield WorkflowEvent objects for each step
+
+        A turn that fails yields one ``ERROR`` event and returns, raising
+        nothing: whatever its run raised (a provider's error, a rate limit
+        included), a context overflow nothing recovered, or, on ADK, a main
+        agent's reply that is no answer. ``WorkflowEvent.turn_failed`` builds
+        it, from the exception or, where none ended the turn, its code: not
+        recoverable, the error's text as ``content``, ``rate_limited`` (a
+        provider's 429, ``retry.is_rate_limit_error``: the CLI says to send
+        the request again later, since a turn is never replayed) and
+        ``error_type`` (the exception's type, else the code, for logs) in its
+        ``metadata``.
+        An ``ERROR`` the turn already yielded that is not recoverable (the
+        overflow handler's ``CONTEXT_OVERFLOW``, say) is its one ``ERROR``: a
+        failure after it is logged, not reported again. Recoverable
+        ``ERROR``s are warnings, and the turn goes on. A cancel still raises
+        ``asyncio.CancelledError``, and a turn that cannot start raises
+        before any event: the backend cannot be initialized or admitted
+        (``_turn``), or its conversation cannot be read or prepared before
+        the run (the store's error; on ADK ``ConversationChangedError`` for
+        a session another process changed). ``resume_with_job_result``
+        fails the same way.
 
         Args:
             message: User message to process.

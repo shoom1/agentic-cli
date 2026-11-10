@@ -1,8 +1,10 @@
 """Rate-limit detection.
 
-``is_rate_limit_error`` tells a provider's 429 from any other failure: the CLI
-message processor uses it to report a turn that failed on one. It retries
-nothing and works for every backend. The retries are the provider clients'
+``is_rate_limit_error`` tells a provider's 429 from any other failure: a
+failed turn's ``ERROR`` says so (``WorkflowEvent.turn_failed``'s
+``rate_limited``), and the CLI message processor uses it for a manager that
+raises, to report a turn that failed on one. It retries nothing and works for
+every backend. The retries are the provider clients'
 (``retry_max_attempts``, ``retry_initial_delay``), before a failure reaches
 the turn.
 """
