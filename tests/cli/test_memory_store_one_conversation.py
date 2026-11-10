@@ -14,7 +14,9 @@ the app's ``resume_session`` and ``pick_session``, ``--resume <id>`` and
 ``--continue`` are refused with one line (``NOT_KEPT``), and nothing changes:
 no conversation is looked up, loaded or held, and no backend is started.
 ``--resume <id>`` then exits with status 1, as for an id that is not stored;
-``--continue`` starts a new conversation and says why, once.
+``--continue`` starts a new conversation and says why, once. ``/sessions``
+says the same, with no table (the one row it could show is the conversation
+the app is in, which ``/status`` names), and ``--delete`` is refused.
 
 A persistent store (sqlite, the default; postgres) keeps every conversation,
 and the run never switches the store by itself.
@@ -298,6 +300,49 @@ class TestResumeIsRefused:
 
         assert picked is None
         assert said(app.session, "add_error") == [NOT_KEPT, NOT_KEPT]
+        assert said(app.session, "add_warning") == []
+
+
+class TestSessions:
+    async def test_it_says_they_are_not_kept(self, project):
+        app, _ = on_memory(conversation("abc", "Plan the trip", 2))
+        await app.process_input("Hello.")
+
+        await app.process_input("/sessions")
+
+        assert said(app.session, "add_message")[-1] == NOT_KEPT
+        assert app.session.add_rich.call_count == 0
+        assert said(app.session, "add_error") == []
+
+    async def test_delete_is_refused(self, project):
+        app, workflow = on_memory(conversation("abc", "Plan the trip", 2))
+
+        await app.process_input("/sessions --delete=abc")
+
+        assert said(app.session, "add_error") == [NOT_KEPT]
+        assert "abc" in workflow.stored and workflow.calls == []
+
+    async def test_status_names_the_conversation_as_not_kept(self, project):
+        """``/sessions`` lists none: ``/status`` names the one the app is in,
+        and says it is not kept."""
+        app, _ = on_memory()
+
+        await app.process_input("/status")
+
+        (panel,) = app.session.add_rich.call_args.args
+        labels, values = (list(column.cells) for column in panel.renderable.columns)
+        assert dict(zip(labels, values))["Session"] == (
+            f"{app.session_id} (not kept: session_store is memory)"
+        )
+
+    async def test_while_the_workflow_is_down_it_says_why_all_the_same(self, project):
+        app, _ = on_memory()
+        controller = app._workflow_controller
+        controller._workflow, controller._init_error = None, RuntimeError("no API key")
+
+        await app.process_input("/sessions")
+
+        assert said(app.session, "add_message")[-1] == NOT_KEPT
         assert said(app.session, "add_warning") == []
 
 
