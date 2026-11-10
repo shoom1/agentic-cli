@@ -1856,21 +1856,36 @@ class BaseCLIApp:
             parts = self._switch_parts()
             place = dataclasses.replace(self._place(), backend=target)  # the run's store
         new = uuid.uuid4().hex[:12]
-        switched = await self._conversation.switch(new, parts, place=place, propose=not moving)
+
+        def opened() -> None:
+            """Say where the app is now."""
+            if moving:
+                line = f"New conversation {new} on {target}."
+                if stored:
+                    line += f" Previous: {old}, kept by {old_backend}."
+            else:
+                line = f"New conversation {new}."
+                if stored:
+                    line += f" Previous: {old}, listed in /sessions."
+            self.session.add_message("system", line)
+            if moving and target == OrchestratorType.LANGGRAPH.value:
+                self.session.add_warning(_LANGGRAPH_DEPRECATION)
+
+        try:
+            switched = await self._conversation.switch(
+                new, parts, place=place, propose=not moving
+            )
+        except asyncio.CancelledError:
+            if self._session_id == new:
+                # On another backend the switch is made before the load, which
+                # the cancel stopped: the app is there, and says so.
+                opened()
+                _show_new_context(controller, self.session)
+            raise
         if not switched.made:  # a new id: never open elsewhere in practice
             raise RuntimeError(f"'{new}' is open in another process ({switched.holder})")
         logger.info("new_session_started", session_id=new, previous=old, backend=target)
-        if moving:
-            line = f"New conversation {new} on {target}."
-            if stored:
-                line += f" Previous: {old}, kept by {old_backend}."
-        else:
-            line = f"New conversation {new}."
-            if stored:
-                line += f" Previous: {old}, listed in /sessions."
-        self.session.add_message("system", line)
-        if moving and target == OrchestratorType.LANGGRAPH.value:
-            self.session.add_warning(_LANGGRAPH_DEPRECATION)
+        opened()
         if interrupted is not None:
             raise interrupted
         return new

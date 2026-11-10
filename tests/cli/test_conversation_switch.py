@@ -996,3 +996,97 @@ class TestAnAppsOwnStartNewSession:
 
         assert app.session_id == old and built == []
         assert said(app.session, "add_error") == ["This app's /new takes no backend."]
+
+
+class TestACtrlCInAMoveOfBackend:
+    """Ctrl+C at each await of a new conversation on another backend, and of
+    the move of an empty conversation while the workflow is down: the app
+    ends in one conversation, held where its turns write, the settings
+    naming the backend that runs, and the user is told where it is."""
+
+    New = TestANewConversationOnAnotherBackend
+    Down = TestAPlaceChangeWhileTheWorkflowIsDown
+
+    async def test_at_the_new_backends_load_its_conversation_is_said(self, home, monkeypatch):
+        app, adk, built = self.New.on_adk(monkeypatch)
+        old = app.session_id
+        loading = asyncio.Event()
+        load = self.New.Manager.load_session
+
+        async def load_session(self, session_id, user_id=None):
+            if self.backend_type == "deepagents":
+                loading.set()
+                await asyncio.Event().wait()
+            return await load(self, session_id, user_id)
+
+        monkeypatch.setattr(self.New.Manager, "load_session", load_session)
+        new = asyncio.create_task(app.process_input("/new deepagents"))
+        await asyncio.wait_for(loading.wait(), 5)
+        new.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await new
+
+        assert app.session_id != old and self.New.running(app) == "deepagents"
+        assert not free(app, app._conversation_key(app.session_id))
+        assert f"New conversation {app.session_id} on deepagents." in said(
+            app.session, "add_message"
+        )
+
+    @staticmethod
+    async def down_on_deepagents(monkeypatch):
+        """An app whose first start failed on deepagents (it would start on adk)."""
+        TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: n == 0)
+        return await TestAPlaceChangeWhileTheWorkflowIsDown.started(
+            BaseSettings(session_store="sqlite", orchestrator="deepagents")
+        )
+
+    async def test_while_the_turn_lock_is_held_elsewhere_nothing_changes(self, home, monkeypatch):
+        app = await self.down_on_deepagents(monkeypatch)
+        key = app._conversation_key(app.session_id)
+        gate = asyncio.Event()
+
+        async def an_apps_task():
+            async with app._turn_lock:
+                await gate.wait()
+
+        holder = asyncio.create_task(an_apps_task())
+        await asyncio.sleep(0)
+        applying = asyncio.create_task(app.apply_settings({"orchestrator": "adk"}))
+        await asyncio.sleep(0.05)
+        applying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+        gate.set()
+        await holder
+
+        assert app.settings.orchestrator.value == "deepagents"
+        assert app._workflow_controller.backend == "deepagents"
+        assert app._conversation_key(app.session_id) == key and not free(app, key)
+        await app._workflow_controller.close()
+
+    async def test_while_the_controller_waits_for_a_release_nothing_changes(
+        self, home, monkeypatch
+    ):
+        """A release still running makes the controller wait before it takes
+        the new backend: the lock taken there is let go again."""
+        app = await self.down_on_deepagents(monkeypatch)
+        controller = app._workflow_controller
+        key = app._conversation_key(app.session_id)
+        releasing = asyncio.Event()
+        release = asyncio.create_task(releasing.wait())  # a release still running
+        controller._orphan_cleanups.add(release)
+        release.add_done_callback(controller._orphan_cleanups.discard)
+
+        applying = asyncio.create_task(app.apply_settings({"orchestrator": "adk"}))
+        await asyncio.sleep(0.05)
+        applying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+        releasing.set()
+        await release
+
+        assert app.settings.orchestrator.value == "deepagents"
+        assert controller.backend == "deepagents"
+        assert app._conversation_key(app.session_id) == key and not free(app, key)
+        assert free(app, ("adk", *key[1:]))
+        await controller.close()
