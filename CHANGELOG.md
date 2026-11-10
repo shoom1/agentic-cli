@@ -2407,15 +2407,15 @@ step; each entry says what to use instead.
 
 ### Fixed
 
-- **A cleanup no longer freezes the app while the services close.** A
-  sandbox's cleanup (`docker rm -f`, a kernel shutdown) and the job
-  manager's close (it takes the jobs directory's lock) ran on the event
-  loop, so the app's exit, the old manager of an
-  orchestrator change, a model switch that started afresh or a failed start's
-  rollback stopped the app, Ctrl+C included, while they ran. They run on a
-  worker thread now, beside the rest of the release, and a cancel still
-  stops only the wait; so do the services a cancelled start finishes
-  building after the cancel.
+- **On ADK and Deep Agents, a cleanup no longer freezes the app while the
+  sandbox closes.** The sandbox's cleanup (`docker rm -f`, a kernel
+  shutdown) ran on the event loop, so the app's exit, the old manager of an
+  orchestrator change, a model switch that started afresh or a failed
+  start's rollback stopped the app, Ctrl+C included, while it ran. The
+  services close on a worker thread now, beside the rest of the release, and
+  a cancel still stops only the wait; so do the services a cancelled start
+  finishes building after the cancel. The deprecated LangGraph backend's own
+  cleanup still closes them on the event loop.
 
 - **`write_file` and `edit_file` of an existing file work on Windows with
   Python 3.12.** Keeping the file's permission bits called `os.fchmod`,
