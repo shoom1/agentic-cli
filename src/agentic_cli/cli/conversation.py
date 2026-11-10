@@ -31,6 +31,14 @@ from agentic_cli.logging import Loggers
 
 logger = Loggers.cli()
 
+#: What the CLI says when asked for a conversation it does not keep (``/resume``,
+#: the picker, ``--resume``, ``--continue``, ``/sessions``): on the memory store
+#: (``Place.kept``) it is in one conversation at a time.
+NOT_KEPT = (
+    "session_store is memory: conversations are not kept. "
+    "Set it to sqlite to keep and resume them (applies at the next start)."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Place:
@@ -73,7 +81,8 @@ class Place:
     def kept(self) -> bool:
         """Whether the CLI keeps its conversations once they are left. Not on
         the memory store, which writes none to disk: the app is in one
-        conversation at a time there, and ``/new`` drops the one it leaves."""
+        conversation at a time there, ``/new`` drops the one it leaves, and
+        nothing is listed or opened again (``NOT_KEPT``)."""
         return self.store != "memory"
 
     def key(self, session_id: str) -> tuple:

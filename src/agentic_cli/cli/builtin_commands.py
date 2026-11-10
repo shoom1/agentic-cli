@@ -10,6 +10,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.conversation import NOT_KEPT
 from agentic_cli.cli.message_processor import _says_so_when_stopped
 from agentic_cli.cli.session_resume import NO_PROMPT
 
@@ -535,6 +536,12 @@ class PapersCommand(Command):
         app.session.add_rich(table)
 
 
+def _keeps_conversations(app: Any) -> bool:
+    """Whether the app keeps the conversations it leaves: not on the memory
+    store (``app.session_store``), where it is in one at a time."""
+    return getattr(app, "session_store", None) != "memory"
+
+
 def _session_workflow(app: Any) -> Any:
     """The app's workflow when it keeps sessions; otherwise None, and the user is told why."""
     try:
@@ -684,7 +691,8 @@ class SessionsCommand(Command):
 
 
 class ResumeSessionCommand(Command):
-    """Reopen a stored conversation: from a picker, or the one named."""
+    """Reopen a stored conversation: from a picker, or the one named. On the
+    memory store, which keeps none, it is refused (``NOT_KEPT``)."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -697,6 +705,9 @@ class ResumeSessionCommand(Command):
 
     async def execute(self, args: str, app: Any) -> None:
         """Resume the conversation named, or the one picked (``pick_session``)."""
+        if not _keeps_conversations(app):  # said before the workflow is needed
+            app.session.add_error(NOT_KEPT)
+            return
         if _session_workflow(app) is None:
             return
         session_id = self.parse_args(args).positional.strip()

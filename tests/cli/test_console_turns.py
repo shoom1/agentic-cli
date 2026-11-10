@@ -311,6 +311,47 @@ def test_new_on_the_memory_store_drops_the_conversation_left(tmp_path):
     assert "Resume this conversation" not in console.transcript
 
 
+def test_resume_on_the_memory_store_is_refused_and_the_turns_stay_here(tmp_path):
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    console = Console(cwd, home, args=("--store", "memory"))
+    try:
+        console.type_line("which")
+        console.expect("Session: ")
+        console.type_line("/resume")
+        console.expect("session_store is memory: conversations are not kept.")
+        console.type_line("which")
+        console.expect("Session: ")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    first, second = re.findall(r"Session: ([0-9a-f]{12})", console.transcript)
+    assert first == second
+    assert "Resume a conversation" not in console.transcript
+
+
+def test_resume_at_startup_on_the_memory_store_exits_before_the_prompt(tmp_path):
+    import pexpect
+
+    (tmp_path / "home").mkdir()
+    args = ("--store", "memory", "--resume", "zzz")
+    console = Console(tmp_path, tmp_path / "home", args=args, prompt=False)
+    try:
+        console.expect("session_store is memory: conversations are not kept. Set it to "
+                       "sqlite to keep and resume them (applies at the next start).",
+                       timeout=STARTUP_TIMEOUT)
+        console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
+        console.child.close()
+    finally:
+        console.child.close(force=True)
+
+    assert console.child.exitstatus == 1
+    assert ">>>" not in console.transcript
+    assert "Traceback (most recent call last)" not in console.transcript
+
+
 def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp_path):
     import pexpect
 

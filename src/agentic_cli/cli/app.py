@@ -40,7 +40,14 @@ from agentic_cli.cli.message_processor import (
     TurnStatus,
     _says_so_when_stopped,
 )
-from agentic_cli.cli.conversation import ConversationCore, Hold, Place, Switch, SwitchParts
+from agentic_cli.cli.conversation import (
+    NOT_KEPT,
+    ConversationCore,
+    Hold,
+    Place,
+    Switch,
+    SwitchParts,
+)
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
     SessionStart,
@@ -410,9 +417,6 @@ _STAYS = "stays"
 #: ... or the workflow came up meanwhile, nothing of it stored (a new
 #: conversation on the new backend, ``start_new_session``).
 _STARTS_ANEW = "starts anew"
-
-#: Why nothing is stored on the memory store, after a startup line.
-_MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
 #: Where ``/new``'s line says the conversation left is on the memory store.
 _NOT_KEPT_LEFT = "not kept (session_store is memory)"
@@ -1108,6 +1112,17 @@ class BaseCLIApp:
         never changes (``/new <backend>`` and ``/resume`` of another
         backend's conversation start that backend)."""
         return self._place().backend
+
+    @property
+    def session_store(self) -> str:
+        """The session store the conversations of this run are kept in
+        (``sqlite``, ``postgres``, ``memory``): the settings' as the run
+        started, for its whole life (a change of ``session_store`` takes
+        effect at the next start). On ``memory`` the app keeps one
+        conversation at a time: ``/new`` drops the one it leaves, and
+        ``/resume``, ``/sessions``, ``--continue`` and ``--resume`` are
+        refused (``cli/conversation.py::NOT_KEPT``)."""
+        return self._place().store
 
     @property
     def session_start(self) -> SessionStart:
@@ -2050,14 +2065,22 @@ class BaseCLIApp:
         (``pick_session``) names the backend it was picked on, and opens
         there.
 
+        On the memory store, which keeps one conversation at a time, it is
+        refused at once with ``NOT_KEPT`` ("session_store is memory:
+        conversations are not kept. ..."): nothing is looked up or held.
+
         Returns:
             True once ``session_id`` is the current conversation. False, with
             nothing changed, when it is already ("Already in this
             conversation."), is not stored ("No conversation '<id>'
             found.", also when it is deleted while it opens, with the
             backends that could not be read), could not be read ("Could not
-            open '<id>': ..."), or its backend did not start.
+            open '<id>': ..."), its backend did not start, or the run's
+            store is the memory store.
         """
+        if not self._place().kept:  # one conversation at a time: none to go back to
+            self.session.add_error(NOT_KEPT)
+            return False
         backend = getattr(session_id, "backend", None)  # the picker's
         async with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(str(session_id), backend)
@@ -2416,8 +2439,10 @@ class BaseCLIApp:
         waits on a dialog (``resume_session`` takes the lock).
 
         Returns:
-            The id picked, or None: Esc, or no other conversation is stored
-            ("No other conversations to resume."). The id is a
+            The id picked, or None: Esc, no other conversation is stored
+            ("No other conversations to resume."), or the run's store is
+            the memory store, which keeps none (``NOT_KEPT`` said, no
+            dialog). The id is a
             ``PickedConversation`` (``cli/session_resume.py``): a ``str``
             whose ``backend`` names the backend that keeps it, which
             ``resume_session`` opens it on.
@@ -2426,6 +2451,9 @@ class BaseCLIApp:
             RuntimeError: The workflow is not ready, or the session is not
                 running (a dialog needs it); ``/resume`` checks both.
         """
+        if not self._place().kept:  # one conversation at a time: none to pick
+            self.session.add_error(NOT_KEPT)
+            return None
         if not self._workflow_controller.is_ready:
             raise RuntimeError("Workflow not initialized yet")
         running = self._workflow_controller.backend
@@ -2435,8 +2463,7 @@ class BaseCLIApp:
             if (info.session_id, info.backend) != here
         ][:PICK_LIMIT]
         if not rows:
-            note = "" if self._place().locked else _MEMORY_NOTE
-            self.session.add_message("system", f"No other conversations to resume.{note}")
+            self.session.add_message("system", "No other conversations to resume.")
             return None
         # Drawn where the settings say now: /settings may have changed the
         # placement since the session started with its own.
@@ -2644,13 +2671,25 @@ class BaseCLIApp:
         chose named, and let go); a backend without sessions
         refuses every start but ``"new"`` (False, status 1). A store that
         fails refuses ``"resume"`` too, and starts the others in a new
-        conversation, saying why. On the memory store a line says why
-        nothing is stored.
+        conversation, saying why.
+
+        The memory store keeps no conversation to go back to: ``"resume"``
+        is refused with ``NOT_KEPT`` (False, status 1, as for an id that is
+        not stored: the user asked for that one, and a script sees that it
+        did not open), and ``"continue"`` starts a new conversation, saying
+        why; neither waits for the workflow, nor looks anything up.
         """
         mode, target = self._session_start.mode, self._session_start.session_id
         chosen, self._chosen_at_start = self._chosen_at_start, None
         if chosen is not None:  # --continue chose before the build (on its backend)
             self._pending_hold = chosen[0]
+        if mode != "new" and not self._place().kept:  # nothing kept to go back to
+            if mode == "resume":
+                self.session.add_error(NOT_KEPT)
+                self.exit_status = 1
+                return False
+            self.session.add_warning(f"{NOT_KEPT} Starting a new conversation.")
+            mode = "new"
         if not await self._workflow_controller.ensure_initialized(self.session):
             # The backend the start moved to for the conversation asked for
             # (not the settings') is named: the run stays on it.
@@ -2685,7 +2724,6 @@ class BaseCLIApp:
             self.session.add_error("This app's backend keeps no sessions.")
             self.exit_status = 1
             return False
-        note = "" if self._place().locked else _MEMORY_NOTE
         try:
             if mode == "resume":
                 # On every installed backend: the running one's first.
@@ -2693,14 +2731,13 @@ class BaseCLIApp:
                     rows = await stored.where(target)
                     unread = stored.notes()
                 if not rows:
-                    # On the memory store there is nothing to open instead.
                     run = (
                         f": {self._command} --continue opens the newest, "
                         "/resume in the app picks one."
-                        if self._command and not note else "."
+                        if self._command else "."
                     )
                     self.session.add_error(" ".join(
-                        [f"No conversation '{target}' found{run}{note}", *unread]
+                        [f"No conversation '{target}' found{run}", *unread]
                     ))
                     self.exit_status = 1
                     return False
@@ -2726,7 +2763,7 @@ class BaseCLIApp:
                     ))
                 elif self._pending_resume is None:
                     self.session.add_message(
-                        "system", f"No conversation to continue; starting a new one.{note}"
+                        "system", "No conversation to continue; starting a new one."
                     )
         except Exception as error:  # noqa: BLE001 - the store failed, not the app
             logger.debug("startup_session_lookup_failed", mode=mode, exc_info=True)

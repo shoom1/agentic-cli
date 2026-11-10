@@ -9,6 +9,13 @@ memories are proposed, which read it, and says so ("Previous: <id>, not kept
 backend that fails to start drops nothing. A finished job of a conversation
 dropped is told as unavailable, as a deleted conversation's is.
 
+Nothing is kept to go back to, so ``/resume`` (with an id or the picker),
+the app's ``resume_session`` and ``pick_session``, ``--resume <id>`` and
+``--continue`` are refused with one line (``NOT_KEPT``), and nothing changes:
+no conversation is looked up, loaded or held, and no backend is started.
+``--resume <id>`` then exits with status 1, as for an id that is not stored;
+``--continue`` starts a new conversation and says why, once.
+
 A persistent store (sqlite, the default; postgres) keeps every conversation,
 and the run never switches the store by itself.
 
@@ -26,6 +33,7 @@ import pytest
 pytest.importorskip("google.adk")
 
 from agentic_cli.cli.message_processor import CANCELLED_LINE  # noqa: E402
+from agentic_cli.cli.session_args import SessionStart  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from tests.cli.test_compact_and_new import (  # noqa: E402,F401
@@ -39,11 +47,18 @@ from tests.cli.test_compact_and_new import (  # noqa: E402,F401
     solo,
 )
 from tests.cli import test_conversation_switch as switch  # noqa: E402
+from tests.cli import test_resume_at_startup as startup  # noqa: E402
+from tests.cli.console_app import ScriptedManager  # noqa: E402
+from tests.cli.test_resume_at_startup import manager  # noqa: E402,F401
 from tests.cli.test_resume_session import Workflow as StoredWorkflow  # noqa: E402
 from tests.cli.test_resume_session import conversation  # noqa: E402
 from tests.cli.test_waiting_jobs import Jobs, finished  # noqa: E402
 
 DROPPED = "not kept (session_store is memory)"
+NOT_KEPT = (
+    "session_store is memory: conversations are not kept. "
+    "Set it to sqlite to keep and resume them (applies at the next start)."
+)
 
 
 class Workflow(StoredWorkflow):
@@ -77,9 +92,9 @@ class Workflow(StoredWorkflow):
         return record.session_id in self.stored
 
 
-def on_memory(**values):
-    """An app on the memory store, running ``Workflow``."""
-    workflow = Workflow()
+def on_memory(*stored, **values):
+    """An app on the memory store, running ``Workflow`` over ``stored``."""
+    workflow = Workflow(*stored)
     app = app_on(workflow, BaseSettings(session_store="memory", **values))
     return app, workflow
 
@@ -219,6 +234,139 @@ class TestNewDropsTheConversationLeft:
         assert said(app.session, "add_message")[-1] == (
             f"New conversation {new}. Previous: {old}, listed in /sessions."
         )
+
+
+class TestResumeIsRefused:
+    """The conversation the store holds (``abc``, as an app's own code may
+    leave one) is not opened either: nothing is kept to go back to."""
+
+    @staticmethod
+    def started(monkeypatch):
+        built = switch.TestAPlaceChangeWhileTheWorkflowIsDown.builds(
+            monkeypatch, lambda n, b: False
+        )
+        app, workflow = on_memory(conversation("abc", "Plan the trip", 2))
+        return app, workflow, built
+
+    async def test_resume_by_id(self, project, monkeypatch):
+        app, workflow, built = self.started(monkeypatch)
+        before = app.session_id
+
+        await app.process_input("/resume abc")
+
+        assert said(app.session, "add_error") == [NOT_KEPT]
+        assert app.session_id == before and workflow.calls == [] and built == []
+
+    async def test_the_picker(self, project, monkeypatch):
+        app, workflow, built = self.started(monkeypatch)
+        before = app.session_id
+
+        await app.process_input("/resume")
+
+        assert said(app.session, "add_error") == [NOT_KEPT]
+        assert app.session.show_dialog.call_count == 0
+        assert app.session_id == before and workflow.calls == [] and built == []
+
+    async def test_the_apps_resume_session(self, project, monkeypatch):
+        app, workflow, _ = self.started(monkeypatch)
+        before = app.session_id
+
+        assert await app.resume_session("abc") is False
+
+        assert said(app.session, "add_error") == [NOT_KEPT]
+        assert app.session_id == before and workflow.calls == []
+
+    async def test_the_apps_pick_session(self, project, monkeypatch):
+        app, workflow, _ = self.started(monkeypatch)
+
+        assert await app.pick_session() is None
+
+        assert said(app.session, "add_error") == [NOT_KEPT]
+        assert app.session.show_dialog.call_count == 0 and workflow.calls == []
+
+    async def test_while_the_workflow_is_down_it_says_why_all_the_same(
+        self, project, monkeypatch
+    ):
+        """No workflow is needed to say so (``pick_session`` raises no
+        "not initialized")."""
+        app, _, _ = self.started(monkeypatch)
+        controller = app._workflow_controller
+        controller._workflow, controller._init_error = None, RuntimeError("no API key")
+
+        await app.process_input("/resume")
+        picked = await app.pick_session()
+
+        assert picked is None
+        assert said(app.session, "add_error") == [NOT_KEPT, NOT_KEPT]
+        assert said(app.session, "add_warning") == []
+
+
+class TestAtStartup:
+    """``--resume <id>`` exits with status 1, as for an id that is not
+    stored: the user asked for that conversation, and a script sees that it
+    did not open. ``--continue`` starts a new conversation, as when nothing
+    is stored, and says why once. Neither looks anything up, nor waits for
+    the workflow to say so."""
+
+    @pytest.fixture
+    def looked(self, monkeypatch) -> list[str]:
+        """The backends whose stored conversations were looked at."""
+        from agentic_cli.cli import stored_conversations
+
+        looked: list[str] = []
+        opener = stored_conversations.open_session_reader
+
+        async def recording(backend, settings, *, store=None):
+            looked.append(backend)
+            return await opener(backend, settings, store=store)
+
+        monkeypatch.setattr(stored_conversations, "open_session_reader", recording)
+        return looked
+
+    async def test_resume_by_id_is_refused_with_status_1(self, manager, looked):
+        startup.store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        session = startup.Session()
+        app = startup.app_with(session, SessionStart("resume", "abc"), store="memory")
+        app._command = "my-app"
+
+        await app.run()
+
+        assert app.exit_status == 1 and not session.prompted
+        assert session.said("error") == [NOT_KEPT]
+        assert not startup.resumed(session) and "Goodbye!" not in session.said("system")
+        assert looked == []
+
+    async def test_continue_starts_a_new_one_and_says_why(self, manager, looked):
+        startup.store(manager, "abc", "Plan the trip", "Sure.", hours=2)
+        session = startup.Session()
+        app = startup.app_with(session, SessionStart("continue"), store="memory")
+        fresh = app.session_id
+
+        await app.run()
+
+        assert app.session_id == fresh and session.prompted and app.exit_status == 0
+        assert session.said("warning") == [f"{NOT_KEPT} Starting a new conversation."]
+        assert not startup.resumed(session)
+        assert not any(line.startswith("No conversation") for line in session.said("system"))
+        assert looked == []
+
+    async def test_continue_with_a_workflow_that_cannot_start_points_at_no_resume(
+        self, manager, tmp_path, monkeypatch
+    ):
+        (tmp_path / "init-fails").touch()
+        (tmp_path / "ready").touch()  # a later retry would start
+        monkeypatch.setattr(ScriptedManager, "initializations", 0)
+        session = startup.Session()
+        app = startup.app_with(session, SessionStart("continue"), store="memory")
+
+        await app.run()
+
+        assert session.prompted and app.exit_status == 0
+        assert session.said("warning") == [
+            f"{NOT_KEPT} Starting a new conversation.",
+            "The workflow did not start. Fix it with /settings; your next message "
+            "starts it again.",
+        ]
 
 
 class TestNewOnAnotherBackend:
