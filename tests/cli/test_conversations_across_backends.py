@@ -178,6 +178,24 @@ class TestListConversations:
         assert readers.opened == []
 
 
+class TestTheLook:
+    async def test_a_look_stopped_while_it_opens_closes_the_readers_it_opened(self, readers):
+        """No workflow runs (before the first start): every backend's reader
+        opens, and a Ctrl+C at the second closes the first."""
+        import asyncio
+
+        from agentic_cli.cli.stored_conversations import StoredConversations
+
+        readers.failing["deepagents"] = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            async with StoredConversations(BaseSettings(session_store="sqlite"), "sqlite"):
+                pass
+
+        assert [r.backend for r in readers.opened] == ["adk"]
+        assert readers.opened[0].closed
+
+
 class TestThePicker:
     async def test_it_lists_every_backend_and_returns_the_pick_with_its_backend(self, readers):
         readers.stored["deepagents"] = [row("d1", "On Deep Agents", hours=1)]

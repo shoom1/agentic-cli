@@ -21,9 +21,11 @@ through ``FakeAPI``, Deep Agents on scripted models), on sqlite.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sqlite3
 import sys
+import threading
 
 import pytest
 
@@ -37,6 +39,7 @@ from agentic_cli.workflow.base_manager import BaseWorkflowManager  # noqa: E402
 from agentic_cli.workflow.checkpointers import deepagents_sqlite_path  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as deepagents_manager  # noqa: E402
+from agentic_cli.workflow.deepagents import sessions as deepagents_sessions  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.session_readers import open_session_reader  # noqa: E402
 from agentic_cli.workflow.sessions import SessionInfo  # noqa: E402
@@ -231,6 +234,71 @@ class TestAStoreNotYetItsBackends:
             assert await reader.list() == []
 
         assert file.stat().st_size == 0
+
+
+def _threads() -> set[int]:
+    return {thread.ident for thread in threading.enumerate()}
+
+
+async def _left_after(before: set[int]) -> set[str]:
+    """The threads started since ``before`` still running, a moment after
+    (a connection's thread ends as it closes)."""
+    for _ in range(100):
+        left = _threads() - before
+        if not left:
+            return set()
+        await asyncio.sleep(0.02)
+    return {thread.name for thread in threading.enumerate() if thread.ident in left}
+
+
+class TestItClosesWhatItOpened:
+    """A reader holds its store's connections (ADK's engine, Deep Agents'
+    checkpointer and index, each on a thread of its own): ``aclose`` closes
+    them, and so does an open that fails or is cancelled half way."""
+
+    async def test_aclose_closes_every_connection(self, backend):
+        app_settings = sqlite_settings()
+        await stored_by_its_manager(backend, app_settings)
+        await asyncio.sleep(0.1)
+        before = _threads()
+
+        reader = await open_session_reader(backend, app_settings)
+        assert [row.session_id for row in await reader.list()] == ["s1", "s2"]
+        assert await reader.exists("s1")
+        opened = _threads() - before
+        await reader.aclose()
+
+        assert opened, "the reader opened no connection to close"
+        assert await _left_after(before) == set()
+
+    @pytest.mark.parametrize("stops", ["fails", "is cancelled"])
+    async def test_a_deep_agents_open_stopped_after_the_checkpointer_closes_it(
+        self, stops, project, monkeypatch
+    ):
+        app_settings = sqlite_settings()
+        monkeypatch.setattr(deepagents_manager, "build_chat_model",
+                            ScriptedModels(solo=[ai(reply) for reply in REPLIES]))
+        await stored_by_its_manager("deepagents", app_settings)
+        await asyncio.sleep(0.1)
+        before = _threads()
+        opening = asyncio.Event()
+
+        async def store_stops(*args, **kwargs):
+            opening.set()
+            if stops == "fails":
+                raise RuntimeError("the index cannot open")
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(deepagents_sessions, "open_store", store_stops)
+        task = asyncio.create_task(open_session_reader("deepagents", app_settings))
+        await asyncio.wait_for(opening.wait(), 10)
+        assert _threads() - before, "the checkpointer was not open yet"
+        if stops == "is cancelled":
+            task.cancel()
+        with pytest.raises((RuntimeError, asyncio.CancelledError)):
+            await task
+
+        assert await _left_after(before) == set()
 
 
 class TestBackendsWithoutOne:

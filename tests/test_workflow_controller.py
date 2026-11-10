@@ -785,6 +785,36 @@ class TestTheRunsServicesMoveWithTheBackend:
 
         kept.cleanup.assert_awaited_once()
 
+    async def test_a_ctrl_c_while_the_give_waits_releases_the_new_one_and_keeps_the_old(self):
+        """The give waits for the old manager's locks (a turn of it, say): a
+        cancel there gave nothing, so the old manager stays published with
+        its services, and the new one, which borrowed them, is released."""
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        giving = asyncio.Event()
+
+        async def waits(loan):
+            giving.set()
+            await asyncio.Event().wait()
+
+        old.give_services = AsyncMock(side_effect=waits)
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            switching = asyncio.create_task(controller.switch_backend("langgraph"))
+            await asyncio.wait_for(giving.wait(), timeout=5)
+            switching.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await switching
+            await controller._join_releases()
+
+        new.cleanup.assert_awaited_once()
+        old.cleanup.assert_not_awaited()
+        assert controller._workflow is old and controller.backend == "adk"
+
     async def test_a_manager_that_lends_nothing_starts_on_its_own(self):
         """An application's own manager, not a ``BaseWorkflowManager``: the
         new one builds its own services, as before."""
