@@ -6,7 +6,7 @@ logic that runs on every message in the hot path.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -41,18 +41,20 @@ class ADKEventProcessor:
 
     Owns an optional on_event callback for event transformation/filtering.
 
-    Only the root agent replies to the user. An event another agent wrote (a
-    sub-agent its parent delegated to, ``workflow/adk/delegation.py``) is its
-    work: its text is marked ``metadata["agent"]``/``["subagent"]`` (the CLI
-    shows it as activity, not as the reply), and its call's usage is
-    ``purpose="subagent"``, since that prompt is the sub-agent's brief, not
-    the conversation's context. A sub-agent's failed model call does not end
-    the turn on ADK: ADK's delegation tool hands its parent "Error running
-    sub-agent: …" and the parent carries on. ADK records the provider's reason
-    on the sub-agent's error event, which becomes a recoverable ``ERROR``,
-    "<agent> failed: <reason>", so the user is told why. With no root (a
-    native ADK YAML app, whose agents transfer and do own the reply) nothing
-    is marked.
+    Only the agents that reply to the user write the reply
+    (``reply_agents``): the root, and every chat-mode agent it can transfer
+    to, which takes the conversation (a native ADK YAML app's). An event
+    another agent wrote (a sub-agent its parent delegated to,
+    ``workflow/adk/delegation.py``) is its work: its text is marked
+    ``metadata["agent"]``/``["subagent"]`` (the CLI shows it as activity, not
+    as the reply), and its call's usage is ``purpose="subagent"``, since that
+    prompt is the sub-agent's brief, not the conversation's context. A
+    sub-agent's failed model call does not end the turn on ADK: ADK's
+    delegation tool hands its parent "Error running sub-agent: …" and the
+    parent carries on. ADK records the provider's reason on the sub-agent's
+    error event, which becomes a recoverable ``ERROR``, "<agent> failed:
+    <reason>", so the user is told why. With neither a root nor reply agents,
+    nothing is marked.
 
     A call's ``LLM_USAGE`` is credited to the agent that made it, the event's
     author: ``metadata["agent"]``, that agent's own model (``models``; the
@@ -71,11 +73,11 @@ class ADKEventProcessor:
     nothing reports nothing, and a list whose tasks are all done stays in the
     session for ``get_tasks``.
 
-    A conversation the main agent's model no longer takes ends its turn with
-    an error response from the overflow handler
+    A conversation the model of an agent that replies no longer takes ends
+    its turn with an error response from the overflow handler
     (``workflow/adk/overflow_plugin.py``), ``error_code="CONTEXT_OVERFLOW"``:
     it becomes the turn's ``ERROR``, with the handler's clear text. A reply of
-    the main agent's that is no answer (nothing but thoughts or blank text,
+    such an agent's that is no answer (nothing but thoughts or blank text,
     and an error code of ``NO_ANSWER_CODES``: a safety stop, a blocked prompt,
     a malformed function call, every token spent thinking, nothing at all; or,
     with no error code, a finish reason other than STOP: a Claude refusal, a
@@ -91,12 +93,14 @@ class ADKEventProcessor:
         model: The default model, which usage names for an agent ``models``
             does not hold.
         on_event: Optional hook to transform/filter events before yielding.
-        root: The root agent's name, or None to mark nothing.
+        root: The root agent's name: the one agent that replies, when
+            ``reply_agents`` is not given.
         models: Each agent's model reference, by name.
         budgets: Each agent's context numbers, by name.
+        reply_agents: The agents that reply to the user, the root among them
+            (``workflow/adk/build.py::reply_agents``); None for the root alone.
 
-    ``root``, ``models`` and ``budgets`` are attributes the manager sets at
-    each initialization, when the agents are built.
+    The manager builds one at each initialization, from the app it built.
     """
 
     def __init__(
@@ -106,10 +110,14 @@ class ADKEventProcessor:
         root: str | None = None,
         models: Mapping[str, str] | None = None,
         budgets: Mapping[str, ContextBudget] | None = None,
+        reply_agents: Collection[str] | None = None,
     ) -> None:
         self._model = model
         self._on_event = on_event
         self.root = root
+        self.reply_agents: Collection[str] | None = (
+            None if reply_agents is None else frozenset(reply_agents)
+        )
         self.models: Mapping[str, str] = models or {}
         self.budgets: Mapping[str, ContextBudget] = budgets or {}
         # The task list this turn last reported, None before any.
@@ -246,9 +254,13 @@ class ADKEventProcessor:
         )
 
     def _subagent(self, adk_event: Any) -> str | None:
-        """The sub-agent that wrote ``adk_event``, or None (the root, the user)."""
+        """The sub-agent that wrote ``adk_event``, or None (an agent that
+        replies, the user)."""
         agent = self._agent(adk_event)
-        if self.root is None or agent in (None, self.root):
+        replying = self.reply_agents
+        if replying is None:
+            replying = () if self.root is None else (self.root,)
+        if agent is None or not replying or agent in replying:
             return None
         return agent
 

@@ -606,12 +606,25 @@ class TestTheStream:
         finally:
             await manager.cleanup()
 
-    async def test_a_native_app_has_none(self, project, tmp_path):
+    async def test_a_native_apps_are_its_root_and_the_agents_it_transfers_to(
+        self, project, tmp_path
+    ):
+        """A native ADK YAML app's chat-mode sub-agent takes the conversation
+        and replies; a single-turn one is a tool, whose text is its work."""
+        (tmp_path / "helper.yaml").write_text(textwrap.dedent("""
+            agent_class: LlmAgent
+            name: helper
+            model: claude-sonnet-4-6
+            instruction: Help.
+        """))
         (tmp_path / "root_agent.yaml").write_text(textwrap.dedent("""
             agent_class: LlmAgent
             name: root
             model: claude-sonnet-4-6
             instruction: Route.
+            sub_agents:
+              - config_path: helper.yaml
+              - code: tests.workflow.adk.native_agents.solver
         """))
         manager = GoogleADKWorkflowManager(
             agent_configs=[],
@@ -620,14 +633,16 @@ class TestTheStream:
         )
         await manager.initialize_services()
         try:
-            assert manager._event_processor.root is None
-            # Each agent a native app transfers to replies: fact extraction
-            # reads them all.
+            assert manager._event_processor.reply_agents == {"root", "helper"}
+            # Fact extraction reads what the agents that reply wrote.
             service = manager._session_service
             session = await service.create_session(
                 app_name=manager.app_name, user_id="u", session_id="s"
             )
-            for author, role, text in (("user", "user", "Hi."), ("helper", "model", "Helper here.")):
+            for author, role, text in (
+                ("user", "user", "Hi."), ("solver", "model", "4"),
+                ("helper", "model", "Helper here."),
+            ):
                 await service.append_event(session, Event(
                     author=author, invocation_id="i1",
                     content=types.Content(role=role, parts=[types.Part.from_text(text=text)]),

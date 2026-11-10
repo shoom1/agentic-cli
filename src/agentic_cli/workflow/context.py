@@ -262,8 +262,9 @@ def usage_fields(budget: ContextBudget | None) -> dict[str, int | bool]:
     ``context_trigger`` is the prompt size at which the agent's conversation
     is summarized, and ``window_known`` whether its window is the model's own
     or the ``UNKNOWN_WINDOW`` floor: the CLI shows the main agent's last
-    prompt against that trigger. Nothing for an agent with no budget, one
-    whose context nobody manages (a native ADK YAML app's, LangGraph's).
+    prompt against that trigger. Nothing for an agent with no budget: one
+    whose model did not resolve (a native ADK YAML app's), or whose context
+    nobody manages (LangGraph's).
     """
     if budget is None:
         return {}

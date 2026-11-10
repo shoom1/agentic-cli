@@ -1,10 +1,11 @@
-"""ADK: the app's whole plugin chain, in order, for each kind of app.
+"""ADK: the app's whole plugin chain, in order, whoever built its agents.
 
 The order is the backend's core invariant. ADK runs a callback of each
 plugin in turn and stops at the first that returns a value, so a plugin
-placed after one that answers never runs for that call. The chain is built
-in two places (``_init_plugins`` gives its head, ``_do_initialize`` the
-rest), and these tests pin it whole, so a move anywhere fails one of them:
+placed after one that answers never runs for that call; an agent's own
+callbacks run after every plugin, and only when none answered. The chain
+is listed in one place (``_plugin_chain``, whose head is ``_init_plugins``),
+and these tests pin it whole, so a move anywhere fails one of them:
 
 - ``main_agent`` first: it records the running agent, which the summarizer
   reads;
@@ -24,9 +25,8 @@ rest), and these tests pin it whole, so a move anywhere fails one of them:
   plugin edited;
 - ``llm_logging_sent`` last: it logs the request as sent.
 
-A native ADK YAML app gets the head alone (and the context cache): its
-agents' own after-tool callbacks would be skipped by the cap, and its
-agents' context is ADK's own.
+A native ADK YAML app gets the same chain: only the building of its agents
+differs (``workflow/adk/build.py``).
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.memory_tools import search_memory  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from tests.workflow.adk.fakes import dead_base_urls  # noqa: E402
 from tests.workflow.test_adk_context_cache import _native_yaml  # noqa: E402
 
 MODEL = "claude-sonnet-4-6"
@@ -50,6 +51,7 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    dead_base_urls(monkeypatch)
     return tmp_path
 
 
@@ -110,21 +112,44 @@ async def test_a_plain_config_built_app(project):
     ]
 
 
-async def test_a_native_adk_yaml_app(project):
+async def test_a_native_adk_yaml_app_gets_the_same_chain(project):
     manager = GoogleADKWorkflowManager(
         agent_configs=[], settings=_settings(extras=False),
         adk_config_path=_native_yaml(project, MODEL, helper=True),
     )
 
-    assert await _chain(manager) == ["permission", "tool_error"]
+    assert await _chain(manager) == [
+        "main_agent",
+        "permission",
+        "tool_error",
+        "foreign_reasoning",
+        "interrupted_calls",
+        "tool_result_cap",
+        "context_overflow",
+        "fit_guard",
+    ]
 
 
-async def test_a_native_adk_yaml_app_with_the_raw_log_and_caching(project):
+async def test_a_native_adk_yaml_app_with_every_option(project):
+    """The raw log, a caching model and a root whose YAML names a memory tool."""
+    path = _native_yaml(project, MODEL, helper=True)
+    with open(path, "a", encoding="utf-8") as yaml:
+        yaml.write("tools:\n  - name: agentic_cli.tools.memory_tools.search_memory\n")
     manager = GoogleADKWorkflowManager(
-        agent_configs=[], settings=_settings(extras=True),
-        adk_config_path=_native_yaml(project, MODEL, helper=True),
+        agent_configs=[], settings=_settings(extras=True), adk_config_path=path,
     )
 
     assert await _chain(manager) == [
-        "permission", "tool_error", "llm_logging", "context_cache",
+        "main_agent",
+        "permission",
+        "tool_error",
+        "llm_logging",
+        "foreign_reasoning",
+        "context_cache",
+        "interrupted_calls",
+        "tool_result_cap",
+        "memory_index",
+        "context_overflow",
+        "fit_guard",
+        "llm_logging_sent",
     ]

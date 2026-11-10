@@ -77,6 +77,10 @@ the start of the entry's title.
   beside other calls; a prompt's `{name}` is not filled from session state.
   (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
   ADK, an agent's prompt…**)
+- A native ADK YAML app (`adk_config_path`) needs an `LlmAgent` root, agent
+  names unique across its tree and no task-mode agent; agent configs passed
+  with it are ignored, so name its tools in the YAML; a YAML ADK cannot load
+  raises `AgentGraphError`. (Changed: **A native ADK YAML app runs as…**)
 - `app_name` comes only from the settings class or the constructor; ADK 2
   refuses one that does not start with a letter, holds other than letters,
   digits, `_` and `-`, or is `user`. Code calling ADK follows ADK 2's notes.
@@ -1057,7 +1061,7 @@ the start of the entry's title.
   first kept message and reports `CONTEXT_TRIMMED` (`source="fit_guard"`,
   `turns_dropped`) once a turn. The raw LLM log (`raw_llm_logging`) records a
   request as it is sent, after that trim; the summary call and an overflow's
-  retry are not in it. A native ADK YAML app gets none of it.
+  retry are not in it. A native ADK YAML app gets it too (see Changed).
 - **`EventType.CONTEXT_SUMMARIZING`**, from
   `WorkflowEvent.context_summarizing(agent=None)`: a summary of the earlier
   conversation is starting. It is reported as the summary call starts, while
@@ -1101,8 +1105,8 @@ the start of the entry's title.
   again without a second file. Every result is covered: registered, MCP and
   skill tools, `job_result`, and a sub-agent's answer (Deep Agents' `task`,
   and on ADK the tool named after the sub-agent). ADK's
-  `ToolResultCapPlugin` caps apps built from agent configs
-  (a native ADK YAML app's own `after_tool_callback`s would be skipped);
+  `ToolResultCapPlugin` caps every agent but one with `after_tool_callback`s
+  of its own (a native ADK YAML app's), which ADK would skip once it cut;
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
   and the tool-error middleware, so an error result is capped too. Each
   tool's own limits stay; this is the net beneath them. ADK's Claude and
@@ -1140,8 +1144,8 @@ the start of the entry's title.
   `trigger` and the `keep` tail, computed when the models are resolved,
   before any service is built. It raises `RuntimeError` before the manager
   initializes and `KeyError` for an agent whose context the manager does not
-  manage: LangGraph and a native ADK YAML app manage none, and their
-  `root_agent_name` is None. On ADK and
+  manage, a native ADK YAML app's whose model does not resolve; LangGraph
+  manages none, and its `root_agent_name` is None. On ADK and
   Deep Agents every `LLM_USAGE` an agent's call reports now carries `agent`,
   that agent's `context_trigger` and `window_known`; a summary's carries
   those of the agent it summarized. A sub-agent's call stays
@@ -1154,8 +1158,9 @@ the start of the entry's title.
   that the summary comes at 200,000. The bar names the main agent's own
   model (it named the default model, beside the main agent's trigger). A
   sub-agent's call and a summary's never move it, an inheriting sub-agent's
-  neither. On a model whose window is unknown, on LangGraph and in a native
-  ADK YAML app, it is the prompt alone, `ctx 45k`. A `/settings` change
+  neither. On a model whose window is unknown, on LangGraph and for a native
+  ADK YAML app's main agent whose model does not resolve, it is the prompt
+  alone, `ctx 45k`. A `/settings` change
   that rebuilds the agents shows the new trigger at once, not after the
   next call. Token counts read "146k", not "146.0k".
   `/status` adds the main agent's rows after Services: Main Agent (its name
@@ -1206,8 +1211,9 @@ the start of the entry's title.
   and never says a summary was made; a summary that fails raises the
   provider's error, and one that comes back empty `ValueError` ("… wrote
   an empty summary"), with no warning of its own. A native ADK YAML app
-  has none: `supports_compact` is False there, and `compact` raises
-  `NotImplementedError`. Both rest on private ADK and Deep Agents methods,
+  whose main agent's model does not resolve has none: `supports_compact` is
+  False once it is built, and `compact` raises `NotImplementedError`. Both
+  rest on private ADK and Deep Agents methods,
   each pinned by a contract test (`deepagents` stays on 0.7.x).
 - **`/compact [focus]` and `/new`**, the two commands the overflow message
   names, and their public twins `BaseCLIApp.compact(focus=None) ->
@@ -1225,9 +1231,9 @@ the start of the entry's title.
   context. It says "Nothing to summarize yet." with nothing before the kept
   tail (or no conversation yet), "Could not summarize: <error>" once when
   the summary fails (the error's type when it has no words), and "/compact
-  is not supported on this backend" on LangGraph, with no events box (a
-  native ADK YAML app, which no `BaseCLIApp` starts, has no `compact`
-  either). `/new` starts a new conversation without a
+  is not supported on this backend" on LangGraph, with no events box (and
+  for an app whose main agent has no context budget). `/new` starts a new
+  conversation without a
   restart, under the turn lock: memories are proposed from the conversation
   being left first when `auto_extract_session_facts` is on, as at exit,
   under the status line "Looking for memories to propose…" (a failure
@@ -1381,6 +1387,59 @@ the start of the entry's title.
 
 ### Changed
 
+- **A native ADK YAML app runs as an app built from configs; only the building
+  of its agents differs.** In 0.6 a native app (`adk_config_path`) and one
+  built from `AgentConfig`s ran the same plugins. What 0.7.0 adds to an app
+  built from configs (the summary, the fit guard, the overflow handler, the
+  tool result cap, interrupted calls, the memory index, the tool thread pool,
+  the job notice) is a native app's too: the run reads what it needs from the
+  tree, whoever built it (`workflow/adk/build.py`). Its YAML is loaded, and
+  the code it names imported, when the manager validates its agents, before
+  any model, service or store (the settings' API keys already exported, so
+  a module that reads one as it is imported finds it), and once per
+  manager: a retry after a failed start and a model switch build on the
+  same agents, where 0.6 loaded the YAML again and ADK refused a
+  module-level `code:` agent ("already has a parent agent"). An edit of the
+  YAML takes effect in a new manager. What changes for an app moving from
+  0.6:
+  - The root must be an `LlmAgent`. A `SequentialAgent`, `LoopAgent`,
+    `ParallelAgent`, a workflow or another class at the root raises
+    `AgentGraphError` naming it: make an `LlmAgent` the root, with the other
+    agent as its sub-agent.
+  - A YAML ADK cannot load raises `AgentGraphError` (a `ValueError`), "cannot
+    load the native ADK app <path>: <type>: <ADK's message>", ADK's error as
+    its cause, where 0.6 raised ADK's own (`FileNotFoundError`, a YAML
+    `ParserError`, pydantic's `ValidationError`, `ModuleNotFoundError`).
+    Catch `AgentGraphError`, as for a config-built graph.
+  - Agent names must be unique across the tree, as in a config-built graph
+    (ADK requires it only among siblings): a name used twice raises
+    `AgentGraphError` ("Duplicate agent name(s): …"). Rename one.
+  - A task-mode agent (ADK 2's `mode="task"`, through a `code:` sub-agent)
+    raises `AgentGraphError`: "agent 'x' is in task mode, which is not
+    supported; use a chat-mode sub-agent". ADK runs its delegation outside
+    the tool pipeline and keeps the call open across turns.
+  - Agent configs passed with `adk_config_path` (as
+    `create_workflow_manager_from_settings` passes an app's) are ignored, with
+    a warning (`adk_native_configs_ignored`), where 0.6 built the services
+    their tools declared. Name the tools in the YAML instead: the services
+    its registered tools declare are built.
+  - Each agent's model is the one ADK runs it on (its YAML's `model` or
+    `model_code`, else its parent's, else ADK's default), resolved through
+    the model catalog for its context budget, its usage and the context
+    cache; 0.6 named the default model for every agent. An agent whose model
+    does not resolve gets no budget, with a warning
+    (`adk_agent_model_unresolved`), and a main agent without one is not
+    summarized (`supports_compact` is False once the app is built).
+  - The agents that reply are the root and every chat-mode agent it
+    transfers to: their text is the reply and what fact extraction reads,
+    and a conversation their model no longer takes ends the turn with the
+    clear error. Only the root's conversation is summarized and carries the
+    memory index; an agent it transferred to is trimmed by the fit guard.
+  - An agent's own callbacks run after every plugin, as ADK runs them, and
+    only when none answered the call: before-model callbacks see the request
+    after the fit guard, and before-tool callbacks do not run for a call the
+    permission gate denied. An agent with after-tool callbacks of its own is
+    left out by the tool result cap, so they still see every result whole.
 - **A failed ADK turn yields one `ERROR` event instead of raising.** On ADK
   `process()` and `resume_with_job_result()` raised what failed a turn (a
   provider's error, a rate limit), where Deep Agents yielded one `ERROR`. On
@@ -1482,9 +1541,10 @@ the start of the entry's title.
   logging may now see google-genai's "non-text parts in the response"
   warning). Each `GoogleADKWorkflowManager` construction pointed ADK's
   process-wide model registry at `DirectAnthropicLlm` for `claude-*` names
-  again and cleared its cache; the first one does it, once per process
-  (`anthropic_llm.ensure_direct_anthropic`; `register_direct_anthropic`
-  still registers when called).
+  again and cleared its cache; now only loading a native ADK YAML app does
+  it, once per process (agents built from configs never go through the
+  registry: `anthropic_llm.ensure_direct_anthropic`;
+  `register_direct_anthropic` still registers when called).
 
 - **A call to a tool name the agent does not have reads the same on ADK and
   Deep Agents, and is no warning.** The model reads ADK's own first two
@@ -1507,8 +1567,8 @@ the start of the entry's title.
   the log context, enters turn admission and the workflow context, and
   yields the conversation's `SessionRef`. `resume_with_job_result(record,
   result=None)` is the base's: the record must name its conversation (its
-  session and user, and its call where the job answers it, as a native ADK
-  YAML app's does); then, as a turn of that conversation, the conversation
+  session and user, and its call where a backend's job answers it); then,
+  as a turn of that conversation, the conversation
   must be there (the hook `_conversation_exists(ref)`), the result, when not
   given, is read from the job manager on a worker thread, and the hook
   `_deliver_job_notice(notice, record, result, ref)` tells the root agent
@@ -1546,8 +1606,8 @@ the start of the entry's title.
   does). The base also computes each agent's context numbers, once the models
   are resolved and before any service is built; a backend that summarizes by
   them says so in `_manages_context()` and reads `_budgets` in
-  `_do_initialize` (ADK for an app built from agent configs, and Deep Agents,
-  do; LangGraph and a native ADK YAML app have none).
+  `_do_initialize` (ADK, whoever built its agents, and Deep Agents, do;
+  LangGraph has none).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -1649,8 +1709,9 @@ the start of the entry's title.
   unknown group is an error instead of an exception.
 
 - **On ADK, synchronous tools run in worker threads, as on Deep Agents.**
-  A config-built app's synchronous function tools, the framework's and its
-  own, now run in ADK's tool thread pool with a copy of the turn's context
+  An app's synchronous function tools, the framework's and its own, a
+  native ADK YAML app's too, now run in ADK's tool thread pool with a copy
+  of the turn's context
   variables, and the calls of one model step overlap; before, they ran one
   after another on the event loop. Such a tool must now be safe to run
   beside another call and off the loop's thread, as Deep Agents already
@@ -1661,7 +1722,7 @@ the start of the entry's title.
   exit). The framework's tools allow for it: calls on one sandbox session
   wait for each other, and `edit_file` and `write_file` take a lock per
   file, so two edits of one file at once no longer lose one (which Deep
-  Agents already risked). A native ADK YAML app is unchanged.
+  Agents already risked).
 - **On ADK, an agent's prompt is sent as written.** ADK fills `{name}` in a
   prompt from the session state and raises `KeyError` for a name the state
   lacks, so a prompt quoting code (`f'{value}'`) or JSON failed every turn
@@ -1764,9 +1825,9 @@ the start of the entry's title.
   starter now returns the job's id like any tool, and when the job
   finishes the root agent is told in a message of its own, the one Deep
   Agents sends (`JOB_NOTICE_HEADER` and the payload, `job_notice` in
-  `tools/jobs/resume.py`); the root's own job still answers its call. A
-  native ADK YAML app (`adk_config_path`) is unchanged: its agents
-  transfer, and only such an app now gets ADK's "no context_cache_config"
+  `tools/jobs/resume.py`); the root's own job is told the same way. A
+  native ADK YAML app (`adk_config_path`) keeps its transfers (see
+  Changed), and only such an app now gets ADK's "no context_cache_config"
   advice (logged at debug).
 - **A sub-agent's text is its activity, not the reply.** On both backends
   a sub-agent's `TEXT` event carries `metadata["agent"]` and
@@ -1917,7 +1978,7 @@ the start of the entry's title.
   Claude or Gemini (an agent without a `model` runs on the default model),
   the ADK app gets ADK's context cache, with ADK's defaults: a 1800-second
   TTL, and a Gemini cache made again after 10 invocations. A native ADK YAML
-  app (`adk_config_path`) caches when its default model is Claude or Gemini.
+  app (`adk_config_path`) caches when ADK runs one of its agents on either.
   The cache belongs to the app, so the setting turns it on or off for every
   agent at once. What it does, and what it costs:
   - **Claude**: from the first turn, every request marks three cache
@@ -3186,10 +3247,10 @@ step; each entry says what to use instead.
   named none: a `sandbox_execute` cell (two minutes by default, plus up to
   three for a container to start) or `compile_document` (five) held the loop
   for as long as it ran, so the spinner and the job monitor stopped and
-  Ctrl+C waited for the tool to finish. A config-built app's turns now run
+  Ctrl+C waited for the tool to finish. Every app's turns now run
   with ADK's tool thread pool (8 workers): Ctrl+C ends the turn at once, the
   call is answered as interrupted, and the result its thread returns later
-  is dropped. A native ADK YAML app keeps ADK's default.
+  is dropped.
 - **Two `sandbox_execute` calls on one session no longer break each
   other.** Both backends run a model step's synchronous calls in worker
   threads at once (Deep Agents always, ADK now too), and nothing kept two
@@ -3339,8 +3400,7 @@ step; each entry says what to use instead.
   timeout out. Each call reports its own error (the shared `last_error` let
   one search report another's), the feed is parsed off the event loop, and
   `search_arxiv` is a coroutine, so a search no longer freezes the UI for
-  seconds where ADK runs a synchronous tool on the event loop (a native ADK
-  YAML app). Code that called `search_arxiv` directly awaits it;
+  seconds. Code that called `search_arxiv` directly awaits it;
   `ArxivSearchSource` gains `asearch` and `transport=`, keeps `search` as its
   synchronous form (which now raises inside a running event loop, rather
   than block it), and loses `wait_for_rate_limit`.
@@ -3380,8 +3440,11 @@ step; each entry says what to use instead.
   it; `live_events.merged(on_stop=)` sets the signal before the runner is
   cancelled), and a call nothing sealed (a crash, or a session from before)
   is answered "Interrupted before it finished …" when the next turn starts
-  (an app built from configs: a native ADK YAML app keeps ADK's own
-  handling, which leaves a task-mode sub-agent's call open on purpose);
+  (a native ADK YAML app's too: one with a task-mode agent, whose call ADK
+  keeps open on purpose, is refused; ADK's client calls for a human,
+  `adk_request_confirmation`, `adk_request_credential` and
+  `adk_request_input`, are answered so too, since the manager offers no way
+  to answer them);
   ADK's warning goes to the debug log (`adk_dropped_open_calls`). On Deep
   Agents `InterruptedCallsMiddleware` takes `PatchToolCallsMiddleware`'s
   place.
@@ -3394,8 +3457,8 @@ step; each entry says what to use instead.
   turns since it started.** ADK delivered a job's result to its pending call
   itself, and ADK then sent the model the call, that result and nothing in
   between, so the agent answered without what the user had said since; it
-  is now one user-role notice, as on Deep Agents (an app built from configs;
-  a native ADK YAML app keeps the call's result), and `can_resume` no longer
+  is now one user-role notice, as on Deep Agents (a native ADK YAML app's
+  too), and `can_resume` no longer
   needs the call's id; a call still open there (a starter that returned
   nothing) is answered first, since Claude and OpenAI refuse it. `/jobs
   resume` and the turn-boundary resume showed every waiting job's resume
@@ -3490,8 +3553,9 @@ step; each entry says what to use instead.
   sub-agent on a model of its own, or a root agent with its own `model`,
   was reported against the wrong one. It now names the agent
   (`metadata["agent"]`) and that agent's own model, as on Deep Agents; a
-  native ADK YAML app's agents, which ADK builds, still report the default
-  model.
+  native ADK YAML app's agent reports the model ADK runs it on, resolved
+  through the catalog (the default model for one whose model does not
+  resolve).
 - **With `raw_llm_logging` on, ADK reported every model call's usage
   twice.** The raw log's plugin put its own copy of each call's usage into
   the turn's stream beside the event processor's, naming the default model

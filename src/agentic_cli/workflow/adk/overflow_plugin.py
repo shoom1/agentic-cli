@@ -30,10 +30,13 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   fit guard reports its own, once a turn.
 
 When the retry is refused as too long too, or nothing could be left out (the
-newest turn alone is too long), the main agent answers with an error
-response, ``error_code="CONTEXT_OVERFLOW"`` and the clear text
-(``context.overflow_message``), never with model text, which ADK would store
-as its reply; ``ADKEventProcessor`` turns it into the turn's one ``ERROR``. A
+newest turn alone is too long), an agent that replies to the user (the main
+agent, or a chat-mode agent it transferred the conversation to: a native ADK
+YAML app's) answers with an error response, ``error_code="CONTEXT_OVERFLOW"``
+and the clear text (``context.overflow_message``), never with model text,
+which ADK would store as its reply; ``ADKEventProcessor`` turns it into the
+turn's one ``ERROR``. Only the main agent summarizes: an agent it transferred
+to is retried without the oldest turns. A
 sub-agent answers its coordinator with text, "I could not do this task: …",
 which is how a coordinator hears from it (its reply lives in its own branch
 and reaches the coordinator as the tool's result), and the user is told
@@ -49,7 +52,7 @@ response: it gets the same answer, without a retry.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import TYPE_CHECKING
 
 from google.adk.models.llm_response import LlmResponse
@@ -102,6 +105,9 @@ class OverflowPlugin(BasePlugin):
 
     Args:
         root: The main agent's name.
+        reply_agents: The agents that reply to the user besides the root (a
+            chat-mode agent it transfers to): their overflow is the turn's
+            clear error too.
         budgets: Each agent's context budget, by name. An agent not named
             here is left to ADK.
         kinds: Each agent's provider kind, by name.
@@ -117,6 +123,7 @@ class OverflowPlugin(BasePlugin):
         self,
         *,
         root: str,
+        reply_agents: Collection[str] = (),
         budgets: Mapping[str, "ContextBudget"],
         kinds: Mapping[str, "ProviderKind"],
         models: Mapping[str, str],
@@ -125,6 +132,8 @@ class OverflowPlugin(BasePlugin):
     ) -> None:
         super().__init__(name=OVERFLOW_PLUGIN)
         self._root = root
+        # The agents whose overflow is the turn's clear error.
+        self._replying = frozenset({root, *reply_agents})
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)
         self._models = dict(models)
@@ -224,7 +233,7 @@ class OverflowPlugin(BasePlugin):
     def _does_not_fit(self, agent: str) -> LlmResponse:
         """The answer once nothing more can make the request fit."""
         model = self._models.get(agent, "the model")
-        if agent == self._root:
+        if agent in self._replying:
             return LlmResponse(
                 error_code=OVERFLOW_ERROR_CODE, error_message=overflow_message(model)
             )

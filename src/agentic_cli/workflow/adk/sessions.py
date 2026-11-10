@@ -16,8 +16,8 @@ turn saves both, counting the turns it already had.
 Only what the user typed is a turn (``typed_prompts``): a text event of the
 user's that is not a job's notice. ADK stores a summary (a compaction) as a
 user event without content, a delegated request not at all, and a job's
-result as a notice (``JOB_NOTICE_HEADER``) or a native app's function
-response; none of them is a typed prompt.
+result as a notice (``JOB_NOTICE_HEADER``), or, before the notice, a
+function response; none of them is a typed prompt.
 
 The session hooks read the session service through ``ServiceSessions``, the
 manager's (``session_exists``, ``list_sessions``, ``session_info``,

@@ -118,7 +118,9 @@ async def test_the_loop_runs_while_a_synchronous_tool_works(project, claude):
 
 
 @pytest.mark.parametrize("native", [False, True], ids=["config-built", "native-yaml"])
-async def test_only_a_config_built_app_gets_the_tool_thread_pool(project, tmp_path, native):
+async def test_every_app_gets_the_tool_thread_pool(project, tmp_path, native):
+    """A native ADK YAML app's too: its synchronous tools are the framework's
+    (the permission gate denies any other), which the pool is for."""
     manager = (
         GoogleADKWorkflowManager(
             agent_configs=[], settings=settings(), adk_config_path=_native_yaml(tmp_path, MODEL),
@@ -141,7 +143,4 @@ async def test_only_a_config_built_app_gets_the_tool_thread_pool(project, tmp_pa
         await manager.cleanup()
 
     pool = getattr(passed.get("run_config"), "tool_thread_pool_config", None)
-    if native:
-        assert pool is None  # its tools are the app's own: ADK's default
-    else:
-        assert pool is not None and pool.max_workers == 8
+    assert pool is not None and pool.max_workers == 8

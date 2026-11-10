@@ -8,8 +8,9 @@ instance. A native ADK agent YAML (``adk_config_path``) still names its model
 as a string, so ``register_direct_anthropic()`` points ``claude-*`` at
 ``DirectAnthropicLlm``, ADK's direct-API ``AnthropicLlm`` under a name of its
 own. ADK builds it with the class defaults and its own client, keyed by
-``ANTHROPIC_API_KEY``. Each ADK manager asks for it as it is made
-(``ensure_direct_anthropic``), which registers it once per process.
+``ANTHROPIC_API_KEY``. Loading a native app's YAML asks for it
+(``build.load_native_root`` → ``ensure_direct_anthropic``), which registers
+it once per process; agents built from configs never do.
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ _registered = False
 
 
 def ensure_direct_anthropic() -> None:
-    """``register_direct_anthropic``, once per process: what each ADK manager calls.
+    """``register_direct_anthropic``, once per process: what loading a native ADK YAML app calls.
 
     ADK's registry is the process's and a registration lasts, so a second
     one would only clear the cache of every name resolved since.

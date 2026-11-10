@@ -845,9 +845,11 @@ async def test_on_adk_a_quiet_starter_beside_a_cancel_is_answered_with_its_job(
     assert json.loads(results(claude.last("Answer"))["toolu_j"])["job_id"]
 
 
-async def test_on_a_native_adk_app_nothing_is_answered_for_it(hermetic):
-    """ADK leaves some calls open on purpose (a task-mode sub-agent waiting
-    for the user): a native app's own agents get ADK's handling alone."""
+async def test_on_a_native_adk_app_a_call_left_open_is_answered_too(hermetic):
+    """A native ADK YAML app runs as any app once its agents are built: a call
+    a crash left open is answered at the next turn. The one call ADK keeps
+    open on purpose, a task-mode agent's delegation, cannot be built: a
+    native app with a task-mode agent is refused (``build.load_native_root``)."""
     from types import SimpleNamespace
 
     from google.adk.events import Event
@@ -873,7 +875,9 @@ async def test_on_a_native_adk_app_nothing_is_answered_for_it(hermetic):
 
     await manager._answer_left_open(session)
 
-    assert appended == []
+    (answer,) = appended
+    (response,) = answer.get_function_responses()
+    assert (answer.author, response.id, response.name) == ("coordinator", "toolu_task", "booker")
 
 
 # --- a crash ----------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import anthropic
 import openai
@@ -332,13 +333,20 @@ class TestTheApp:
         (cap,) = [p for p in plugins if isinstance(p, ToolResultCapPlugin)]
         assert (cap.max_chars, cap.folder) == (30_000, folder())
 
-    async def test_a_native_adk_app_has_no_cap(self, project, tmp_path):
-        # A plugin's value would skip the app's own after_tool_callbacks, and
-        # a native app is otherwise left as ADK builds it.
+    async def test_a_native_adk_app_has_the_cap_but_for_agents_with_their_own_callbacks(
+        self, project, tmp_path
+    ):
+        # A plugin's value would skip an agent's own after_tool_callbacks: the
+        # cap leaves those agents' results whole (adk/test_native_app.py runs
+        # it), and cuts every other agent's.
+        path = _native_yaml(tmp_path, "claude-sonnet-4-5")
+        with open(path, "a", encoding="utf-8") as yaml:
+            yaml.write("after_tool_callbacks:\n"
+                       "  - name: tests.workflow.adk.native_agents.after_tool\n")
         manager = GoogleADKWorkflowManager(
             agent_configs=[],
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-5"),
-            adk_config_path=_native_yaml(tmp_path, "claude-sonnet-4-5"),
+            adk_config_path=path,
         )
         try:
             await manager.initialize_services()
@@ -346,7 +354,8 @@ class TestTheApp:
         finally:
             await manager.cleanup()
 
-        assert not any(isinstance(p, ToolResultCapPlugin) for p in plugins)
+        (cap,) = [p for p in plugins if isinstance(p, ToolResultCapPlugin)]
+        assert cap.skip_agents == {"root"}
 
 
 def plugin(max_chars: int = 20_000) -> ToolResultCapPlugin:
@@ -365,6 +374,26 @@ def read_file_tool() -> FunctionTool:
 
 
 class TestThePlugin:
+    async def test_an_agent_with_its_own_after_tool_callbacks_is_left_out(self, project):
+        """ADK runs an agent's own after-tool callbacks only when no plugin
+        returned a value, so a cut would skip them: such an agent (a native ADK
+        YAML app's) gets its results whole."""
+        cap = ToolResultCapPlugin(20_000, folder(), skip_agents={"own"})
+
+        def context(agent: str):
+            return SimpleNamespace(agent_name=agent, function_call_id="c1")
+
+        whole = await cap.after_tool_callback(
+            tool=read_file_tool(), tool_args={}, tool_context=context("own"), result="x" * 50_000
+        )
+        cut = await cap.after_tool_callback(
+            tool=read_file_tool(), tool_args={}, tool_context=context("other"),
+            result="x" * 50_000,
+        )
+
+        assert whole is None
+        assert CUT.search(cut["result"])
+
     async def test_a_result_that_fits_is_left_alone(self, project):
         assert await after(plugin(), read_file_tool(), {"success": True, "content": "x"}) is None
         assert not folder().exists()

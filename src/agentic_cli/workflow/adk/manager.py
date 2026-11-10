@@ -72,9 +72,13 @@ from agentic_cli.config import (
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
+from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from agentic_cli.models import Provider, ResolvedModel, RoleMap
+    from agentic_cli.workflow.adk.build import ADKBuild
     from agentic_cli.workflow.sessions import SessionRef
 
 
@@ -178,6 +182,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             print(event.content)
     """
 
+    #: A native ADK YAML app's agents, loaded once per manager, when they are
+    #: first validated (``_native_root``). A class default, so a manager made
+    #: without ``__init__`` (a test's) has none.
+    _loaded_native_root: LlmAgent | None = None
+    #: What the live app was built from (``_build_app``), None while there is
+    #: none. A class default, as above.
+    _build: "ADKBuild | None" = None
+    #: The reply set of the build ``_build_app`` is making, or made last, for
+    #: the parts it builds through hooks (the gate, ``_init_plugins``).
+    _reply_agents: frozenset[str] | None = None
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -200,11 +215,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 or a model id (see ``BaseWorkflowManager``)
             on_event: Optional hook to transform/filter events before yielding
             adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
-                When set, the agent tree is built via ADK ``from_config`` instead
-                of from ``agent_configs`` (full ADK fidelity; framework service /
-                state tool injection does not apply). Library-only for now: no
+                When set, ADK builds the agent tree from it (``from_config``)
+                instead of the manager building it from ``agent_configs``,
+                which are then ignored, with a warning. Only the building
+                differs: the app runs as one built from configs
+                (``workflow/adk/build.py``). Library-only for now: no
                 ``BaseCLIApp`` starts such an app.
         """
+        if adk_config_path and agent_configs:
+            # ADK builds the agents from the YAML: configs beside it would be
+            # validated, resolved and given services for nothing.
+            logger.warning(
+                "adk_native_configs_ignored",
+                path=str(adk_config_path),
+                agents=[config.name for config in agent_configs],
+            )
+            agent_configs = []
         super().__init__(
             agent_configs=agent_configs,
             settings=settings,
@@ -221,21 +247,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self._root_agent: Agent | None = None
         self._runner: Runner | None = None
 
-        self._event_processor = ADKEventProcessor(
-            model=model or "",
-            on_event=on_event,
-        )
+        # Each initialization builds the processor again, from the app it built
+        # (_do_initialize); this one stands until then.
+        self._event_processor = ADKEventProcessor(model=model or "", on_event=on_event)
 
         # The raw LLM log's plugin (made in _init_plugins), whose buffer a
         # turn drains: the reference exists before process() is called.
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
-
-        # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
-        # configs) to the direct-API DirectAnthropicLlm instead of Vertex
-        # Claude: ADK's registry is the process's, so once per process.
-        from agentic_cli.workflow.adk.anthropic_llm import ensure_direct_anthropic
-
-        ensure_direct_anthropic()
 
         logger.debug(
             "workflow_manager_created",
@@ -281,6 +299,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         runner, self._runner = self._runner, None
         self._root_agent = None
+        self._build = None
+        self._reply_agents = None
+        # A native app's agents stay (_native_root): ADK gives an agent one
+        # parent, so a YAML naming a module-level agent cannot be loaded
+        # again, and the runner's close leaves their toolsets reusable.
         if self._llm_logging_plugin:
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
@@ -358,8 +381,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         A long-running tool returns a ``job_id`` immediately and the model is
         instructed not to re-call it while pending; the eventual result is
-        told later (``resume_with_job_result``: a notice; a native app's
-        answers the call).
+        told later (``resume_with_job_result``: a notice).
         Detection is by registry identity — the exact object the default
         registry issued, never a matching name — so a plain callable an
         application names after a long-running tool keeps its ordinary
@@ -505,26 +527,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return root_agent
 
     def _init_plugins(self) -> list:
-        """The head of the app's plugin chain, not the whole of it.
+        """The head of the app's plugin chain (``_plugin_chain``), not the whole of it.
 
         The permission gate, the tool-error answer and, with
-        ``raw_llm_logging``, the raw LLM log, in that order; the logging
-        plugin is kept, since the manager drains its buffer. Task progress
-        is the event processor's (``ADKEventProcessor``, from each event's
-        state delta). ``_do_initialize`` adds the rest: for an app built
-        from agent configs, ``MainAgentPlugin`` before them, and after them
-        the foreign reasoning filter, ``ContextCachePlugin`` when the app
-        caches, the interrupted calls, the result cap, the memory index, the
-        overflow handler, the fit guard and the raw log as sent. A native ADK
-        YAML app gets ``ContextCachePlugin`` alone after them, when it
-        caches. The whole order is pinned by
-        ``tests/workflow/adk/test_plugin_chain.py``.
+        ``raw_llm_logging``, the raw LLM log of each call as the model
+        answers it, in that order; the logging plugin is kept, since the
+        manager drains its buffer. The gate writes the outside-content mark
+        into the session state at the model calls of the agents that reply:
+        the build's (``_build_app``), else the root's tree's. Task progress is the event processor's
+        (``ADKEventProcessor``, from each event's state delta). The whole
+        order is pinned by ``tests/workflow/adk/test_plugin_chain.py``.
 
         Returns:
             Those plugins, in chain order.
         """
+        from agentic_cli.workflow.adk.build import reply_agents
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
+        root = self._root_agent
+        replies = self._reply_agents
+        if replies is None:
+            replies = reply_agents(root) if root else frozenset()
         # ToolErrorPlugin: ADK ends the turn when a tool raises; this turns the
         # exception into an error result the model can read. It records its
         # answer to an unknown tool, whose after-tool callbacks ADK skips.
@@ -532,7 +555,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             PermissionPlugin(
                 self._open_calls,
                 marks=self._outside_marks,
-                root=self._root_agent.name if self._root_agent else None,
+                root=root.name if root else None,
+                reply_agents=replies,
             ),
             ToolErrorPlugin(self._open_calls),
         ]
@@ -543,9 +567,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 app_name=self._settings.app_name,
                 include_messages=True,
                 include_raw_parts=True,
-                # An app built from configs records a request as sent, after
-                # the fit guard (SentRequestLoggingPlugin, last).
-                log_requests=bool(self._adk_config_path),
+                # A request is recorded as sent, after the fit guard
+                # (SentRequestLoggingPlugin, last).
+                log_requests=False,
                 # Each call's records name its agent's own model.
                 models=self._agent_model_refs(),
             )
@@ -556,15 +580,89 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         return plugins
 
-    def _agent_model_refs(self) -> dict[str, str]:
-        """Each agent's model reference, by name; none for a native ADK app.
+    def _plugin_chain(
+        self, replies: frozenset[str], cache: ContextCacheConfig | None
+    ) -> list:
+        """The app's whole plugin chain, top to bottom, whoever built its agents.
 
-        A native app's agents are built by ADK from its YAML, not from the
-        models resolved for the configs: usage and the raw log name the
-        default model for them.
+        ADK runs each callback of each plugin in turn and stops at the first
+        that returns a value; an agent's own callbacks (a native ADK YAML
+        app's) run after every plugin, and only when none answered. So:
+
+        - ``MainAgentPlugin`` first: it records the running agent, which the
+          summarizer reads.
+        - ``_init_plugins``: the permission gate (a denial is the call's
+          answer), the tool-error answer, the raw log as the model answers.
+        - ``ForeignReasoningPlugin``: a model switch keeps the session, and no
+          model is sent the thoughts another provider wrote (which it would
+          refuse), before the request is measured.
+        - ``ContextCachePlugin``, when the app caches: one Gemini cache
+          attempt a turn, not one per tool step.
+        - ``InterruptedCallsPlugin`` before the cap: it records every
+          finished result, for the calls a cancel leaves open, and the cap
+          returns its cut, which ends ADK's after-tool callbacks.
+        - ``ToolResultCapPlugin``: every result over the limit is cut, but an
+          agent's with after-tool callbacks of its own, which a cut would
+          skip (``build.own_after_tool_agents``).
+        - ``MemoryIndexPlugin``, when the main agent has a memory tool:
+          before the overflow handler and the fit guard, which keep it.
+        - ``OverflowPlugin``: a call refused as too long is summarized (the
+          main agent) or trimmed, retried once from the request the fit guard
+          saw, then one clear answer; for an agent that replies, the turn's.
+        - ``FitGuardPlugin`` last but the raw log: it measures the request
+          every other plugin edited, and drops the oldest turns of one over
+          its budget.
+        - ``SentRequestLoggingPlugin``, with ``raw_llm_logging``: the request
+          as sent.
+
+        Args:
+            replies: The agents that reply to the user (``build.reply_agents``).
+            cache: The app's context cache, or None.
         """
-        if self._adk_config_path:
-            return {}
+        from agentic_cli.workflow.adk.build import own_after_tool_agents
+        from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
+
+        root = self._root_agent
+        kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
+        plugins: list = [MainAgentPlugin(), *self._init_plugins()]
+        plugins.append(ForeignReasoningPlugin({name: kind.value for name, kind in kinds.items()}))
+        if cache is not None:
+            from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
+
+            plugins.append(ContextCachePlugin())
+        cap = ToolResultCapPlugin(
+            self._settings.tool_result_max_chars,
+            tool_output_dir(self._settings.app_name),
+            skip_agents=own_after_tool_agents(root),
+        )
+        plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
+        plugins.append(cap)
+        if self._memory_index_wanted(root.name):
+            from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
+
+            plugins.append(MemoryIndexPlugin(root=root.name, index_for=self._memory_index_now))
+        fit_guard = FitGuardPlugin(self._budgets, kinds)
+        plugins.append(OverflowPlugin(
+            root=root.name,
+            reply_agents=replies,
+            budgets=self._budgets,
+            kinds=kinds,
+            models=self._agent_model_refs(),
+            summarize_now=self._summarize_now,
+            fit_guard=fit_guard,
+        ))
+        plugins.append(fit_guard)
+        if self._llm_logging_plugin is not None:
+            plugins.append(SentRequestLoggingPlugin(self._llm_logging_plugin))
+        return plugins
+
+    def _agent_model_refs(self) -> dict[str, str]:
+        """Each agent's model reference, by name.
+
+        Every agent built from a config, and each of a native ADK YAML app's
+        agents whose model resolved (``_resolve_extra_models``); usage and the
+        raw log name the default model for any other.
+        """
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
     def _make_session_service(self) -> BaseSessionService:
@@ -581,17 +679,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return ServiceSessions(self._session_service)
 
     async def _do_initialize(self) -> None:
-        """ADK-specific initialization: session service, agents, runner.
+        """ADK-specific initialization: session service, agents, the app and its runner.
 
-        An app built from agent configs summarizes its main agent's
-        conversation (``_compaction_config``) with ADK's after-turn pass
-        switched off (``NoAfterTurnCompactionRunner``), at the trigger of the
-        agents' context numbers (``_budgets``, which the base computed before
-        any service was built: ``_manages_context``). A native ADK YAML app
-        gets neither.
+        The agents are built from the agent configs, or by ADK from a native
+        ADK YAML (``_native_root``): the one place the two kinds of app
+        differ. The app is then built from the tree alone (``_build_app``),
+        so both run alike: the whole plugin chain, the main agent's
+        conversation summarized at the trigger of its context numbers
+        (``_budgets``, which the base computed before any service was built)
+        with ADK's after-turn pass switched off
+        (``NoAfterTurnCompactionRunner``), and an event processor that knows
+        which agents reply.
         """
         logger.info("initializing_services", app_name=self.app_name)
-        native = bool(self._adk_config_path)
 
         # Create the session service (durable DatabaseSessionService by
         # default; InMemory only when session_store='memory') — unless one is
@@ -601,107 +701,79 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._session_service is None:
             self._session_service = self._make_session_service()
 
-        # Create agent hierarchy — natively from an ADK config, or from configs.
+        # Create agent hierarchy — by ADK from a native YAML, or from configs.
         if self._adk_config_path:
-            from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
-
-            self._root_agent = load_adk_agent_native(self._adk_config_path)
-            logger.info("adk_native_config_loaded", path=self._adk_config_path)
+            self._root_agent = self._native_root()
         else:
             self._root_agent = self._create_agents()
 
+        build = self._build = self._build_app()
         # The plugins belong to the App; ADK deprecates Runner(plugins=...).
-        context_cache = self._context_cache_config()
-        plugins = self._init_plugins()
-        if not native:
-            # First: it records the running agent, which the summarizer reads.
-            plugins.insert(0, MainAgentPlugin())
-        if not self._adk_config_path:
-            from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
-
-            # A model switch keeps the session: no model is sent the thoughts
-            # another provider wrote, which it would refuse.
-            plugins.append(ForeignReasoningPlugin({
-                name: model.record.kind.value for name, model in self._resolved_models.items()
-            }))
-        if context_cache is not None:
-            from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
-
-            # One Gemini cache attempt a turn, not one per tool step.
-            plugins.append(ContextCachePlugin())
-        if not self._adk_config_path:
-            # Every tool result over the limit is cut. ADK stops at the first
-            # plugin whose after_tool_callback returns a value, and this one
-            # returns the cut. Not for a native ADK app, whose agents' own
-            # after_tool_callbacks it would skip.
-            cap = ToolResultCapPlugin(
-                self._settings.tool_result_max_chars, tool_output_dir(self._settings.app_name)
-            )
-            # Before the cap, which returns its cut: this one records every
-            # result, for the calls a cancel leaves open.
-            plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
-            plugins.append(cap)
-            if self._memory_index_wanted(self._root_agent.name):
-                from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
-
-                # Before the overflow handler and the fit guard, which keep it.
-                plugins.append(MemoryIndexPlugin(
-                    root=self._root_agent.name, index_for=self._memory_index_now
-                ))
-            kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
-            fit_guard = FitGuardPlugin(self._budgets, kinds)
-            # A call refused as too long: summarize (the root) or trim, retry
-            # once from the request the fit guard saw, then one clear answer.
-            plugins.append(OverflowPlugin(
-                root=self._root_agent.name,
-                budgets=self._budgets,
-                kinds=kinds,
-                models={name: str(model.ref) for name, model in self._resolved_models.items()},
-                summarize_now=self._summarize_now,
-                fit_guard=fit_guard,
-            ))
-            # Last but the raw log: it measures the request every other plugin
-            # has edited, and drops the oldest turns of one over its budget.
-            plugins.append(fit_guard)
-            if self._llm_logging_plugin is not None:
-                plugins.append(SentRequestLoggingPlugin(self._llm_logging_plugin))
         app = App(
             name=self.app_name,
-            root_agent=self._root_agent,
-            plugins=plugins,
-            context_cache_config=context_cache,
-            events_compaction_config=None if native else self._compaction_config(),
+            root_agent=build.root,
+            plugins=list(build.plugins),
+            context_cache_config=build.cache,
+            events_compaction_config=build.compaction,
         )
-        runner = Runner if native else NoAfterTurnCompactionRunner
-        self._runner = runner(app=app, session_service=self._session_service)
-        # A call's usage names its agent's own model and context numbers. The
-        # default model, resolved for this initialization, stands in for an
-        # agent the framework did not build (a native ADK app's).
-        self._event_processor.model = self.model
-        self._event_processor.models = self._agent_model_refs()
-        self._event_processor.budgets = self._budgets
-        # Only the root replies to the user; another agent's text is a
-        # sub-agent's work. A native ADK app's agents transfer, and each one
-        # it transfers to replies.
-        self._event_processor.root = None if self._adk_config_path else self._root_agent.name
+        self._runner = NoAfterTurnCompactionRunner(app=app, session_service=self._session_service)
+        # A call's usage names its agent's own model and context numbers (the
+        # default model stands in for an agent without one); only the agents
+        # that reply write the reply, another's text is a sub-agent's work.
+        self._event_processor = ADKEventProcessor(
+            model=self.model,
+            on_event=self._on_event,
+            root=build.root.name,
+            models=build.models,
+            budgets=self._budgets,
+            reply_agents=build.reply_agents,
+        )
 
         logger.info(
             "services_initialized",
             model=self.model,
-            agent_name=self._root_agent.name if self._root_agent else None,
+            agent_name=build.root.name,
             required_managers=list(self._required_managers),
-            context_cache=app.context_cache_config is not None,
+            context_cache=build.cache is not None,
+            summarized=build.compaction is not None,
         )
 
-    def _compaction_config(self) -> EventsCompactionConfig:
-        """The main agent's conversation summarized at its trigger.
+    def _build_app(self) -> ADKBuild:
+        """What the app is built from: the root agent's tree and what the run reads of it.
+
+        From the tree alone (``_root_agent``, set first), whoever built it,
+        through the hooks a subclass may override (``_plugin_chain``,
+        ``_compaction_config``, ``_context_cache_config``,
+        ``_agent_model_refs``). The reply set is computed once, and every
+        part reads it: the gate through ``_reply_agents``.
+        """
+        from agentic_cli.workflow.adk import build as adk_build
+
+        root = self._root_agent
+        replies = self._reply_agents = adk_build.reply_agents(root)
+        cache = self._context_cache_config()
+        return adk_build.ADKBuild(
+            root=root,
+            reply_agents=replies,
+            plugins=tuple(self._plugin_chain(replies, cache)),
+            compaction=self._compaction_config(),
+            cache=cache,
+            models=self._agent_model_refs(),
+        )
+
+    def _compaction_config(self) -> EventsCompactionConfig | None:
+        """The main agent's conversation summarized at its trigger; None without a budget.
 
         ADK checks before each model call of every agent; the summarizer
         writes only for the main agent, on its own model (thinking off,
         ``SUMMARY_MAX_TOKENS``), keeping its ``keep`` tokens word for word.
         ``event_retention_size`` 0: the summarizer picks the range itself.
         ADK marks the config experimental; the CLI logs that notice at debug.
+        A main agent whose model did not resolve (a native ADK YAML app's,
+        ``_resolve_extra_models``) has no budget, and is not summarized.
         """
+        if self._root_agent.name not in self._budgets:
+            return None
         return EventsCompactionConfig(
             summarizer=self._summarizer(),
             token_threshold=self._budgets[self._root_agent.name].trigger,
@@ -755,9 +827,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         ADK caches for every agent of an app through one config, so it is set
         when ``prompt_caching_enabled`` is on and any agent's model caches (an
-        agent without a model is resolved to the default). A native ADK YAML
-        app builds no agent from a resolved model, so its default model
-        decides. ADK then marks cache breakpoints on every Claude request, and
+        agent without a model is resolved to the default; a native ADK YAML
+        app's agent to the model ADK runs it on, ``_resolve_extra_models``,
+        and one whose model did not resolve is not counted). ADK then marks
+        cache breakpoints on every Claude request, and
         keeps a server-side cache per Gemini agent from its second turn
         (Google bills its storage while it lives); GPT and the configured
         providers' models are untouched.
@@ -769,10 +842,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         if not self._settings.prompt_caching_enabled:
             return None
-        if self._adk_config_path:
-            models = [self._default_model]
-        else:
-            models = list(self._resolved_models.values())
+        models = list(self._resolved_models.values())
         if not any(m is not None and m.record.cache in _CACHING for m in models):
             return None
         return ContextCacheConfig(
@@ -780,26 +850,104 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _run_config(self) -> RunConfig | None:
-        """A turn's ``RunConfig``: a config-built app's synchronous tools run
-        in ADK's tool thread pool; None keeps ADK's default.
+        """A turn's ``RunConfig``: the agents' synchronous tools run in ADK's tool thread pool.
 
         Without the pool ADK calls a synchronous function tool on the event
         loop, which a two-minute sandbox cell then holds: the spinner, the job
         monitor and Ctrl+C all wait for it. In the pool only the function
         leaves the loop (plugins, callbacks and async tools stay on it), with
         a copy of the turn's context variables, and the calls of one model
-        step overlap, as on Deep Agents. A native ADK YAML app's tools are its
-        own, so it keeps ADK's default.
+        step overlap, as on Deep Agents.
         """
-        if self._adk_config_path:
-            return None
         return RunConfig(
             tool_thread_pool_config=ToolThreadPoolConfig(max_workers=_TOOL_THREADS)
         )
 
     def _manages_context(self) -> bool:
-        """True for an app built from agent configs, not for a native ADK YAML app."""
-        return not self._adk_config_path
+        """True: each agent with a resolved model is summarized and trimmed by its budget.
+
+        A native ADK YAML app's agents too: each is resolved by the model ADK
+        runs it on (``_resolve_extra_models``), and one whose model does not
+        resolve has no budget, so the fit guard and the overflow handler
+        leave it alone.
+        """
+        return True
+
+    def _detect_required_managers(self) -> set[str]:
+        """The services the agents' registered tools declare.
+
+        The configs' (the base's), and a native ADK YAML app's: the tools of
+        the tree it loaded when it validated its agents, found as the
+        permission gate finds them (``tool_definition``: a callable the
+        registry issued, or one of ADK's own function tools around one), so
+        a ``kb_*`` tool the YAML names gets its knowledge base.
+        """
+        required = super()._detect_required_managers()
+        root = self._loaded_native_root
+        if root is None:
+            return required
+        from agentic_cli.workflow.adk.build import walk
+        from agentic_cli.workflow.adk.permission_plugin import tool_definition
+
+        for agent in walk(root):
+            for tool in getattr(agent, "tools", None) or ():
+                definition = tool_definition(tool)
+                if definition is not None:
+                    required.update(definition.requires)
+        return required
+
+    def _resolve_extra_models(
+        self, roles: "RoleMap", providers: "Mapping[str, Provider]"
+    ) -> "dict[str, ResolvedModel]":
+        """A native ADK YAML app's agents' models (the base's hook), by name.
+
+        Its agents run on the models ADK resolves for them: the one its YAML
+        names (a model string or ``model_code``), else its parent's, else
+        ADK's default. Each is resolved through the catalog by that model's
+        name, as an agent config naming it would be. Leniently: an agent
+        whose model ADK or the catalog cannot resolve is left out with a
+        warning, and has no context budget.
+        """
+        root = self._loaded_native_root
+        if root is None:
+            return {}
+        from agentic_cli.workflow.adk.build import walk
+
+        resolved: dict[str, ResolvedModel] = {}
+        for agent in walk(root):
+            if not isinstance(agent, LlmAgent):
+                continue
+            spec: str | None = None
+            try:
+                spec = agent.canonical_model.model
+                config = AgentConfig(name=agent.name, prompt="", model=spec)
+                resolved[agent.name] = self._resolve_for(config, roles, self._catalog, providers)
+            except (ValueError, ImportError) as exc:
+                logger.warning(
+                    "adk_agent_model_unresolved", agent=agent.name, model=spec, error=str(exc)
+                )
+        return resolved
+
+    def _root_memory_tools(self, root: str | None = None) -> tuple[str, ...]:
+        """The memory tools the main agent has, by name: the built root's.
+
+        Read from the agent as built (``tool_definition``, as the permission
+        gate finds a tool), so a native ADK YAML app's root that names a
+        memory tool carries the memory index too. Before the root is built,
+        its config's (the base's).
+        """
+        built = self._root_agent
+        if built is None or built.name != (root or self._root_agent_name):
+            return super()._root_memory_tools(root)
+        from agentic_cli.memory import ALL_MEMORY_TOOLS
+        from agentic_cli.workflow.adk.permission_plugin import tool_definition
+
+        names = [
+            definition.name
+            for definition in (tool_definition(tool) for tool in getattr(built, "tools", ()) or ())
+            if definition is not None and definition.name in ALL_MEMORY_TOOLS
+        ]
+        return tuple(dict.fromkeys(names))
 
     def _validate_agent_graph(self) -> AgentGraph | None:
         """Reject an unbuildable agent graph before anything is allocated.
@@ -810,15 +958,46 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         kept for ``_create_agents``, which builds this initialization's agents
         from it rather than validating again.
 
+        A native ADK YAML app's agents are built here the first time, by
+        ADK (``_native_root``), and kept for ``_do_initialize``: its code is
+        imported now, and a root that is not an ``LlmAgent`` or a task-mode
+        agent is refused before anything else is done.
+
         Returns:
-            The graph; None for a native ADK config, whose topology ADK owns.
+            The graph; for a native ADK YAML app, one naming its root alone
+            (ADK built the tree, from no configs).
         """
         if self._adk_config_path:
-            return None  # native ADK config: ADK owns the topology
+            root = self._native_root()
+            self._required_managers = self._detect_required_managers()
+            return AgentGraph(config_map={}, build_order=(), root_name=root.name)
         self._validated_graph = validate_agent_graph(
             self._agent_configs, backend=self.backend_type
         )
         return self._validated_graph
+
+    def _native_root(self) -> LlmAgent:
+        """The native ADK YAML app's agents, loaded the first time they are asked for.
+
+        Once per manager: ADK gives an agent one parent, so a YAML naming a
+        module-level agent (``code:``, ADK's usual form) cannot be loaded
+        twice in a process. A retry after a failed start, a model switch and
+        a start after ``cleanup()`` build the app on the same tree: the
+        closed runner closed its toolsets, and an MCP toolset starts its
+        server again for the next runner. An edit of the YAML takes effect
+        in a new manager.
+
+        The settings' API keys are exported first (the base exports them
+        only after validation), so a module the YAML names that reads a key
+        as it is imported finds it, as it did when the YAML was loaded with
+        the app.
+        """
+        if self._loaded_native_root is None:
+            from agentic_cli.workflow.adk.build import load_native_root
+
+            self._settings.export_api_keys_to_env()
+            self._loaded_native_root = load_native_root(self._adk_config_path)
+        return self._loaded_native_root
 
     def _backend_ready(self) -> bool:
         """True when the runner, session service and agent tree are all live."""
@@ -872,15 +1051,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         them; ADK would keep a long-running one in every request, which
         Claude and OpenAI refuse, and drop any other one with a warning.
 
+        ADK keeps two kinds of call open on purpose. A task-mode agent's
+        delegation cannot be built (a native ADK YAML app with one is
+        refused, ``build.load_native_root``). Its client calls for a human
+        (``adk_request_confirmation``, ``adk_request_credential``,
+        ``adk_request_input``: a tool that requires confirmation, an MCP
+        toolset that needs auth) are answered as interrupted, as any other:
+        the manager offers no way to answer them.
+
         Raises:
             ConversationChangedError: Another process changed the session
                 since it was read (ADK's ``StaleSessionError``), before the
                 run: the turn raises it, as it cannot start.
         """
-        if self._adk_config_path:
-            # A native app's agents are ADK's own, and ADK leaves some calls
-            # open on purpose (a task-mode sub-agent waiting for the user).
-            return session
         answers = left_open(session.events, self._open_calls)
         for event in answers:
             try:
@@ -977,7 +1160,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
         Shared by ``process()`` (user message) and ``_deliver_job_notice()``
-        (a job's notice, or a native app's function response). The caller
+        (a job's notice). The caller
         must already be inside the turn (the base's ``_turn``) with the
         session prepared. ``state_delta`` is saved with ``new_message`` (a
         user turn's row).
@@ -1086,11 +1269,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async for workflow_event in self._event_processor.process_event(adk_event, session_id):
             yield workflow_event
 
-    @property
-    def _answers_job_calls(self) -> bool:
-        """A native ADK YAML app's job answers its pending call, so its record needs the call."""
-        return bool(self._adk_config_path)
-
     async def _conversation_exists(self, ref: SessionRef) -> bool:
         """Whether ``ref``'s ADK session is stored, with events or none.
 
@@ -1113,19 +1291,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def _deliver_job_notice(
         self, notice: str, record: Any, result: Any, ref: SessionRef
     ) -> AsyncGenerator[WorkflowEvent, None]:
-        """Run the root agent on a finished job's notice (the base's ``resume_with_job_result``).
+        """Run the agents on a finished job's notice (the base's ``resume_with_job_result``).
 
-        In an app built from agent configs the root agent runs on one
-        user-role text, the notice, as on Deep Agents, whoever started the
-        job: the call already has its result (the job's id, or "pending"),
-        and a result for the call itself made ADK send the call, that result
-        and nothing between (its rearranger), so the agent answered without
-        the turns since. A call still open (a starter that returned nothing,
-        a crash's) is answered first. A native ADK YAML app's job still
-        answers its pending call, as an ADK ``FunctionResponse`` matching
-        ``record.call_id`` whose response is ``job_result_payload``. The
-        notice marks the conversation as having read outside content, in its
-        state too.
+        The conversation is told in one user-role text, the notice, as on
+        Deep Agents, whoever started the job: the call already has its result
+        (the job's id, or "pending"), and a result for the call itself made
+        ADK send the call, that result and nothing between (its rearranger),
+        so the agent answered without the turns since. A call still open (a
+        starter that returned nothing, a crash's) is answered first. ADK runs
+        the notice as any user turn: on the root, or on the agent it
+        transferred the conversation to. The notice marks the conversation as
+        having read outside content, in its state too.
         """
         session = await self._session_service.get_session(
             app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
@@ -1134,33 +1310,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             logger.warning("job_resume_session_missing", job_id=record.job_id,
                            session_id=ref.session_id)
             return
-        native = self._answers_job_calls
-        if not native:
-            # A call still open gets its result before the notice: Claude
-            # and OpenAI refuse a call without one.
-            session = await self._answer_left_open(session)
+        # A call still open gets its result before the notice: Claude and
+        # OpenAI refuse a call without one.
+        session = await self._answer_left_open(session)
 
         # The job's output is outside content: its notice marks the conversation.
         state_delta = self._seed_outside_content(ref, session)
         if self._outside_marks.mark(ref, JOB_RESULT):
             state_delta[OUTSIDE_CONTENT_KEY] = JOB_RESULT
 
-        if not native:
-            # The root is told, as on Deep Agents.
-            new_message = types.Content(
-                role="user", parts=[types.Part.from_text(text=notice)],
-            )
-        else:
-            function_response = types.FunctionResponse(
-                id=record.call_id,
-                name=record.call_name or record.tool,
-                # A summary and a pointer, not the raw result.
-                response=job_result_payload(record, result),
-            )
-            new_message = types.Content(
-                role="user",
-                parts=[types.Part(function_response=function_response)],
-            )
+        new_message = types.Content(role="user", parts=[types.Part.from_text(text=notice)])
 
         async with contextlib.aclosing(self._run_and_stream(
             session_id=ref.session_id,
@@ -1173,18 +1332,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
     @property
     def supports_compact(self) -> bool:
-        """True for an app built from agent configs; a native ADK YAML app has none.
+        """True unless the app is built and its main agent is not summarized.
 
-        Its agents are ADK's own, and their context too (``compact`` raises
-        ``NotImplementedError`` there), so a caller can tell before it asks.
+        A main agent whose model did not resolve (a native ADK YAML app's)
+        has no context budget and no summary (``compact`` raises
+        ``NotImplementedError`` there). That is known once the app is built:
+        before, the answer is True.
         """
-        return not self._adk_config_path
+        build = self._build
+        return build is None or build.compaction is not None
 
     def _no_compact_support(self) -> NotImplementedError:
-        """Why a native ADK YAML app has no ``compact``."""
+        """Why this app's main agent has no ``compact``."""
         return NotImplementedError(
-            "A native ADK YAML app (adk_config_path) cannot be summarized on "
-            "demand: its agents' context is ADK's own."
+            "The main agent's conversation is not summarized: its model has no "
+            "context budget (it did not resolve through the model catalog)."
         )
 
     async def _compact_turn(
@@ -1202,16 +1364,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         the session between its read and the summary's append (ADK's
         ``StaleSessionError``), and nothing is written until the summary is:
         a cancel leaves the session as it was, and says nothing was made. A
-        native ADK YAML app has none (``supports_compact``).
+        main agent without a context budget has none (``supports_compact``).
 
         Returns:
             What the summary did; None with no conversation yet, or nothing
             before the kept tail.
 
         Raises:
+            NotImplementedError: The main agent is not summarized
+                (``supports_compact``).
             Exception: Why the summary failed (the summarizer's
                 ``last_error``, the provider's error).
         """
+        if not self.supports_compact:
+            raise self._no_compact_support()
         stored = await self._session_service.get_session(
             app_name=session.app_name,
             user_id=session.user_id,
@@ -1321,10 +1487,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> list[dict]:
         """Recent text messages from the stored session (fact extraction, a resume's replay).
 
-        Text only: a reply's thinking is left out. The user's and the root
-        agent's: a sub-agent's text is its work,
-        which its parent read as a tool result, not a reply. A native ADK
-        YAML app's agents transfer, and each one replies, so all are read. A
+        Text only: a reply's thinking is left out. The user's and the agents'
+        that reply (``build.reply_agents``: the root, and an agent it
+        transferred the conversation to): a sub-agent's text is its work,
+        which its parent read as a tool result, not a reply. A
         job notice (``job_notice``) is left out, as on Deep Agents: nobody
         typed it. ADK keeps no mark on the message, so it is known by its
         header.
@@ -1344,12 +1510,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         if session is None or not getattr(session, "events", None):
             return []
-        root = (
-            None if self._root_agent is None or self._adk_config_path else self._root_agent.name
-        )
+        replying = self._build.reply_agents if self._build is not None else None
         out: list[dict] = []
         for event in session.events:
-            if root is not None and getattr(event, "author", None) not in ("user", root):
+            author = getattr(event, "author", None)
+            if replying is not None and author != "user" and author not in replying:
                 continue
             content = getattr(event, "content", None)
             if content is None:

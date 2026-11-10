@@ -91,7 +91,8 @@ class FitGuardPlugin(BasePlugin):
 
     Args:
         budgets: Each agent's context budget, by name. An agent not named
-            here (a native ADK YAML app's) is left alone.
+            here (a native ADK YAML app's whose model did not resolve) is left
+            alone.
         kinds: Each agent's provider kind, by name, for its characters per token.
     """
 

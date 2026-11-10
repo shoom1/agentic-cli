@@ -9,8 +9,8 @@ A job's call already has its result, "pending" (or the job's id), and a call
 that is answered cannot be answered again (Anthropic and OpenAI accept one
 result per call; ADK, given a second, sent the call, that result and nothing
 between). So a finished job is told to the root agent in a message of its
-own, ``job_notice``, which opens with ``JOB_NOTICE_HEADER``, on both backends;
-only a native ADK YAML app answers the job's call with the payload.
+own, ``job_notice``, which opens with ``JOB_NOTICE_HEADER``, on both backends,
+a native ADK YAML app's too.
 """
 
 from __future__ import annotations
@@ -65,8 +65,7 @@ def job_notice(record: Any, result: Any) -> str:
     """The text that tells the root agent ``record``'s job finished.
 
     ``JOB_NOTICE_HEADER``, ``JOB_NOTICE_ASK``, then ``job_result_payload``
-    as JSON, a line each: what both backends send when a job finishes (a
-    native ADK YAML app answers the job's call instead).
+    as JSON, a line each: what both backends send when a job finishes.
 
     Args:
         record: The finished ``JobRecord``.

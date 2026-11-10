@@ -635,6 +635,51 @@ class Team(FakeAPI):
         return self.scripts[prompt].pop(0)
 
 
+class TestAnAgentThatReplies:
+    """An agent the root transfers to (a native ADK YAML app's chat-mode agent)
+    holds the conversation and answers the user: a conversation it no longer
+    fits ends the turn with the clear error, as the main agent's does, never
+    with a sub-agent's "I could not do this task" as its reply."""
+
+    @staticmethod
+    def plugin() -> "OverflowPlugin":
+        from agentic_cli.workflow.adk.overflow_plugin import OverflowPlugin
+        from agentic_cli.workflow.context import ContextBudget
+
+        budget = ContextBudget(window=200_000, window_known=True, budget=180_000,
+                               trigger=150_000, keep=20_000)
+        names = ("root", "helper", "worker")
+
+        async def summarize_now(callback_context):
+            return None
+
+        return OverflowPlugin(
+            root="root", reply_agents={"root", "helper"},
+            budgets={name: budget for name in names},
+            kinds={name: ProviderKind.ANTHROPIC for name in names},
+            models={name: "anthropic:claude-sonnet-4-6" for name in names},
+            summarize_now=summarize_now,
+        )
+
+    async def test_its_overflow_is_the_turns_clear_error(self):
+        from types import SimpleNamespace
+
+        plugin = self.plugin()
+        failed = LlmResponse(error_code="400", error_message="context_length_exceeded")
+
+        helper = await plugin.after_model_callback(
+            callback_context=SimpleNamespace(agent_name="helper"), llm_response=failed
+        )
+        worker = await plugin.after_model_callback(
+            callback_context=SimpleNamespace(agent_name="worker"), llm_response=failed
+        )
+
+        assert helper.error_code == OVERFLOW_ERROR_CODE
+        assert helper.error_message == overflow_message("anthropic:claude-sonnet-4-6")
+        assert worker.error_code is None
+        assert worker.content.parts[0].text.startswith("I could not do this task")
+
+
 class TestASubAgentsOverflow:
     async def test_it_answers_that_it_could_not_and_the_user_is_warned_once(
         self, project, monkeypatch

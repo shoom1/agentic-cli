@@ -189,24 +189,18 @@ async def test_a_mark_the_process_holds_is_never_saved_as_unmarked():
     assert runner.calls[0].state_delta == {OUTSIDE_CONTENT_KEY: "web_fetch"}
 
 
-async def test_a_native_adk_app_still_answers_the_pending_call():
-    """A native ADK YAML app's agents are ADK's own: its job answers its call."""
+async def test_a_native_adk_app_is_told_in_the_notice_too():
+    """A native ADK YAML app runs as any app once its agents are built: its
+    job is told in the notice, not as a second result of its call, which
+    ADK's rearranger would send with nothing after it."""
     runner = _FakeRunner()
     mgr = _resume_manager(runner, native=True)
     events = [ev async for ev in mgr.resume_with_job_result(_record(), result="build output")]
 
-    # One WorkflowEvent per adk event from the fake runner.
     assert [e.content for e in events] == ["ev-1", "ev-2"]
     assert len(runner.calls) == 1
-
-    part = runner.calls[0].new_message.parts[0]
-    fr = part.function_response
-    assert fr.id == "fc-1"
-    assert fr.name == "run_shell_job"
-    assert fr.response["state"] == "succeeded"
-    assert fr.response["exit_code"] == 0
-    assert fr.response["result_summary"] == "build output"
-    assert "job_result('j1')" in fr.response["hint"]
+    assert runner.calls[0].new_message.parts[0].function_response is None
+    assert _notice_payload(runner)["result_summary"] == "build output"
     # Active turn was cleared after the resume.
     assert mgr.active_session_id is None
 
@@ -296,12 +290,12 @@ async def test_a_job_without_its_call_id_is_still_told():
     assert _notice_payload(runner)["job_id"] == "j1"
 
 
-async def test_on_a_native_app_a_missing_call_id_yields_nothing():
+async def test_on_a_native_app_a_job_without_its_call_id_is_told_too():
     runner = _FakeRunner()
     mgr = _resume_manager(runner, native=True)
     events = [ev async for ev in mgr.resume_with_job_result(_record(call_id=None), result="x")]
-    assert events == []
-    assert runner.calls == []
+    assert [e.content for e in events] == ["ev-1", "ev-2"]
+    assert _notice_payload(runner)["result_summary"] == "x"
 
 
 async def test_resume_missing_session_yields_nothing():
@@ -350,10 +344,11 @@ async def test_can_resume_false_when_ids_missing():
     assert await mgr.can_resume(_record(user_id=None)) is False
 
 
-async def test_a_job_without_its_call_id_can_resume_but_not_on_a_native_app():
+async def test_a_job_without_its_call_id_can_resume_on_any_app():
+    # The notice needs only the job's conversation, a native ADK YAML app's too.
     assert await _can_resume_manager(True).can_resume(_record(call_id=None)) is True
     native = _can_resume_manager(True, native=True)
-    assert await native.can_resume(_record(call_id=None)) is False
+    assert await native.can_resume(_record(call_id=None)) is True
 
 
 async def test_can_resume_reads_no_events():

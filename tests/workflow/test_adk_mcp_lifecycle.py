@@ -95,3 +95,57 @@ async def test_cleanup_stops_the_servers_and_a_model_switch_leaves_one(
         await manager.cleanup()
 
     assert alive(pid_dir) == [], "a server outlived cleanup()"
+
+
+async def test_a_native_apps_toolset_outlives_its_runner_and_serves_the_next(
+    project, pid_dir, monkeypatch
+):
+    """A native ADK YAML app's agents are loaded once per manager, so a model
+    switch builds the new runner on the same toolset object: the old runner
+    closed it (its server stops), and the new one starts it again."""
+    import json
+    import textwrap
+
+    from tests.workflow.adk.fakes import dead_base_urls, route_anthropic
+
+    dead_base_urls(monkeypatch)
+    api = FakeAPI(anthropic_message({"type": "text", "text": "ok"}, model="claude-sonnet-4-6"))
+    route_anthropic(monkeypatch, api)
+    (project / "atlas_tools.py").write_text(textwrap.dedent(f"""
+        import sys
+
+        from agentic_cli.workflow.mcp import MCPServerConfig, to_adk_toolset
+
+        atlas = to_adk_toolset(MCPServerConfig(
+            name="atlas", command=sys.executable, args=[{str(SERVER)!r}], timeout=30,
+            env={{"MCP_TEST_PID_DIR": {str(pid_dir)!r}}},
+        ))
+    """), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(project))
+    monkeypatch.delitem(sys.modules, "atlas_tools", raising=False)
+    (project / "root_agent.yaml").write_text(textwrap.dedent("""
+        agent_class: LlmAgent
+        name: root
+        model: claude-sonnet-4-6
+        instruction: Answer.
+        tools:
+          - name: atlas_tools.atlas
+    """), encoding="utf-8")
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[],
+        settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+        adk_config_path=str(project / "root_agent.yaml"),
+    )
+    try:
+        await turn(manager)
+        assert len(alive(pid_dir)) == 1
+        await manager.reinitialize(model="claude-haiku-4-5")
+        assert alive(pid_dir) == [], "the closed runner left the server running"
+        await turn(manager)
+        assert len(alive(pid_dir)) == 1
+    finally:
+        await manager.cleanup()
+
+    assert alive(pid_dir) == [], "a server outlived cleanup()"
+    tools = [sorted(t["name"] for t in json.loads(r.content).get("tools", [])) for r in api.requests]
+    assert tools == [["add", "lookup"], ["add", "lookup"]]

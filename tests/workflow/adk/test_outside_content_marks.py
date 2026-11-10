@@ -99,6 +99,20 @@ async def test_a_sub_agent_s_mark_is_written_at_the_root_s_next_model_call(activ
     assert root.state[OUTSIDE_CONTENT_KEY] == "kb_read"
 
 
+async def test_an_agent_that_replies_writes_the_mark_at_its_model_call(active_turn):
+    """An agent the root transfers to holds the conversation (a native ADK YAML
+    app's chat-mode agent): its calls write the mark into the session state,
+    as the root's do; a sub-agent's never do."""
+    marks = OutsideContentMarks()
+    marks.mark(REF, "kb_read")
+    plugin = PermissionPlugin(marks=marks, root="root", reply_agents={"root", "helper"})
+    helper, worker = _context("helper"), _context("worker")
+    await plugin.before_model_callback(callback_context=worker, llm_request=None)
+    await plugin.before_model_callback(callback_context=helper, llm_request=None)
+    assert OUTSIDE_CONTENT_KEY not in worker.state
+    assert helper.state[OUTSIDE_CONTENT_KEY] == "kb_read"
+
+
 async def _allow(self, tool, defn, tool_args, tool_context):
     return None
 

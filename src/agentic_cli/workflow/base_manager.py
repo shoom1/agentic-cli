@@ -1112,8 +1112,8 @@ class BaseWorkflowManager(ABC):
 
         False: the root agent is told in a message of its own, which needs
         only the job's conversation. A backend whose job answers the call
-        instead (a native ADK YAML app's) says True, and a record without
-        ``call_id`` cannot be resumed there.
+        instead says True, and a record without ``call_id`` cannot be
+        resumed there.
         """
         return False
 
@@ -1130,8 +1130,8 @@ class BaseWorkflowManager(ABC):
 
         The checks ``resume_with_job_result`` makes, without its turn: the
         backend can resume (``supports_job_resume``), the record names its
-        conversation (session and user, and its call where a job answers it:
-        a native ADK YAML app's), and the conversation is in the backend's
+        conversation (session and user, and its call where a job answers
+        it), and the conversation is in the backend's
         store (:meth:`_conversation_exists`). The CLI asks it to resume a
         job or to say "finished while its conversation was unavailable", and
         whether a job's conversation is gone.
@@ -1527,7 +1527,7 @@ class BaseWorkflowManager(ABC):
         """The root agent's name, from the validated agent graph.
 
         None before initialization, and on a manager that validates no graph
-        of its own (LangGraph, a native ADK YAML app).
+        of its own (LangGraph).
         """
         return self._root_agent_name if self._initialized else None
 
@@ -1545,8 +1545,9 @@ class BaseWorkflowManager(ABC):
         Raises:
             RuntimeError: Before initialization, or after cleanup.
             KeyError: ``agent_name`` names no agent whose context this manager
-                manages. LangGraph and a native ADK YAML app manage none: every
-                name is unknown there, the root's included.
+                manages: one whose model did not resolve (a native ADK YAML
+                app's). LangGraph manages none: every name is unknown there,
+                the root's included.
         """
         if not self._initialized:
             raise RuntimeError(
@@ -1566,8 +1567,8 @@ class BaseWorkflowManager(ABC):
         Derived, as ``supports_sessions`` is, so it cannot drift from the
         code: True when the subclass implements :meth:`_compact_turn` (the
         base's ``compact`` runs it) or overrides ``compact`` itself. A backend
-        that cannot in some configuration narrows it (ADK, for a native ADK
-        YAML app).
+        that cannot in some configuration narrows it (ADK, for a main agent
+        whose model has no context budget).
         """
         cls = type(self)
         return (
@@ -1742,8 +1743,7 @@ class BaseWorkflowManager(ABC):
         gives every agent a budget (``context_budget``) once the models are
         resolved, and a model whose window is too small to work in fails the
         start before any service is built. The base says no: a backend that
-        keeps its own history (LangGraph), and an app whose agents ADK owns (a
-        native ADK YAML app), have none.
+        keeps its own history (LangGraph) has none.
         """
         return False
 
@@ -1841,6 +1841,7 @@ class BaseWorkflowManager(ABC):
                 resolved[config.name] = model
         if errors:
             raise SettingsValidationError("\n".join(dict.fromkeys(errors)))
+        resolved.update(self._resolve_extra_models(roles, providers))
 
         self._default_model, self._resolved_models = default, resolved
         logger.info(
@@ -1848,6 +1849,18 @@ class BaseWorkflowManager(ABC):
             default=str(default.ref),
             agents={name: str(model.ref) for name, model in resolved.items()},
         )
+
+    def _resolve_extra_models(
+        self, roles: RoleMap, providers: Mapping[str, Provider]
+    ) -> dict[str, ResolvedModel]:
+        """The models of agents a backend built without configs, by name (none here).
+
+        A backend hook of ``_resolve_models``, after every config's model
+        resolved: ADK's for a native ADK YAML app's agents. Leniently: an
+        agent left out has no model and no context budget. ``_catalog`` is
+        loaded by then.
+        """
+        return {}
 
     def _resolve_for(
         self,

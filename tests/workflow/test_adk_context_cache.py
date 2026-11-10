@@ -186,26 +186,27 @@ def _native_yaml(tmp_path, model: str, *, helper: bool = False) -> str:
 
 
 @pytest.mark.parametrize(
-    "provider, default_model, caches",
+    "yaml_model, default_model, caches",
     [
-        pytest.param("anthropic", "claude-sonnet-4-5", True, id="claude"),
-        pytest.param("google", "gemini-2.5-flash", True, id="gemini"),
-        pytest.param("openai", "gpt-5.5", False, id="openai"),
+        pytest.param("claude-sonnet-4-5", "gpt-5.5", True, id="claude"),
+        pytest.param("gemini-2.5-flash", "gpt-5.5", True, id="gemini"),
+        pytest.param("gpt-5.5", "claude-sonnet-4-5", False, id="openai"),
     ],
 )
-async def test_a_native_adk_app_follows_the_default_model(
-    tmp_path, monkeypatch, provider, default_model, caches
+async def test_a_native_adk_app_caches_by_its_agents_models(
+    tmp_path, monkeypatch, yaml_model, default_model, caches
 ):
-    """A native ADK YAML app (``adk_config_path``) has no resolved agents."""
-    keys(monkeypatch, provider)
+    """A native ADK YAML app (``adk_config_path``) by the models ADK runs its
+    agents on, as an app built from configs: not by its default model."""
+    keys(monkeypatch, "anthropic", "google", "openai")
     manager = adk(
         [], settings(default_model=default_model),
-        adk_config_path=_native_yaml(tmp_path, default_model),
+        adk_config_path=_native_yaml(tmp_path, yaml_model),
     )
 
     await manager.initialize_services()
     try:
-        assert manager._resolved_models == {}
+        assert set(manager._resolved_models) == {"root"}
         if caches:
             assert_caches(cache_config(manager))
         else:

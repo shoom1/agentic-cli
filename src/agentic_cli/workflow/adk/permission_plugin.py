@@ -54,6 +54,8 @@ from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import get_active_turn
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.tools import BaseTool
     from google.adk.tools.tool_context import ToolContext
@@ -232,6 +234,9 @@ class PermissionPlugin(BasePlugin):
             waits at its prompt: a cancel there means it was not run.
         marks: The manager's record of each conversation's mark.
         root: The root agent's name, whose session state carries the mark.
+        reply_agents: The agents that reply to the user besides the root (a
+            chat-mode agent it transfers to holds the conversation): their
+            model calls write the mark into the session state too.
     """
 
     def __init__(
@@ -240,11 +245,14 @@ class PermissionPlugin(BasePlugin):
         *,
         marks: "OutsideContentMarks | None" = None,
         root: str | None = None,
+        reply_agents: "Collection[str]" = (),
     ) -> None:
         super().__init__(name="permission")
         self._open_calls = open_calls
         self._marks = marks
         self._root = root
+        # The agents whose model calls write the mark into the session state.
+        self._writers = frozenset({*reply_agents, *([root] if root else [])})
 
     def _asking(self, tool_context: "ToolContext | None"):
         call_id = getattr(tool_context, "function_call_id", None)
@@ -297,8 +305,9 @@ class PermissionPlugin(BasePlugin):
         self, *, callback_context: "CallbackContext", llm_request: Any
     ) -> None:
         """Mark the conversation when the request brings a model-side tool, and
-        write its mark into the root's session state when a sub-agent's call
-        set it (a sub-agent's state may be its own).
+        write its mark into the session state, at a call of an agent that
+        replies (the root, a chat-mode agent it transferred to), when a
+        sub-agent's call set it (a sub-agent's state may be its own).
 
         A model-side tool (Google Search, URL context, Vertex AI Search, a code
         executor) puts search results, pages or program output into the
@@ -315,7 +324,7 @@ class PermissionPlugin(BasePlugin):
             logger.debug(
                 "conversation_marked_outside_content", tool=name, session_id=ref.session_id
             )
-        if self._root is None or callback_context.agent_name != self._root:
+        if callback_context.agent_name not in self._writers:
             return None
         mark = self._marks.get(ref)
         if mark and callback_context.state.get(OUTSIDE_CONTENT_KEY) != mark:

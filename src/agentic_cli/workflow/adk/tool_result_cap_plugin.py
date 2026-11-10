@@ -8,10 +8,13 @@ Deep Agents' cap does the same
 (``workflow/deepagents/middleware.py::ToolResultCapMiddleware``).
 
 ADK stops at the first plugin whose ``after_tool_callback`` returns a value,
-so the manager registers this one after ``InterruptedCallsPlugin``, which
-records every finished result and returns nothing. For the same reason a
-native ADK YAML app gets none: its agents' own ``after_tool_callback``s would
-be skipped for every cut result.
+and runs an agent's own after-tool callbacks only when no plugin did
+(``google/adk/flows/llm_flows/tools/_caller.py``, steps 4 and 5). So the
+manager registers this one after ``InterruptedCallsPlugin``, which records
+every finished result and returns nothing, and it leaves out the agents that
+have after-tool callbacks of their own (``skip_agents``, a native ADK YAML
+app's: ``workflow/adk/build.py::own_after_tool_agents``): a cut would skip
+them, so such an agent's results reach its model whole.
 
 ADK's Claude and OpenAI Responses adapters send a model only part of a
 result: its ``content`` when that is a non-empty string or list (as
@@ -27,7 +30,7 @@ included.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +55,8 @@ class ToolResultCapPlugin(BasePlugin):
     Args:
         max_chars: ``tool_result_max_chars``.
         folder: Where full outputs are saved (``tool_output_dir``).
+        skip_agents: The agents whose results it leaves whole: those with
+            after-tool callbacks of their own.
 
     Attributes:
         on_cut: Told each cut this plugin makes, with its call's id, or
@@ -60,10 +65,13 @@ class ToolResultCapPlugin(BasePlugin):
             model would have read, without cutting (and saving) it again.
     """
 
-    def __init__(self, max_chars: int, folder: Path) -> None:
+    def __init__(
+        self, max_chars: int, folder: Path, *, skip_agents: Collection[str] = ()
+    ) -> None:
         super().__init__(name="tool_result_cap")
         self.max_chars = max_chars
         self.folder = folder
+        self.skip_agents = frozenset(skip_agents)
         self.on_cut: Callable[[str, Any], None] | None = None
 
     async def after_tool_callback(
@@ -75,6 +83,8 @@ class ToolResultCapPlugin(BasePlugin):
         result: Any,
     ) -> dict | None:
         """The cut result, or None to leave it as it is."""
+        if getattr(tool_context, "agent_name", None) in self.skip_agents:
+            return None
         try:
             capped = cap_tool_result(
                 result,

@@ -102,6 +102,42 @@ def serve(model: Any, api: FakeAPI) -> None:
     )
 
 
+#: A local port nothing listens on.
+DEAD_URL = "http://127.0.0.1:9"
+
+
+def dead_base_urls(monkeypatch) -> None:
+    """Point every provider SDK's base URL at ``DEAD_URL``: a client a test did
+    not route fails at once instead of reaching a provider."""
+    for name in (
+        "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_VERTEX_BASE_URL", "OPENROUTER_BASE_URL",
+    ):
+        monkeypatch.setenv(name, DEAD_URL)
+
+
+def route_anthropic(monkeypatch, api: FakeAPI) -> None:
+    """Send every Anthropic client built from now on to ``api``, keeping its other arguments.
+
+    Both bindings: the framework's ``anthropic.AsyncAnthropic`` and the one
+    ADK's own ``AnthropicLlm`` module bound at import, which a native ADK YAML
+    app's bare ``claude-*`` model builds. Each is replaced by a subclass, since
+    ADK names the class in a type union at run time.
+    """
+    import anthropic
+    from google.adk.models import anthropic_llm
+
+    for module in (anthropic, anthropic_llm):
+        real = module.AsyncAnthropic
+        library = http_library(real)
+
+        class Routed(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, _library: ModuleType = library, **kwargs: Any) -> None:
+                super().__init__(*args, **{**kwargs, "http_client": api.http_client(_library)})
+
+        monkeypatch.setattr(module, "AsyncAnthropic", Routed)
+
+
 def anthropic_message(*blocks: dict[str, Any], model: str = "claude-sonnet-4-5") -> dict[str, Any]:
     """An Anthropic Messages API response; one text block by default."""
     return {
