@@ -1730,6 +1730,8 @@ class BaseCLIApp:
             claimed = await _claim_delivery(jm, record.job_id)
             if claimed and getattr(record, "session_id", None) == self._session_id:
                 self._turned = True  # the resume adds to this conversation
+                # Defensive: a job of this conversation was submitted by a
+                # turn, which stored it already (fresh was False before).
                 self._conversation.written = True
             return claimed
 

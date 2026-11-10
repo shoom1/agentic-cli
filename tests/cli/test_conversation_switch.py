@@ -1000,6 +1000,98 @@ class TestWhetherAConversationMayMove:
         )
 
 
+class TestAConversationAMoveWaitedOn:
+    """What makes a conversation stay on its backend, at the last moment: a
+    turn the ready workflow ran (stored, cancelled or failed: it may have
+    stored the input), and a turn queued behind ``/settings`` that the move
+    waits for."""
+
+    Down = TestAPlaceChangeWhileTheWorkflowIsDown
+    New = TestANewConversationOnAnotherBackend
+
+    async def test_a_cancelled_turn_keeps_it_on_its_backend(self, home, monkeypatch):
+        app, adk, built = self.New.on_adk(monkeypatch)
+        started = asyncio.Event()
+
+        async def process(message, user_id, session_id=None):
+            adk.turns.append(session_id)  # the input is stored as the turn starts
+            started.set()
+            await asyncio.Event().wait()
+            yield None
+
+        adk.process = process
+        turn = asyncio.create_task(app.process_input("Hello."))
+        await asyncio.wait_for(started.wait(), 5)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn
+        conversation = app.session_id
+
+        assert await app.apply_settings({"orchestrator": "deepagents"})
+
+        assert not app._conversation.fresh and app.session_id == conversation
+        assert said(app.session, "add_success") == [
+            "Orchestrator: deepagents (applies to the next /new)"
+        ]
+        assert built == []
+
+    async def test_a_failed_turn_keeps_it_on_its_backend(self, home, monkeypatch):
+        app, adk, built = self.New.on_adk(monkeypatch)
+
+        async def process(message, user_id, session_id=None):
+            adk.turns.append(session_id)
+            raise RuntimeError("provider down")
+            yield None
+
+        adk.process = process
+        await app.process_input("Hello.")
+        conversation = app.session_id
+
+        assert await app.apply_settings({"orchestrator": "deepagents"})
+
+        assert not app._conversation.fresh and app.session_id == conversation
+        assert said(app.session, "add_success") == [
+            "Orchestrator: deepagents (applies to the next /new)"
+        ]
+
+    async def test_a_turn_queued_behind_settings_that_stores_one_keeps_it(
+        self, home, monkeypatch
+    ):
+        """Down; /settings decides the move; an app's turn queued on the turn
+        lock behind it starts the workflow and stores a turn; then the move
+        takes the lock: the conversation stays where its turn was stored."""
+        built = self.Down.builds(monkeypatch, lambda n, b: n == 0)
+        app = await self.Down.started(
+            BaseSettings(session_store="sqlite", orchestrator="deepagents")
+        )
+        controller = app._workflow_controller
+        conversation = app.session_id
+        gate = asyncio.Event()
+
+        async def an_apps_task():
+            async with app._turn_lock:
+                await gate.wait()
+
+        holder = asyncio.create_task(an_apps_task())
+        await asyncio.sleep(0)
+        applying = asyncio.create_task(app.apply_settings({"orchestrator": "adk"}))
+        await asyncio.sleep(0.01)
+        turn = asyncio.create_task(app._handle_message("an app's turn"))  # behind /settings
+        await asyncio.sleep(0.01)
+        gate.set()
+        assert await asyncio.wait_for(applying, 5)
+        await asyncio.wait_for(asyncio.gather(holder, turn), 5)
+
+        assert said(app.session, "add_success") == ["Orchestrator: adk (applies to the next /new)"]
+        assert controller.backend == "deepagents" and app.session_id == conversation
+        assert [(m.backend_type, m.turns) for m in built] == [
+            ("deepagents", []), ("deepagents", [conversation])
+        ]
+        assert not free(app, app._conversation_key(conversation))
+        assert app._conversation_key(conversation)[0] == "deepagents"
+        await controller.close()
+
+
 class TestABackendThatCannotRun:
     """No backend that cannot run is accepted: an ``orchestrator`` change to
     one whose extra is not installed is refused, whatever the conversation
