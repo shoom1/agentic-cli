@@ -1349,24 +1349,24 @@ the start of the entry's title.
   model catalog, takes what the backend holds through two hooks,
   `_detach_backend()` (what each initialization builds: agents, a runner, MCP
   sessions) and `_detach_store()` (the store the conversations live in),
-  closes the services on a worker thread, then the rest in one task of its
-  own, in that order, each close isolated, awaited under a shield: a Ctrl+C
-  during a model switch stops only the wait, and nothing is left open. Each
-  hook is synchronous, detaches its handles and returns `(name, close)`
-  pairs; both default to nothing, and one that returns an awaitable (`async
-  def` by mistake) fails the release with a `TypeError` once the rest is
-  released. A model switch (`reinitialize(preserve_sessions=True)`) keeps the
-  store and the services with one mechanism, `_keeping(preserve)`
-  (`_carrying_services` is its other name), also through a switch that fails.
-  A backend now implements `backend_type`, `_get_state_tools`,
-  `_do_initialize`, `process` and the hooks for what it holds, as the class
-  docstring's example does; one that overrides `cleanup` or `reinitialize`
-  keeps its own (the LangGraph backend does). The base also computes each
-  agent's context numbers, once the models are resolved and before any service
-  is built; a backend that summarizes by them says so in `_manages_context()`
-  and reads `_budgets` in `_do_initialize` (ADK for an app built from agent
-  configs, and Deep Agents, do; LangGraph and a native ADK YAML app have
-  none).
+  starts closing the services on a worker thread, then closes the rest in one
+  task of its own, which waits for the services last, each close isolated,
+  awaited under a shield: a Ctrl+C during a model switch stops only the wait,
+  and nothing is left open. Each hook is synchronous, detaches its handles and
+  returns `(name, close)` pairs; both default to nothing, and one that returns
+  an awaitable (`async def` by mistake) fails the release with a `TypeError`
+  once the rest is released. A model switch
+  (`reinitialize(preserve_sessions=True)`) keeps the store and the services
+  with one mechanism, `_keeping(preserve)` (`_carrying_services` is its other
+  name), also through a switch that fails. A backend now implements
+  `backend_type`, `_get_state_tools`, `_do_initialize`, `process` and the
+  hooks for what it holds, as the class docstring's example does; one that
+  overrides `cleanup` or `reinitialize` keeps its own (the LangGraph backend
+  does). The base also computes each agent's context numbers, once the models
+  are resolved and before any service is built; a backend that summarizes by
+  them says so in `_manages_context()` and reads `_budgets` in
+  `_do_initialize` (ADK for an app built from agent configs, and Deep Agents,
+  do; LangGraph and a native ADK YAML app have none).
 
 - **`/models` notes a thinking model that does not send its reasoning as
   text.** A model's `reasoning_text` (a `models` entry's, the shipped table's,
@@ -2413,8 +2413,8 @@ step; each entry says what to use instead.
   loop, so the app's exit, the old manager of an
   orchestrator change, a model switch that started afresh or a failed start's
   rollback stopped the app, Ctrl+C included, while they ran. They run on a
-  worker thread now, before the rest of the release closes, and a cancel
-  still stops only the wait; so do the services a cancelled start finishes
+  worker thread now, beside the rest of the release, and a cancel still
+  stops only the wait; so do the services a cancelled start finishes
   building after the cancel.
 
 - **`write_file` and `edit_file` of an existing file work on Windows with

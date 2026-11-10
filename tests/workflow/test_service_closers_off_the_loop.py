@@ -6,19 +6,23 @@ takes the jobs directory's lock, a knowledge base's ``close`` closes its
 databases: each one blocks. A release ran them on the event loop, so a
 cleanup (the app's exit, the old manager of an orchestrator swap, a model
 switch that starts afresh, a failed start's rollback) froze the whole app,
-Ctrl+C included, for as long as they took. They now run on a worker thread,
-first in the release's closing task, before the backend's, the store's and
-the catalog's closers: a cancel still stops only the wait. So do the
-services a cancelled initialization's build thread finishes after the
-cancel.
+Ctrl+C included, for as long as they took. They now start on a worker
+thread as the release detaches them, the backend's, the store's and the
+catalog's closers run meanwhile, and the release's closing task waits for
+the services last, under a shield: a cancel still stops only the wait, a
+service closer that hangs holds none of the rest, and the loop's shutdown
+cancels no close that has not started. So do the services a cancelled
+initialization's build thread finishes after the cancel.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -151,7 +155,19 @@ class _Held:
         return self.sandbox.threads + self.jobs.threads
 
 
-EVERYTHING = ["sandbox", "jobs", "backend", "store", "catalog"]
+#: The services, closed on a worker thread in the table's order, and the
+#: rest, closed on the loop in the release's order.
+SERVICES_CLOSED = ["sandbox", "jobs"]
+THE_REST = ["backend", "store", "catalog"]
+
+
+def _each_once(closed: list[str]) -> bool:
+    """Everything closed once: the services in their order, the rest in theirs."""
+    return (
+        len(closed) == len(SERVICES_CLOSED) + len(THE_REST)
+        and [name for name in closed if name in SERVICES_CLOSED] == SERVICES_CLOSED
+        and [name for name in closed if name in THE_REST] == THE_REST
+    )
 
 
 class TestAReleaseClosesTheServicesOffTheLoop:
@@ -161,7 +177,7 @@ class TestAReleaseClosesTheServicesOffTheLoop:
         with no_blocking_calls():
             await held.manager.cleanup()
 
-        assert held.closed == EVERYTHING
+        assert _each_once(held.closed), held.closed
         assert held.threads() and threading.main_thread() not in held.threads()
         assert held.manager.services == {}
 
@@ -205,15 +221,60 @@ class TestAReleaseClosesTheServicesOffTheLoop:
             await task
         gate.set()
         for _ in range(200):
-            if held.closed == EVERYTHING:
+            if _each_once(held.closed):
                 break
             await asyncio.sleep(0.01)
 
-        assert held.closed == EVERYTHING
+        assert _each_once(held.closed), held.closed
         assert held.manager.is_initialized is False
         assert held.manager.services == {}
         await held.manager.cleanup()
-        assert held.closed == EVERYTHING
+        assert _each_once(held.closed), held.closed
+
+    async def test_a_hanging_service_closer_holds_none_of_the_rest(self, ctx, build):
+        """Waited for first, a service close that hangs (a container that does
+        not go away) held the backend's, the store's and the catalog's."""
+        gate = threading.Event()
+        held = _Held(build, ctx.settings, gate)
+
+        task = asyncio.create_task(held.manager.cleanup())
+        try:
+            for _ in range(200):
+                if set(THE_REST) <= set(held.closed):
+                    break
+                await asyncio.sleep(0.01)
+            assert [name for name in held.closed if name in THE_REST] == THE_REST
+            assert "sandbox" not in held.closed and not task.done()
+        finally:
+            gate.set()
+        await asyncio.wait_for(task, timeout=5)
+
+        assert _each_once(held.closed), held.closed
+
+
+def test_everything_closes_at_the_exit_with_a_busy_executor(ctx, build):
+    """Ctrl+C at the app's exit stops the cleanup's wait, and ``asyncio.run``
+    then cancels the closing task and joins the executor. Waited for first,
+    the services' close was cancelled with the task when no worker had
+    picked it up yet (one busy: a cancelled turn's synchronous tool), and
+    the rest never ran: nothing closed."""
+    busy = threading.Event()
+    held = _Held(build, ctx.settings)
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        loop.run_in_executor(None, busy.wait, 0.5)
+        cleanup = asyncio.ensure_future(held.manager.cleanup())
+        await asyncio.sleep(0.01)
+        cleanup.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup
+
+    asyncio.run(main())
+    busy.set()
+
+    assert _each_once(held.closed), held.closed
 
 
 class _SlowBuild(BaseWorkflowManager):

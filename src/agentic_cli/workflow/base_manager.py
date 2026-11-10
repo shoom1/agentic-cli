@@ -1988,19 +1988,21 @@ class BaseWorkflowManager(ABC):
         3. The services, detached now, except those a model switch carries
            and those another manager owns (lent to this one, or given
            away: dropped, never closed here), and their closes started on a
-           worker thread
-           (:meth:`_start_closing_services`): they block, and on the event
-           loop they froze the app.
+           worker thread (:meth:`_start_closing_services`): they block, and
+           on the event loop they froze the app.
         4. The closers, in one task of its own, in a fixed order: the
-           services' closes waited for, then the backend's, the store's and
-           the catalog's. Each is isolated (one that raises is logged, and
-           the rest still run), and the task is awaited under a shield: a
-           cancel of the caller (Ctrl+C during a ``/settings`` model switch,
-           a cancelled ``async with manager``) stops only the wait, and
-           everything still closes, once. Only an event loop shutting down,
-           which cancels the closing task itself, skips the closers after
-           the one running (the services' closes, on their thread, still
-           run to their end).
+           backend's, the store's and the catalog's, while the services
+           close on their thread, then the services' closes waited for,
+           last and under a shield of their own, so a service close that
+           hangs holds none of the others, and a cancel never cancels one
+           that has not started. Each is isolated (one that raises is
+           logged, and the rest still run), and the task is awaited under a
+           shield: a cancel of the caller (Ctrl+C during a ``/settings``
+           model switch, a cancelled ``async with manager``) stops only the
+           wait, and everything still closes, once. Only an event loop
+           shutting down, which cancels the closing task itself, skips the
+           closers after the one running; the services' closes still run,
+           on a thread the loop joins as it closes.
 
         It raises nothing a close raises. It raises ``TypeError`` for a hook
         that is not synchronous (returns an awaitable), after releasing
@@ -2050,7 +2052,7 @@ class BaseWorkflowManager(ABC):
 
         services = self._start_closing_services(self._service_set.release())
         if services is not None:
-            closers.insert(0, ("services", lambda: services))
+            closers.append(("services", lambda: asyncio.shield(services)))
 
         closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)
@@ -2068,13 +2070,12 @@ class BaseWorkflowManager(ABC):
         repeat release finds nothing) and return the closers of what they
         held, in the order they must run. Called on every release, a model
         switch's included. It must be synchronous (``def``, never
-        ``async def``) and must not raise. The services are already closed
-        when its closers run (the base starts closing them first, on a
-        worker thread, and waits for them before any closer, so a cancel
-        cannot skip them); that is safe because no turn is in flight (a
-        release holds the turn lock, or rolls back an attempt no turn ran
-        on) and the services never reach the backend's MCP servers or its
-        store. The base holds nothing here.
+        ``async def``) and must not raise. The services may still be
+        closing when its closers run (the base starts their closes first,
+        on a worker thread, and waits for them last); that is safe because
+        no turn is in flight (a release holds the turn lock, or rolls back
+        an attempt no turn ran on) and the services never reach the
+        backend's MCP servers or its store. The base holds nothing here.
         """
         return []
 
@@ -2084,9 +2085,9 @@ class BaseWorkflowManager(ABC):
         A backend hook of the release (:meth:`_release_resources`), as
         :meth:`_detach_backend` is, for the store the conversations live in
         (a session service, a checkpointer and its connections): synchronous,
-        never raising, and its closers run after the services closed, which
-        is safe for the same reasons (no turn in flight; no service reaches
-        the store). Not called while a model switch keeps the store
+        never raising, and its closers run while the services may still be
+        closing, which is safe for the same reasons (no turn in flight; no
+        service reaches the store). Not called while a model switch keeps the store
         (:meth:`_keeping`): the backend then finds its store still attached
         when it builds again, and must reuse it rather than open another. The
         base holds nothing here.
