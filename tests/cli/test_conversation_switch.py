@@ -1395,6 +1395,26 @@ class TestTheExitHintOnAnotherBackend:
 
         assert app._resume_hint() == f"Resume this conversation with /resume {app.session_id}"
 
+    async def test_after_a_store_change_it_names_the_runs_store(self, home, monkeypatch):
+        """The next start opens the new store, where the conversation is not."""
+        app, _, _ = self.New.on_adk(monkeypatch)
+        assert await app.apply_settings({"session_store": "memory"})
+
+        assert app._resume_hint() == (
+            f"Resume this conversation with /resume {app.session_id} "
+            "(set session_store to sqlite first: it is stored there)"
+        )
+
+    async def test_after_both_changes_it_names_both(self, home, monkeypatch):
+        app, _, _ = self.New.on_adk(monkeypatch)
+        await app.process_input("/new deepagents")
+        assert await app.apply_settings({"session_store": "postgres", "postgres_uri": "postgresql://h/db"})
+
+        assert app._resume_hint() == (
+            f"Resume this conversation with /resume {app.session_id} "
+            "(set orchestrator to deepagents and session_store to sqlite first: it runs there)"
+        )
+
 
 class TestARunThatWritesNothing:
     """An id this run generated (the start's new conversation, ``/new``, an

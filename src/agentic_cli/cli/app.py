@@ -2508,17 +2508,25 @@ class BaseCLIApp:
         """The exit line that names how to come back to the current conversation.
 
         ``--resume`` (and ``/resume``) open a conversation on the settings'
-        orchestrator, the backend of new conversations: one that runs on
-        another (``/new <backend>``) is found once the orchestrator names
-        its backend, and the line says so.
+        orchestrator, the backend of new conversations, in the settings'
+        session store: one that runs on another backend (``/new
+        <backend>``), or in the store this run keeps after a change of
+        ``session_store`` (which takes effect at the next start), is found
+        once the settings name its backend and its store, and the line says
+        so.
         """
         if self._command:
             hint = f"Resume this conversation with: {self._command} --resume {self._session_id}"
         else:
             hint = f"Resume this conversation with /resume {self._session_id}"
-        backend = self._place().backend
-        if backend != orchestrator_of(self._settings).value:
-            hint += f" (set orchestrator to {backend} first: it runs there)"
+        place = self._place()
+        other_backend = place.backend != orchestrator_of(self._settings).value
+        settings_first = [f"orchestrator to {place.backend}"] if other_backend else []
+        if place.store != self._settings.session_store:
+            settings_first.append(f"session_store to {place.store}")
+        if settings_first:
+            why = "it runs there" if other_backend else "it is stored there"
+            hint += f" (set {' and '.join(settings_first)} first: {why})"
         return hint
 
     async def _extract_session_facts_on_exit(self) -> None:

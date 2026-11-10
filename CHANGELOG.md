@@ -1316,7 +1316,8 @@ the start of the entry's title.
   left); an unknown name, or a backend whose extra is not installed, is
   refused with the reason, and nothing changes (so is a backend named to an
   app whose `start_new_session` override takes none). After it, the exit
-  hint names the backend to set before `--resume`. A model switch never
+  hint names the backend to set before `--resume` (and the run's store,
+  after a change of `session_store` in the run). A model switch never
   changes the backend: `WorkflowController` runs the conversation's
   (`backend`; `switch_backend(backend)` starts another, for a new
   conversation), not `settings.orchestrator`, and `reinitialize` is always
