@@ -16,6 +16,12 @@ and the same id in another place, while the workflow is down and its next
 start builds on another backend or store.
 So the conversation the turns write to is always the one held and loaded,
 whichever way it changed and wherever a Ctrl+C lands.
+
+What writes to the conversation runs here too, under the core's turn lock,
+which every switch takes as well: a turn (``run_turn``) and ``/compact``
+(``compact``), each held to write first (an id this run made is held from
+its first write). ``BaseCLIApp`` forwards to them, on its parts as they are
+(``TurnParts``).
 """
 
 from __future__ import annotations
@@ -24,10 +30,14 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentic_cli.cli.conversation_lock import ConversationLock, Taken
+from agentic_cli.cli.message_processor import CANCELLED_LINE, TurnResult, TurnStatus
 from agentic_cli.logging import Loggers
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.context import CompactResult
 
 logger = Loggers.cli()
 
@@ -132,6 +142,26 @@ class SwitchParts:
 
 
 @dataclass(frozen=True, slots=True)
+class TurnParts:
+    """What a write to the conversation runs on besides it: the app's parts as they are.
+
+    Attributes:
+        controller: The workflow controller (``ensure_initialized``,
+            ``is_ready``, ``workflow``).
+        processor: The message processor, which runs the turn and draws it.
+        ui: The session the turn is drawn in.
+        settings: The app's settings.
+        tracker: The usage tracker the turn's token counts go to; None for none.
+    """
+
+    controller: Any
+    processor: Any
+    ui: Any
+    settings: Any
+    tracker: Any
+
+
+@dataclass(frozen=True, slots=True)
 class Switch:
     """How a switch ended.
 
@@ -154,7 +184,8 @@ class Switch:
 
 
 class ConversationCore:
-    """The conversation the app is in: its id, ``turned``, and its lock.
+    """The conversation the app is in: its id, ``turned``, its lock, and its
+    turn lock, under which what writes to it runs (a turn, ``/compact``).
 
     Args:
         session_id: The conversation's id.
@@ -199,6 +230,9 @@ class ConversationCore:
         #: app's own tasks.
         self.turn_lock = asyncio.Lock()
         self._lock: ConversationLock | None = None
+        #: The run said its conversation runs unheld (a lock that could not be
+        #: taken): said once a run.
+        self._said_unheld = False
 
     @property
     def fresh(self) -> bool:
@@ -435,6 +469,127 @@ class ConversationCore:
         self._make(taken, parts, moved=False, opened_empty=False, deferred=False)
         parts.status()
         return None
+
+    async def run_turn(self, message: str, parts: TurnParts) -> TurnResult | None:
+        """Run a turn of the user's ``message`` in the conversation, under the turn lock.
+
+        The line is echoed as its turn starts: one typed while the
+        conversation ``--continue``/``--resume`` asked for opens shows under
+        its replay; one Ctrl+C stops while it waits is shown and said
+        cancelled (it never ran), not dropped unseen. The conversation is
+        held to write first, then the message processor runs the turn
+        (``MessageProcessor.process``) in it. It is ``turned`` from then on
+        (its memories are proposed on leaving it), and ``written`` once the
+        turn reached a ready workflow, which stores it (a turn the workflow
+        was not up for stores nothing; one that raised or was cancelled
+        counts when the workflow was ready: it may have begun).
+
+        Args:
+            message: What the user typed.
+            parts: The app's parts it runs on.
+
+        Returns:
+            The turn's outcome; None when it did not run (another process has
+            the conversation open, said).
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor
+                says, or while it waited for the turn lock.
+        """
+        ui = parts.ui
+        try:
+            await self.turn_lock.acquire()
+        except asyncio.CancelledError:
+            ui.add_message("user", message)
+            ui.add_message("system", CANCELLED_LINE)
+            raise
+        try:
+            ui.add_message("user", message)
+            if not self._held_to_write(ui):
+                return None
+            self.turned = True  # the conversation now holds this message
+            reached = False  # the turn reached a ready workflow, which stores it
+            try:
+                result = await parts.processor.process(
+                    message=message,
+                    workflow_controller=parts.controller,
+                    ui=ui,
+                    settings=parts.settings,
+                    usage_tracker=parts.tracker,
+                    session_id=self.session_id,
+                )
+                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+            except BaseException:
+                reached = parts.controller.is_ready  # it may have begun
+                raise
+            finally:
+                if reached:
+                    self.written = True
+            return result
+        finally:
+            self.turn_lock.release()
+
+    async def compact(self, focus: str | None, parts: TurnParts) -> "CompactResult | None":
+        """Summarize the conversation now (``/compact [focus]``), as a turn runs.
+
+        Under the turn lock, held to write first: the workflow's ``compact``
+        runs with a turn's events box, status line, token counts and Ctrl+C
+        (``MessageProcessor.process_compact``), which says what it did, or
+        why nothing was.
+
+        Args:
+            focus: What the summary should keep above all, if anything.
+            parts: The app's parts it runs on.
+
+        Returns:
+            What the summary did; None when nothing was summarized (or the
+            conversation is open in another process, said).
+        """
+        async with self.turn_lock:
+            if not self._held_to_write(parts.ui):
+                return None
+            return await parts.processor.process_compact(
+                focus,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            )
+
+    def _held_to_write(self, ui: Any) -> bool:
+        """Hold the conversation before it is written, when its id was made by
+        this run (``hold_to_write``); the caller holds the turn lock. False,
+        said, when another process has it open (a collision of random ids):
+        the write must not happen.
+
+        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
+        on a postgres store) does not stop the write: the conversation runs
+        unheld, as an id given to the app does whose startup hold failed,
+        and the run says so once.
+        """
+        try:
+            holder = self.hold_to_write()
+        except OSError as error:
+            logger.debug(
+                "conversation_hold_failed", session_id=self.session_id, exc_info=True
+            )
+            self.deferred = False  # written unheld: not tried again
+            if not self._said_unheld:
+                self._said_unheld = True
+                reason = str(error) or type(error).__name__
+                ui.add_warning(
+                    f"Could not hold conversation '{self.session_id}' for this "
+                    f"process: {reason}. Its turns run unheld, so another process "
+                    "could open it too."
+                )
+            return True
+        if holder is None:
+            return True
+        ui.add_error(
+            f"Conversation '{self.session_id}' is open in another process ({holder})."
+        )
+        return False
 
     def _make(
         self,

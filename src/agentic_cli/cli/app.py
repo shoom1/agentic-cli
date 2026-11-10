@@ -34,12 +34,7 @@ from prompt_toolkit.history import InMemoryHistory
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.message_processor import (
-    CANCELLED_LINE,
-    MessageProcessor,
-    TurnStatus,
-    _says_so_when_stopped,
-)
+from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
     NOT_KEPT,
     ConversationCore,
@@ -47,6 +42,7 @@ from agentic_cli.cli.conversation import (
     Place,
     Switch,
     SwitchParts,
+    TurnParts,
 )
 from agentic_cli.cli.session_args import (
     SessionArgumentParser,
@@ -1604,52 +1600,30 @@ class BaseCLIApp:
             self.session.add_message("system", "Type /help to see available commands")
 
     async def _handle_message(self, message: str) -> None:
-        """Route message through agentic workflow.
-
-        Delegates to MessageProcessor for event stream handling.
+        """Run the user's ``message`` as a turn of the conversation
+        (``ConversationCore.run_turn``: one at a time, under the turn lock),
+        then, at the turn boundary, tell the finished jobs that wait for it
+        (``job_auto_resume``) through the app's ``resume_finished_jobs``.
 
         Args:
             message: User message to process
         """
-        # Delegate to message processor (one turn at a time). Echoed as its
-        # turn starts: a line typed while the conversation --continue/--resume
-        # asked for opens shows under its replay; one Ctrl+C stops while it
-        # waits is shown and said cancelled (it never ran), not dropped unseen.
-        try:
-            await self._turn_lock.acquire()
-        except asyncio.CancelledError:
-            self.session.add_message("user", message)
-            self.session.add_message("system", CANCELLED_LINE)
-            raise
-        try:
-            self.session.add_message("user", message)
-            if not self._held_to_write():
-                return
-            self._turned = True  # the conversation now holds this message
-            reached = False  # the turn reached a ready workflow, which stores it
-            try:
-                result = await self._message_processor.process(
-                    message=message,
-                    workflow_controller=self._workflow_controller,
-                    ui=self.session,
-                    settings=self._settings,
-                    usage_tracker=self._usage_tracker,
-                    session_id=self._session_id,
-                )
-                reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
-            except BaseException:
-                reached = self._workflow_controller.is_ready  # it may have begun
-                raise
-            finally:
-                if reached:
-                    self._conversation.written = True
-        finally:
-            self._turn_lock.release()
-
+        if await self._conversation.run_turn(message, self._turn_parts()) is None:
+            return  # open in another process: nothing ran
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).
         if getattr(self._settings, "job_auto_resume", False):
             await self._resume_on_its_own()
+
+    def _turn_parts(self) -> TurnParts:
+        """What a write to the conversation runs on besides it, as the app has it now."""
+        return TurnParts(
+            controller=self._workflow_controller,
+            processor=self._message_processor,
+            ui=self.session,
+            settings=self._settings,
+            tracker=self._usage_tracker,
+        )
 
     async def _resume_on_its_own(self) -> None:
         """``resume_finished_jobs``, as the CLI runs it unasked (``_TELLING_ON_ITS_OWN``)."""
@@ -1806,7 +1780,7 @@ class BaseCLIApp:
             async with self._turn_lock:
                 if not await self._told_here(record):
                     return None
-                if not self._held_to_write():  # its notice is written here
+                if not self._conversation._held_to_write(self.session):  # its notice is written here
                     return None
                 result = await self._message_processor.process_resume(
                     record=record,
@@ -1870,7 +1844,8 @@ class BaseCLIApp:
         The public twin of ``start_new_session()``: under the turn lock, the
         workflow's ``compact`` runs with the turn's events box, status line,
         token counts and Ctrl+C (``MessageProcessor.process_compact``), and
-        what it did, or why nothing was, is said as ``/compact`` says it.
+        what it did, or why nothing was, is said as ``/compact`` says it
+        (``ConversationCore.compact``).
 
         Args:
             focus: What the summary should keep above all, if anything.
@@ -1878,17 +1853,7 @@ class BaseCLIApp:
         Returns:
             What the summary did; None when nothing was summarized.
         """
-        async with self._turn_lock:
-            if not self._held_to_write():
-                return None
-            return await self._message_processor.process_compact(
-                focus,
-                workflow_controller=self._workflow_controller,
-                ui=self.session,
-                settings=self._settings,
-                usage_tracker=self._usage_tracker,
-                session_id=self._session_id,
-            )
+        return await self._conversation.compact(focus, self._turn_parts())
 
     async def start_new_session(self, backend: str | None = None) -> str:
         """Start a new conversation in this process (``/new``), and return its id.
@@ -2371,41 +2336,6 @@ class BaseCLIApp:
                 f"'{session_id}' is also a conversation on {' and '.join(names)}: "
                 f"/resume lists {'it' if len(names) == 1 else 'them'}.",
             )
-
-    def _held_to_write(self) -> bool:
-        """Hold the conversation before it is written, when its id was made by
-        this run (``ConversationCore.hold_to_write``); the caller holds the
-        turn lock. False, said, when another process has it open (a collision
-        of random ids): the write must not happen.
-
-        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
-        on a postgres store) does not stop the write: the conversation runs
-        unheld, as an id given to the app does whose startup hold failed,
-        and the run says so once.
-        """
-        core = self._conversation
-        try:
-            holder = core.hold_to_write()
-        except OSError as error:
-            logger.debug(
-                "conversation_hold_failed", session_id=core.session_id, exc_info=True
-            )
-            core.deferred = False  # written unheld: not tried again
-            if not getattr(self, "_said_unheld", False):
-                self._said_unheld = True
-                reason = str(error) or type(error).__name__
-                self.session.add_warning(
-                    f"Could not hold conversation '{core.session_id}' for this "
-                    f"process: {reason}. Its turns run unheld, so another process "
-                    "could open it too."
-                )
-            return True
-        if holder is None:
-            return True
-        self.session.add_error(
-            f"Conversation '{self._session_id}' is open in another process ({holder})."
-        )
-        return False
 
     def _switch_parts(self, *, drawn: bool = True) -> SwitchParts:
         """What a switch acts on besides the conversation, as the app has it now.
