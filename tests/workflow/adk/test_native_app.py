@@ -17,6 +17,7 @@ builds for a bare ``claude-*`` model) are routed to a fake API.
 from __future__ import annotations
 
 import json
+import sys
 import textwrap
 
 import pytest
@@ -101,6 +102,14 @@ def native(path: str, configs=(), **overrides) -> GoogleADKWorkflowManager:
     )
 
 
+def app_module(project, monkeypatch, name: str, source: str):
+    """A module of the app's own, ``name``, importable from ``project``: what
+    a native app's YAML names by module path. Imported fresh by each test."""
+    (project / f"{name}.py").write_text(textwrap.dedent(source), encoding="utf-8")
+    monkeypatch.syspath_prepend(str(project))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+
+
 class TestTheYAMLIsLoadedWhenItIsValidated:
     async def test_a_root_that_is_not_an_llm_agent_is_refused(self, project):
         write(project, "helper.yaml", """
@@ -147,6 +156,33 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
             "agent 'asker' is in task mode, which is not supported; use single_turn or chat"
         )
         assert manager._session_service is None
+
+    async def test_its_code_sees_the_settings_keys_when_it_is_imported(
+        self, project, monkeypatch
+    ):
+        """A module the YAML names may read a key as it is imported (a client
+        made at module level). The settings' keys (from the constructor, an
+        env file) are in the environment by then, as they were when the YAML
+        was loaded with the app."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "restored after the test")
+        monkeypatch.delenv("GOOGLE_API_KEY")
+        app_module(project, monkeypatch, "key_reader", """
+            import os
+
+            KEY_SEEN = os.environ.get("GOOGLE_API_KEY")
+
+
+            def look_up(city: str) -> str:
+                return city
+        """)
+        path = root_yaml(project, extra="tools:\n  - name: key_reader.look_up\n")
+        manager = native(path, google_api_key="from-settings")
+        try:
+            await manager.initialize_services()
+        finally:
+            await manager.cleanup()
+
+        assert sys.modules["key_reader"].KEY_SEEN == "from-settings"
 
     async def test_its_root_is_the_main_agent(self, project):
         manager = native(root_yaml(project))

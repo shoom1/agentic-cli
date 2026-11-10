@@ -950,7 +950,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         A native ADK YAML app's agents are built here, by ADK
         (``build.load_native_root``), and kept for ``_do_initialize``: its
         code is imported now, and a root that is not an ``LlmAgent`` or a
-        task-mode agent is refused before anything else is done.
+        task-mode agent is refused before anything else is done. The
+        settings' API keys are exported first (the base exports them only
+        after this check), so a module the YAML names that reads a key as it
+        is imported finds it, as it did when the YAML was loaded with the app.
 
         Returns:
             The graph; for a native ADK YAML app, one naming its root alone
@@ -959,6 +962,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._adk_config_path:
             from agentic_cli.workflow.adk.build import load_native_root
 
+            self._settings.export_api_keys_to_env()
             root = self._loaded_native_root = load_native_root(self._adk_config_path)
             self._required_managers = self._detect_required_managers()
             return AgentGraph(config_map={}, build_order=(), root_name=root.name)

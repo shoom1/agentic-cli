@@ -1362,7 +1362,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `BaseCLIApp` starts one (the CLI builds its manager from agent configs).
   - **Loaded at validation.** The YAML is loaded, and the code it names
     imported, when the manager validates its agents, before any model,
-    service or store. A root that is not an `LlmAgent` (a workflow or
+    service or store; the settings' API keys are in the environment by
+    then. A root that is not an `LlmAgent` (a workflow or
     another agent class) is refused there, and so is a task-mode agent
     anywhere in the tree: `AgentGraphError`, naming the agent ("agent 'x'
     is in task mode, which is not supported; use single_turn or chat").
