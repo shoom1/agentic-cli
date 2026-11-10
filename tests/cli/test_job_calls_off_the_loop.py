@@ -248,7 +248,6 @@ class TestAStopWhileTheClaimIsTaken:
             record = finished(jobs, "s", "u")
             app = BaseCLIApp.__new__(BaseCLIApp)
             app._workflow_controller = ReplayController(HangingWorkflow())
-            app._turn_lock = asyncio.Lock()
             app._message_processor = MessageProcessor()
             app.session = opening_boxes(autospec_session())
             app._settings = SETTINGS

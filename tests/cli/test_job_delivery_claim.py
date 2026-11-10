@@ -83,7 +83,6 @@ def app_with(controller, jobs: JobManager) -> BaseCLIApp:
     controller.workflow.job_manager = jobs
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._workflow_controller = controller
-    app._turn_lock = asyncio.Lock()
     app._message_processor = MessageProcessor()
     app.session = opening_boxes(autospec_session())
     app._settings = SETTINGS

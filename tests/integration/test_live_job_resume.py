@@ -21,7 +21,6 @@ case runs on Gemini, so it requires GOOGLE_API_KEY:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import time
@@ -276,7 +275,6 @@ async def test_full_resume_loop_via_coordinator(live_settings):
             ensure_initialized=lambda ui=None: _true(),
             update_status_bar=lambda ui: None,
         )
-        app._turn_lock = asyncio.Lock()
         app._message_processor = MessageProcessor()
         app.session = session
         # The CLI runs every turn as default_user, in the current conversation:

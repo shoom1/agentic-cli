@@ -722,13 +722,6 @@ class BaseCLIApp:
         )
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()
-
-        # Serializes what writes to the conversation: a turn, a job's resume,
-        # /compact, /new and /resume (not /settings, nor the /resume picker,
-        # which waits on a dialog). thinking-prompt runs one input handler at
-        # a time, so it orders them against the startup resume
-        # (_open_on_startup, a task of its own) and an app's own tasks.
-        self._turn_lock = asyncio.Lock()
         self.should_exit = False
 
         # === Commands: registered once the session exists (below) ===
@@ -1053,6 +1046,12 @@ class BaseCLIApp:
         except KeyError:
             core = self.__dict__["_conversation_core"] = ConversationCore()
             return core
+
+    @property
+    def _turn_lock(self) -> asyncio.Lock:
+        """The conversation's turn lock (``_conversation.turn_lock``): a turn,
+        a job's notice, ``/compact``, ``/new`` and ``/resume`` take it."""
+        return self._conversation.turn_lock
 
     @property
     def _session_id(self) -> str | None:

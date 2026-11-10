@@ -70,7 +70,6 @@ def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None,
     app._workflow_controller = SimpleNamespace(
         is_ready=ready, workflow=SimpleNamespace(job_manager=jm, can_resume=can_resume)
     )
-    app._turn_lock = asyncio.Lock()
     app._message_processor = _FakeMessageProcessor(result)
     app.session = object()
     app._settings = SimpleNamespace(job_auto_resume=True)
@@ -293,7 +292,6 @@ def _strict_app(records: list, processor=None):
     app._workflow_controller = SimpleNamespace(
         is_ready=True, workflow=SimpleNamespace(job_manager=jm)
     )
-    app._turn_lock = asyncio.Lock()
     app._message_processor = processor or _FakeMessageProcessor()
     app.session = SimpleNamespace(add_error=lambda msg: None)
     app._settings = SimpleNamespace(job_auto_resume=True)
@@ -388,7 +386,6 @@ class TestClaimIsAlwaysClosed:
         app, jm = _strict_app([record])
         second_app = BaseCLIApp.__new__(BaseCLIApp)
         second_app._workflow_controller = app._workflow_controller
-        second_app._turn_lock = asyncio.Lock()
         second_app._message_processor = _FakeMessageProcessor()
         second_app.session = app.session
         second_app._settings = app._settings

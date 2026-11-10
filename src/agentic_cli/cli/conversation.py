@@ -191,6 +191,13 @@ class ConversationCore:
         #: id the app was given is held from the start.
         self.deferred = deferred
         self.place = place
+        #: Serializes what writes to the conversation and every change of
+        #: it: a turn, a job's notice, ``/compact``, ``/new`` and ``/resume``
+        #: (not ``/settings``, nor the ``/resume`` picker, which waits on a
+        #: dialog). thinking-prompt runs one input handler at a time, so it
+        #: orders them against the startup resume (a task of its own) and an
+        #: app's own tasks.
+        self.turn_lock = asyncio.Lock()
         self._lock: ConversationLock | None = None
 
     @property

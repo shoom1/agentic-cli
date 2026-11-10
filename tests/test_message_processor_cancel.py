@@ -327,7 +327,6 @@ async def test_a_cancelled_resume_turn_says_so_once_records_the_failure_and_re_r
     workflow = Workflow([WorkflowEvent.thinking("reading the result")])
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._workflow_controller = ReplayController(workflow)
-    app._turn_lock = asyncio.Lock()
     app._message_processor = MessageProcessor()
     app.session = ui
     app._settings = SETTINGS
