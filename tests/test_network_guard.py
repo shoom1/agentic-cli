@@ -152,16 +152,18 @@ class TestNoRunTraces:
     def test_the_live_tests_key_file_turns_no_tracing_on(self, tmp_path, monkeypatch):
         """``tests/integration/conftest.py`` loads the live tests' keys from a
         file as it is collected, after the session cleared the switches."""
-        from tests.integration.conftest import _load_live_test_env
-
         keys = tmp_path / "live-keys"
         keys.write_text(
             "NETGUARD_FAKE_KEY=k-test\n" + "".join(f"{name}=true\n" for name in TRACING),
             encoding="utf-8",
         )
+        # Before the import, which loads the file it names (the first that
+        # exists wins), so no real key file is read here.
         monkeypatch.setenv("AGENTIC_TEST_ENV_FILE", str(keys))
 
-        with patch.dict(os.environ):  # what the loader sets is put back
+        with patch.dict(os.environ):  # what the loader sets, at import too, is put back
+            from tests.integration.conftest import _load_live_test_env
+
             _load_live_test_env()
             loaded = {name: os.environ.get(name) for name in ("NETGUARD_FAKE_KEY", *TRACING)}
 
