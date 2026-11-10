@@ -264,6 +264,29 @@ class TestTheBackend:
         assert controller._workflow is built and controller.backend == "langgraph"
         await controller.close()
 
+    async def test_a_manager_kept_to_revive_is_released_for_another_backend(self):
+        """A failed reinitialization keeps its manager for the next start to
+        revive; a new conversation on another backend releases it instead,
+        so that start builds the new backend rather than reviving the old."""
+        controller = self._make_controller(OrchestratorType.ADK)
+        kept = _FakeADKWorkflow()
+        kept.is_initialized = False  # a failed reinitialization left it
+        controller._workflow = kept
+        controller._init_error = RuntimeError("reinitialize failed")
+        built = _FakeLangGraphWorkflow()
+
+        await controller.switch_backend("langgraph")
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=built,
+        ):
+            assert await controller.ensure_initialized() is True
+
+        kept.cleanup.assert_awaited_once()
+        kept.initialize_services.assert_not_awaited()
+        assert controller._workflow is built and controller.backend == "langgraph"
+        await controller.close()
+
     async def test_a_retry_after_a_failed_start_keeps_the_backend_chosen(self):
         """The settings may say otherwise by then: the backend is the
         conversation's."""
