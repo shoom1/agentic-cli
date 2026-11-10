@@ -9,8 +9,9 @@ memories are proposed, which read it, and says so ("Previous: <id>, not kept
 backend that fails to start drops nothing. A finished job of a conversation
 dropped is told as unavailable, as a deleted conversation's is. One left
 while the workflow was down (the manager a failed reinitialization kept,
-its store with it) is dropped once a workflow is ready, before it is used:
-a turn, a delivery of finished jobs, ``/compact`` or the next ``/new``.
+its store with it), or whose delete raised, is dropped once a workflow is
+ready, before it is used: a turn, a delivery of finished jobs, ``/compact``
+or the next ``/new``.
 
 Nothing is kept to go back to, so ``/resume`` (with an id or the picker),
 the app's ``resume_session`` and ``pick_session``, ``--resume <id>`` and
@@ -756,6 +757,63 @@ class TestDroppedOnceTheWorkflowIsBack:
         told = [line for line in lines if "while its conversation was unavailable" in line]
         assert not stored and state == "failed" and len(told) == 1
         assert lines[-1] == "No finished background jobs to resume."
+
+
+class TestDroppedOnceItsDeleteWorks:
+    """``/new`` whose delete raised left the conversation in the store, as
+    when the workflow was down: it is dropped at the next point once deletes
+    work again, and its job is told as unavailable, once."""
+
+    async def test_the_next_turn_drops_it_and_its_job_is_told_unavailable(self, project):
+        app, workflow, jobs, old = await with_a_finished_job(job_auto_resume=True)
+        deletes = Deletes(workflow)
+        deletes.failing = True
+        await app.process_input("/new")
+        new = app.session_id
+        assert new != old and old in workflow.stored
+        deletes.failing = False
+
+        await app.process_input("Hello.")
+        await app.process_input("Again.")
+
+        assert not await workflow.session_exists(old)
+        assert jobs.records[0].resume_state == "failed"
+        assert deletes.asked == [old, old]
+        assert workflow.calls[-3:] == [f"delete_session {old}", f"turn {new}", f"turn {new}"]
+        assert said(app.session, "add_message").count(UNAVAILABLE) == 1
+
+    async def test_one_whose_delete_fails_after_a_ctrl_c_is_dropped_all_the_same(
+        self, project
+    ):
+        """Ctrl+C stops the wait, not the delete, which then raises: the
+        conversation is still dropped at the next point."""
+        app, workflow, jobs, old = await with_a_finished_job(job_auto_resume=True)
+        gate, failed = asyncio.Event(), asyncio.Event()
+
+        async def stuck(session_id, *, user_id=None) -> bool:
+            workflow.deleting.set()
+            await gate.wait()
+            failed.set()
+            raise RuntimeError("the store is busy")
+
+        workflow.delete_session = stuck
+        starting = asyncio.create_task(app.process_input("/new"))
+        await asyncio.wait_for(workflow.deleting.wait(), 5)
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(starting, 5)
+        gate.set()
+        await asyncio.wait_for(failed.wait(), 5)
+        for _ in range(5):  # the drop's task ends
+            await asyncio.sleep(0)
+        del workflow.delete_session  # deletes work again
+        assert app.session_id != old and old in workflow.stored
+
+        await app.process_input("Hello.")
+
+        assert not await workflow.session_exists(old)
+        assert jobs.records[0].resume_state == "failed"
+        assert said(app.session, "add_message").count(UNAVAILABLE) == 1
 
 
 class TestOnTheRealBackends:

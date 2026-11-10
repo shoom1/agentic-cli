@@ -1129,10 +1129,13 @@ class BaseCLIApp:
             switched = await self._conversation.switch(
                 new, parts, place=place, propose=not moving, generated=True
             )
-            if switched.made and dropping is not None:
-                await self._drop(dropping, old)
-            elif switched.made and later:
+            if switched.made and (dropping is not None or later):
+                # Kept until the store has it no more: a delete that raises,
+                # even after a Ctrl+C stopped the wait, leaves it to the next
+                # point (ConversationCore.drop_left).
                 self._conversation.to_drop.append(old)
+                if dropping is not None and await self._drop(dropping, old):
+                    self._conversation.to_drop.remove(old)
         except asyncio.CancelledError:
             if self._session_id == new:
                 # On another backend the switch is made before the load, which

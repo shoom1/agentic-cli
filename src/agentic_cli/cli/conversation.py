@@ -24,9 +24,9 @@ job that waits for the conversation (``deliver_finished_jobs``, by
 ``cli/waiting_jobs.py``'s rule, which ``waiting_jobs`` names them by), each
 held to write first (an id this run made is held from its first write).
 ``BaseCLIApp`` forwards to them, on its parts as they are (``TurnParts``).
-Each drops first the conversations ``/new`` left on the memory store while
-the workflow was down (``to_drop``, ``drop_left``), whose store may still
-hold them.
+Each drops first the conversations ``/new`` left on the memory store that
+the workflow's store may still hold, the workflow being down then or their
+delete having raised (``to_drop``, ``drop_left``).
 """
 
 from __future__ import annotations
@@ -269,10 +269,10 @@ class ConversationCore:
         #: conversation.
         self._said_not_told: set[tuple[str, str | None]] = set()
         #: Conversations ``/new`` left on the memory store that the
-        #: workflow's store may still hold, its workflow being down then:
-        #: dropped once a workflow is ready, before it is used
-        #: (``drop_left``). Nothing lists or opens them, and a job of one
-        #: would never be told.
+        #: workflow's store may still hold (the workflow was down then, or
+        #: their delete raised): dropped once a workflow is ready, before it
+        #: is used (``drop_left``). Nothing lists or opens them, and a job
+        #: of one would never be told.
         self.to_drop: list[str] = []
 
     @property
