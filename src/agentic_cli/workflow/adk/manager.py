@@ -54,7 +54,6 @@ from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggin
 from agentic_cli.workflow.adk.sessions import (
     ServiceSessions,
     make_session_service,
-    session_db_url,
     turn_state,
 )
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
@@ -563,13 +562,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._adk_config_path:
             return {}
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
-
-    def _session_db_url(self) -> str | None:
-        """``settings.session_db_url()`` for the store it was built for
-        (``adk/sessions.py::session_db_url``): an override without a
-        ``store`` parameter fails the build rather than build on the other
-        store."""
-        return session_db_url(self._settings, self.session_store)
 
     def _make_session_service(self) -> BaseSessionService:
         """Build the ADK session service of its ``session_store``
