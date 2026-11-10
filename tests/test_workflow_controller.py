@@ -815,6 +815,35 @@ class TestTheRunsServicesMoveWithTheBackend:
         old.cleanup.assert_not_awaited()
         assert controller._workflow is old and controller.backend == "adk"
 
+    async def test_a_close_while_the_give_waits_publishes_nothing(self):
+        """``close()`` came while the give waited: nothing may publish from
+        then on. The new manager, given the services, is released (closing
+        them once), and the old one by the close."""
+        import asyncio
+
+        controller, old = self._controller_needing_swap()
+        new = _FakeLangGraphWorkflow()
+        closing: list = []
+        seen: list = []
+
+        async def give(loan):
+            closing.append(asyncio.create_task(controller.close()))
+            await asyncio.sleep(0)  # the close starts, and waits for the switch
+
+        old.give_services = AsyncMock(side_effect=give)
+        new.cleanup = AsyncMock(side_effect=lambda: seen.append(controller._workflow is new))
+        with patch(
+            "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+            return_value=new,
+        ):
+            with pytest.raises(RuntimeError, match="closed"):
+                await controller.switch_backend("langgraph")
+            await asyncio.wait_for(closing[0], timeout=5)
+
+        assert seen == [False], "the new manager was published after close()"
+        old.cleanup.assert_awaited_once()
+        assert controller._workflow is None
+
     async def test_a_manager_that_lends_nothing_starts_on_its_own(self):
         """An application's own manager, not a ``BaseWorkflowManager``: the
         new one builds its own services, as before."""

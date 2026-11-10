@@ -723,6 +723,12 @@ class WorkflowController:
             except Exception:
                 await self._cleanup_manager(new_workflow)
                 raise
+            if self._closed:
+                # close() came while the give waited: nothing publishes from
+                # then on. The new manager owns the services now and closes
+                # them; close() releases the old one, which holds none.
+                await self._cleanup_manager(new_workflow)
+                raise RuntimeError("WorkflowController is closed")
         self._workflow = new_workflow  # at once: no await since the give
         self._backend = backend
         self._init_error = None
