@@ -31,7 +31,7 @@ from agentic_cli.config import (
     set_context_settings,
     set_settings,
 )
-from tests.network_guard import dead_base_urls
+from tests.network_guard import dead_base_urls, no_tracing
 
 
 class MockContext:
@@ -242,16 +242,26 @@ def _no_model_warnings_from_other_tests(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(catalog, "_WARNED_MODELS", set())
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    # No run uploads LangSmith traces, offline or live. Once, for the whole
+    # run, rather than in a per-test fixture: langsmith caches what it reads
+    # of the environment, so a switch removed for one test would not take.
+    no_tracing()
+
+
 @pytest.fixture(autouse=True)
 def _dead_provider_urls(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every offline test runs with each provider SDK's host at a dead local port.
+    """Every offline test runs with each built-in provider SDK's host at a dead
+    local port, and no proxy for it.
 
-    A client a test did not route to a fake then fails at once, locally,
-    instead of reaching a provider with whatever key the environment holds
-    (``tests/network_guard.py``). A live test (marked ``llm``, on itself, its
-    class or its module) keeps the real environment its keys come from. A test
-    that needs an SDK's own default host deletes the variable itself
-    (``monkeypatch.delenv``), after routing every client it builds.
+    A built-in provider's client that a test did not route to a fake then
+    fails at once, locally (``tests/network_guard.py``, which says what it
+    does not cover: a configured provider's host, a child process given its
+    own environment, a module- or session-scoped fixture). A live test (marked
+    ``llm``, on itself, its class or its module) keeps the real environment
+    its keys come from. A test that needs an SDK's own default host deletes the
+    variable itself (``monkeypatch.delenv``), after routing every client it
+    sends from.
     """
     if request.node.get_closest_marker("llm") is None:
         dead_base_urls(monkeypatch)
