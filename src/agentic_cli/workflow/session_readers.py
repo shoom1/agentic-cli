@@ -9,7 +9,11 @@ delete a conversation of a backend that is not running, a caller (the CLI's
 backend's ``SessionReader`` from the settings and the store: it reads with
 the backend's own session code, so it answers what the manager's session
 hooks answer, and it builds no agent, resolves no model, builds no service
-and opens nothing but the store (no store at all where none was made yet).
+and opens nothing but the store. It writes into no store that is not yet
+its backend's: none is made where none was, and a database without its
+backend's tables (a file ``sqlite_uri`` names that the other backend or a
+team uses, a Postgres database the backend never ran on), looked at
+read-only, reads as empty, its tables and journal mode left as they are.
 
 This module sits beside the factory (``workflow/factory.py``), which builds a
 backend's manager, for the same reasons: one entry per backend, imported only
@@ -188,8 +192,10 @@ async def open_session_reader(
     Returns:
         The reader; None where there is nothing to read without the
         manager: the memory store, or a backend without a reader
-        (LangGraph). A sqlite store whose file is not made yet reads as
-        empty, and Deep Agents' is not imported to read it.
+        (LangGraph). A store the backend has not written yet (a sqlite
+        file not made, a database without its tables) reads as empty, and
+        nothing is written to it; Deep Agents is not even imported for a
+        sqlite file not made.
 
     Raises:
         ValueError: ``backend`` is no orchestrator.

@@ -546,9 +546,13 @@ the start of the entry's title.
   `aclose()`, or `async with`), each row naming its backend
   (`SessionInfo.backend`). It reads with the backend's own session code over
   its store (ADK's session service, Deep Agents' checkpointer and session
-  index) and builds no agent, resolves no model, builds no service, and makes
-  no store that holds nothing yet; the module is imported on a worker
-  thread (Deep Agents' not at all while its sqlite file is not made). None
+  index) and builds no agent, resolves no model, builds no service, and
+  writes into no store that is not yet its backend's: none is made where
+  none was, and a database without the backend's tables (a `sqlite_uri` file
+  the other backend or a team uses, a Postgres database it never ran on),
+  looked at read-only, reads as empty, its tables and journal mode left as
+  they are. The module is imported on a worker thread (Deep Agents' not at
+  all while its sqlite file is not made). None
   for the memory store (its conversations live in the manager that made
   them) and for LangGraph; a backend whose extra is not installed raises
   `ImportError` with the install hint. `reader_backends()` names the

@@ -22,6 +22,7 @@ through ``FakeAPI``, Deep Agents on scripted models), on sqlite.
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 import sys
 
 import pytest
@@ -176,6 +177,60 @@ class TestOpeningOneBuildsNothing:
 
         after = sorted(p.name for p in app_settings.sessions_dir.parent.rglob("*"))
         assert after == before, "reading made the store"
+
+
+def _tables(path) -> list[str]:
+    with sqlite3.connect(path) as db:
+        rows = db.execute("select name from sqlite_master where type='table'")
+        return sorted(name for (name,) in rows)
+
+
+def _journal_mode(path) -> str:
+    with sqlite3.connect(path) as db:
+        return db.execute("pragma journal_mode").fetchone()[0]
+
+
+class TestAStoreNotYetItsBackends:
+    """A reader writes into no store that is not yet its backend's: the
+    file ``sqlite_uri`` names may be another backend's (both read it), or a
+    team's. It checks, read-only, that its backend's tables are there, and
+    reads nothing otherwise: no new tables, no change of journal mode."""
+
+    @pytest.mark.parametrize("backend, other", [("adk", "deepagents"), ("deepagents", "adk")])
+    async def test_the_other_backends_file_keeps_its_tables_and_journal_mode(
+        self, backend, other, project, tmp_path, monkeypatch
+    ):
+        shared = tmp_path / "shared.db"
+        app_settings = sqlite_settings(sqlite_uri=str(shared))
+        if other == "adk":
+            serve(monkeypatch, Claude(solo=[says(reply) for reply in REPLIES]))
+        else:
+            monkeypatch.setattr(deepagents_manager, "build_chat_model",
+                                ScriptedModels(solo=[ai(reply) for reply in REPLIES]))
+        await stored_by_its_manager(other, app_settings)
+        tables, mode = _tables(shared), _journal_mode(shared)
+
+        async with await open_session_reader(backend, app_settings) as reader:
+            assert await reader.list() == []
+            assert await reader.info("s1") is None
+            assert await reader.exists("s1") is False
+
+        assert (_tables(shared), _journal_mode(shared)) == (tables, mode)
+
+    @pytest.mark.parametrize("backend", ["adk", "deepagents"])
+    async def test_an_empty_file_a_failed_start_left_is_left_as_it_is(self, backend, project):
+        app_settings = sqlite_settings()
+        file = (
+            deepagents_sqlite_path(app_settings) if backend == "deepagents"
+            else app_settings.sessions_dir / "sessions.db"
+        )
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.touch()
+
+        async with await open_session_reader(backend, app_settings) as reader:
+            assert await reader.list() == []
+
+        assert file.stat().st_size == 0
 
 
 class TestBackendsWithoutOne:

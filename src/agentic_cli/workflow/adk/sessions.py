@@ -277,9 +277,13 @@ async def open_sessions(settings: Any, store: str) -> tuple[ServiceSessions | No
     """Open ``store``'s ADK conversations from ``settings``, without a manager
     (``workflow/session_readers.py``).
 
-    A sqlite store whose file does not exist yet holds nothing, and reading
-    it makes none: ``(None, None)``. Otherwise the session service the
-    manager would open (``make_session_service``), and what closes it.
+    A store ADK has not written yet holds none of its conversations, and
+    reading it writes nothing there: ``(None, None)`` for a sqlite file not
+    made, and for a database without ADK's ``sessions`` table (a file
+    ``sqlite_uri`` names that Deep Agents or a team uses, a Postgres
+    database ADK never ran on), looked at read-only before ADK's session
+    service creates any table. Otherwise the session service the manager
+    would open (``make_session_service``), and what closes it.
     """
     db_url = session_db_url(settings, store)
     if db_url is None:
@@ -287,7 +291,31 @@ async def open_sessions(settings: Any, store: str) -> tuple[ServiceSessions | No
     if db_url.startswith("sqlite") and not Path(_sqlite_database(db_url)).is_file():
         return None, None
     service = make_session_service(settings, store)
+    try:
+        ours = await _has_table(service, SESSIONS_TABLE)
+    except BaseException:
+        await service.close()
+        raise
+    if not ours:
+        await service.close()
+        return None, None
     return ServiceSessions(service), service.close
+
+
+#: The table ADK's session service keeps a conversation's row in, in both of
+#: its schemas: a database without it is not ADK's yet.
+SESSIONS_TABLE = "sessions"
+
+
+async def _has_table(service: Any, table: str) -> bool:
+    """Whether the database ``service``'s engine names has ``table``: read
+    only (no ``prepare_tables``), on any dialect."""
+    from sqlalchemy import inspect as inspect_database
+
+    async with service.db_engine.connect() as connection:
+        return await connection.run_sync(
+            lambda sync: inspect_database(sync).has_table(table)
+        )
 
 
 def _sqlite_database(db_url: str) -> str:
