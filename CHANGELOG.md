@@ -2058,8 +2058,9 @@ the start of the entry's title.
   when the list offers no entry, each built-in provider with a key's newest
   fast, default and strong model. A listing never adds to it, where 0.6's
   picker offered every model the providers listed. A role's picker shows
-  the model it maps, or the one it resolves to, and its menu shows each
-  reference whole (the dialog is 80 columns wide).
+  the model it maps, or the one it resolves to (offered even when the list
+  leaves it out: see Fixed), and its menu shows each reference whole (the
+  dialog is 80 columns wide).
   Picking a role saves that role alone into the project settings file's
   `model_roles` (the roles from the user file, the environment or the app's
   defaults stay where they are) and reinitializes the workflow with its
@@ -2605,6 +2606,16 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **A `/settings` model picker offers the model it shows.** A picker showed
+  its role's model even when that model was not among its choices (in 0.6, a
+  `default_model` the model list did not include; now one the list leaves
+  out, as its provider is not defined, has no key, or does not serve it), so
+  a user who moved off it could not pick it back. The picker now offers it,
+  first, as `<model> (current; not offered)`, and its description says why
+  ("Not offered (no key: set ANTHROPIC_API_KEY); agents without a model of
+  their own run on it"). Left as it opened, or picked again, it changes
+  nothing on Save.
 
 - **On ADK and Deep Agents, a cleanup no longer freezes the app while the
   sandbox closes.** The sandbox's cleanup (`docker rm -f`, a kernel
@@ -3509,7 +3520,9 @@ step; each entry says what to use instead.
   them (a new theme stayed in the settings, too, while the screen kept the
   old one). Interrupted, the restart is now undone as a failed one is: every
   setting is restored and the workflow is brought back on the model it had.
-  Nothing is printed, as Ctrl+C there is the session's own interruption.
+  As for a turn, `Operation cancelled...` is said once, wherever the Save
+  waits: for a start in progress, for the turn lock, for the restart, or for
+  a new conversation's backend.
 - **On ADK, a `/settings` switch to another provider no longer breaks the
   session.** ADK sends an agent's earlier turns back with every request,
   thoughts included, and after the switch they were another provider's:
