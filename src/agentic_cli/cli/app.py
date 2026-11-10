@@ -2194,7 +2194,9 @@ class BaseCLIApp:
 
         The caller holds the turn lock. In order: the conversation is held
         where it is kept (``hold``, when the caller took it; one another
-        process has open is refused, and nothing starts); the memories of
+        process has open is refused, and nothing starts), and looked at
+        again there (one deleted since the look is refused, nothing
+        started: a CLI's delete takes the hold first); the memories of
         the conversation left are proposed while its backend still runs; the
         controller starts the conversation's backend on the run's services
         (``switch_backend``); and the switch to it is made there, at once
@@ -2207,7 +2209,8 @@ class BaseCLIApp:
         (the old one being released) opens the conversation there, then the
         cancel goes on. A Ctrl+C during the load there, the switch made, says
         where the app is ("Resumed on <backend>: …", no replay) and draws the
-        status line before it goes on.
+        status line before it goes on. One deleted after all (by a deleter
+        that holds no lock) leaves a new conversation open there, said.
         """
         controller = self._workflow_controller
         session_id, backend = info.session_id, info.backend
@@ -2220,6 +2223,18 @@ class BaseCLIApp:
                 )
                 return False
             hold = taken
+        # Looked at again once held: another process's /sessions --delete
+        # takes the hold first, so one gone by now is gone for good.
+        try:
+            async with self._stored(only=backend) as stored:
+                still = await stored.kept_elsewhere(session_id)
+        except BaseException:
+            self._conversation.abandon(hold)
+            raise
+        if not still:
+            self._conversation.abandon(hold)
+            self.session.add_error(f"No conversation '{session_id}' found.")
+            return False
         old, interrupted = self._session_id, None
         try:
             if self._turned:  # proposed while the backend that holds them runs
@@ -2258,10 +2273,17 @@ class BaseCLIApp:
                 _show_new_context(controller, self.session)
             raise
         logger.info("session_resumed", session_id=session_id, previous=old, backend=backend)
-        if switched.gone:  # deleted as it opened: it starts empty there
+        if switched.gone:
+            # Deleted as it opened, by a deleter that holds no lock: the
+            # backend runs, and the conversation left is not on it, so a new
+            # conversation opens there, never the id deleted.
+            import uuid
+
+            new = uuid.uuid4().hex[:12]
+            await core.switch(new, self._switch_parts(), generated=True, propose=False)
             self.session.add_error(
-                f"Conversation '{session_id}' was deleted as it opened: it starts empty "
-                f"on {backend}."
+                f"No conversation '{session_id}' found on {backend}: it was deleted as it "
+                f"opened. New conversation {new} on {backend}."
             )
         else:
             self.session.add_message(

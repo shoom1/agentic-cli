@@ -341,6 +341,62 @@ class TestResumeOnAnotherBackend:
         gate.set()
         await app._workflow_controller.close()
 
+    async def test_one_deleted_after_the_look_is_refused_before_its_backend_starts(
+        self, two, monkeypatch
+    ):
+        """Another CLI's ``/sessions --delete`` between the look and the hold:
+        looked at again once held, it is gone, and nothing starts."""
+        from agentic_cli.cli import stored_conversations
+
+        app, adk = await on_adk(two)
+        looked = stored_conversations.StoredConversations.__aexit__
+
+        async def deleted_after_the_look(self, *exc):
+            two.stored["deepagents"].pop("d1", None)
+            return await looked(self, *exc)
+
+        monkeypatch.setattr(
+            stored_conversations.StoredConversations, "__aexit__", deleted_after_the_look
+        )
+        await app.process_input("/resume d1")
+
+        assert two.built == [] and (app.session_id, running(app)) == ("a1", "adk")
+        assert said(app.session, "add_error") == ["No conversation 'd1' found."]
+        assert free(app, held_by(app, "deepagents", "d1"))
+        assert not free(app, held_by(app, "adk", "a1"))
+
+    async def test_one_deleted_as_its_backend_starts_opens_a_new_one_there(
+        self, two, monkeypatch
+    ):
+        """The last resort (a deleter that holds no lock, not another CLI):
+        the backend runs, and the conversation left is not on it, so the app
+        opens a new conversation there, never the id deleted."""
+        app, _ = await on_adk(two)
+        build = two.manager
+
+        def manager(backend):
+            made = build(backend)
+
+            async def initialize_services():
+                two.stored["deepagents"].pop("d1", None)
+                made.is_initialized = True
+
+            made.initialize_services = initialize_services
+            return made
+
+        monkeypatch.setattr(two, "manager", manager)
+        await app.process_input("/resume d1")
+
+        new = app.session_id
+        assert new not in ("d1", "a1") and app.session_backend == "deepagents"
+        assert said(app.session, "add_error") == [
+            f"No conversation 'd1' found on deepagents: it was deleted as it opened. "
+            f"New conversation {new} on deepagents."
+        ]
+        await app.process_input("Hello.")
+        assert two.built[0].turns == [new]
+        assert free(app, held_by(app, "deepagents", "d1"))
+
     async def test_not_found_anywhere_says_which_backends_were_not_read(self, two):
         two.unreadable["deepagents"] = RuntimeError("database is locked")
         app, _ = await on_adk(two)
