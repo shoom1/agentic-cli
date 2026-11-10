@@ -1051,9 +1051,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         them; ADK would keep a long-running one in every request, which
         Claude and OpenAI refuse, and drop any other one with a warning.
 
-        No call is left open on purpose: the only one ADK keeps open across
-        turns, a task-mode agent's delegation, cannot be built (a native ADK
-        YAML app with one is refused, ``build.load_native_root``).
+        ADK keeps two kinds of call open on purpose. A task-mode agent's
+        delegation cannot be built (a native ADK YAML app with one is
+        refused, ``build.load_native_root``). Its client calls for a human
+        (``adk_request_confirmation``, ``adk_request_credential``,
+        ``adk_request_input``: a tool that requires confirmation, an MCP
+        toolset that needs auth) are answered as interrupted, as any other:
+        the manager offers no way to answer them.
 
         Raises:
             ConversationChangedError: Another process changed the session

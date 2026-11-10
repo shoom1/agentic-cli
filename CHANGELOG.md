@@ -3430,7 +3430,10 @@ step; each entry says what to use instead.
   cancelled), and a call nothing sealed (a crash, or a session from before)
   is answered "Interrupted before it finished …" when the next turn starts
   (a native ADK YAML app's too: one with a task-mode agent, whose call ADK
-  keeps open on purpose, is refused);
+  keeps open on purpose, is refused; ADK's client calls for a human,
+  `adk_request_confirmation`, `adk_request_credential` and
+  `adk_request_input`, are answered so too, since the manager offers no way
+  to answer them);
   ADK's warning goes to the debug log (`adk_dropped_open_calls`). On Deep
   Agents `InterruptedCallsMiddleware` takes `PatchToolCallsMiddleware`'s
   place.
