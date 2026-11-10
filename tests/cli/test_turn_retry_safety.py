@@ -158,6 +158,21 @@ class TestRateLimitReporting:
         await _run(MessageProcessor(), ui, _DurableSource(raises=_RateLimited()))
         assert ui.dialogs == 0
 
+    async def test_a_rate_limit_reported_as_the_turns_error_is_said_the_same(self):
+        """A backend reports a failed turn as one ERROR (ADK, Deep Agents);
+        an app's own manager may raise it. The user reads the same line."""
+        raised, reported = _UI(), _UI()
+        await _run(MessageProcessor(), raised, _DurableSource(raises=_RateLimited()))
+
+        result = await _run(MessageProcessor(), reported, _DurableSource(
+            events=[WorkflowEvent.turn_failed(_RateLimited())]
+        ))
+
+        assert reported.errors() == raised.errors()
+        assert len(reported.errors()) == 1
+        assert result.status is TurnStatus.FAILED
+        assert result.error == "429 RESOURCE_EXHAUSTED: rate limit exceeded"
+
 
 class TestTurnResultContract:
     async def test_success_is_delivered(self):

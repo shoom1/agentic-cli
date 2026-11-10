@@ -57,6 +57,23 @@ NOTHING_TO_SUMMARIZE = "Nothing to summarize yet."
 COMPACT_NOT_SUPPORTED = "/compact is not supported on this backend"
 
 
+def _rate_limited(error: str) -> str:
+    """What the CLI says of a turn a provider rate-limited: ``error``, and why
+    it was not run again."""
+    return (
+        f"Rate limited: {error}\n"
+        "The turn was not retried: the backend accepts and persists the input "
+        "before the first event, so running it again would duplicate this turn "
+        "(and repeat any tool calls it made). Send the request again once the "
+        "limit resets."
+    )
+
+
+def _conversation_changed(error: str) -> str:
+    """What the CLI says of a turn whose conversation another process changed."""
+    return f"{error} Send your message again to go on from what it holds now."
+
+
 @asynccontextmanager
 async def _says_so_when_stopped(
     ui: "ThinkingPromptSession", jobs: "Callable[[], Any] | None" = None
@@ -634,7 +651,9 @@ class MessageProcessor:
         (configured in ``workflow/adk/model_factory.py``) retry transient 5xx
         inside the client, and the Anthropic and OpenAI clients retry per
         ``retry_max_attempts``.
-        A rate limit that still surfaces here fails the turn explicitly.
+        A rate limit that still surfaces here fails the turn explicitly,
+        whether the backend reports it as its turn's ``ERROR`` (ADK, Deep
+        Agents) or raises it (an app's own manager, LangGraph).
 
         A cancel of this coroutine stops the request the agent is processing:
         the user's Ctrl+C (thinking-prompt cancels the input handler's task,
@@ -801,18 +820,9 @@ class MessageProcessor:
 
                 if is_rate_limit_error(e):
                     logger.warning("turn_rate_limited", partial=state.side_effects_seen)
-                    ui.add_error(
-                        f"Rate limited: {e}\n"
-                        "The turn was not retried: the backend accepts and "
-                        "persists the input before the first event, so running "
-                        "it again would duplicate this turn (and repeat any "
-                        "tool calls it made). Send the request again once the "
-                        "limit resets."
-                    )
+                    ui.add_error(_rate_limited(str(e)))
                 elif isinstance(e, ConversationChangedError):
-                    ui.add_error(
-                        f"{e} Send your message again to go on from what it holds now."
-                    )
+                    ui.add_error(_conversation_changed(str(e)))
                 else:
                     ui.add_error(f"Workflow error: {e}")
                 result = TurnResult(
@@ -982,7 +992,11 @@ class MessageProcessor:
         Anything else is a failure the caller must see in the ``TurnResult``,
         because a background-job coordinator keys durable state off
         ``delivered`` — an unrendered, unreported error was recorded as a
-        successful delivery.
+        successful delivery. A failed turn's one ``ERROR``
+        (``WorkflowEvent.turn_failed``, the backends' contract) is said as a
+        turn that raised it is: a provider's rate limit (``rate_limited``)
+        as "Rate limited: …", a conversation another process changed with
+        what to do next.
         """
         recoverable = bool(event.metadata.get("recoverable", False))
         code = event.metadata.get("error_code")
@@ -993,9 +1007,21 @@ class MessageProcessor:
             logger.warning("workflow_error_event", recoverable=True, code=code)
             return
 
-        ui.add_error(f"{event.content}{suffix}")
+        if event.metadata.get("rate_limited"):
+            ui.add_error(_rate_limited(event.content))
+            logger.warning("turn_rate_limited", partial=state.side_effects_seen)
+        else:
+            if code == ConversationChangedError.__name__:
+                ui.add_error(_conversation_changed(event.content))
+            else:
+                ui.add_error(f"{event.content}{suffix}")
+            logger.error(
+                "workflow_error_event",
+                recoverable=False,
+                code=code,
+                error_type=event.metadata.get("error_type"),
+            )
         state.status_line = f"x {event.content}"
-        logger.error("workflow_error_event", recoverable=False, code=code)
         if state.fatal_error is None:
             # Keep the first: later ones are usually the cascade.
             state.fatal_error = event.content
