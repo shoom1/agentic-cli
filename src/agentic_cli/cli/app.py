@@ -35,6 +35,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import (
+    CANCELLED_LINE,
     MessageProcessor,
     TurnStatus,
     _says_so_when_stopped,
@@ -1535,10 +1536,17 @@ class BaseCLIApp:
         Args:
             message: User message to process
         """
-        # Delegate to message processor (one turn at a time).
-        async with self._turn_lock:
-            # Echoed as its turn starts: a line typed while the conversation
-            # --continue/--resume asked for opens shows under its replay.
+        # Delegate to message processor (one turn at a time). Echoed as its
+        # turn starts: a line typed while the conversation --continue/--resume
+        # asked for opens shows under its replay; one Ctrl+C stops while it
+        # waits is shown and said cancelled (it never ran), not dropped unseen.
+        try:
+            await self._turn_lock.acquire()
+        except asyncio.CancelledError:
+            self.session.add_message("user", message)
+            self.session.add_message("system", CANCELLED_LINE)
+            raise
+        try:
             self.session.add_message("user", message)
             self._turned = True  # the conversation now holds this message
             reached = False  # the turn reached a ready workflow, which stores it
@@ -1558,6 +1566,8 @@ class BaseCLIApp:
             finally:
                 if reached:
                     self._conversation.written = True
+        finally:
+            self._turn_lock.release()
 
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).

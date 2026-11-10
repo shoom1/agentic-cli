@@ -39,7 +39,10 @@ With a file named ``init-fails`` in the working directory at startup, the
 first initialization fails, and the next one (a turn retries it) waits until
 a file named ``ready`` appears. A ``seed.json`` there holds conversations an
 earlier run stored: ``{"<id>": {"messages": [["user", "..."], ["assistant",
-"..."]], "hours": 2}}``, last active that many hours ago.
+"..."]], "hours": 2}}``, last active that many hours ago. With a file named
+``open-gate`` there, loading a stored conversation (``--continue`` opening it
+once the prompt is up, holding the turn lock) writes a file named ``opening``
+and waits until a file named ``open-released`` appears.
 """
 
 from __future__ import annotations
@@ -108,6 +111,10 @@ class ScriptedManager:
         self.is_initialized = True
 
     async def load_session(self, session_id, user_id=None) -> bool:
+        if session_id in self._messages and Path("open-gate").exists():
+            Path("opening").touch()
+            while not Path("open-released").exists():
+                await asyncio.sleep(0.05)
         return False
 
     async def session_exists(self, session_id, *, user_id=None) -> bool:

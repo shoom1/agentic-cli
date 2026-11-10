@@ -333,6 +333,61 @@ def test_continue_resumes_the_newest_once_the_prompt_is_up(tmp_path):
     assert transcript.index(">>>") < transcript.index("Resumed:")
 
 
+def _wait_for(path: Path, timeout: float = STARTUP_TIMEOUT) -> None:
+    """Until ``path`` exists: the child writes it where output cannot tell."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        assert time.monotonic() < deadline, f"no {path.name}"
+        time.sleep(0.05)
+
+
+def _typed_while_continue_opens(tmp_path: Path, line: str) -> "Console":
+    """``--continue`` holding the turn lock at its load, and ``line`` typed: its
+    turn waits for the open (a second Enter says "Busy"; Ctrl+U clears it)."""
+    (tmp_path / "home").mkdir()
+    _seed(tmp_path)
+    (tmp_path / "open-gate").touch()
+    console = Console(tmp_path, tmp_path / "home", args=("--continue",))
+    _wait_for(tmp_path / "opening")
+    console.type_line(line)
+    console.send("x\r")
+    console.expect("Busy")
+    console.send("\x15")
+    return console
+
+
+def test_a_line_typed_while_continue_opens_runs_there_after_its_replay(tmp_path):
+    console = _typed_while_continue_opens(tmp_path, "which")
+    try:
+        (tmp_path / "open-released").touch()
+        console.expect("Session: abc123def456")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    transcript = console.transcript
+    assert transcript.index("Resumed:") < transcript.rindex("which")
+
+
+def test_ctrl_c_on_a_line_typed_while_continue_opens_says_so(tmp_path):
+    """It never ran: it is shown, and said cancelled, rather than vanishing."""
+    console = _typed_while_continue_opens(tmp_path, "typed ahead")
+    try:
+        console.child.sendcontrol("c")
+        console.expect("Operation cancelled...")
+        (tmp_path / "open-released").touch()
+        console.expect("Resumed:")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    transcript = console.transcript
+    assert transcript.index("typed ahead") < transcript.index("Operation cancelled...")
+    assert "Echo: typed ahead" not in transcript
+
+
 def test_continue_with_nothing_stored_starts_a_new_conversation(tmp_path):
     (tmp_path / "home").mkdir()
     console = Console(tmp_path, tmp_path / "home", args=("--continue",))

@@ -263,6 +263,36 @@ class TestATurnTypedBeforeTheStartupOpen:
         )
 
 
+class TestATypedAheadLineCancelledWhileItWaits:
+    """Ctrl+C on a line whose turn waits for the startup open: it never ran,
+    and it is shown and said cancelled, not dropped without a word (the pty
+    test is ``test_console_turns``'s)."""
+
+    async def test_it_is_shown_and_said_cancelled(self, project, monkeypatch):
+        from agentic_cli.cli.message_processor import CANCELLED_LINE
+
+        workflow = Workflow(conversation("T", "Earlier work", 2))
+        app = app_on(workflow, fake_settings())
+        gate = asyncio.Event()
+
+        async def opening():
+            async with app._turn_lock:
+                await gate.wait()
+
+        holder = asyncio.create_task(opening())
+        await asyncio.sleep(0)
+        typed = asyncio.create_task(app._handle_message("typed ahead"))
+        await asyncio.sleep(0.05)
+        typed.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await typed
+        gate.set()
+        await holder
+
+        assert said(app.session, "add_message") == ["typed ahead", CANCELLED_LINE]
+        assert workflow.turns == [] and not app._turn_lock.locked()
+
+
 class TestTheSessionIdSetter:
     """``app.session_id = <id>`` moved the turns to another conversation with
     no lock, no load and no reset: the next turn wrote to a conversation
