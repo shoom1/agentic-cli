@@ -49,12 +49,18 @@ class SessionInfo:
         turns: How many turns the user ran in it (a job's resume is none);
             None when the backend cannot tell.
         updated: When it last changed; None when the backend cannot tell.
+        backend: The backend that keeps it (``adk``, ``deepagents``): a
+            conversation belongs to one for its whole life. Named by a
+            ``SessionReader`` (``workflow/session_readers.py``) and by the
+            CLI's listings; None in a manager's own rows, which are all its
+            backend's.
     """
 
     session_id: str
     title: str = ""
     turns: int | None = None
     updated: datetime | None = None
+    backend: str | None = None
 
 
 class ConversationChangedError(RuntimeError):

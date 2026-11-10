@@ -30,12 +30,17 @@ provider adapter sends. The model reads it as the rest of the conversation;
 ``recent`` leaves it out, because the user did not write it, and so does a
 conversation's row: its title is the first prompt the user typed, its turns
 how many they typed.
+
+``open_sessions`` opens a store's conversations from the settings, without
+the manager, for ``workflow/session_readers.py``: the checkpointer and the
+index the manager would open, read through ``CheckpointSessions``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +49,12 @@ from langgraph.store.base import PutOp
 
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.jobs.resume import job_notice
+from agentic_cli.workflow.checkpointers import (
+    deepagents_sqlite_location,
+    open_checkpointer,
+    open_store,
+    private_sqlite_file,
+)
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
@@ -380,6 +391,54 @@ class CheckpointSessions:
             for session_id, item in latest.items()
             if _messages(item)
         }
+
+
+#: What closes a store a reader opened.
+Close = Callable[[], Awaitable[None]]
+
+
+async def open_sessions(
+    settings: Any, store: str
+) -> tuple[CheckpointSessions | None, Close | None]:
+    """Open ``store``'s Deep Agents conversations from ``settings``, without a
+    manager (``workflow/session_readers.py``).
+
+    The checkpointer and the index beside it that the manager opens
+    (``DeepAgentsWorkflowManager._open_session_store``), on connections of
+    their own, read through ``CheckpointSessions`` (the backfill included: a
+    database from before the index is scanned once, as the manager's first
+    listing would). A sqlite file that does not exist yet holds nothing, and
+    reading it makes none: ``(None, None)``.
+
+    Returns:
+        The conversations, and what closes both connections.
+    """
+    if store == "memory":
+        raise ValueError("The memory store's conversations live in the manager that made them.")
+    sqlite_path = None
+    if store == "sqlite":
+        sqlite_path = deepagents_sqlite_location(settings)
+        if not sqlite_path.is_file():
+            return None, None
+        private_sqlite_file(
+            sqlite_path, tighten_existing=not getattr(settings, "sqlite_uri", None)
+        )
+    where: dict[str, Any] = {
+        "sqlite_path": sqlite_path,
+        "postgres_uri": getattr(settings, "postgres_uri", None),
+    }
+    connections = contextlib.AsyncExitStack()
+    try:
+        saver, connection = await open_checkpointer(store, **where)
+        if connection is not None:
+            connections.push_async_exit(connection.__aexit__)
+        index, connection = await open_store(store, **where)
+        if connection is not None:
+            connections.push_async_exit(connection.__aexit__)
+    except BaseException:
+        await connections.aclose()
+        raise
+    return CheckpointSessions(saver, index), connections.aclose
 
 
 def _label(value: str) -> str:

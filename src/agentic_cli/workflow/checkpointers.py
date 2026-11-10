@@ -318,7 +318,13 @@ def deepagents_sqlite_path(settings: Any) -> Path:
     names, and that exists, is left as it is), its directory created if
     missing.
     """
-    uri = getattr(settings, "sqlite_uri", None)
-    path = Path(sqlite_file(uri)) if uri else settings.sessions_dir / "checkpoints.db"
-    private_sqlite_file(path, tighten_existing=not uri)
+    path = deepagents_sqlite_location(settings)
+    private_sqlite_file(path, tighten_existing=not getattr(settings, "sqlite_uri", None))
     return path
+
+
+def deepagents_sqlite_location(settings: Any) -> Path:
+    """Where ``deepagents_sqlite_path`` puts the file, without making it: a
+    reader of the conversations makes no store that holds none."""
+    uri = getattr(settings, "sqlite_uri", None)
+    return Path(sqlite_file(uri)) if uri else settings.sessions_dir / "checkpoints.db"
