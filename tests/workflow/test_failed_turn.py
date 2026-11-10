@@ -289,3 +289,47 @@ async def test_on_adk_an_error_already_yielded_is_not_followed_by_a_second(
 
     (error,) = errors(events)
     assert error.metadata["error_code"] == OVERFLOW_ERROR_CODE
+
+
+async def test_on_adk_a_session_changed_before_the_run_is_the_conversation_changed(
+    hermetic, monkeypatch
+):
+    """A turn that cannot read or prepare its conversation raises before any
+    event (the contract's one exception besides a cancel). Answering a call a
+    crash left open appends to the session first; one another process
+    changed meanwhile raises ``ConversationChangedError``, as it does
+    during the run, not ADK's own ``StaleSessionError``."""
+    from google.adk.errors import StaleSessionError
+    from google.adk.events import Event
+    from google.genai import types
+
+    from agentic_cli.workflow.sessions import ConversationChangedError
+
+    serve(monkeypatch, Script(say("First."), say("Second.")), "adk")
+    manager = solo("adk")
+    try:
+        [e async for e in manager.process("Hello.", "u", session_id="s")]
+        service = manager._session_service
+        session = await service.get_session(
+            app_name=manager.app_name, user_id="u", session_id="s"
+        )
+        await service.append_event(session, Event(
+            author="solo", invocation_id="crashed",
+            content=types.Content(role="model", parts=[types.Part(
+                function_call=types.FunctionCall(id="toolu_x", name="ft_lookup", args={})
+            )]),
+        ))
+        real = service.append_event
+
+        async def stale(session, event):
+            if event.get_function_responses():
+                raise StaleSessionError("The session has been modified in storage.")
+            return await real(session, event)
+
+        monkeypatch.setattr(service, "append_event", stale)
+        with pytest.raises(ConversationChangedError) as raised:
+            [e async for e in manager.process("Again.", "u", session_id="s")]
+    finally:
+        await manager.cleanup()
+
+    assert raised.value.session_id == "s"

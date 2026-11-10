@@ -871,6 +871,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         A crash, or a cancel from before ``abort_signal`` was set, leaves
         them; ADK would keep a long-running one in every request, which
         Claude and OpenAI refuse, and drop any other one with a warning.
+
+        Raises:
+            ConversationChangedError: Another process changed the session
+                since it was read (ADK's ``StaleSessionError``), before the
+                run: the turn raises it, as it cannot start.
         """
         if self._adk_config_path:
             # A native app's agents are ADK's own, and ADK leaves some calls
@@ -878,7 +883,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return session
         answers = left_open(session.events, self._open_calls)
         for event in answers:
-            await self._session_service.append_event(session, event)
+            try:
+                await self._session_service.append_event(session, event)
+            except StaleSessionError:
+                raise ConversationChangedError(session.id) from None
         if answers:
             logger.debug("left_open_calls_answered", count=sum(
                 len(event.content.parts) for event in answers

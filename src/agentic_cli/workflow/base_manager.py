@@ -2227,9 +2227,12 @@ class BaseWorkflowManager(ABC):
         overflow handler's ``CONTEXT_OVERFLOW``, say) is its one ``ERROR``: a
         failure after it is logged, not reported again. Recoverable
         ``ERROR``s are warnings, and the turn goes on. A cancel still raises
-        ``asyncio.CancelledError``, and a turn that cannot start (the
-        backend cannot be initialized or admitted, ``_turn``) raises before
-        any event. ``resume_with_job_result`` fails the same way.
+        ``asyncio.CancelledError``, and a turn that cannot start raises
+        before any event: the backend cannot be initialized or admitted
+        (``_turn``), or its conversation cannot be read or prepared before
+        the run (the store's error; on ADK ``ConversationChangedError`` for
+        a session another process changed). ``resume_with_job_result``
+        fails the same way.
 
         Args:
             message: User message to process.
