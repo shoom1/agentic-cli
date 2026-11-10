@@ -37,7 +37,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 │  - Service registry: shared state for tools (KB, memory, sandbox…)  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  GoogleADKWorkflowManager (default)                                 │
-│  + PermissionPlugin, LLMLoggingPlugin, TaskProgressPlugin           │
+│  + PermissionPlugin, LLMLoggingPlugin, ToolResultCapPlugin          │
 ├─────────────────────────────────────────────────────────────────────┤
 │  DeepAgentsWorkflowManager (deepagents extra)                       │
 │  + PermissionMiddleware, SubAgentMiddleware (task), summarization   │
@@ -350,7 +350,10 @@ ADK integrations:
   none of it
 - **PermissionPlugin** — evaluates each tool's declared capabilities against the permission engine and prompts the user when no rule matches
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
-- **TaskProgressPlugin** — streams the task checklist into its own thinking box
+- **Task progress** — the event processor reports the task checklist (its
+  own thinking box in the CLI) when a tool call changed it, as on Deep
+  Agents. `TaskProgressPlugin`, which reported after every tool call and
+  cleared a finished list, is deprecated and unused (removed in 0.8.0)
 
 ### DeepAgentsWorkflowManager
 
@@ -1470,9 +1473,13 @@ the CLI asks them. `BaseWorkflowManager`'s docstring ends with such a backend.
 surfaced rate limit fails it explicitly. An `EventType.ERROR` event is
 rendered as it arrives — `recoverable=True` is a warning and the stream still
 decides the outcome, anything else makes the turn `FAILED` (`delivered`
-False). Ctrl+C stops the request the agent is processing: it cancels the CLI's
-input handler, which runs every turn, so a stopped turn raises
-`asyncio.CancelledError`. Cancelling the caller cancels and awaits the event
+False). On both backends a turn that fails yields one such `ERROR` and
+`process()` returns, raising nothing (see
+[Processing Events](#processing-events)); the CLI says a rate limit from it
+("Rate limited: … Send the request again once the limit resets."), as it
+does when an app's own manager raises one. Ctrl+C stops the request the
+agent is processing: it cancels the CLI's input handler, which runs every
+turn, so a stopped turn raises `asyncio.CancelledError`. Cancelling the caller cancels and awaits the event
 consumer before the turn is torn down; the boxes the request's processing
 opened end with it, and `Operation cancelled...` says once that the request
 was stopped. The whole request stops, its sub-agents too, and every tool call
@@ -2129,8 +2136,8 @@ registering its own, keeps working: its commands are registered just before
 | `CODE_EXECUTION` | Code execution result (Gemini on ADK) |
 | `EXECUTABLE_CODE` | Code the model intends to run (Gemini on ADK) |
 | `FILE_DATA` | Binary/file payload from a tool (ADK) |
-| `ERROR` | Error message (`recoverable`, `error_code` metadata) |
-| `TASK_PROGRESS` | Task checklist update (drives the task box) |
+| `ERROR` | Error message (`recoverable`, `error_code` metadata; a failed turn's also `rate_limited`, `error_type`) |
+| `TASK_PROGRESS` | The task checklist changed (drives the task box) |
 | `CONTEXT_SUMMARIZING` | A summary of the earlier conversation is starting (reported while the stream waits on it) |
 | `CONTEXT_TRIMMED` | The context was made smaller: a summary (`source="summarization"`, with `messages_summarized`, `tokens_before`, `tokens_after`), or older turns left out of one request on ADK (`source="fit_guard"`, with `turns_dropped`) |
 | `LLM_REQUEST` / `LLM_RESPONSE` / `LLM_USAGE` | LLM traffic + token accounting |
@@ -2155,7 +2162,18 @@ async for event in manager.process(message, user_id="user1"):
         print(f"Calling: {event.metadata['tool_name']}")
     elif event.type == EventType.TOOL_RESULT:
         print(f"Result: {event.metadata['result']}")
+    elif event.type == EventType.ERROR and not event.metadata["recoverable"]:
+        print(f"Failed: {event.content}")  # the turn's one error; the stream ends
 ```
+
+A turn that fails yields one `ERROR` that is not recoverable, on ADK and Deep
+Agents, and `process()` returns: it raises nothing but a cancel
+(`asyncio.CancelledError`), and an error before the turn starts (the
+backend could not be initialized). The event's `content` is the error's
+text, its `error_code` the code (the exception's type, or
+`CONTEXT_OVERFLOW`), `metadata["rate_limited"]` whether a provider
+rate-limited the turn and `metadata["error_type"]` the exception's type.
+An `ERROR` with `recoverable` true is a warning: the turn goes on.
 
 ### Dual Thinking Boxes + Task Progress
 
@@ -2176,7 +2194,10 @@ Status icons:
 - `[ ]` Pending
 - `[-]` Cancelled
 
-Task state persists across turns within a session.
+Task state persists across turns within a session. A `TASK_PROGRESS` event
+follows each tool call that changed the list, on ADK and Deep Agents, and a
+list whose tasks are all done stays: `get_tasks` answers it until the model
+writes another.
 
 ## Examples
 
@@ -2302,7 +2323,7 @@ agentic-cli/
 │   │   │   ├── event_processor.py
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
-│   │   │   ├── task_progress_plugin.py
+│   │   │   ├── task_progress_plugin.py   # TaskProgressPlugin (deprecated, unused)
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)
 │   │   │   ├── manager.py                # DeepAgentsWorkflowManager
