@@ -111,8 +111,9 @@ REBUILD_KEYS = frozenset({
 NEW_CONVERSATION_KEYS = frozenset({"orchestrator"})
 
 # Read only as the app starts: logging is configured once, in the app's
-# constructor, and a rebuild keeps the session store it has. A change is
-# saved, and takes effect at the next start.
+# constructor, and the session store is fixed for the run (every manager the
+# run builds keeps the store it started with). A change is saved, and takes
+# effect at the next start.
 RESTART_KEYS = frozenset({"session_store", "log_level", "log_format"})
 
 # Read each time they are used (a tool call, a sandbox or a container started,

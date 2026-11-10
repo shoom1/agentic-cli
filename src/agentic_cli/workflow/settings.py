@@ -726,7 +726,8 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
             "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral). "
             "ADK keeps them in {workspace}/sessions/sessions.db and Deep Agents in "
             "{workspace}/sessions/checkpoints.db; sessions do not move between "
-            "backends: a conversation stays on the backend it began on."
+            "backends: a conversation stays on the backend it began on. Takes "
+            "effect at the next start: a run keeps one store."
         ),
         json_schema_extra={"ui_order": 145},
     )

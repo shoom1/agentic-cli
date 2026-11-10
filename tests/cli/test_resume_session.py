@@ -574,8 +574,8 @@ class TestAJobWhoseConversationWasLeftWhileItWaited:
         waits on the turn lock. The turn submits a job that ends before the
         turn does; the switch takes the lock as the turn ends, and while it
         loads, the turn's ``resume_finished_jobs`` checks that job belongs
-        here, and its delivery waits on the lock. The job's conversation is no longer the current one by then:
-        it is not told here (``ctx`` and the task list would show the left
+        here, and its delivery waits on the lock. The job's conversation is
+        no longer the current one by then: it is not told here (``ctx`` and the task list would show the left
         conversation's numbers in this one), nor claimed; it waits for its
         conversation, as another conversation's job does. (``--continue`` and
         ``--resume`` take the lock before the prompt takes a line, so their
@@ -608,14 +608,21 @@ class TestAJobWhoseConversationWasLeftWhileItWaited:
 
         app._message_processor.process_resume = process_resume
 
+        async def one_waits_on_the_turn_lock() -> None:
+            for _ in range(500):
+                if len(app._turn_lock._waiters or ()) == 1:
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("nothing waits on the turn lock")
+
         workflow.load_gate = asyncio.Event()  # the switch stops at its load
         handler = asyncio.create_task(app._handle_message("Build it."))
         await asyncio.wait_for(started.wait(), 5)
         switching = asyncio.create_task(app.resume_session("T"))  # the app's own task
-        await asyncio.sleep(0.1)  # the switch now waits on the turn lock
+        await one_waits_on_the_turn_lock()  # the switch
         release.set()  # the turn ends, and the switch takes the lock
         await asyncio.wait_for(workflow.loading.wait(), 5)
-        await asyncio.sleep(0.2)  # the turn's delivery found the job here, and waits
+        await one_waits_on_the_turn_lock()  # the turn's delivery, having found the job here
         workflow.load_gate.set()
         await asyncio.wait_for(handler, 5)
         assert await asyncio.wait_for(switching, 5)

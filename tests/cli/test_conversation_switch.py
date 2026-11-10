@@ -500,7 +500,7 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     ):
         """A failed reinitialization keeps its manager, and the next start
         revives it on the backend and the store it had: the turns go on
-        there, and so does the lock (the next rebuild swaps)."""
+        there, and so does the lock (the change waits for /new)."""
         built = self.builds(monkeypatch, lambda n, backend: False)
         app = app_on(self.Manager("adk", fails=False), BaseSettings(session_store="sqlite"))
         kept = app._workflow_controller._workflow

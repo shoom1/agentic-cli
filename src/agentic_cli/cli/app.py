@@ -2375,13 +2375,12 @@ class BaseCLIApp:
         """Where the conversation is kept: its backend and store, as the
         workflow runs them.
 
-        Recorded when the workflow starts (``run()``), when an orchestrator
-        switch starts another one, and when ``/settings`` changes the
-        orchestrator or ``session_store`` while the workflow is down and its
-        next start builds on the new values (``_hold_it_at``); never read from
-        the settings in between: a change of ``session_store`` while the
-        workflow runs takes effect at the next start, and until then the lock
-        keys the store the workflow keeps. An app built with ``__new__`` reads
+        Recorded when the workflow starts (``run()``), for a new conversation
+        on another backend, and when ``/settings`` changes the orchestrator
+        while the workflow is down and nothing of the conversation is stored
+        (``_move_here``); never read from the settings in between. The store
+        is the run's for its whole life (a change of ``session_store`` takes
+        effect at the next app start). An app built with ``__new__`` reads
         its settings on first use.
         """
         core = self._conversation

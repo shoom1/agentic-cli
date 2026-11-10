@@ -1180,8 +1180,13 @@ the start of the entry's title.
   waits until that conversation is opened (`/resume` tells it when
   `job_auto_resume` is on; the status bar's `↻N` counts it), and is never
   told in the new one, whose `ctx` and task list it would move. `/new
-  <backend>` starts the new conversation on another backend (see Changed).
-  `/clear` is still a screen clear.
+  <backend>` starts the new conversation on another backend (see Changed),
+  which starts a new manager, and with it new services until a later
+  release: in-process jobs end, sandbox kernels start over and "Allow for
+  this session" grants are forgotten; and a finished job of the
+  conversation left is told in the new one as unavailable (the new backend
+  does not hold its conversation), as an orchestrator switch told it
+  before. `/clear` is still a screen clear.
 - **A session list's rows: `SessionInfo` and `session_info()`.**
   `list_sessions(*, user_id=None, limit=None)` returns one frozen
   `SessionInfo(session_id, title, turns, updated)` per stored conversation,
@@ -1271,19 +1276,27 @@ the start of the entry's title.
   went on in the new backend's store, where none of its history is. Each
   conversation now runs on one backend for its whole life. Changed while
   the workflow runs, `orchestrator` starts a new conversation on the new
-  backend at once when the open one holds nothing yet (it began in this
-  run, and no turn ran in it): "New conversation <id> on deepagents.";
-  otherwise it is saved, and its line says "(applies to the next /new)":
-  nothing is rebuilt (`settings_persistence.NEW_CONVERSATION_KEYS`, beside
-  `REBUILD_KEYS`, which no longer has it). Changed while the workflow is
-  down (a failed start), the next start builds the new backend, and the
-  conversation is held there. `/new [adk|deepagents|langgraph]` starts a
+  backend at once, through the app's `start_new_session()`, when nothing
+  of the open one is stored (`ConversationCore.fresh`: it began in this run
+  as a new one, no turn of it ran on a ready workflow, and an id the app was
+  given was found empty; read under the turn lock): "New conversation <id>
+  on deepagents."; otherwise it is saved, and its line says "(applies to
+  the next /new)": nothing is rebuilt
+  (`settings_persistence.NEW_CONVERSATION_KEYS`, beside `REBUILD_KEYS`,
+  which no longer has it). Changed while the workflow is down and its next
+  start builds a manager afresh, the next start runs the open conversation
+  on the new backend when nothing of it is stored, held there; otherwise
+  the change applies to the next /new too, and the next start revives or
+  rebuilds the conversation's own backend. A backend that cannot run is
+  refused, whatever the conversation. `/new [adk|deepagents|langgraph]` starts a
   new conversation on the backend named, without saving it anywhere
   (`BaseCLIApp.start_new_session(backend=None)`, an additive keyword; the
   conversation left has its memories proposed while its backend runs, and
   the line names the new backend, and the one that keeps the conversation
   left); an unknown name, or a backend whose extra is not installed, is
-  refused with the reason, and nothing changes. A model switch never
+  refused with the reason, and nothing changes (so is a backend named to an
+  app whose `start_new_session` override takes none). After it, the exit
+  hint names the backend to set before `--resume`. A model switch never
   changes the backend: `WorkflowController` runs the conversation's
   (`backend`; `switch_backend(backend)` starts another, for a new
   conversation), not `settings.orchestrator`, and `reinitialize` is always
@@ -2564,8 +2577,11 @@ step; each entry says what to use instead.
   `NEW_CONVERSATION_KEYS` (`orchestrator`) apply to a new conversation (see
   Changed), `RESTART_KEYS` are saved and their line says "(takes effect at
   the next start)", and `LIVE_KEYS` apply at once. A change of
-  `session_store` or `orchestrator` made while the workflow is starting
-  waits for that start, which reads it, as a rebuild does.
+  `orchestrator` made while the workflow is starting waits for that start,
+  as a rebuild does. The session store is fixed for the run
+  (`WorkflowController.store`): every manager the run builds (a retry, a
+  revive, `/new <backend>`) keeps the store the run started with, and a
+  change of `session_store` takes effect at the next app start, always.
 
 - **`/settings` while the workflow is still starting runs the change it
   saves.** A start resolves its models from the settings before it builds
@@ -3213,14 +3229,14 @@ step; each entry says what to use instead.
   holds its conversation from the start, also when the workflow fails to
   start; a line typed before `--continue` or `--resume` has opened its
   conversation waits for it and runs there. It is keyed by the backend and
-  the store the conversation runs on: recorded as the app starts, for a new
+  the store the conversation runs on: the store is the run's for its whole
+  life, and the backend is recorded as the app starts, for a new
   conversation on another backend, and when `/settings` changes the
-  orchestrator or `session_store` while the workflow is down (a failed start, which the user fixes there and goes on:
-  the next start builds on the new values, so the lock moves to them at
-  once, and the change is refused, "Settings were not changed.", when
-  another process has the conversation open there). A change of
-  `session_store` while the workflow runs takes effect at the next start
-  and leaves the lock on the store it runs. ADK's stale
+  orchestrator while the workflow is down and nothing of the conversation
+  is stored (a failed start, which the user fixes there and goes on: the
+  next start builds the new backend, so the lock moves there at once, and
+  the change is refused, "Settings were not changed.", when another process
+  has the conversation open there). ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message

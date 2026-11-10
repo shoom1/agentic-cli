@@ -290,7 +290,9 @@ class WorkflowController:
         they are then: none is kept (none was built yet, or the one that
         failed to start was released). A manager a failed reinitialization
         left is kept instead, and the next start revives it, on the backend
-        and the session store it had. False while one runs."""
+        and the session store it had. False while one runs; True while a
+        revive is in progress too (the manager is taken out to be revived),
+        which is why a caller waits for a start in progress first."""
         return self._workflow is None
 
     @property
@@ -561,8 +563,8 @@ class WorkflowController:
 
         The backend stays the one it runs (``backend``), whatever
         ``settings.orchestrator`` says: a conversation never changes backend,
-        and the model is model-agnostic about it (ADK runs Claude natively
-        through ``AnthropicLlm``). Another backend is a new conversation's
+        and the backend is model-agnostic (ADK runs Claude natively through
+        ``AnthropicLlm``). Another backend is a new conversation's
         (``switch_backend``).
 
         On success the manager is published fully initialized; on failure
