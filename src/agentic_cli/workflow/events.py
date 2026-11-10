@@ -247,6 +247,36 @@ class WorkflowEvent:
         return cls(type=EventType.ERROR, content=message, metadata=metadata)
 
     @classmethod
+    def turn_failed(
+        cls,
+        error: BaseException,
+        message: str | None = None,
+        error_code: str | None = None,
+    ) -> "WorkflowEvent":
+        """A failed turn's one ``ERROR``, from ``error`` (``process()``'s contract).
+
+        Not recoverable. Its text is ``message``, else the error's own (its
+        type's name when it has none), and its ``error_code`` is
+        ``error_code``, else the error's type name. ``metadata`` also says
+        whether a provider rate-limited the turn (``rate_limited``,
+        ``workflow/retry.py::is_rate_limit_error``), which the CLI reports in
+        its own words, and names the error's type (``error_type``), for logs.
+
+        Args:
+            error: What the turn failed with.
+            message: What to say instead of the error's text (a context
+                overflow's sentence).
+            error_code: The code instead of the type's name.
+        """
+        from agentic_cli.workflow.retry import is_rate_limit_error
+
+        name = type(error).__name__
+        event = cls.error(message or str(error) or name, error_code=error_code or name)
+        event.metadata["rate_limited"] = is_rate_limit_error(error)
+        event.metadata["error_type"] = name
+        return event
+
+    @classmethod
     def task_progress(
         cls,
         display: str,

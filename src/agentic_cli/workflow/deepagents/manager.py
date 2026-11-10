@@ -663,12 +663,14 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             self._open_calls.cancelled(ref)
             raise
         except Exception as error:
-            logger.warning(
+            # The ERROR is the report; the log is for diagnosis, its traceback
+            # at debug, so nothing is said twice over the CLI's prompt.
+            logger.info(
                 "deepagents_turn_failed",
                 error_type=type(error).__name__,
                 error=truncate(str(error), _MAX_LOGGED_ERROR),
-                exc_info=error,
             )
+            logger.debug("deepagents_turn_failed", exc_info=error)
             # The failed step's writes are gone: its calls that returned keep
             # their results for the next run, which answers the others.
             self._open_calls.failed(ref)

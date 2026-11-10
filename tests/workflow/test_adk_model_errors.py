@@ -8,7 +8,7 @@ refusal or a reply cut at its token limit has only its finish reason. None of
 them raises. Only a sub-agent's such reply, or a context overflow, became an
 ``ERROR``: the main agent's turn ended with no text and no error. A model
 call that fails is not this: ADK records an error event for it too, and the
-run then raises, which reports it once.
+run then raises, which the manager reports once, as the turn's ``ERROR``.
 """
 
 from __future__ import annotations
@@ -133,20 +133,16 @@ async def test_a_reply_cut_at_its_limit_with_text_is_an_answer(monkeypatch):
 
 
 async def test_a_failed_model_call_is_reported_once_by_the_run(monkeypatch):
-    """ADK's own error event for the failed call is not a second report."""
+    """ADK's own error event for the failed call is not a second report: the
+    turn's one ``ERROR`` is the run's failure, and the turn raises nothing."""
     refused = httpx.Response(
         400, json={"error": {"code": 400, "message": "bad request", "status": "INVALID_ARGUMENT"}}
     )
 
-    with pytest.raises(Exception, match="bad request"):
-        events = []
-        route_gemini(monkeypatch, FakeAPI(refused))
-        manager = adk([AgentConfig(name="solo", prompt="Answer.")],
-                      settings(default_model="gemini-2.5-flash"))
-        try:
-            async for event in manager.process("Hello", user_id="u", session_id="s"):
-                events.append(event)
-        finally:
-            await manager.cleanup()
+    events = await turn_on(monkeypatch, refused)
 
-    assert errors(events) == []
+    (error,) = errors(events)
+    assert "bad request" in error.content
+    assert error.metadata["recoverable"] is False
+    assert error.metadata["error_type"] == "ClientError"
+    assert error.metadata["rate_limited"] is False

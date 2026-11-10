@@ -299,7 +299,11 @@ class TestTurns:
         assert failed[0].metadata["error_code"] == "RuntimeError"
         assert failed[0].metadata["recoverable"] is False
         assert failed[0].metadata["agent"] == "solo"
-        assert [e for _, e, _ in recorder.calls].count("deepagents_turn_failed") == 1
+        assert [(level, e) for level, e, _ in recorder.calls].count(
+            ("info", "deepagents_turn_failed")
+        ) == 1
+        assert failed[0].metadata["error_type"] == "RuntimeError"
+        assert failed[0].metadata["rate_limited"] is False
         # The failed turn's message stays; the next turn continues after it.
         assert [m.text for m in models.chats["solo"].conversation(1)] == ["First.", "Second."]
         assert [e.content for e in of(answered, EventType.TEXT)] == ["Recovered."]

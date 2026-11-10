@@ -69,6 +69,7 @@ from agentic_cli.config import (
     BaseSettings,
     get_settings,
 )
+from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.models import CacheMechanism
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
@@ -96,6 +97,9 @@ _CACHE_CREATE_TIMEOUT_MS = 60_000
 # thread until it returns, so there are more than ADK's default 4.
 _TOOL_THREADS = 8
 
+# The longest error text a failed turn's log line carries.
+_MAX_LOGGED_ERROR = 500
+
 
 def _check_app_name(app_name: str) -> None:
     """Refuse an ``app_name`` ADK cannot run, naming the setting.
@@ -118,12 +122,17 @@ def _plugin_cause(error: RuntimeError) -> BaseException:
     A retry that fails for another reason propagates, and ADK's plugin manager
     wraps it (``overflow_plugin.OVERFLOW_PLUGIN_FAILED``); the turn fails
     with the provider's own error instead, as any failed call does. Any other
-    error is ``error`` itself, re-raised as it is.
+    error is ``error`` itself, the turn's error as it is.
     """
     cause = error.__cause__
     if str(error).startswith(OVERFLOW_PLUGIN_FAILED) and cause is not None:
         return cause
     return error
+
+
+def _fails_turn(event: WorkflowEvent) -> bool:
+    """Whether ``event`` is an ``ERROR`` that is not recoverable: a turn's one."""
+    return event.type is EventType.ERROR and not event.metadata.get("recoverable")
 
 
 def _as_written(prompt: str) -> Callable[[Any], str]:
@@ -915,7 +924,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         manager-scoped, so overlapping turns would drain each other's events.
         Overlapping callers queue; the lock is released on cancellation.
         Admission also re-verifies that the backend is still live (a cleanup
-        can land between initialization and the turn lock).
+        can land between initialization and the turn lock). A turn that
+        fails yields one ``ERROR`` and ends (``_run_and_stream``, the base
+        ``process()``'s contract).
 
         Args:
             message: User message
@@ -973,8 +984,19 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         (``workflow/live_events.py``), so it shows while the runner still
         waits on the call. Retries are the provider client's
         (``HttpRetryOptions``).
+
+        A run that fails yields the turn's one ``ERROR``
+        (``WorkflowEvent.turn_failed``, the base ``process()``'s contract),
+        last, and ends: the provider's error behind ADK's plugin-manager
+        wrapper (``_plugin_cause``), or ``ConversationChangedError`` for a
+        session another process changed. A run that already yielded an
+        ``ERROR`` that is not recoverable (the overflow handler's) yields no
+        second one.
         """
         event_count = 0
+        # An ERROR the turn has yielded that is not recoverable: its one.
+        reported_failure = False
+        failure: BaseException | None = None
         live = live_events.LiveEvents()
         # Set when the turn is stopped: ADK then answers, as it closes, the
         # calls the invocation leaves open (InterruptedCallsPlugin words them).
@@ -999,19 +1021,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                             if isinstance(item, WorkflowEvent):
                                 reported = self._apply_event_hook(item)
                                 if reported:
+                                    reported_failure |= _fails_turn(reported)
                                     event_count += 1
                                     yield reported
                                 continue
                             async for workflow_event in self._workflow_events(item, session_id):
+                                reported_failure |= _fails_turn(workflow_event)
                                 event_count += 1
                                 yield workflow_event
                     except StaleSessionError:
-                        raise ConversationChangedError(session_id) from None
+                        failure = ConversationChangedError(session_id)
                     except RuntimeError as error:
-                        cause = _plugin_cause(error)
-                        if cause is error:
-                            raise
-                        raise cause from None
+                        failure = _plugin_cause(error)
+                    except Exception as error:
+                        failure = error
             finally:
                 # Every call of the turn is answered now, sealed or returned.
                 # One a failure left open is answered at the next turn
@@ -1035,7 +1058,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     event_count += 1
                     yield llm_event
 
-        logger.info("message_processed", event_count=event_count)
+        if failure is None:
+            logger.info("message_processed", event_count=event_count)
+            return
+        # The ERROR is the report; the log is for diagnosis, its traceback at
+        # debug, so nothing is said twice over the CLI's prompt.
+        logger.info(
+            "adk_turn_failed",
+            error_type=type(failure).__name__,
+            error=truncate(str(failure), _MAX_LOGGED_ERROR),
+            reported=reported_failure,
+        )
+        logger.debug("adk_turn_failed", exc_info=failure)
+        if not reported_failure:
+            error = self._apply_event_hook(WorkflowEvent.turn_failed(failure))
+            if error is not None:
+                yield error
 
     async def _workflow_events(
         self, adk_event: Any, session_id: str

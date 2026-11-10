@@ -985,7 +985,7 @@ async def test_on_adk_a_jobs_resume_answers_its_open_call_first(hermetic, monkey
 
 async def test_on_adk_a_turn_the_store_finds_stale_says_so_plainly(hermetic, monkeypatch):
     """ADK refuses to append to a session another process changed since it
-    was read (StaleSessionError): the turn raises one error that says so."""
+    was read (StaleSessionError): the turn's one error says so."""
     from google.adk.errors import StaleSessionError
 
     from agentic_cli.workflow.sessions import ConversationChangedError
@@ -1003,10 +1003,11 @@ async def test_on_adk_a_turn_the_store_finds_stale_says_so_plainly(hermetic, mon
             return await real(session, event)
 
         monkeypatch.setattr(service, "append_event", stale)
-        with pytest.raises(ConversationChangedError) as raised:
-            await turn(manager, "Hello again.")
+        events = await turn(manager, "Hello again.")
     finally:
         await manager.cleanup()
 
-    assert raised.value.session_id == "s"
-    assert str(raised.value) == "Conversation 's' was changed by another process during this turn."
+    (error,) = [e for e in events if e.type is EventType.ERROR]
+    assert error.content == "Conversation 's' was changed by another process during this turn."
+    assert error.metadata["error_code"] == ConversationChangedError.__name__
+    assert error.metadata["recoverable"] is False

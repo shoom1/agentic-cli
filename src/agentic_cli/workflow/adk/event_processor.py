@@ -75,7 +75,7 @@ class ADKEventProcessor:
     becomes the turn's ``ERROR``, "<model> returned no answer", its code
     the error code or finish reason. No other error code of the main agent
     is mapped: ADK records one for an exception that then leaves the run,
-    which reports it.
+    which the manager reports as the turn's one ``ERROR``.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -137,8 +137,8 @@ class ADKEventProcessor:
 
         error_code = getattr(adk_event, "error_code", None)
         if subagent is not None and error_code:
-            # The root's own failure leaves the run, which reports it; this
-            # one never does.
+            # The root's own failure leaves the run, which the manager
+            # reports as the turn's ERROR; this one never does.
             error = WorkflowEvent.error(
                 f"{subagent} failed: {adk_event.error_message or error_code}",
                 error_code=error_code,

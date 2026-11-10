@@ -177,6 +177,36 @@ class TestWorkflowEvent:
         assert event.metadata["recoverable"] is True
         assert event.metadata["details"]["status_code"] == 429
 
+    def test_a_failed_turns_error_names_its_type_and_any_rate_limit(self):
+        class ClientError(Exception):
+            code = 429
+
+        event = WorkflowEvent.turn_failed(ClientError("429 RESOURCE_EXHAUSTED"))
+
+        assert event.type is EventType.ERROR
+        assert event.content == "429 RESOURCE_EXHAUSTED"
+        assert event.metadata == {
+            "recoverable": False,
+            "error_code": "ClientError",
+            "rate_limited": True,
+            "error_type": "ClientError",
+        }
+
+    def test_a_failed_turns_error_without_text_is_its_types_name(self):
+        event = WorkflowEvent.turn_failed(TimeoutError())
+
+        assert event.content == "TimeoutError"
+        assert event.metadata["rate_limited"] is False
+
+    def test_a_failed_turns_error_may_say_it_otherwise(self):
+        event = WorkflowEvent.turn_failed(
+            ValueError("prompt is too long"), "It no longer fits.", error_code="CONTEXT_OVERFLOW"
+        )
+
+        assert event.content == "It no longer fits."
+        assert event.metadata["error_code"] == "CONTEXT_OVERFLOW"
+        assert event.metadata["error_type"] == "ValueError"
+
     def test_event_has_timestamp(self):
         """Test that events have timestamps."""
         event = WorkflowEvent.text("Hello")
