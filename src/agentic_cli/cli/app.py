@@ -2111,8 +2111,30 @@ class BaseCLIApp:
         """Hold the conversation before it is written, when its id was made by
         this run (``ConversationCore.hold_to_write``); the caller holds the
         turn lock. False, said, when another process has it open (a collision
-        of random ids): the write must not happen."""
-        holder = self._conversation.hold_to_write()
+        of random ids): the write must not happen.
+
+        A lock that cannot be taken (``<sessions_dir>/locks`` read-only, say,
+        on a postgres store) does not stop the write: the conversation runs
+        unheld, as an id given to the app does whose startup hold failed,
+        and the run says so once.
+        """
+        core = self._conversation
+        try:
+            holder = core.hold_to_write()
+        except OSError as error:
+            logger.debug(
+                "conversation_hold_failed", session_id=core.session_id, exc_info=True
+            )
+            core.deferred = False  # written unheld: not tried again
+            if not getattr(self, "_said_unheld", False):
+                self._said_unheld = True
+                reason = str(error) or type(error).__name__
+                self.session.add_warning(
+                    f"Could not hold conversation '{core.session_id}' for this "
+                    f"process: {reason}. Its turns run unheld, so another process "
+                    "could open it too."
+                )
+            return True
         if holder is None:
             return True
         self.session.add_error(

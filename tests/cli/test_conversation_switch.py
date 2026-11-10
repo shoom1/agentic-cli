@@ -1469,6 +1469,34 @@ class TestARunThatWritesNothing:
         assert len(workflow.compacted) == 1  # the first refused
         assert not free(app, app._conversation_key(app.session_id))
 
+    @pytest.mark.parametrize("line", ["Hello.", "/compact"])
+    async def test_a_locks_folder_it_cannot_write_lets_the_write_go_on_unheld(
+        self, home, line
+    ):
+        """A read-only sessions folder (a postgres store, say): the run says
+        once that it could not hold the conversation, and why, and its turns
+        and /compact run unheld, as before."""
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        locks = app.settings.sessions_dir / "locks"
+        locks.mkdir(parents=True)
+        os.chmod(locks, 0o500)
+        try:
+            await app.process_input(line)
+            await app.process_input(line)
+        finally:
+            os.chmod(locks, 0o700)
+
+        done = workflow.turns if line == "Hello." else workflow.compacted
+        assert len(done) == 2
+        assert said(app.session, "add_error") == []
+        warnings = said(app.session, "add_warning")
+        assert len(warnings) == 1
+        assert warnings[0].startswith(
+            f"Could not hold conversation '{app.session_id}' for this process: "
+        )
+        assert "Permission denied" in warnings[0]
+
     async def test_a_new_conversation_is_held_at_its_first_turn(self, home, monkeypatch):
         app, _, _ = TestANewConversationOnAnotherBackend.on_adk(monkeypatch)
         await app.process_input("/new")
