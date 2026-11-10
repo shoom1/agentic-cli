@@ -197,7 +197,8 @@ class TestAStoreNotYetItsBackends:
     """A reader writes into no store that is not yet its backend's: the
     file ``sqlite_uri`` names may be another backend's (both read it), or a
     team's. It checks, read-only, that its backend's tables are there, and
-    reads nothing otherwise: no new tables, no change of journal mode."""
+    reads nothing otherwise: no new tables, no change of journal mode, and
+    nothing left open (ADK's engine connected to look, then closed)."""
 
     @pytest.mark.parametrize("backend, other", [("adk", "deepagents"), ("deepagents", "adk")])
     async def test_the_other_backends_file_keeps_its_tables_and_journal_mode(
@@ -212,6 +213,8 @@ class TestAStoreNotYetItsBackends:
                                 ScriptedModels(solo=[ai(reply) for reply in REPLIES]))
         await stored_by_its_manager(other, app_settings)
         tables, mode = _tables(shared), _journal_mode(shared)
+        await asyncio.sleep(0.1)
+        before = _threads()
 
         async with await open_session_reader(backend, app_settings) as reader:
             assert await reader.list() == []
@@ -219,6 +222,7 @@ class TestAStoreNotYetItsBackends:
             assert await reader.exists("s1") is False
 
         assert (_tables(shared), _journal_mode(shared)) == (tables, mode)
+        assert await _left_after(before) == set()
 
     @pytest.mark.parametrize("backend", ["adk", "deepagents"])
     async def test_an_empty_file_a_failed_start_left_is_left_as_it_is(self, backend, project):
@@ -229,15 +233,22 @@ class TestAStoreNotYetItsBackends:
         )
         file.parent.mkdir(parents=True, exist_ok=True)
         file.touch()
+        before = _threads()
 
         async with await open_session_reader(backend, app_settings) as reader:
             assert await reader.list() == []
 
         assert file.stat().st_size == 0
+        assert await _left_after(before) == set()
 
 
 def _threads() -> set[int]:
-    return {thread.ident for thread in threading.enumerate()}
+    """The threads running, but the loop's default executor (``asyncio_N``):
+    a pool ``asyncio.to_thread`` reuses, no connection's."""
+    return {
+        thread.ident for thread in threading.enumerate()
+        if not thread.name.startswith("asyncio_")
+    }
 
 
 async def _left_after(before: set[int]) -> set[str]:
