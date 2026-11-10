@@ -25,7 +25,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from agentic_cli.cli.waiting_jobs import waiting_here
+from agentic_cli.cli.waiting_jobs import KeptElsewhere, opens_anywhere, waiting_here
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -68,6 +68,10 @@ class JobMonitor:
             conversation's are told when it is opened). The cue shows
             whatever ``job_auto_resume`` says, naming ``/jobs resume`` when
             nothing resumes them on its own.
+        kept_elsewhere: Whether another installed backend keeps a job's
+            conversation, asked when the workflow's ``can_resume`` says no
+            (``waiting_jobs.opens_anywhere``): such a job waits for its
+            conversation. Its answer is kept as ``can_resume``'s is.
     """
 
     def __init__(
@@ -79,8 +83,10 @@ class JobMonitor:
         interval: float = _DEFAULT_INTERVAL,
         note_ticks: int = _DEFAULT_NOTE_TICKS,
         conversation: "Callable[[], tuple[str | None, str | None]] | None" = None,
+        kept_elsewhere: KeptElsewhere | None = None,
     ) -> None:
         self._ui = ui
+        self._kept_elsewhere = kept_elsewhere
         self._controller = controller
         self._settings = settings
         # (user, session) of the conversation shown: the resume cue counts its
@@ -193,7 +199,9 @@ class JobMonitor:
         return await waiting_here(awaiting, here, self._conversation_opens)
 
     async def _conversation_opens(self, record: Any) -> bool:
-        """``workflow.can_resume(record)``, its answer kept ``_CONVERSATION_RECHECK_S``.
+        """``workflow.can_resume(record)`` (and, when it says no, whether
+        another installed backend keeps the conversation: ``kept_elsewhere``),
+        its answer kept ``_CONVERSATION_RECHECK_S``.
 
         Kept for the workflow that gave it: another one (a new conversation
         on another backend, which holds other conversations) is asked
@@ -209,7 +217,9 @@ class JobMonitor:
         now = time.monotonic()
         if kept is not None and now - kept[1] < _CONVERSATION_RECHECK_S:
             return kept[0]
-        can_resume = getattr(workflow, "can_resume", None)
+        can_resume = opens_anywhere(
+            getattr(workflow, "can_resume", None), self._kept_elsewhere
+        )
         if can_resume is None:
             return True  # it cannot say: the job waits for its conversation
         opens = bool(await can_resume(record))

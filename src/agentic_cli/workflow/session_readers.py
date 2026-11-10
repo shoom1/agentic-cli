@@ -117,11 +117,13 @@ class SessionReader:
         row = await self._sessions.info(self._ref(session_id))
         return None if row is None else self._named(row)
 
-    async def exists(self, session_id: str) -> bool:
-        """Whether ``session_id``'s conversation is stored."""
+    async def exists(self, session_id: str, *, user_id: str | None = None) -> bool:
+        """Whether ``session_id``'s conversation is stored (``user_id``'s:
+        the reader's user by default)."""
         if self._sessions is None:
             return False
-        return await self._sessions.exists(self._ref(session_id))
+        ref = SessionRef(self._app_name, user_id or self._user_id, session_id)
+        return await self._sessions.exists(ref)
 
     async def delete(self, session_id: str) -> bool:
         """Delete ``session_id``'s conversation; False if it was not stored.

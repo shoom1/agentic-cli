@@ -73,6 +73,8 @@ class StoredConversations:
         self._readers: list["SessionReader"] = []
         #: Each backend whose conversations were not read, and why (a sentence).
         self.unread: dict[str, str] = {}
+        #: The backends whose store failed (installed, but not read).
+        self._failing: set[str] = set()
 
     async def __aenter__(self) -> "StoredConversations":
         try:
@@ -142,6 +144,22 @@ class StoredConversations:
                 others.append(row)
         return found + sorted(others, key=_when, reverse=True)
 
+    async def kept_elsewhere(self, session_id: str, user_id: str | None = None) -> bool:
+        """Whether a backend read here, not the running workflow's, keeps
+        ``session_id``'s conversation (``user_id``'s; the settings' user by
+        default). A store that cannot be read may keep it: unknown counts as
+        yes. A backend whose extra is not installed keeps none."""
+        if self._failing:
+            return True
+        for reader in self._readers:
+            try:
+                if await reader.exists(session_id, user_id=user_id):
+                    return True
+            except Exception as error:  # noqa: BLE001 - unknown: it may keep it
+                self._failed(reader.backend, error)
+                return True
+        return False
+
     async def delete(self, session_id: str, backend: str) -> bool:
         """Delete ``session_id`` on ``backend``; False when it keeps none.
 
@@ -194,6 +212,7 @@ class StoredConversations:
         logger.warning("session_reader_failed", backend=backend, error=str(error))
         logger.debug("session_reader_failed", backend=backend, exc_info=error)
         self.unread[backend] = _unreadable(backend, error)
+        self._failing.add(backend)
 
 
 def _when(row: "SessionInfo") -> datetime:

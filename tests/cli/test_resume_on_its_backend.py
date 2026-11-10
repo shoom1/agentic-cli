@@ -100,7 +100,7 @@ class StoreReader:
     async def info(self, session_id):
         return self._row(session_id) if session_id in self.stored else None
 
-    async def exists(self, session_id):
+    async def exists(self, session_id, *, user_id=None):
         return session_id in self.stored
 
     async def delete(self, session_id):

@@ -56,7 +56,7 @@ from agentic_cli.cli.session_resume import (
 )
 from agentic_cli.cli.stored_conversations import StoredConversations
 from agentic_cli.cli.usage_tracker import UsageTracker
-from agentic_cli.cli.waiting_jobs import Here, told_here, waiting_here
+from agentic_cli.cli.waiting_jobs import Here, opens_anywhere, told_here, waiting_here
 from agentic_cli.cli.workflow_controller import WorkflowController, WorkflowState
 from agentic_cli.config import MODEL_ROLE_KEY_PREFIX, BaseSettings
 from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
@@ -1700,9 +1700,30 @@ class BaseCLIApp:
         """
         workflow = self._workflow_controller.workflow
         async with _says_so_when_stopped(self.session):
-            return await told_here(
-                record, self._here(), getattr(workflow, "can_resume", None)
-            )
+            return await told_here(record, self._here(), self._opens_anywhere(workflow))
+
+    def _opens_anywhere(self, workflow: Any) -> Any:
+        """Whether a job's conversation can be opened, on any installed
+        backend (``waiting_jobs.opens_anywhere``): the running ``workflow``'s
+        ``can_resume``, then ``_kept_elsewhere``."""
+        return opens_anywhere(getattr(workflow, "can_resume", None), self._kept_elsewhere)
+
+    async def _kept_elsewhere(self, record: Any) -> bool:
+        """Whether another installed backend than the running one keeps
+        ``record``'s conversation: a job of it waits for it there, to be told
+        once ``/resume`` opens it on its own backend. A store that cannot be
+        read counts as keeping it (unknown: the job waits). Never raises."""
+        session_id = getattr(record, "session_id", None)
+        if session_id is None or not self._place().locked:
+            return False  # the memory store's conversations are its manager's alone
+        try:
+            async with self._stored() as stored:
+                return await stored.kept_elsewhere(
+                    session_id, getattr(record, "user_id", None)
+                )
+        except Exception:  # noqa: BLE001 - unknown: it waits for its conversation
+            logger.debug("job_conversation_lookup_failed", session_id=session_id, exc_info=True)
+            return True
 
     async def _deliver_resume(self, jm, record) -> bool | None:
         """Claim one job and run its resume turn, and close out its transition.
@@ -2053,7 +2074,7 @@ class BaseCLIApp:
             return
         waiting = await waiting_here(
             await asyncio.to_thread(jm.awaiting_resume), self._here(),
-            getattr(workflow, "can_resume", None),
+            self._opens_anywhere(workflow),
         )
         if len(waiting) == 1:
             self.session.add_message(
@@ -2884,16 +2905,23 @@ class BaseCLIApp:
         if self._turned:
             await self._extract_session_facts()
 
+    def _new_job_monitor(self) -> "JobMonitor":
+        """The status bar's job monitor ``run()`` runs: ``↻N`` counts the
+        jobs that wait for this conversation, as ``cli/waiting_jobs.py`` says
+        (a conversation another installed backend keeps is not gone)."""
+        from agentic_cli.cli.job_monitor import JobMonitor
+
+        return JobMonitor(
+            self.session, self._workflow_controller, settings=self._settings,
+            conversation=lambda: (self._settings.default_user, self._session_id),
+            kept_elsewhere=self._kept_elsewhere,
+        )
+
     async def run(self) -> None:
         """Run the main application loop."""
         logger.info("repl_starting")
 
-        from agentic_cli.cli.job_monitor import JobMonitor
-
-        job_monitor = JobMonitor(
-            self.session, self._workflow_controller, settings=self._settings,
-            conversation=lambda: (self._settings.default_user, self._session_id),
-        )
+        job_monitor = self._new_job_monitor()
         self._job_monitor = job_monitor  # told when a conversation is deleted
 
         # Once, before anything waits for the workflow: a backend that cannot

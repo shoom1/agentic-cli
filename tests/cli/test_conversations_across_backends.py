@@ -70,7 +70,7 @@ class FakeReader:
         assert not self.closed
         return self.rows.get(session_id)
 
-    async def exists(self, session_id):
+    async def exists(self, session_id, *, user_id=None):
         return session_id in self.rows
 
     async def delete(self, session_id):

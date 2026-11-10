@@ -1222,9 +1222,9 @@ the start of the entry's title.
   which starts a new manager on the run's services: the "Allow for this
   session" grants, in-process jobs, sandbox kernels, knowledge bases and
   embedding model are handed over (**A manager's services can move…**); and
-  a finished job of the conversation left is told in the new one as
-  unavailable (the new backend does not hold its conversation), as an
-  orchestrator switch told it before. `/clear` is still a screen clear.
+  a finished job of the conversation left waits for it on its own backend
+  (the other backends' stores are asked before a conversation is called
+  gone), told once `/resume` opens it there. `/clear` is still a screen clear.
 - **A session list's rows: `SessionInfo` and `session_info()`.**
   `list_sessions(*, user_id=None, limit=None)` returns one frozen
   `SessionInfo(session_id, title, turns, updated, backend=None)` per stored
@@ -3301,7 +3301,8 @@ step; each entry says what to use instead.
   here, another conversation's too; they now tell the current
   conversation's jobs, and, as unavailable, those with no conversation or
   whose conversation can be opened no more (deleted, or kept in memory by
-  an earlier run).
+  an earlier run); one another installed backend keeps can still be opened
+  there, so its jobs wait for it (`waiting_jobs.opens_anywhere`).
   `/resume` tells the finished jobs of the conversation it opens when
   `job_auto_resume` is on; at startup (`--continue`, `--resume <id>`),
   outside the input handler, where Ctrl+C could not stop a turn, a line
