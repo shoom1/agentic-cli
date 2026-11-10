@@ -951,3 +951,48 @@ class TestABackendThatCannotRun:
 
         assert app.session_id == old and built == [] and "on_session_end" not in adk.calls
         assert said(app.session, "add_error") == [self.MISSING]
+
+
+class TestAnAppsOwnStartNewSession:
+    """The flows go through the app's public ``start_new_session()``, so an
+    override applies: an orchestrator change in a conversation with nothing
+    stored calls it with no keyword (it runs on the settings' orchestrator,
+    which names the new backend). ``/new <backend>`` on an app whose override
+    takes no ``backend`` is refused plainly."""
+
+    New = TestANewConversationOnAnotherBackend
+
+    async def test_the_orchestrator_change_calls_it(self, home, monkeypatch):
+        from agentic_cli.cli.app import BaseCLIApp
+
+        calls: list = []
+
+        class App(BaseCLIApp):
+            async def start_new_session(self) -> str:
+                calls.append("theirs")
+                return await super().start_new_session()
+
+        app, _, _ = self.New.on_adk(monkeypatch)
+        app.__class__ = App
+        old = app.session_id
+
+        assert await app.apply_settings({"orchestrator": "deepagents"})
+
+        assert calls == ["theirs"] and app.session_id != old
+        assert self.New.running(app) == "deepagents"
+
+    async def test_new_with_a_backend_is_refused_when_it_takes_none(self, home, monkeypatch):
+        from agentic_cli.cli.app import BaseCLIApp
+
+        class App(BaseCLIApp):
+            async def start_new_session(self) -> str:
+                return await super().start_new_session()
+
+        app, _, built = self.New.on_adk(monkeypatch)
+        app.__class__ = App
+        old = app.session_id
+
+        await app.process_input("/new deepagents")
+
+        assert app.session_id == old and built == []
+        assert said(app.session, "add_error") == ["This app's /new takes no backend."]

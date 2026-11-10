@@ -715,6 +715,9 @@ class NewCommand(Command):
             except ImportError as error:  # its extra is not installed
                 app.session.add_error(str(error).split("\n")[0])
             return
+        if not _takes_a_backend(app.start_new_session):
+            app.session.add_error("This app's /new takes no backend.")
+            return
         try:
             check_backend(backend)
         except ValueError:
@@ -727,6 +730,15 @@ class NewCommand(Command):
             app.session.add_error(str(error).split("\n")[0])
             return
         await app.start_new_session(backend=backend)
+
+
+def _takes_a_backend(start_new_session: Any) -> bool:
+    """Whether an app's ``start_new_session`` takes ``backend``: one an app
+    overrode without it (0.7.0 added the keyword) is called as before."""
+    import inspect
+
+    parameters = inspect.signature(start_new_session).parameters.values()
+    return any(p.name == "backend" or p.kind is p.VAR_KEYWORD for p in parameters)
 
 
 class ModelsCommand(Command):

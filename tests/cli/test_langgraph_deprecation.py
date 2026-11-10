@@ -272,8 +272,14 @@ async def test_a_settings_switch_to_langgraph_warns_again(backends):
 
     assert [m.backend_type for m in backends.built] == ["langgraph", "adk", "langgraph"]
     assert session.notices == [CLI_NOTICE, CLI_NOTICE]
-    switched = session.shown.index(("success", "Orchestrator: langgraph"))
-    assert session.shown[switched + 1] == ("warning", CLI_NOTICE)
+    # Each switch starts a new conversation there (nothing was stored), and
+    # the one on LangGraph is told at once.
+    (opened,) = [
+        i for i, (kind, text) in enumerate(session.shown)
+        if kind == "system" and text.startswith("New conversation") and "langgraph" in text
+    ]
+    assert session.shown[opened + 1] == ("warning", CLI_NOTICE)
+    assert session.shown.index(("success", "Orchestrator: langgraph")) > opened
     assert session.shown.index(("success", "Orchestrator: adk")) > session.shown.index(
         ("warning", CLI_NOTICE)
     )

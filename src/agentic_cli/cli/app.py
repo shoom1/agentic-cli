@@ -1333,12 +1333,13 @@ class BaseCLIApp:
 
         if starts_anew:
             try:
-                async with self._turn_lock:
-                    await self._new_conversation(target, warn=False)
+                # The app's own /new (an override applies), on the settings'
+                # orchestrator, which names the new backend now.
+                await self.start_new_session()
             except asyncio.CancelledError as cancel:
                 if controller.backend != target:
                     # Stopped before the new backend ran: nothing of the Save
-                    # stays, and nothing is said.
+                    # stays ("Operation cancelled...", as /new says it).
                     _restore_settings(self._settings, snapshot)
                     raise
                 # It runs, and its conversation is open: too late to undo. The
@@ -1391,8 +1392,8 @@ class BaseCLIApp:
             self.session.add_success(line)
         for notice in switched:
             self.session.add_message("system", notice)
-        if not was_langgraph:  # a switch to it, not a change made while on it
-            _warn_if_langgraph(self._settings, self.session)
+        if not was_langgraph and not starts_anew:  # a switch to it (the new
+            _warn_if_langgraph(self._settings, self.session)  # conversation said it)
         if self._settings.ui_theme != theme_before:
             # Repaint: text printed before would keep the old theme's colors.
             # The transcript is printed again, the lines above included.
@@ -1828,10 +1829,9 @@ class BaseCLIApp:
             async with self._turn_lock:
                 return await self._new_conversation(target)
 
-    async def _new_conversation(self, backend: str | None, *, warn: bool = True) -> str:
+    async def _new_conversation(self, backend: str | None) -> str:
         """``start_new_session``'s switch, under the turn lock: on ``backend``
-        (the settings' orchestrator when None). ``warn``: a new conversation
-        on LangGraph says it is deprecated (``apply_settings`` says it itself)."""
+        (the settings' orchestrator when None)."""
         import uuid
 
         controller = self._workflow_controller
@@ -1869,7 +1869,7 @@ class BaseCLIApp:
             if stored:
                 line += f" Previous: {old}, listed in /sessions."
         self.session.add_message("system", line)
-        if warn and moving and target == OrchestratorType.LANGGRAPH.value:
+        if moving and target == OrchestratorType.LANGGRAPH.value:
             self.session.add_warning(_LANGGRAPH_DEPRECATION)
         if interrupted is not None:
             raise interrupted
