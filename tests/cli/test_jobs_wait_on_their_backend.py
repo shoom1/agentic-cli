@@ -133,6 +133,39 @@ class TestOnTheFakes:
 
         assert told == []
 
+    async def test_a_store_broken_for_good_is_warned_of_once_by_the_background_looks(
+        self, jobs_on_adk, monkeypatch
+    ):
+        """The status bar's recheck and ``/jobs resume`` look at the other
+        backends for each waiting job, again and again: a store that cannot
+        be read is warned of once (above the prompt), then logged at debug.
+        A look the user asked for (``/sessions``) still warns."""
+        from agentic_cli.cli import job_monitor, stored_conversations
+
+        warned: list[str] = []
+
+        class Recorder:
+            def __getattr__(self, level: str):
+                def log(event: str, **fields) -> None:
+                    if level == "warning":
+                        warned.append(event)
+
+                return log
+
+        jobs_on_adk.unreadable["deepagents"] = RuntimeError("file is not a database")
+        app, _, told = await started(jobs_on_adk, monkeypatch)  # its /resume a1 warned
+        monkeypatch.setattr(stored_conversations, "logger", Recorder())
+        monkeypatch.setattr(job_monitor, "_CONVERSATION_RECHECK_S", 0.0)
+        monitor = app._new_job_monitor()
+
+        for _ in range(5):
+            await monitor.poll_once()
+        await app.process_input("/jobs resume")
+
+        assert told == [] and warned == ["session_reader_failed"]
+        await app.process_input("/sessions")
+        assert warned == ["session_reader_failed"] * 2
+
     async def test_resuming_its_conversation_tells_it_there(
         self, jobs_on_adk, monkeypatch
     ):

@@ -54,6 +54,11 @@ class StoredConversations:
         backend: The running workflow's backend; its conversations are the
             workflow's to answer for.
         only: Look at this backend's conversations alone.
+        warned: For a look the app makes on its own, again and again (the
+            status bar's, a finished job's): the backends whose failing store
+            was warned of already, this run. Such a look warns of each at
+            most once (adding it here), then logs at debug; a look the user
+            asked for (None) warns each time.
     """
 
     def __init__(
@@ -64,8 +69,10 @@ class StoredConversations:
         workflow: Any = None,
         backend: str | None = None,
         only: str | None = None,
+        warned: set[str] | None = None,
     ) -> None:
         self._settings = settings
+        self._warned = warned
         self._store = store
         self._workflow = workflow if only in (None, backend) else None
         self._backend = backend if self._workflow is not None else None
@@ -208,8 +215,12 @@ class StoredConversations:
 
     def _failed(self, backend: str, error: Exception) -> None:
         """``backend``'s store failed: its conversations are left out, said
-        in the log (a warning: they are missing from what the user sees)."""
-        logger.warning("session_reader_failed", backend=backend, error=str(error))
+        in the log (a warning: they are missing from what the user sees;
+        once a run for the looks the app makes on its own, ``warned``)."""
+        if self._warned is None or backend not in self._warned:
+            logger.warning("session_reader_failed", backend=backend, error=str(error))
+            if self._warned is not None:
+                self._warned.add(backend)
         logger.debug("session_reader_failed", backend=backend, exc_info=error)
         self.unread[backend] = _unreadable(backend, error)
         self._failing.add(backend)

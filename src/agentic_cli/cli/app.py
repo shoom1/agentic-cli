@@ -1717,7 +1717,10 @@ class BaseCLIApp:
         if session_id is None or not self._place().locked:
             return False  # the memory store's conversations are its manager's alone
         try:
-            async with self._stored() as stored:
+            # A look the app makes on its own, again and again (the status
+            # bar's recheck, each turn's end, /jobs resume): a store that
+            # cannot be read is warned of once a run, then at debug.
+            async with self._stored(quiet=True) as stored:
                 return await stored.kept_elsewhere(
                     session_id, getattr(record, "user_id", None)
                 )
@@ -2469,15 +2472,20 @@ class BaseCLIApp:
         async with self._stored(only=backend) as stored:
             return await stored.delete(session_id, backend)
 
-    def _stored(self, *, only: str | None = None) -> StoredConversations:
+    def _stored(self, *, only: str | None = None, quiet: bool = False) -> StoredConversations:
         """One look at the stored conversations of every installed backend
         (``only``'s alone, when named), in the run's store: the running
-        workflow answers for its own backend while it is ready."""
+        workflow answers for its own backend while it is ready. A ``quiet``
+        look (one the app makes on its own) warns of a store that cannot be
+        read once a run; the others, which the user asked for, each time."""
         controller = self._workflow_controller
+        warned = None
+        if quiet:  # made on first use: an app built with __new__ has one too
+            warned = self.__dict__.setdefault("_unreadable_warned", set())
         return StoredConversations(
             self._settings, self._place().store,
             workflow=controller.workflow if controller.is_ready else None,
-            backend=controller.backend, only=only,
+            backend=controller.backend, only=only, warned=warned,
         )
 
     async def _saving_facts(self, session_id: str) -> None:
