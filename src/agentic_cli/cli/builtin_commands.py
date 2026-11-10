@@ -558,11 +558,14 @@ def _session_workflow(app: Any) -> Any:
 class SessionsCommand(Command):
     """List and manage saved sessions.
 
-    One row per stored conversation (``SessionInfo``): its id (the current
-    one marked ``* ``) and its title (the first prompt), both shown as given,
-    never as markup, its turns and when it last changed. ``--delete=<id>``
-    deletes one, never the conversation the user is in nor one open in
-    another process.
+    One row per stored conversation of every installed backend
+    (``app.list_conversations()``: a ``SessionInfo`` each, newest first): its
+    id (the conversation the app is in, its id on its backend, marked
+    ``* ``) and its title (the first prompt), both shown as given, never as
+    markup, its backend, its turns and when it last changed.
+    ``--delete=<id>`` deletes one on the backend that keeps it, never the
+    conversation the user is in nor one open in another process; an id two
+    backends keep needs ``--backend=<name>``.
     """
 
     def __init__(self) -> None:
@@ -570,60 +573,46 @@ class SessionsCommand(Command):
             name="sessions",
             description="List saved sessions",
             aliases=["sess"],
-            usage="/sessions [--delete=<id>]",
+            usage="/sessions [--delete=<id> [--backend=<backend>]]",
             examples=["/sessions", "/sessions --delete=my-research"],
             category=CommandCategory.SESSION,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """Display persisted sessions (from the native store) or delete one."""
+        """Display persisted sessions (from every backend's store) or delete one."""
         from rich.text import Text
 
         parsed = self.parse_args(args)
         delete_id = parsed.get_option("delete", "", str) or ""
+        backend = parsed.get_option("backend", "", str) or None
 
         workflow = _session_workflow(app)
         if workflow is None:
             return
 
         if delete_id:
-            if delete_id == app.session_id:
-                app.session.add_error("You are in this conversation; /new or /resume another first.")
-                return
-            # Held while it is deleted: one open in another process would be
-            # recreated there, empty, at its next turn, and that process not told.
-            with app.conversation_held(delete_id) as holder:
-                if holder is not None:
-                    app.session.add_error(
-                        f"Could not delete '{delete_id}': it is open in another "
-                        f"process ({holder})."
-                    )
-                    return
-                deleted = await workflow.delete_session(delete_id)
-            if deleted:
-                app.session.add_success(f"Session '{delete_id}' deleted.")
-            else:
-                app.session.add_error(f"Session '{delete_id}' not found.")
+            await self._delete(app, delete_id, backend)
             return
 
-        sessions = await workflow.list_sessions()
+        sessions = await app.list_conversations()
         if not sessions:
             app.session.add_message("system", "No saved sessions.")
             return
 
         table = Table(title="Saved Sessions", show_lines=False, padding=(0, 1))
         table.add_column("Session ID", style="bold cyan", no_wrap=True)
+        table.add_column("Backend", style="dim", no_wrap=True)
         table.add_column("Title")  # the terminal's own color: readable on every theme
         table.add_column("Turns", style="dim", justify="right")
         table.add_column("Last Update", style="dim", no_wrap=True)
 
-        current_sid = app.session_id
+        current = (app.session_id, app.session_backend)
 
         for info in sessions:
             sid = info.session_id
             # Text: an id and a title are shown as typed, neither markup nor
             # emoji codes (":x:"), so an id can be copied back.
-            label = Text(f"* {sid}" if sid == current_sid else sid)
+            label = Text(f"* {sid}" if (sid, info.backend) == current else sid)
             if info.title:
                 title = Text(info.title)
             elif info.turns is not None:  # stored, and no prompt in it yet
@@ -634,9 +623,64 @@ class SessionsCommand(Command):
             updated = (
                 info.updated.astimezone().strftime("%Y-%m-%d %H:%M") if info.updated else ""
             )
-            table.add_row(label, title, turns, updated)
+            table.add_row(label, Text(info.backend or ""), title, turns, updated)
 
         app.session.add_rich(table)
+
+    @staticmethod
+    async def _delete(app: Any, session_id: str, backend: str | None) -> None:
+        """Delete ``session_id`` on the backend that keeps it (``backend``, when named)."""
+        from agentic_cli.workflow.settings import OrchestratorType
+
+        names = sorted(o.value for o in OrchestratorType)
+        if backend is not None and backend not in names:
+            app.session.add_error(
+                f"Unknown backend '{backend}': {', '.join(names[:-1])} or {names[-1]}."
+            )
+            return
+        if session_id == app.session_id and backend in (None, app.session_backend):
+            twins = sorted(
+                info.backend for info in await app.list_conversations()
+                if info.session_id == session_id and info.backend != app.session_backend
+            )
+            line = "You are in this conversation; /new or /resume another first."
+            if twins:
+                line += (
+                    f" {twins[0]} keeps one with this id too: /sessions "
+                    f"--delete={session_id} --backend={twins[0]} deletes that one."
+                )
+            app.session.add_error(line)
+            return
+        rows = [
+            info for info in await app.list_conversations()
+            if info.session_id == session_id and backend in (None, info.backend)
+        ]
+        if not rows:
+            app.session.add_error(f"Session '{session_id}' not found.")
+            return
+        if len(rows) > 1:
+            keeping = sorted(info.backend or "?" for info in rows)
+            names, choices = " and ".join(keeping), " or ".join(keeping)
+            app.session.add_error(
+                f"'{session_id}' is kept by {names}: "
+                f"/sessions --delete={session_id} --backend=<{choices}> deletes one."
+            )
+            return
+        (info,) = rows
+        # Held while it is deleted: one open in another process would be
+        # recreated there, empty, at its next turn, and that process not told.
+        with app.conversation_held(session_id, backend=info.backend) as holder:
+            if holder is not None:
+                app.session.add_error(
+                    f"Could not delete '{session_id}': it is open in another "
+                    f"process ({holder})."
+                )
+                return
+            deleted = await app.delete_conversation(session_id, backend=info.backend)
+        if deleted:
+            app.session.add_success(f"Session '{session_id}' deleted.")
+        else:
+            app.session.add_error(f"Session '{session_id}' not found.")
 
 
 class ResumeSessionCommand(Command):

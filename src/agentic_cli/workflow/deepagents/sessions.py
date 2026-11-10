@@ -30,13 +30,21 @@ provider adapter sends. The model reads it as the rest of the conversation;
 ``recent`` leaves it out, because the user did not write it, and so does a
 conversation's row: its title is the first prompt the user typed, its turns
 how many they typed.
+
+``open_sessions`` opens a store's conversations from the settings, without
+the manager, for ``workflow/session_readers.py``: the checkpointer and the
+index the manager would open, read through ``CheckpointSessions``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
-from collections.abc import Sequence
+import sqlite3
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -44,6 +52,12 @@ from langgraph.store.base import PutOp
 
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.jobs.resume import job_notice
+from agentic_cli.workflow.checkpointers import (
+    deepagents_sqlite_location,
+    open_checkpointer,
+    open_store,
+    private_sqlite_file,
+)
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
@@ -380,6 +394,90 @@ class CheckpointSessions:
             for session_id, item in latest.items()
             if _messages(item)
         }
+
+
+#: What closes a store a reader opened.
+Close = Callable[[], Awaitable[None]]
+
+
+async def open_sessions(
+    settings: Any, store: str
+) -> tuple[CheckpointSessions | None, Close | None]:
+    """Open ``store``'s Deep Agents conversations from ``settings``, without a
+    manager (``workflow/session_readers.py``).
+
+    The checkpointer and the index beside it that the manager opens
+    (``DeepAgentsWorkflowManager._open_session_store``), on connections of
+    their own, read through ``CheckpointSessions`` (the backfill included: a
+    database from before the index is scanned once, as the manager's first
+    listing would). A store Deep Agents has not written yet holds none of
+    its conversations, and reading it writes nothing there: ``(None,
+    None)`` for a sqlite file not made, and for a database without Deep
+    Agents' ``checkpoints`` table (a file ``sqlite_uri`` names that ADK or a
+    team uses, a Postgres database it never ran on), looked at read-only
+    before the savers' ``setup()`` creates tables or, on sqlite, turns WAL
+    on.
+
+    Returns:
+        The conversations, and what closes both connections.
+    """
+    if store == "memory":
+        raise ValueError("The memory store's conversations live in the manager that made them.")
+    sqlite_path = None
+    postgres_uri = getattr(settings, "postgres_uri", None)
+    if store == "sqlite":
+        sqlite_path = deepagents_sqlite_location(settings)
+        if not sqlite_path.is_file():
+            return None, None
+        if not await asyncio.to_thread(_sqlite_has_table, sqlite_path, CHECKPOINTS_TABLE):
+            return None, None
+        private_sqlite_file(
+            sqlite_path, tighten_existing=not getattr(settings, "sqlite_uri", None)
+        )
+    elif store == "postgres" and postgres_uri:
+        if not await _postgres_has_table(postgres_uri, CHECKPOINTS_TABLE):
+            return None, None
+    where: dict[str, Any] = {"sqlite_path": sqlite_path, "postgres_uri": postgres_uri}
+    connections = contextlib.AsyncExitStack()
+    try:
+        saver, connection = await open_checkpointer(store, **where)
+        if connection is not None:
+            connections.push_async_exit(connection.__aexit__)
+        index, connection = await open_store(store, **where)
+        if connection is not None:
+            connections.push_async_exit(connection.__aexit__)
+    except BaseException:
+        await connections.aclose()
+        raise
+    return CheckpointSessions(saver, index), connections.aclose
+
+
+#: The table Deep Agents' checkpointer keeps its checkpoints in: a database
+#: without it is not Deep Agents' yet.
+CHECKPOINTS_TABLE = "checkpoints"
+
+
+def _sqlite_has_table(path: "str | Path", table: str) -> bool:
+    """Whether the sqlite file ``path`` has ``table``, read on a connection
+    that cannot write (``query_only``): no table made, no journal mode
+    changed."""
+    with contextlib.closing(sqlite3.connect(path)) as database:
+        database.execute("pragma query_only = on")
+        found = database.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
+        ).fetchone()
+    return found is not None
+
+
+async def _postgres_has_table(uri: str, table: str) -> bool:
+    """Whether the Postgres database ``uri`` names has ``table``
+    (``to_regclass``), on a connection of its own that writes nothing."""
+    import psycopg
+
+    async with await psycopg.AsyncConnection.connect(uri, autocommit=True) as connection:
+        cursor = await connection.execute("select to_regclass(%s)", (table,))
+        found = await cursor.fetchone()
+    return found is not None and found[0] is not None
 
 
 def _label(value: str) -> str:

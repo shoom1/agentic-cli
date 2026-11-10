@@ -24,6 +24,7 @@ pytest.importorskip("google.adk")
 from agentic_cli.cli.job_monitor import JobMonitor  # noqa: E402
 from agentic_cli.tools.jobs import JobRecord, JobState  # noqa: E402
 from agentic_cli.workflow.events import WorkflowEvent  # noqa: E402
+from agentic_cli.workflow.sessions import SessionInfo  # noqa: E402
 from tests.cli.test_compact_and_new import (  # noqa: E402,F401
     Workflow,
     app_on,
@@ -180,8 +181,12 @@ class TestTheStatusBarAsksAgain:
             stored.discard(session_id)
             return True
 
+        async def list_sessions(*, user_id=None, limit=None) -> list[SessionInfo]:
+            return [SessionInfo(session_id) for session_id in sorted(stored)][:limit]
+
         workflow.can_resume = can_resume
         workflow.delete_session = delete_session
+        workflow.list_sessions = list_sessions  # /sessions --delete looks it up first
         app = app_on(workflow, fake_settings())
         jobs.records.append(finished("elsewhere", "other", app.settings.default_user))
         monitor = monitor_of(app)

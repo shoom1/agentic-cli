@@ -10,9 +10,10 @@ same id in another backend or store is another conversation).
 
 Every change of conversation goes through one protocol, ``switch``: ``/new``
 (on the running backend or another: a conversation never changes backend),
-``/resume``, the conversation a run starts in (``--continue``, ``--resume``, a
-new one), and the same id in another place, while the workflow is down and
-its next start builds on another backend or store.
+``/resume`` (on the backend that keeps the conversation, which runs then),
+the conversation a run starts in (``--continue``, ``--resume``, a new one),
+and the same id in another place, while the workflow is down and its next
+start builds on another backend or store.
 So the conversation the turns write to is always the one held and loaded,
 whichever way it changed and wherever a Ctrl+C lands.
 """
@@ -122,8 +123,10 @@ class Switch:
         made: The app is in the target conversation now, holding it.
         holder: Not made: the process id of another process that has the
             target open (0 when unknown).
-        gone: Not made: a stored target the workflow no longer holds or lists
-            (deleted since it was read).
+        gone: A stored target the workflow no longer holds or lists (deleted
+            since it was read): not made; or made, when there was nowhere
+            else to stay (a conversation on another backend, which runs
+            already), and it starts empty.
         loaded: Made: whether the workflow found it stored (its
             ``load_session``); None when it was not asked (not ready).
     """
@@ -277,7 +280,8 @@ class ConversationCore:
            counts as unused, so a switch that fails now proposes none again;
         3. the workflow, when it is ready, loads ``to``: a ``stored`` one it
            finds empty and no longer lists is gone (deleted since it was
-           read), and the switch is not made;
+           read), and the switch is not made (made already, with nowhere
+           else to stay, it starts empty: ``gone`` says so);
         4. the switch is made: the lock on ``to`` is kept and the one before
            let go, ``to`` is the conversation (unused), and the task list
            and the usage counters start over; else ``to``'s lock is let go;
@@ -290,8 +294,8 @@ class ConversationCore:
         half way). A switch with no other conversation to stay in is made
         before the load, whatever the load says: to the conversation the app
         is already in (the one a run starts in), or to another place (a new
-        conversation on another backend, which runs already: the one left
-        is not there).
+        conversation, or a stored one, on another backend, which runs
+        already: the one left is not there).
 
         Args:
             to: The conversation's id.
@@ -299,7 +303,9 @@ class ConversationCore:
             place: Where ``to`` is kept: the current place by default; another
                 one for a conversation on another backend or store. The same
                 conversation in another place keeps the session's usage
-                totals and forgets only the context.
+                totals and forgets only the context; the same id ``stored``
+                there is another conversation (a twin another backend
+                keeps), which starts over.
             stored: ``to`` must be in the store (``/resume``); a new
                 conversation's load finds nothing, as it should.
             propose: Propose the memories of the conversation left (not when
@@ -329,9 +335,11 @@ class ConversationCore:
                 return Switch(made=False, holder=taken)
             hold = taken
         elsewhere = hold.place != self.place
-        moved = elsewhere and to == left  # the same conversation, in another place
+        # The same conversation, in another place (one stored there is
+        # another conversation: the same id another backend keeps).
+        moved = elsewhere and to == left and not stored
         workflow = parts.workflow
-        made = told = False
+        made = told = gone = False
         loaded: bool | None = None
         try:
             if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
@@ -346,7 +354,9 @@ class ConversationCore:
                 loaded = await workflow.load_session(to)
                 told = True
                 if stored and not loaded and await workflow.session_info(to) is None:
-                    return Switch(made=False, gone=True)
+                    if not made:
+                        return Switch(made=False, gone=True)
+                    self.opened_empty = gone = True  # nowhere else to stay: it starts empty
                 if loaded:  # it holds what an earlier run stored
                     self.opened_empty = False
                 elif to == left and not stored:  # an id given to the app, found empty
@@ -363,7 +373,7 @@ class ConversationCore:
                 if told and left is not None:
                     await _give_back(workflow, left)
         parts.status()
-        return Switch(made=True, loaded=loaded)
+        return Switch(made=True, loaded=loaded, gone=gone)
 
     def switch_now(self, to: str | None, parts: SwitchParts) -> int | None:
         """What ``switch`` does without an await, for a caller that cannot
@@ -414,8 +424,9 @@ class ConversationCore:
     ) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters. The same
-        conversation in another place keeps what it was."""
-        same = hold.session_id == self.session_id
+        conversation, here or ``moved`` to another place, keeps what it was;
+        the same id stored in another place is another conversation."""
+        same = hold.session_id == self.session_id and (moved or hold.place == self.place)
         self.commit(hold)
         self.place = hold.place
         self.session_id = hold.session_id

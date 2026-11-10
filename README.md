@@ -184,6 +184,20 @@ while the workflow is down takes the hold before its retried start). Fixed with
 `/settings` (another orchestrator, while nothing of the conversation is
 stored), a failed start runs it, and holds it, where the next start runs. The session store is the run's: a change of
 `session_store` takes effect at the next start.
+A conversation belongs to the backend it began on (`orchestrator`, or
+`/new <backend>`) for its whole life, and each backend keeps its own store.
+`--continue`, `--resume <id>`, `/resume` and `/sessions` read the
+conversations of every installed backend (a LangGraph conversation only
+while LangGraph runs: the exit line says to set `orchestrator` first), and
+one another backend keeps opens there: the app starts that backend ("Resumed on deepagents: …"; at
+startup it builds that backend in the first place), carrying this run's
+"Allow for this session" grants, background jobs, sandbox kernels and
+knowledge bases over to it; a backend that fails to start changes nothing.
+`/sessions` names each conversation's backend. An id two backends keep (an
+earlier version switched the backend under an open conversation) is two
+conversations: `/resume <id>` opens the running backend's and names the
+other, the picker opens the row picked, and `/sessions --delete=<id>
+--backend=<name>` deletes one.
 A line typed before `--continue` or `--resume` has opened its
 conversation waits for it, then runs there. An app switches with
 `await app.resume_session(id)` or `await app.start_new_session()`; setting
@@ -394,7 +408,8 @@ How it differs from ADK:
 - **A sub-agent's failure ends the turn** with one error; on ADK the
   coordinator carries on, and the user gets a warning.
 - **Its own sessions**: neither backend reads the other's, so a
-  conversation stays on the backend it began on. `orchestrator` is the
+  conversation stays on the backend it began on; `/resume`, `--continue`
+  and `--resume` open it there, whichever backend runs. `orchestrator` is the
   backend of new conversations: changed in `/settings`, it starts a new
   conversation on the new backend at once when the open one holds nothing
   yet (no turn ran in it), and otherwise applies to the next `/new` ("(applies
@@ -2032,9 +2047,9 @@ model and its `max_tokens`.
   it: the line names the backend ("New conversation <id> on deepagents."),
   the memories of the conversation left are proposed first, and an unknown
   backend, or one whose extra is not installed, is refused. A new backend
-  starts a new manager, whose services are new too: an in-process job
-  ends, sandbox kernels start over and "Allow for this session" grants are
-  forgotten.
+  starts a new manager on this run's services: in-process jobs run on,
+  sandbox kernels keep their variables, "Allow for this session" grants
+  hold, and the embedding model is not loaded again.
 
 ## CLI Commands
 
@@ -2051,10 +2066,10 @@ Built-in slash commands available in all apps:
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
-| `/sessions` | `/sess` | List saved sessions: title, turns, last update (delete one with `--delete=<id>`) |
+| `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep) |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new [backend]` | | Start a new conversation, on the backend named (`adk`, `deepagents`, `langgraph`) or the settings' `orchestrator`; the current one stays in `/sessions` |
-| `/resume` | | Reopen a saved conversation: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
+| `/resume` | | Reopen a saved conversation, on the backend that keeps it: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
 | `/memory` | | Review saved memories: the list of both scopes, one memory (Delete, History), `/memory <id>`, `/memory history` (restore a version), `/memory inbox` (Accept, Discard or Skip the proposals the extractor filed), `/memory stale` (not updated for 90 days) |
 
 Apps can add more of their own. `research_demo`, for instance, registers

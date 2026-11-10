@@ -14,6 +14,13 @@ or none), when it has no conversation, or when its conversation is gone
 (``can_resume`` says it cannot be resumed: deleted, or kept in memory by an
 earlier run); the last two are told nowhere else, as unavailable. Another
 conversation's job waits until that conversation is opened.
+
+A conversation belongs to one backend, and the running manager's
+``can_resume`` knows its own backend's alone: one another installed backend
+keeps is no gone conversation. So "gone" asks those backends too
+(``opens_anywhere``: ``can_resume``, then the app's look at the other
+backends' stores when it says no), and the job waits for its conversation
+wherever that is kept, until ``/resume`` opens it on its own backend.
 """
 
 from __future__ import annotations
@@ -30,6 +37,26 @@ Here = tuple[str | None, str | None]
 
 #: ``workflow.can_resume``: whether a job's conversation can be resumed now.
 CanResume = Callable[[Any], Awaitable[bool]]
+
+#: Whether another installed backend than the running one keeps a job's
+#: conversation (``BaseCLIApp._kept_elsewhere``).
+KeptElsewhere = Callable[[Any], Awaitable[bool]]
+
+
+def opens_anywhere(
+    can_resume: CanResume | None, kept_elsewhere: KeptElsewhere | None
+) -> CanResume | None:
+    """Whether a job's conversation can be opened, on any installed backend:
+    ``can_resume`` (the running manager's), and when it says no,
+    ``kept_elsewhere``. None when the running manager cannot say (the job
+    waits for its conversation)."""
+    if can_resume is None or kept_elsewhere is None:
+        return can_resume
+
+    async def opens(record: Any) -> bool:
+        return bool(await can_resume(record)) or bool(await kept_elsewhere(record))
+
+    return opens
 
 
 def is_its_job(record: Any, here: Here | None) -> bool:

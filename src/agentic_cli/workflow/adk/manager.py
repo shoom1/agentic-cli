@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import inspect
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -26,7 +25,7 @@ from google.adk.apps.app import EventsCompactionConfig, validate_app_name
 from google.adk.agents import LlmAgent, Agent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
-from google.adk.sessions import InMemorySessionService, BaseSessionService, Session
+from google.adk.sessions import BaseSessionService, Session
 from google.adk.sessions.base_session_service import GetSessionConfig
 from google.adk.errors import StaleSessionError
 from google.adk.tools import LongRunningFunctionTool
@@ -53,9 +52,8 @@ from agentic_cli.workflow.adk.overflow_plugin import OVERFLOW_PLUGIN_FAILED, Ove
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.sessions import (
-    last_updated,
-    row_from_events,
-    row_from_state,
+    ServiceSessions,
+    make_session_service,
     turn_state,
 )
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
@@ -565,57 +563,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             return {}
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
-    def _session_db_url(self) -> str | None:
-        """``settings.session_db_url()`` for the store it was built for.
-
-        Called as 0.6.4 documented it, with no argument, while that store is
-        the settings' own, so an app's override without a ``store``
-        parameter keeps working; with ``store=`` only when they differ (a
-        ``/settings`` change of ``session_store`` in the run: the run keeps
-        its store). An override that cannot take it then fails the build
-        rather than build on the other store.
-        """
-        store = self.session_store
-        if store == self._settings.session_store:
-            return self._settings.session_db_url()
-        if not _takes_store(self._settings.session_db_url):
-            raise RuntimeError(
-                "This app's settings.session_db_url() takes no store, so this run "
-                "cannot rebuild on its session store after session_store changed: "
-                "restart the app."
-            )
-        return self._settings.session_db_url(store=store)
-
     def _make_session_service(self) -> BaseSessionService:
-        """Build the ADK session service of its ``session_store``.
+        """Build the ADK session service of its ``session_store``
+        (``adk/sessions.py::make_session_service``, which its reader opens
+        too): in memory, or durable on sqlite or Postgres."""
+        return make_session_service(self._settings, self.session_store)
 
-        ``memory`` → ephemeral ``InMemorySessionService``; ``sqlite``/``postgres``
-        → native ``DatabaseSessionService`` (durable across restarts, full event
-        fidelity). The sqlite file is made owner-only before the engine opens
-        it, its directory created if missing (``private_sqlite_file``; one
-        ``sqlite_uri`` names, and that exists, is left as it is).
-        """
-        db_url = self._session_db_url()
-        if db_url is None:
-            logger.debug("using_in_memory_session_service")
-            return InMemorySessionService()
-
-        if db_url.startswith("sqlite"):
-            # The file as SQLAlchemy reads the URL: without a query
-            # (?timeout=30), which goes to sqlite3.
-            from sqlalchemy.engine import make_url
-
-            from agentic_cli.workflow.checkpointers import private_sqlite_file
-
-            private_sqlite_file(
-                make_url(db_url).database or "",
-                tighten_existing=not getattr(self._settings, "sqlite_uri", None),
-            )
-
-        from google.adk.sessions import DatabaseSessionService
-
-        logger.info("using_database_session_service", store=self.session_store)
-        return DatabaseSessionService(db_url=db_url)
+    @property
+    def _stored(self) -> ServiceSessions | None:
+        """The session hooks over its session service, None before it has one."""
+        if self._session_service is None:
+            return None
+        return ServiceSessions(self._session_service)
 
     async def _do_initialize(self) -> None:
         """ADK-specific initialization: session service, agents, runner.
@@ -1267,16 +1226,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_id: Session to look up.
             user_id: Owner of the session (defaults to ``settings.default_user``).
         """
-        if not self._session_service:
+        stored = self._stored
+        if stored is None:
             return False
-        ref = self.session_ref(session_id, user_id)
-        session = await self._session_service.get_session(
-            app_name=ref.app_name,
-            user_id=ref.user_id,
-            session_id=ref.session_id,
-            config=GetSessionConfig(num_recent_events=1),
-        )
-        return session is not None and bool(getattr(session, "events", None))
+        return await stored.exists(self.session_ref(session_id, user_id))
 
     async def list_sessions(
         self, *, user_id: str | None = None, limit: int | None = None
@@ -1292,31 +1245,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             user_id: Their owner (defaults to ``settings.default_user``).
             limit: Only the newest this many (None: all of them).
         """
-        if not self._session_service:
+        stored = self._stored
+        if stored is None:
             return []
         ref = self.session_ref(user_id=user_id)
-        resp = await self._session_service.list_sessions(
-            app_name=ref.app_name, user_id=ref.user_id,
-        )
-        listed = sorted(
-            getattr(resp, "sessions", []),
-            key=lambda s: s.last_update_time or 0,
-            reverse=True,
-        )
-        rows: list[SessionInfo] = []
-        for session in listed:
-            if limit is not None and len(rows) >= limit:
-                break
-            row = row_from_state(session)
-            if row is None:
-                try:
-                    row = await self.session_info(session.id, user_id=ref.user_id)
-                except Exception:  # noqa: BLE001 - one unreadable row is no unreadable store
-                    logger.debug("session_row_unreadable", session_id=session.id, exc_info=True)
-                    row = SessionInfo(session.id, updated=last_updated(session))
-            if row is not None:
-                rows.append(row)
-        return rows
+
+        async def row_of(session_id: str) -> SessionInfo | None:
+            return await self.session_info(session_id, user_id=ref.user_id)
+
+        return await stored.list(ref.app_name, ref.user_id, limit=limit, row_of=row_of)
 
     async def session_info(
         self, session_id: str, *, user_id: str | None = None
@@ -1327,15 +1264,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session_id: The conversation.
             user_id: Its owner (defaults to ``settings.default_user``).
         """
-        if not self._session_service:
+        stored = self._stored
+        if stored is None:
             return None
-        ref = self.session_ref(session_id, user_id)
-        session = await self._session_service.get_session(
-            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
-        )
-        if session is None or not session.events:
-            return None
-        return row_from_state(session) or row_from_events(session)
+        return await stored.info(self.session_ref(session_id, user_id))
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
         """Delete a persisted session from the store.
@@ -1351,21 +1283,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Returns:
             False if there is no such session.
         """
-        if not self._session_service:
-            return False
-        ref = self.session_ref(session_id, user_id)
-        stored = await self._session_service.get_session(
-            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
+        stored = self._stored
         if stored is None:
             return False
-        await self._session_service.delete_session(
-            app_name=ref.app_name,
-            user_id=ref.user_id,
-            session_id=ref.session_id,
-        )
-        return True
+        return await stored.delete(self.session_ref(session_id, user_id))
 
     async def recent_messages(
         self, session_id: str, limit: int = 20, *, user_id: str | None = None
@@ -1417,17 +1338,3 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     {"role": "user" if role == "user" else "assistant", "content": text}
                 )
         return out[-limit:]
-
-
-def _takes_store(method: Any) -> bool:
-    """Whether ``method`` (an app's ``session_db_url``, maybe overridden as
-    0.6.4 documented it) takes ``store=``."""
-    try:
-        parameters = inspect.signature(method).parameters.values()
-    except (TypeError, ValueError):  # no signature to read: try it
-        return True
-    return any(
-        p.kind is inspect.Parameter.VAR_KEYWORD
-        or (p.name == "store" and p.kind is not inspect.Parameter.POSITIONAL_ONLY)
-        for p in parameters
-    )

@@ -77,6 +77,11 @@ def _app(records: list, *, ready: bool = True, has_jm: bool = True, result=None,
     app._usage_tracker = None
     app._session_id = "s"
     app._turned = False
+
+    async def kept_nowhere(record) -> bool:
+        return False  # no other installed backend keeps it (test_jobs_wait_on_their_backend.py)
+
+    app._kept_elsewhere = kept_nowhere
     return app, jm
 
 
@@ -295,6 +300,11 @@ def _strict_app(records: list, processor=None):
     app._usage_tracker = None
     app._session_id = "s"
     app._turned = False
+
+    async def kept_nowhere(record) -> bool:
+        return False  # no other installed backend keeps it (test_jobs_wait_on_their_backend.py)
+
+    app._kept_elsewhere = kept_nowhere
     return app, jm
 
 

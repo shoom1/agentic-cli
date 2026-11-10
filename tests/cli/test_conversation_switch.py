@@ -1373,20 +1373,43 @@ class TestAWorkflowThatCameUpWhileTheChangeWaited:
 
 
 class TestTheExitHintOnAnotherBackend:
-    """``--resume`` opens a conversation on the settings' orchestrator, the
-    backend of new conversations: one ``/new <backend>`` started elsewhere is
-    found only once the orchestrator names its backend, so the hint says so."""
+    """``--resume`` opens a conversation on its own backend, whatever the
+    settings' orchestrator names (``tests/cli/test_resume_on_its_backend.py``):
+    one ``/new <backend>`` started elsewhere needs no setting first. The
+    session store is the run's, which a ``session_store`` change in the run
+    leaves for the next start: the hint names it then."""
 
     New = TestANewConversationOnAnotherBackend
 
-    async def test_it_names_the_backend_to_start_with(self, home, monkeypatch):
+    async def test_on_another_backend_it_needs_no_setting(self, home, monkeypatch):
         app, _, _ = self.New.on_adk(monkeypatch)
         await app.process_input("/new deepagents")
         app._command = "my-app"
 
         assert app._resume_hint() == (
+            f"Resume this conversation with: my-app --resume {app.session_id}"
+        )
+
+    async def test_on_langgraph_it_names_the_backend_to_start_with(self, home, monkeypatch):
+        """LangGraph has no reader: ``--resume`` finds its conversations only
+        while it runs, so the hint says to run it."""
+        app, _, _ = self.New.on_adk(monkeypatch)
+        await app.process_input("/new langgraph")
+        app._command = "my-app"
+
+        assert app._resume_hint() == (
             f"Resume this conversation with: my-app --resume {app.session_id} "
-            "(set orchestrator to deepagents first: it runs there)"
+            "(set orchestrator to langgraph first: it runs there)"
+        )
+
+    async def test_on_langgraph_after_a_store_change_it_names_both(self, home, monkeypatch):
+        app, _, _ = self.New.on_adk(monkeypatch)
+        await app.process_input("/new langgraph")
+        assert await app.apply_settings({"session_store": "memory"})
+
+        assert app._resume_hint() == (
+            f"Resume this conversation with /resume {app.session_id} "
+            "(set orchestrator to langgraph and session_store to sqlite first: it runs there)"
         )
 
     async def test_on_the_settings_backend_it_is_as_before(self, home, monkeypatch):
@@ -1405,7 +1428,7 @@ class TestTheExitHintOnAnotherBackend:
             "(set session_store to sqlite first: it is stored there)"
         )
 
-    async def test_after_both_changes_it_names_both(self, home, monkeypatch):
+    async def test_after_both_changes_it_names_the_store_alone(self, home, monkeypatch):
         app, _, _ = self.New.on_adk(monkeypatch)
         await app.process_input("/new deepagents")
         assert await app.apply_settings(
@@ -1414,7 +1437,7 @@ class TestTheExitHintOnAnotherBackend:
 
         assert app._resume_hint() == (
             f"Resume this conversation with /resume {app.session_id} "
-            "(set orchestrator to deepagents and session_store to sqlite first: it runs there)"
+            "(set session_store to sqlite first: it is stored there)"
         )
 
 
