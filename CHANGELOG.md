@@ -1303,7 +1303,9 @@ the start of the entry's title.
   (`settings_persistence.NEW_CONVERSATION_KEYS`, beside `REBUILD_KEYS`,
   which no longer has it). Changed while the workflow is down and its next
   start builds a manager afresh, the next start runs the open conversation
-  on the new backend when nothing of it is stored, held there; otherwise
+  on the new backend when nothing of it is stored, held there (decided
+  again once the change has the turn lock: a workflow an app's task started
+  meanwhile is left for a new conversation, as a running one); otherwise
   the change applies to the next /new too, and the next start revives or
   rebuilds the conversation's own backend. A backend that cannot run is
   refused, whatever the conversation. `/new [adk|deepagents|langgraph]` starts a
@@ -2619,8 +2621,16 @@ step; each entry says what to use instead.
   `orchestrator` made while the workflow is starting waits for that start,
   as a rebuild does. The session store is fixed for the run
   (`WorkflowController.store`): every manager the run builds (a retry, a
-  revive, `/new <backend>`) keeps the store the run started with, and a
-  change of `session_store` takes effect at the next app start, always.
+  revive, `/new <backend>`) keeps the store the run started with
+  (`create_workflow_manager_from_settings(session_store=)`, an additive
+  keyword; `BaseWorkflowManager.session_store`, the store a manager was
+  built for, else the settings'), and a change of `session_store` takes
+  effect at the next app start, always. `BaseSettings.session_db_url(store=)`
+  names another store than the settings' (an additive keyword); ADK's
+  manager calls it with no argument while its store is the settings' own,
+  so an app's override with 0.6.4's signature keeps working, and with
+  `store=` only after a change of `session_store` in the run, which such an
+  override cannot follow: that rebuild fails, saying to restart the app.
 
 - **`/settings` while the workflow is still starting runs the change it
   saves.** A start resolves its models from the settings before it builds

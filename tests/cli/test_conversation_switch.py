@@ -381,8 +381,9 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     """The first start fails (``orchestrator=deepagents`` without its extra,
     say), and ``/settings`` changes the orchestrator or the session store,
     as the warning invites. The workflow is not running, so nothing is
-    rebuilt: the next message's start builds a manager from the settings as
-    they are then. The store is fixed for the run, so only an orchestrator
+    rebuilt: the next message's start builds a manager on the orchestrator
+    the settings name then, on the run's store. The store is fixed for the
+    run (a change of it moves nothing, and no lock), so only an orchestrator
     change moves the conversation, and only one with nothing stored
     (``fresh``): it moves with the change, through the switch every change of
     conversation makes. Its own new one is held from its first write, so

@@ -1192,11 +1192,14 @@ class BaseCLIApp:
            place, on the backend it runs;
         2. ``NEW_CONVERSATION_KEYS`` (``orchestrator``: the backend of new
            conversations; a conversation never changes backend) start a new
-           conversation on the new backend at once when the open one holds
-           nothing yet (``ConversationCore.fresh``: it began in this run and
-           no turn ran in it), as ``/new <backend>`` does, and the line of
-           the new conversation names its backend; else they are saved, and
-           their line says "(applies to the next /new)": nothing is rebuilt;
+           conversation on the new backend at once when nothing of the open
+           one is stored (``ConversationCore.fresh``: it began in this run as
+           a new one, or a load found it empty, and no turn of it ran on a
+           ready workflow, even one cancelled or failed, which may have
+           stored its input; read under the turn lock), as ``/new <backend>``
+           does, and the line of the new conversation names its backend;
+           else they are saved, and their line says "(applies to the next
+           /new)": nothing is rebuilt;
         3. ``RESTART_KEYS`` (read only as the app starts: ``session_store``,
            ``log_level``, ``log_format``) are applied and saved, and their
            line says "(takes effect at the next start)";
@@ -1207,15 +1210,21 @@ class BaseCLIApp:
         asked for while the workflow is still starting waits for that start
         first, as a turn does ("Waiting for initialization...": the start
         resolved its models from the settings before the change), and so
-        does a change of ``session_store`` or ``orchestrator``, which that
-        start reads; Ctrl+C
-        stops the wait, re-raised, and changes nothing. When that start
-        fails, the change is applied as for any workflow that is not
-        running: nothing is rebuilt, and the next start uses it. A change of
-        the orchestrator or ``session_store`` made while the workflow is down
-        (whose next start builds on the new values) holds the conversation
-        where that start will run it (``_hold_it_at``), and is refused, every
-        field restored, when another process has it open there. A
+        does a change of ``orchestrator``, which needs that start's outcome
+        (one of ``session_store`` does not wait: the run keeps the store its
+        first start took); Ctrl+C stops the wait, re-raised, and changes
+        nothing. When that start fails, the change is applied as for any
+        workflow that is not running: nothing is rebuilt, and the next start
+        uses it. A change of the orchestrator made while the workflow is
+        down, its next start building afresh, has that start run a
+        conversation with nothing stored on the new backend (``_move_here``,
+        decided again under the turn lock: one stored by then stays, and one
+        whose workflow came up meanwhile is left for a new conversation, as
+        on a running workflow). Held from its first write, it has no lock to
+        move; one a line typed while the workflow was down holds is refused,
+        every field restored, when another process has it open there. A
+        change of ``session_store`` moves nothing and no lock: it takes
+        effect at the next start. A
         switch to the deprecated LangGraph orchestrator ends with its
         deprecation warning. A change of ``ui_theme`` switches the session to
         ``get_theme(ui_theme)`` last, repainting the transcript; one rolled
@@ -1246,10 +1255,10 @@ class BaseCLIApp:
         controller = self._workflow_controller
         if read_by_the_start and controller.state is WorkflowState.INITIALIZING:
             # The start in progress read the settings as they are (its models
-            # first, its session store too): wait for it, as a turn does, so
-            # the rebuild below runs on the new values and the session store
-            # is not taken half way. Ctrl+C stops the wait before anything
-            # changed. A start that fails leaves the workflow down, and the
+            # first): wait for it, as a turn does, so the rebuild below runs
+            # on the new values, and whether an orchestrator change starts a
+            # new conversation or moves the open one follows its outcome.
+            # Ctrl+C stops the wait before anything changed. A start that fails leaves the workflow down, and the
             # change is applied for the next start, as for any failed workflow.
             async with _says_so_when_stopped(self.session):
                 await controller.ensure_initialized(self.session)
