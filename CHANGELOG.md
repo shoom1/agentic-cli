@@ -1382,19 +1382,20 @@ the start of the entry's title.
   last, and returns: its `content` is the error's text, its `error_code` the
   exception's type (or `CONTEXT_OVERFLOW`), and its `metadata` says whether a
   provider rate-limited the turn (`rate_limited`) and names the exception's
-  type (`error_type`); `WorkflowEvent.turn_failed` builds it. An `ERROR` the
-  turn already yielded that is not recoverable (the overflow handler's) is its
-  only one. A cancel still raises `asyncio.CancelledError`, and a turn that
-  cannot start (the backend not initialized or admitted) still raises. The
-  CLI says a rate limit from the event with the line it said for the raise
-  ("Rate limited: … Send the request again once the limit resets."), a
-  changed conversation with "Send your message again…", and any other
-  failure as `<the error> [<its type>]`, where on ADK it said `Workflow
-  error: <the error>`; a manager that raises (an app's own, LangGraph) is
-  said as before. The backends log the failure at info, its traceback at
-  debug, and the CLI its record of it (`workflow_error_event`,
-  `turn_rate_limited`) at info, so at the default log level the error is all
-  that is printed over the prompt.
+  type, or the code where none ended the turn (`error_type`), ADK's overflow
+  answer and "returned no answer" included; `WorkflowEvent.turn_failed`
+  builds it. An `ERROR` the turn already yielded that is not recoverable (the
+  overflow handler's) is its only one. A cancel still raises
+  `asyncio.CancelledError`, and a turn that cannot start (the backend not
+  initialized or admitted) still raises. The CLI says a rate limit from the
+  event with the line it said for the raise ("Rate limited: … Send the
+  request again once the limit resets."), a changed conversation with "Send
+  your message again…", and any other failure as `<the error> [<its type>]`,
+  where on ADK it said `Workflow error: <the error>`; a manager that raises
+  (an app's own, LangGraph) is said as before. The backends log the failure
+  at info, its traceback at debug, and the CLI its record of it
+  (`workflow_error_event`, `turn_rate_limited`) at info, so at the default
+  log level the error is all that is printed over the prompt.
 - **On ADK, task progress is reported when the task list changes, and a
   finished list stays.** ADK's `TaskProgressPlugin` reported the list after
   every tool call while there was one, and cleared it once every task was

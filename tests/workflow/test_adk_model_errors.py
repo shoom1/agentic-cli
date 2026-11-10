@@ -117,6 +117,9 @@ async def test_no_answer_ends_the_turn_with_an_error(monkeypatch, answer, model,
                                     " returned no answer")
     assert error.metadata["error_code"] == code
     assert error.metadata["recoverable"] is False
+    # The fields of every failed turn's ERROR; no exception ended this one.
+    assert error.metadata["rate_limited"] is False
+    assert error.metadata["error_type"] == code
     assert not [event for event in events if event.type is EventType.TEXT]
 
 

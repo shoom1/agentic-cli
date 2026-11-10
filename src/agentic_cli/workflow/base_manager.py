@@ -2215,12 +2215,14 @@ class BaseWorkflowManager(ABC):
 
         A turn that fails yields one ``ERROR`` event and returns, raising
         nothing: whatever its run raised (a provider's error, a rate limit
-        included), or a context overflow nothing recovered.
-        ``WorkflowEvent.turn_failed`` builds it from the exception: not
+        included), a context overflow nothing recovered, or, on ADK, a main
+        agent's reply that is no answer. ``WorkflowEvent.turn_failed`` builds
+        it, from the exception or, where none ended the turn, its code: not
         recoverable, the error's text as ``content``, ``rate_limited`` (a
         provider's 429, ``retry.is_rate_limit_error``: the CLI says to send
         the request again later, since a turn is never replayed) and
-        ``error_type`` (the exception's type, for logs) in its ``metadata``.
+        ``error_type`` (the exception's type, else the code, for logs) in its
+        ``metadata``.
         An ``ERROR`` the turn already yielded that is not recoverable (the
         overflow handler's ``CONTEXT_OVERFLOW``, say) is its one ``ERROR``: a
         failure after it is logged, not reported again. Recoverable

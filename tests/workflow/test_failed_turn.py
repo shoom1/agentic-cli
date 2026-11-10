@@ -50,6 +50,10 @@ RAISED = {
     },
 }
 
+#: An overflow's ``error_type``: on ADK the overflow handler answers the call
+#: (no exception ends the turn), so it is the code; Deep Agents raises it.
+OVERFLOW_TYPE = {"adk": OVERFLOW_ERROR_CODE, "deepagents": "ContextOverflowError"}
+
 
 @register_tool(capabilities=EXEMPT, description="Answers at once (a test tool).")
 async def ft_lookup(topic: str) -> dict:
@@ -199,7 +203,9 @@ async def test_an_overflow_nothing_recovers_is_one_clear_error(hermetic, monkeyp
     assert error.content == overflow_message(CLAUDE)
     assert error.metadata["recoverable"] is False
     assert error.metadata["error_code"] == OVERFLOW_ERROR_CODE
-    assert error.metadata.get("rate_limited", False) is False
+    # The fields every failed turn's ERROR has, read as an app reads them.
+    assert error.metadata["rate_limited"] is False
+    assert error.metadata["error_type"] == OVERFLOW_TYPE[backend]
     assert [event for event in events if event.type is EventType.TEXT] == []
 
 

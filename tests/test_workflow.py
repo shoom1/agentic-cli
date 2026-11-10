@@ -207,6 +207,21 @@ class TestWorkflowEvent:
         assert event.metadata["error_code"] == "CONTEXT_OVERFLOW"
         assert event.metadata["error_type"] == "ValueError"
 
+    def test_a_turn_no_exception_ended_names_its_code(self):
+        event = WorkflowEvent.turn_failed(message="It returned no answer.", error_code="SAFETY")
+
+        assert event.content == "It returned no answer."
+        assert event.metadata == {
+            "recoverable": False,
+            "error_code": "SAFETY",
+            "rate_limited": False,
+            "error_type": "SAFETY",
+        }
+
+    def test_a_turn_no_exception_ended_must_say_what_did(self):
+        with pytest.raises(ValueError):
+            WorkflowEvent.turn_failed(message="It failed.")
+
     def test_event_has_timestamp(self):
         """Test that events have timestamps."""
         event = WorkflowEvent.text("Hello")

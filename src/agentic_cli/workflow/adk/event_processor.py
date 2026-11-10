@@ -81,7 +81,9 @@ class ADKEventProcessor:
     with no error code, a finish reason other than STOP: a Claude refusal, a
     reply cut at its token limit) ends the turn too, raising nothing: it
     becomes the turn's ``ERROR``, "<model> returned no answer", its code
-    the error code or finish reason. No other error code of the main agent
+    the error code or finish reason. Both are the turn's one ``ERROR``, with
+    a failed turn's fields (``WorkflowEvent.turn_failed``: ``rate_limited``
+    false, the code as ``error_type``). No other error code of the main agent
     is mapped: ADK records one for an exception that then leaves the run,
     which the manager reports as the turn's one ``ERROR``.
 
@@ -163,8 +165,11 @@ class ADKEventProcessor:
             if error:
                 yield error
         elif error_code == OVERFLOW_ERROR_CODE:
-            error = self._apply_hook(WorkflowEvent.error(
-                adk_event.error_message or error_code, error_code=OVERFLOW_ERROR_CODE
+            # The turn's one ERROR (the base process()'s contract), though
+            # no exception ended it: the overflow handler answered the call.
+            error = self._apply_hook(WorkflowEvent.turn_failed(
+                message=adk_event.error_message or error_code,
+                error_code=OVERFLOW_ERROR_CODE,
             ))
             if error:
                 yield error
@@ -173,8 +178,8 @@ class ADKEventProcessor:
             message = adk_event.error_message
             # ADK's own message for an empty reply says no more than the code.
             said = f": {message}" if message and code != "MODEL_RETURNED_NO_CONTENT" else ""
-            error = self._apply_hook(WorkflowEvent.error(
-                f"{model} returned no answer{said}", error_code=code
+            error = self._apply_hook(WorkflowEvent.turn_failed(
+                message=f"{model} returned no answer{said}", error_code=code
             ))
             if error:
                 yield error

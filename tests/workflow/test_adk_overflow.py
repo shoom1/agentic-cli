@@ -214,7 +214,10 @@ class TestEachProvidersOverflow:
         (error,) = errors(third)
         assert error.content == overflow_message(model)
         assert error.content.endswith("Use /compact or /new.")
-        assert error.metadata == {"recoverable": False, "error_code": OVERFLOW_ERROR_CODE}
+        assert error.metadata == {
+            "recoverable": False, "error_code": OVERFLOW_ERROR_CODE,
+            "rate_limited": False, "error_type": OVERFLOW_ERROR_CODE,
+        }
         # The main agent's last event is the error, holding no reply.
         last = [e for e in events if e.author == "solo"][-1]
         assert (last.error_code, last.content) == (OVERFLOW_ERROR_CODE, None)

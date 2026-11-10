@@ -2170,9 +2170,10 @@ A turn that fails yields one `ERROR` that is not recoverable, on ADK and Deep
 Agents, and `process()` returns: it raises nothing but a cancel
 (`asyncio.CancelledError`), and an error before the turn starts (the
 backend could not be initialized). The event's `content` is the error's
-text, its `error_code` the code (the exception's type, or
-`CONTEXT_OVERFLOW`), `metadata["rate_limited"]` whether a provider
-rate-limited the turn and `metadata["error_type"]` the exception's type.
+text, its `error_code` the code (the exception's type, `CONTEXT_OVERFLOW`,
+or on ADK why a reply was no answer), `metadata["rate_limited"]` whether a
+provider rate-limited the turn and `metadata["error_type"]` the exception's
+type (the code where no exception ended the turn).
 An `ERROR` with `recoverable` true is a warning: the turn goes on.
 
 ### Dual Thinking Boxes + Task Progress
