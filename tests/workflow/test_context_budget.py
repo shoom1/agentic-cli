@@ -473,16 +473,18 @@ class TestTheManagersBudget:
 
         assert threshold == trigger
 
-    async def test_a_native_adk_app_manages_no_context(self, hermetic):
+    async def test_a_native_adk_apps_main_agent_has_its_models_budget(self, hermetic):
+        # The model its YAML names, as ADK runs it: not the default model.
         (hermetic / "root_agent.yaml").write_text(
-            "agent_class: LlmAgent\nname: root\nmodel: claude-sonnet-4-6\ninstruction: Help.\n"
+            "agent_class: LlmAgent\nname: root\nmodel: claude-opus-4-6\ninstruction: Help.\n"
         )
         manager = _manager("adk", [], adk_config_path=str(hermetic / "root_agent.yaml"))
         await manager.initialize_services()
         try:
             assert manager.root_agent_name == "root"
-            with pytest.raises(KeyError):
-                manager.context_budget()
+            model = manager.agent_models["root"]
+            assert str(model.ref) == "anthropic:claude-opus-4-6"
+            assert manager.context_budget() == context_budget(model, manager._settings)
         finally:
             await manager.cleanup()
 

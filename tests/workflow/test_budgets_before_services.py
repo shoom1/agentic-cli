@@ -10,9 +10,10 @@ embedding model, opened both knowledge bases and the jobs store, and only
 then heard that its model could not work. Deep Agents also opened its
 checkpointer first.
 
-A backend takes part through ``_manages_context``: ADK (an app built from
-agent configs) and Deep Agents say yes; a backend that says nothing, a
-native ADK YAML app and LangGraph manage none and keep an empty ``_budgets``.
+A backend takes part through ``_manages_context``: ADK (whether its agents
+were built from configs or from a native ADK YAML) and Deep Agents say yes; a
+backend that says nothing and LangGraph manage none and keep an empty
+``_budgets``.
 
 Offline: catalogs never list (``tests/conftest.py``), and no model is called.
 """

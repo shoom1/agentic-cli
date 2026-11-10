@@ -75,6 +75,9 @@ from agentic_cli.models import CacheMechanism
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER, job_result_payload
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from agentic_cli.models import Provider
     from agentic_cli.workflow.sessions import SessionRef
 
 
@@ -805,8 +808,70 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _manages_context(self) -> bool:
-        """True for an app built from agent configs, not for a native ADK YAML app."""
-        return not self._adk_config_path
+        """True: each agent with a resolved model is summarized and trimmed by its budget.
+
+        A native ADK YAML app's agents too: each is resolved by the model ADK
+        runs it on (``_resolve_models``), and one whose model does not
+        resolve has no budget, so the fit guard and the overflow handler
+        leave it alone.
+        """
+        return True
+
+    def _detect_required_managers(self) -> set[str]:
+        """The services the agents' registered tools declare.
+
+        The configs' (the base's), and a native ADK YAML app's: the tools of
+        the tree it loaded when it validated its agents, found as the
+        permission gate finds them (``tool_definition``: a callable the
+        registry issued, or one of ADK's own function tools around one), so
+        a ``kb_*`` tool the YAML names gets its knowledge base.
+        """
+        required = super()._detect_required_managers()
+        root = self._loaded_native_root
+        if root is None:
+            return required
+        from agentic_cli.workflow.adk.build import walk
+        from agentic_cli.workflow.adk.permission_plugin import tool_definition
+
+        for agent in walk(root):
+            for tool in getattr(agent, "tools", None) or ():
+                definition = tool_definition(tool)
+                if definition is not None:
+                    required.update(definition.requires)
+        return required
+
+    def _resolve_models(self, providers: "Mapping[str, Provider]") -> None:
+        """The default model and every agent's (the base's), then a native app's agents'.
+
+        A native ADK YAML app's agents run on the models ADK resolves for
+        them: the one its YAML names (a model string or ``model_code``),
+        else its parent's, else ADK's default. Each is resolved through the
+        catalog by that model's name, as an agent config naming it would
+        be. Leniently: an agent whose model ADK or the catalog cannot
+        resolve is left out with a warning, and has no context budget.
+        """
+        super()._resolve_models(providers)
+        root = self._loaded_native_root
+        if root is None:
+            return
+        from agentic_cli.workflow import model_services
+        from agentic_cli.workflow.adk.build import walk
+
+        roles = model_services.role_map_from_settings(self._settings, self._model_override)
+        for agent in walk(root):
+            if not isinstance(agent, LlmAgent):
+                continue
+            spec: str | None = None
+            try:
+                spec = agent.canonical_model.model
+                config = AgentConfig(name=agent.name, prompt="", model=spec)
+                model = self._resolve_for(config, roles, self._catalog, providers)
+            except (ValueError, ImportError) as exc:
+                logger.warning(
+                    "adk_agent_model_unresolved", agent=agent.name, model=spec, error=str(exc)
+                )
+                continue
+            self._resolved_models[agent.name] = model
 
     def _validate_agent_graph(self) -> AgentGraph | None:
         """Reject an unbuildable agent graph before anything is allocated.
@@ -830,6 +895,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             from agentic_cli.workflow.adk.build import load_native_root
 
             root = self._loaded_native_root = load_native_root(self._adk_config_path)
+            self._required_managers = self._detect_required_managers()
             return AgentGraph(config_map={}, build_order=(), root_name=root.name)
         self._validated_graph = validate_agent_graph(
             self._agent_configs, backend=self.backend_type

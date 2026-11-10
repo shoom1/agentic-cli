@@ -168,3 +168,72 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
         await manager.initialize_services()
         await manager.cleanup()
         assert calls == ["registered"]
+
+
+class TestItsAgentsRunOnTheirOwnModels:
+    """Each agent's model is the one ADK resolves for it (its YAML's, else its
+    parent's), resolved through the catalog for its context budget, as an
+    agent config naming it would be. An agent whose model does not resolve
+    gets no budget, and the fit guard and the overflow handler leave it
+    alone."""
+
+    async def test_each_agent_gets_the_budget_of_the_model_adk_runs_it_on(
+        self, project, monkeypatch
+    ):
+        monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+        write(project, "helper.yaml", """
+            agent_class: LlmAgent
+            name: helper
+            instruction: You help.
+        """)
+        path = root_yaml(project, model="gemini-2.5-flash", extra=(
+            "sub_agents:\n  - config_path: helper.yaml\n"
+            "  - code: tests.workflow.adk.native_agents.chatter\n"
+        ))
+        manager = native(path)
+        await manager.initialize_services()
+        try:
+            models = {name: str(model.ref) for name, model in manager.agent_models.items()}
+            budgets = dict(manager._budgets)
+            main = manager.context_budget()
+        finally:
+            await manager.cleanup()
+
+        # The helper names no model: ADK runs it on its parent's.
+        assert models == {
+            "root": "google:gemini-2.5-flash",
+            "helper": "google:gemini-2.5-flash",
+            "chatter": "anthropic:claude-sonnet-4-6",
+        }
+        assert set(budgets) == {"root", "helper", "chatter"}
+        assert main == budgets["root"] and main.window == 1_048_576
+
+    async def test_an_agent_whose_model_does_not_resolve_gets_no_budget(self, project, logged):
+        write(project, "helper.yaml", """
+            agent_class: LlmAgent
+            name: helper
+            model: local-model
+            instruction: You help.
+        """)
+        manager = native(root_yaml(project, extra="sub_agents:\n  - config_path: helper.yaml\n"))
+        await manager.initialize_services()
+        try:
+            assert set(manager.agent_models) == {"root"}
+            assert set(manager._budgets) == {"root"}
+        finally:
+            await manager.cleanup()
+
+        (warning,) = [e for e in logged if e["event"] == "adk_agent_model_unresolved"]
+        assert (warning["log_level"], warning["agent"]) == ("warning", "helper")
+
+    async def test_a_registered_tool_it_names_gets_its_service(self, project):
+        path = root_yaml(project, extra=(
+            "tools:\n  - name: agentic_cli.tools.memory_tools.search_memory\n"
+        ))
+        manager = native(path)
+        await manager.initialize_services()
+        try:
+            assert "memory_store" in manager.required_managers
+            assert manager.services.get("memory_store") is not None
+        finally:
+            await manager.cleanup()

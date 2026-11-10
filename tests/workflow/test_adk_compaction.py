@@ -521,7 +521,6 @@ class TestTheApp:
         assert type(runner) is Runner
         assert runner.app.events_compaction_config is None
         assert not any(isinstance(p, MainAgentPlugin) for p in runner.app.plugins)
-        assert budgets == {}
 
 
 def team(context: str | None) -> list[AgentConfig]:

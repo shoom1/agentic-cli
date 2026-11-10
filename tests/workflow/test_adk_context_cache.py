@@ -196,7 +196,7 @@ def _native_yaml(tmp_path, model: str, *, helper: bool = False) -> str:
 async def test_a_native_adk_app_follows_the_default_model(
     tmp_path, monkeypatch, provider, default_model, caches
 ):
-    """A native ADK YAML app (``adk_config_path``) has no resolved agents."""
+    """A native ADK YAML app (``adk_config_path``) on its default model."""
     keys(monkeypatch, provider)
     manager = adk(
         [], settings(default_model=default_model),
@@ -205,7 +205,7 @@ async def test_a_native_adk_app_follows_the_default_model(
 
     await manager.initialize_services()
     try:
-        assert manager._resolved_models == {}
+        assert set(manager._resolved_models) == {"root"}
         if caches:
             assert_caches(cache_config(manager))
         else:
