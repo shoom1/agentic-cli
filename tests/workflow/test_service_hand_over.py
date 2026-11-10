@@ -447,3 +447,22 @@ class TestTheLoan:
                 await new.give_services(loan)
         finally:
             await new.cleanup()
+
+    async def test_it_is_not_given_from_inside_a_turn_of_the_lender(self, pair, ctx, run):
+        """The give waits for the lender's running turn: from inside that turn
+        it waited for itself, forever."""
+        _, borrower_cls = pair
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        try:
+            async with run.manager._turn("s", "u"):
+                with pytest.raises(RuntimeError, match="inside a turn"):
+                    await asyncio.wait_for(run.manager.give_services(loan), timeout=2)
+            assert loan.given is False
+
+            await run.manager.give_services(loan)
+
+            assert loan.given is True
+        finally:
+            await new.cleanup()

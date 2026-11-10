@@ -58,12 +58,14 @@ from agentic_cli.workflow.sessions import (
     set_active_turn,
 )
 from agentic_cli.workflow.service_registry import (
+    get_service,
     set_service_registry,
     JOB_MANAGER,
     KNOWLEDGE_BASE,
     LLM_SUMMARIZER,
     MEMORY_STORE,
     SANDBOX_MANAGER,
+    WORKFLOW,
 )
 from agentic_cli.workflow.services import (
     SERVICE_CLOSERS,
@@ -228,15 +230,16 @@ class BaseWorkflowManager(ABC):
         that fails to initialize, is cancelled while it does, or is cleaned
         up before they are given closes none of them, and the old one keeps
         working with them (nothing has to hand them back). ``give_services``
-        waits for the old manager's running turn, makes the new manager
-        their owner and moves what they hold of their owner to it: the
-        permission engine's prompts and per-call say, the knowledge base's
-        summarizer. Each manager keeps its own ``WORKFLOW`` and summarizer
-        entries and builds its own service-bound tools. A manager that holds
-        services it does not own runs no turn (``_turn_admission`` raises
-        ``RuntimeError``), since the engine's per-call check reads its
-        owner's outside-content marks: the new manager until the give, the
-        old one after it, until it is released.
+        waits for the old manager's running turn (inside one of its turns it
+        raises ``RuntimeError`` rather than wait for itself), makes the new
+        manager their owner and moves what they hold of their owner to it:
+        the permission engine's prompts and per-call say, the knowledge
+        base's summarizer. Each manager keeps its own ``WORKFLOW`` and
+        summarizer entries and builds its own service-bound tools. A manager
+        that holds services it does not own runs no turn
+        (``_turn_admission`` raises ``RuntimeError``), since the engine's
+        per-call check reads its owner's outside-content marks: the new
+        manager until the give, the old one after it, until it is released.
 
         The base also computes each agent's context numbers (``_budgets``),
         once the models are resolved and before any service is built, so a
@@ -1399,13 +1402,21 @@ class BaseWorkflowManager(ABC):
 
         Raises:
             ValueError: This manager did not lend them.
-            RuntimeError: They were given already; no manager borrowed them
-                (none initialized with them, or its initialization failed or
-                was cancelled, or it was released since); or this manager
-                released them while they were lent.
+            RuntimeError: It was called inside a turn of this manager (it
+                would wait for that turn, forever); they were given already;
+                no manager borrowed them (none initialized with them, or its
+                initialization failed or was cancelled, or it was released
+                since); or this manager released them while they were lent.
         """
         if loan.lender is not self:
             raise ValueError(f"{type(self).__name__} did not lend these services.")
+        if get_service(WORKFLOW) is self:
+            # The turn's registry is this manager's: the give would wait for
+            # the turn lock the calling turn holds.
+            raise RuntimeError(
+                f"give_services was called inside a turn of {type(self).__name__}: "
+                "it waits for this manager's running turn. Call it between turns."
+            )
         async with self._lifecycle_lock:
             async with self._turn_lock:
                 if loan.given:
