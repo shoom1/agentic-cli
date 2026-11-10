@@ -347,7 +347,7 @@ ADK integrations:
   request the provider refuses as too long is summarized or trimmed and
   retried once, then ends in one clear error (see
   [Context management](#context-management)). A native ADK YAML app gets
-  none of it
+  the same: only the building of its agents differs
 - **PermissionPlugin** — evaluates each tool's declared capabilities against the permission engine and prompts the user when no rule matches
 - **LLMLoggingPlugin** — structured logging of LLM requests/responses
 - **Task progress** — the event processor reports the task checklist (its
@@ -1144,9 +1144,9 @@ What it does depends on the backend and the model:
 
 - **On ADK**, the app gets ADK's context cache when any agent runs on Claude or
   Gemini (an agent without a `model` runs on the default model). A native ADK
-  YAML app (`adk_config_path`) has no agent list to check, so its default model
-  decides. The cache belongs to the app: the setting turns it on or off for
-  every agent at once.
+  YAML app (`adk_config_path`) is judged by the models ADK runs its agents on
+  (an agent's own, else its parent's). The cache belongs to the app: the
+  setting turns it on or off for every agent at once.
 - **On Deep Agents**, each agent on Claude on Anthropic's API marks three cache
   breakpoints, as on ADK: its system prompt, its last tool and the
   conversation, for 5 minutes. A sub-agent's own prompt and tools are cached
@@ -1352,13 +1352,45 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   same turn. When the job finishes, the main agent is told, in a message of
   its own that opens with `[Automatic job notification — not written by the
   user]`, on both backends, which fact extraction leaves out. The main
-  agent's own job is told the same way (a native ADK YAML app's still
-  answers the call that started it).
-- **A native ADK YAML app** (`adk_config_path`) is built by ADK and keeps
-  `transfer_to_agent`: the agent it transfers to takes the conversation and
-  answers the user. It is library-only for now: an app's own code runs it,
+  agent's own job is told the same way, a native ADK YAML app's too.
+- **A native ADK YAML app** (`adk_config_path`) is built by ADK
+  (`from_config`), and only the building differs: once its agents are
+  built, it runs as an app built from configs (the same plugins, summary,
+  fit guard, overflow handling, result cap, interrupted calls, memory index
+  and job notices). It is library-only for now: an app's own code runs it,
   `GoogleADKWorkflowManager(agent_configs=[], adk_config_path=...)`, and no
   `BaseCLIApp` starts one (the CLI builds its manager from agent configs).
+  - **Loaded at validation.** The YAML is loaded, and the code it names
+    imported, when the manager validates its agents, before any model,
+    service or store. A root that is not an `LlmAgent` (a workflow or
+    another agent class) is refused there, and so is a task-mode agent
+    anywhere in the tree: `AgentGraphError`, naming the agent ("agent 'x'
+    is in task mode, which is not supported; use single_turn or chat").
+    Agent configs passed with it are ignored, with a warning.
+  - **Models.** Each agent runs on the model ADK resolves for it (its
+    YAML's `model` or `model_code`, else its parent's, else ADK's default,
+    never the app's `default_model`); that model's name is resolved through
+    the model catalog for the agent's context budget, its usage and the
+    cache. An agent whose model does not resolve gets no budget, and the
+    fit guard and the overflow handler leave it alone; a main agent without
+    one is not summarized (`supports_compact` is False). A registered tool
+    the YAML names gets its service, as a config's would.
+  - **Transfers.** Its sub-agents keep `transfer_to_agent` (ADK's chat
+    mode): the agent the root transfers to takes the conversation, answers
+    the user, and ADK starts the next turn at it. So the agents that reply
+    are the root and every chat-mode agent: their text is the reply (and
+    what fact extraction reads), and a conversation their model no longer
+    takes ends the turn with the clear error. Only the root's conversation
+    is summarized and carries the memory index; an agent it transferred to
+    is trimmed by the fit guard.
+  - **Its own callbacks.** ADK runs every plugin's callback before an
+    agent's own, and an agent's own only when no plugin answered: an
+    agent's `before_model_callbacks` see the request after the fit guard
+    (and the raw log as sent does not show what they change), and its
+    `before_tool_callbacks` do not run for a call the permission gate
+    denied. The result cap leaves out an agent that has
+    `after_tool_callbacks` of its own, so they still see every result,
+    whole; its large results reach its model uncut.
 
 ### Defining agents in YAML
 
@@ -1980,14 +2012,14 @@ output could not be saved, and the log warns once per folder.
 Every result passes the cap: registered tools, MCP and skill tools,
 `job_result`, and a sub-agent's answer. Each tool's own limits
 stay (`web_fetch` returns a summary, `grep` a number of matches); the cap is
-the net beneath them. On ADK it is the `ToolResultCapPlugin`, for apps built
-from agent configs (a native ADK YAML app keeps its own `after_tool_callback`s
-and gets no cap). ADK's Claude and OpenAI Responses adapters send a model
-only a result's `content`, or else its `result`, so the plugin puts the note
-there as well. On Deep Agents it is the `ToolResultCapMiddleware`, between
-the permission gate and the tool-error middleware, so an error result is
-capped too. A `/settings` change of the limit rebuilds the agents and keeps
-the conversation.
+the net beneath them. On ADK it is the `ToolResultCapPlugin`, for every
+agent but one with `after_tool_callbacks` of its own (a native ADK YAML
+app's), which ADK would skip once the cap answered. ADK's Claude and OpenAI
+Responses adapters send a model only a result's `content`, or else its
+`result`, so the plugin puts the note there as well. On Deep Agents it is
+the `ToolResultCapMiddleware`, between the permission gate and the
+tool-error middleware, so an error result is capped too. A `/settings`
+change of the limit rebuilds the agents and keeps the conversation.
 
 ### Settings
 
@@ -2048,8 +2080,8 @@ model and its `max_tokens`.
   <error>". LangGraph has none ("/compact is not supported on this
   backend"). An app runs the same with `BaseCLIApp.compact(focus=None)`, or
   calls the manager's `compact(session, focus=None)` itself
-  (`supports_compact`; a native ADK YAML app, which no `BaseCLIApp` starts,
-  has none either: its `compact` raises `NotImplementedError`).
+  (`supports_compact`; a native ADK YAML app whose main agent's model has no
+  context budget has none: its `compact` raises `NotImplementedError`).
 - **`/new`** starts a new conversation without a restart, through
   `BaseCLIApp.start_new_session()`, which an app can call too: a new
   session id, the task box and the usage counters reset, and, with
@@ -2315,6 +2347,7 @@ agentic-cli/
 │   │   ├── mcp.py                # MCPServerConfig → ADK toolset / langchain-mcp-adapters connection
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
+│   │   │   ├── build.py                  # ADKBuild; a native ADK YAML app loaded and checked; the agents that reply
 │   │   │   ├── delegation.py             # Sub-agents as single_turn tools; their permission binding
 │   │   │   ├── compaction.py             # AgentCliSummarizer: the main agent's conversation summarized
 │   │   │   ├── fit_guard_plugin.py       # FitGuardPlugin: a request over its budget trimmed to fit
