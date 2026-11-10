@@ -1394,9 +1394,18 @@ class TestRequiresAreConstructible:
                 return {"success": True}
 
     def test_every_declarable_key_is_constructible(self):
-        """The declarable set is the table's: every key a tool may declare is
-        one the manager builds (``workflow/services.py``)."""
+        """What a tool may declare, each a service the manager builds from its
+        row of the table (``workflow/services.py``)."""
         from agentic_cli.workflow.service_registry import KNOWN_SERVICE_KEYS
         from agentic_cli.workflow.services import SERVICES
 
-        assert KNOWN_SERVICE_KEYS == {spec.key for spec in SERVICES if spec.declarable}
+        assert KNOWN_SERVICE_KEYS == {
+            "arxiv_source",
+            "job_manager",
+            "knowledge_base",
+            "llm_summarizer",
+            "memory_store",
+            "sandbox_manager",
+        }
+        rows = {spec.key: spec for spec in SERVICES}
+        assert all(callable(rows[key].build) for key in KNOWN_SERVICE_KEYS)
