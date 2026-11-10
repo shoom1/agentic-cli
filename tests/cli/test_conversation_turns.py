@@ -27,7 +27,12 @@ from agentic_cli.cli import app as app_module
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.conversation import ConversationCore, Place, TurnParts
 from agentic_cli.cli.conversation_lock import ConversationLock
-from agentic_cli.cli.message_processor import CANCELLED_LINE, TurnResult, TurnStatus
+from agentic_cli.cli.message_processor import (
+    CANCELLED_LINE,
+    MessageProcessor,
+    TurnResult,
+    TurnStatus,
+)
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.config import AgentConfig
 
@@ -136,9 +141,8 @@ class TestATurn:
         processor = Processor(core)
         parts = parts_for(processor)
 
-        result = await core.run_turn("Hello.", parts)
+        assert await core.run_turn("Hello.", parts) is True
 
-        assert result.status is TurnStatus.COMPLETED
         assert processor.ran == [("turn", "Hello.", "a", True)]
         assert held_elsewhere(place(tmp_path), "a") == os.getpid()  # held at its first write
         assert (core.turned, core.written) == (True, True)
@@ -153,6 +157,20 @@ class TestATurn:
         assert (core.turned, core.written) == (True, False)
         assert core.fresh
 
+    async def test_a_processor_that_returns_nothing_still_ran_it(self, tmp_path):
+        """Whether the turn ran is the core's to say, not the processor's
+        result: an app's processor whose ``process()`` returns nothing ran
+        the turn all the same."""
+
+        class ReturnsNothing(Processor):
+            async def process(self, **kwargs) -> None:
+                await super().process(**kwargs)
+
+        core = new_core(tmp_path)
+
+        assert await core.run_turn("Hello.", parts_for(ReturnsNothing(core))) is True
+        assert (core.turned, core.written) == (True, True)
+
     async def test_one_open_in_another_process_does_not_run(self, tmp_path):
         other = ConversationLock(tmp_path)
         other.take(place(tmp_path).key("a"))
@@ -161,7 +179,7 @@ class TestATurn:
         parts = parts_for(processor)
 
         try:
-            assert await core.run_turn("Hello.", parts) is None
+            assert await core.run_turn("Hello.", parts) is False
         finally:
             other.release()
 
@@ -236,7 +254,7 @@ class TestTheAppForwards:
 
         async def run_turn(core, message, parts):
             seen.append((core, message, parts))
-            return TurnResult(TurnStatus.COMPLETED)
+            return True
 
         monkeypatch.setattr(ConversationCore, "run_turn", run_turn)
 
@@ -273,9 +291,31 @@ class TestTheAppForwards:
         app = build(Telling, job_auto_resume=True)
 
         async def run_turn(core, message, parts):
-            return TurnResult(TurnStatus.COMPLETED)
+            return True
 
         monkeypatch.setattr(ConversationCore, "run_turn", run_turn)
+
+        await app.process_input("Hello.")
+
+        assert app.told == 1
+
+    async def test_one_whose_processor_returns_nothing_tells_them_too(self, home):
+        """An app's ``MessageProcessor`` whose ``process()`` forgets to
+        return its result: the turn ran, and its end tells the jobs."""
+
+        class Telling(BaseCLIApp):
+            told = 0
+
+            async def resume_finished_jobs(self) -> int:
+                self.told += 1
+                return 0
+
+        class ReturnsNothing(MessageProcessor):
+            async def process(self, **kwargs) -> None:
+                await asyncio.sleep(0)
+
+        app = build(Telling, job_auto_resume=True)
+        app._message_processor = ReturnsNothing()
 
         await app.process_input("Hello.")
 
@@ -292,7 +332,7 @@ class TestTheAppForwards:
         app = build(Telling, job_auto_resume=True)
 
         async def run_turn(core, message, parts):
-            return None  # open in another process
+            return False  # open in another process
 
         monkeypatch.setattr(ConversationCore, "run_turn", run_turn)
 

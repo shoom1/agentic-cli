@@ -1559,7 +1559,7 @@ class BaseCLIApp:
         Args:
             message: User message to process
         """
-        if await self._conversation.run_turn(message, self._turn_parts()) is None:
+        if not await self._conversation.run_turn(message, self._turn_parts()):
             return  # open in another process: nothing ran
         # At the turn boundary, auto-resume any finished background jobs that
         # opted in (gated by the job_auto_resume setting).

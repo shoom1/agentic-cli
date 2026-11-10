@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any
 from agentic_cli.cli.conversation_lock import ConversationLock, Taken
 from agentic_cli.cli.message_processor import (
     CANCELLED_LINE,
-    TurnResult,
     TurnStatus,
     _says_so_when_stopped,
 )
@@ -498,7 +497,7 @@ class ConversationCore:
         parts.status()
         return None
 
-    async def run_turn(self, message: str, parts: TurnParts) -> TurnResult | None:
+    async def run_turn(self, message: str, parts: TurnParts) -> bool:
         """Run a turn of the user's ``message`` in the conversation, under the turn lock.
 
         The line is echoed as its turn starts: one typed while the
@@ -517,8 +516,9 @@ class ConversationCore:
             parts: The app's parts it runs on.
 
         Returns:
-            The turn's outcome; None when it did not run (another process has
-            the conversation open, said).
+            Whether the turn ran: False when another process has the
+            conversation open (said), and nothing ran. The core says so, not
+            the processor's result: an app's processor may return none.
 
         Raises:
             asyncio.CancelledError: Ctrl+C stopped it, as the processor
@@ -534,7 +534,7 @@ class ConversationCore:
         try:
             ui.add_message("user", message)
             if not self._held_to_write(ui):
-                return None
+                return False
             self.turned = True  # the conversation now holds this message
             reached = False  # the turn reached a ready workflow, which stores it
             try:
@@ -553,7 +553,7 @@ class ConversationCore:
             finally:
                 if reached:
                     self.written = True
-            return result
+            return True
         finally:
             self.turn_lock.release()
 
