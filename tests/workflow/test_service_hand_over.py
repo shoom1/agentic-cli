@@ -466,3 +466,106 @@ class TestTheLoan:
             assert loan.given is True
         finally:
             await new.cleanup()
+
+
+class TestTheGiveIsOneStep:
+    """The give moves the services between two turns of the lender, never
+    while the borrower initializes, and never services the lender closed."""
+
+    async def test_it_waits_for_the_lender_s_running_turn(self, pair, ctx, run):
+        _, borrower_cls = pair
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        entered, leave = asyncio.Event(), asyncio.Event()
+
+        async def a_running_turn() -> None:
+            async with run.manager._turn("s", "u"):
+                entered.set()
+                await leave.wait()
+
+        turn = asyncio.create_task(a_running_turn())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            give = asyncio.create_task(run.manager.give_services(loan))
+            await asyncio.sleep(0.05)
+            assert not give.done() and loan.given is False
+            assert run.held[PERMISSION_ENGINE]._workflow is run.manager
+            leave.set()
+            await asyncio.wait_for(turn, timeout=5)
+            await asyncio.wait_for(give, timeout=5)
+            assert loan.given is True
+        finally:
+            leave.set()
+            await new.cleanup()
+
+    async def test_it_waits_for_the_borrower_s_initialization(
+        self, pair, ctx, run, monkeypatch
+    ):
+        """Given halfway through a start that then fails, the services were
+        the new manager's, and its rollback closed them under the old one."""
+        _, borrower_cls = pair
+        closes = _count_closes(monkeypatch, run.held)
+        new = _manager(borrower_cls, ctx)
+        building, fail = asyncio.Event(), asyncio.Event()
+
+        async def _fails_when_told() -> None:
+            building.set()
+            await fail.wait()
+            raise RuntimeError("backend init failed")
+
+        monkeypatch.setattr(new, "_do_initialize", _fails_when_told)
+        loan = run.manager.lend_services()
+        start = asyncio.create_task(new.initialize_services(services=loan))
+        await asyncio.wait_for(building.wait(), timeout=10)
+        give = asyncio.create_task(run.manager.give_services(loan))
+        await asyncio.sleep(0.05)
+        assert not give.done()
+        fail.set()
+
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await asyncio.wait_for(start, timeout=5)
+        with pytest.raises(RuntimeError, match="borrow"):
+            await asyncio.wait_for(give, timeout=5)
+        assert closes == Counter()
+        await run.still_works(run.manager)
+        await new.cleanup()
+        await run.manager.cleanup()
+        assert closes == Counter({key: 1 for key in CLOSERS})
+
+    async def test_it_refuses_what_the_lender_released_while_lent(
+        self, pair, ctx, run, monkeypatch
+    ):
+        _, borrower_cls = pair
+        closes = _count_closes(monkeypatch, run.held)
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        await run.manager.cleanup()  # the lender closes what it owns
+        assert closes == Counter({key: 1 for key in CLOSERS})
+
+        with pytest.raises(RuntimeError, match="released"):
+            await run.manager.give_services(loan)
+
+        assert loan.given is False
+        await new.cleanup()
+        assert closes == Counter({key: 1 for key in CLOSERS}), "closed twice"
+
+    async def test_a_model_switch_of_the_new_manager_after_it_keeps_them(
+        self, pair, ctx, run, monkeypatch
+    ):
+        _, borrower_cls = pair
+        closes = _count_closes(monkeypatch, run.held)
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        await run.manager.give_services(loan)
+        await run.manager.cleanup()
+
+        await new.reinitialize(preserve_sessions=True)
+        try:
+            assert closes == Counter()
+            await run.still_works(new)
+        finally:
+            await new.cleanup()
+        assert closes == Counter({key: 1 for key in CLOSERS})
