@@ -2428,10 +2428,21 @@ class BaseCLIApp:
         self._conversation.release()
 
     def _resume_hint(self) -> str:
-        """The exit line that names how to come back to the current conversation."""
+        """The exit line that names how to come back to the current conversation.
+
+        ``--resume`` (and ``/resume``) open a conversation on the settings'
+        orchestrator, the backend of new conversations: one that runs on
+        another (``/new <backend>``) is found once the orchestrator names
+        its backend, and the line says so.
+        """
         if self._command:
-            return f"Resume this conversation with: {self._command} --resume {self._session_id}"
-        return f"Resume this conversation with /resume {self._session_id}"
+            hint = f"Resume this conversation with: {self._command} --resume {self._session_id}"
+        else:
+            hint = f"Resume this conversation with /resume {self._session_id}"
+        backend = self._place().backend
+        if backend != orchestrator_of(self._settings).value:
+            hint += f" (set orchestrator to {backend} first: it runs there)"
+        return hint
 
     async def _extract_session_facts_on_exit(self) -> None:
         """Propose memories from the session on exit (if enabled).
