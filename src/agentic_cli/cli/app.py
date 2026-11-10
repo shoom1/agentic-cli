@@ -1061,8 +1061,9 @@ class BaseCLIApp:
         with a ``DeprecationWarning``. The workflow is not told until the next
         turn names the id, and the memories of the conversation left are not
         proposed. Set it between turns. None names no conversation: the turns
-        run in the one the workflow loaded last, and the conversation held
-        stays held.
+        run in the one the workflow loaded last, which a ready workflow's
+        ``session_id`` names and which is then held (with none ready, the
+        conversation held stays held).
 
         Raises:
             RuntimeError: On setting an id another process has open; nothing
@@ -1073,9 +1074,11 @@ class BaseCLIApp:
     @session_id.setter
     def session_id(self, value: str | None) -> None:
         warnings.warn(_SESSION_ID_SETTER_DEPRECATED, DeprecationWarning, stacklevel=2)
-        holder = self._conversation.switch_now(value, self._switch_parts())
+        parts = self._switch_parts()
+        holder = self._conversation.switch_now(value, parts)
         if holder is not None:
-            raise RuntimeError(f"Conversation '{value}' is open in another process ({holder}).")
+            name = value if value is not None else getattr(parts.workflow, "session_id", value)
+            raise RuntimeError(f"Conversation '{name}' is open in another process ({holder}).")
 
     @property
     def session_start(self) -> SessionStart:

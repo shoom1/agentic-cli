@@ -315,6 +315,24 @@ class TestTheSessionIdSetter:
         assert app.session_id is None
         assert not free(app, app._conversation_key(old))
 
+    async def test_none_holds_the_conversation_the_workflow_writes_to(self, home):
+        """The turns then name none, and the workflow writes to the one it
+        loaded last (``session_ref``'s fallback): that one is held, whatever
+        an earlier setter left held."""
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        first = app.session_id
+        assert app._hold(first) is None
+        workflow.session_id = first  # the conversation the workflow loaded
+        with pytest.warns(DeprecationWarning):
+            app.session_id = "theirs"  # the workflow is not told
+
+        with pytest.warns(DeprecationWarning):
+            app.session_id = None
+
+        assert not free(app, app._conversation_key(first))
+        assert free(app, app._conversation_key("theirs"))
+
     async def test_the_next_turn_runs_in_it(self, project):
         workflow = Workflow()
         app = app_on(workflow, fake_settings())

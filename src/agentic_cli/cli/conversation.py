@@ -333,10 +333,11 @@ class ConversationCore:
         proposed.
 
         None names no conversation: the turns then run in the one the
-        workflow loaded last (``session_ref`` falls back to its own id), which
-        is the conversation held whenever the workflow ran at its switch.
-        So nothing else changes: the lock, ``turned``, the task list and the
-        usage counters stay.
+        workflow loaded last (``session_ref`` falls back to its own id). A
+        ready workflow's (``parts.workflow.session_id``) is held, letting go
+        of the one held before (an earlier setter may have moved it, which the
+        workflow was not told); with none ready the hold stays. Nothing else
+        changes: ``turned``, the task list and the usage counters stay.
 
         Returns:
             None once ``to`` is the conversation (or was); else the process
@@ -344,7 +345,12 @@ class ConversationCore:
         """
         if to == self.session_id:
             return None
-        if to is None:  # the workflow's own: the conversation held, as it was
+        if to is None:  # the turns write to the workflow's own: hold that one
+            loaded = getattr(parts.workflow, "session_id", None)
+            if isinstance(loaded, str):
+                holder = self.hold(loaded)
+                if holder is not None:
+                    return holder
             self.session_id = None
             return None
         taken = self.acquire(to)

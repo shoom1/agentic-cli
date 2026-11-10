@@ -2111,7 +2111,8 @@ the start of the entry's title.
   usage counters start over; the workflow is not told until the next turn
   names the id, and the memories of the conversation left are not
   proposed. None names no conversation, as before: the turns run in the one
-  the workflow loaded last, which stays held.
+  the workflow loaded last, which is held (the ready workflow's
+  `session_id`).
 
 - **`_release_resources(keep_session_service=True)`**, which kept ADK's
   session service through a release, is deprecated and will be removed in
