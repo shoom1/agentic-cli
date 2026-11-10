@@ -77,6 +77,10 @@ the start of the entry's title.
   beside other calls; a prompt's `{name}` is not filled from session state.
   (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
   ADK, an agent's prompt…**)
+- A native ADK YAML app (`adk_config_path`) needs an `LlmAgent` root, agent
+  names unique across its tree and no task-mode agent; agent configs passed
+  with it are ignored, so name its tools in the YAML; a YAML ADK cannot load
+  raises `AgentGraphError`. (Changed: **A native ADK YAML app runs as…**)
 - `app_name` comes only from the settings class or the constructor; ADK 2
   refuses one that does not start with a letter, holds other than letters,
   digits, `_` and `-`, or is `user`. Code calling ADK follows ADK 2's notes.
