@@ -786,8 +786,12 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         default (``{workspace}/sessions/sessions.db``); Postgres via uri.
 
         Args:
-            store: The store to name (a manager's own, ``session_store`` on
-                it); ``session_store`` by default.
+            store: The store to name; ``session_store`` by default. ADK's
+                manager calls this with no argument while its store is
+                ``session_store`` (0.6.4's call, so an override without the
+                parameter keeps working), and with ``store=`` only after a
+                ``/settings`` change of ``session_store`` in the run (the run
+                keeps its store), which such an override refuses.
         """
         store = store or getattr(self, "session_store", "sqlite")
         if store == "memory":

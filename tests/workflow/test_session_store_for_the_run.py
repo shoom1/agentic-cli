@@ -72,3 +72,86 @@ def test_langgraph_is_given_the_store_it_was_built_for(settings):
     assert factory._backend_kwargs(OrchestratorType.LANGGRAPH, settings, "memory") == {
         "checkpointer": "memory"
     }
+
+
+class AppSettings(BaseSettings):
+    """An app's settings overriding ``session_db_url()`` as 0.6.4 documented
+    it: no argument."""
+
+    def session_db_url(self) -> str | None:
+        return None  # the app keeps its sessions in memory, say
+
+
+ASKED: list = []
+
+
+class StoreAwareSettings(BaseSettings):
+    """An override that takes the store, as ``BaseSettings`` now does."""
+
+    def session_db_url(self, store: str | None = None) -> str | None:
+        ASKED.append(store)
+        return None
+
+
+class TestAnAppsSessionDbUrl:
+    """``session_db_url()`` keeps 0.6.4's call: no argument while the manager's
+    store is the settings' own; ``store=`` only when they differ (a
+    ``/settings`` change of ``session_store`` in the run), which an override
+    without the parameter cannot follow."""
+
+    @pytest.fixture
+    def app_settings(self, settings) -> AppSettings:
+        return AppSettings(session_store="sqlite")
+
+    def test_a_library_user_builds_on_it(self, app_settings):
+        from google.adk.sessions import InMemorySessionService
+
+        manager = factory.create_workflow_manager_from_settings(SOLO, app_settings)
+
+        assert isinstance(manager._make_session_service(), InMemorySessionService)
+
+    def test_the_cli_builds_on_it_while_the_store_is_unchanged(self, app_settings):
+        from google.adk.sessions import InMemorySessionService
+
+        manager = factory.create_workflow_manager_from_settings(
+            SOLO, app_settings, session_store="sqlite"
+        )
+
+        assert isinstance(manager._make_session_service(), InMemorySessionService)
+
+    def test_after_a_store_change_it_cannot_rebuild_and_says_so(self, app_settings):
+        manager = factory.create_workflow_manager_from_settings(
+            SOLO, app_settings, session_store="sqlite"
+        )
+        app_settings.session_store = "memory"  # /settings, in the run
+
+        with pytest.raises(RuntimeError) as raised:
+            manager._make_session_service()
+
+        assert str(raised.value) == (
+            "This app's settings.session_db_url() takes no store, so this run "
+            "cannot rebuild on its session store after session_store changed: "
+            "restart the app."
+        )
+
+    def test_after_a_store_change_one_that_takes_it_is_asked_for_the_runs(self, settings):
+        ASKED.clear()
+        app_settings = StoreAwareSettings(session_store="sqlite")
+        manager = factory.create_workflow_manager_from_settings(
+            SOLO, app_settings, session_store="sqlite"
+        )
+        app_settings.session_store = "memory"
+
+        manager._make_session_service()
+
+        assert ASKED == ["sqlite"]
+
+    def test_the_frameworks_own_names_the_runs_store_after_a_change(self, settings):
+        from google.adk.sessions import DatabaseSessionService
+
+        manager = factory.create_workflow_manager_from_settings(
+            SOLO, settings, session_store="sqlite"
+        )
+        settings.session_store = "memory"
+
+        assert isinstance(manager._make_session_service(), DatabaseSessionService)
