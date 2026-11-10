@@ -22,6 +22,9 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+# Where they lived first: every offline test already runs with them (tests/conftest.py).
+from tests.network_guard import DEAD_URL, dead_base_urls  # noqa: F401
+
 Answer = dict[str, Any] | httpx.Response | Callable[[httpx.Request], Any]
 
 
@@ -100,20 +103,6 @@ def serve(model: Any, api: FakeAPI) -> None:
     model.client = model.client.with_options(
         http_client=api.http_client(http_library(model.client))
     )
-
-
-#: A local port nothing listens on.
-DEAD_URL = "http://127.0.0.1:9"
-
-
-def dead_base_urls(monkeypatch) -> None:
-    """Point every provider SDK's base URL at ``DEAD_URL``: a client a test did
-    not route fails at once instead of reaching a provider."""
-    for name in (
-        "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL",
-        "GOOGLE_VERTEX_BASE_URL", "OPENROUTER_BASE_URL",
-    ):
-        monkeypatch.setenv(name, DEAD_URL)
 
 
 def route_anthropic(monkeypatch, api: FakeAPI) -> None:

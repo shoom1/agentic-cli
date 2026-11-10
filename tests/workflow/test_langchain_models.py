@@ -465,6 +465,8 @@ class TestGpt:
     async def test_the_request(self, settings, monkeypatch):
         api = FakeAPI(openai_response("Hi"))
         route(monkeypatch, openai, "AsyncOpenAI", api)
+        # The SDK's own host, which the request names: routed, it reaches the fake.
+        monkeypatch.delenv("OPENAI_BASE_URL")
         chat = build("openai:gpt-5.5", settings, effort="high", max_tokens=500)
 
         await chat.ainvoke([HumanMessage("Hello")])

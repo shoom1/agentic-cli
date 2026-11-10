@@ -20,6 +20,7 @@ import pytest
 from agentic_cli.config import BaseSettings, set_settings
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent
+from tests.network_guard import TRACING_VARIABLES
 
 
 def _load_live_test_env() -> None:
@@ -34,7 +35,9 @@ def _load_live_test_env() -> None:
     never overridden (a key exported in the shell takes precedence), and this
     is a no-op when no file is found. It runs at import time so the
     module-level ``skipif`` gates in ``test_live.py`` /
-    ``test_research_scenarios.py`` observe the keys during collection.
+    ``test_research_scenarios.py`` observe the keys during collection. A
+    LangSmith tracing switch in the file is left out: no run uploads traces
+    (the root conftest's ``pytest_configure`` removes the environment's).
     """
     candidates: list[Path] = []
     explicit = os.environ.get("AGENTIC_TEST_ENV_FILE")
@@ -54,7 +57,7 @@ def _load_live_test_env() -> None:
             if key.startswith("export "):
                 key = key[len("export ") :].strip()
             value = value.strip().strip('"').strip("'")
-            if key:
+            if key and key not in TRACING_VARIABLES:
                 os.environ.setdefault(key, value)
         break
 
