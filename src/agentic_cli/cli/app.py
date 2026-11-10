@@ -2379,7 +2379,7 @@ class BaseCLIApp:
         the prompt: no memories to propose, no status line yet, which the
         start draws), holding an id given to the constructor; one this run
         made is in no store, so it is held from its first write
-        (``ConversationCore.deferred``) and a run that writes nothing makes
+        (``ConversationCore.deferred``) and a run in which no turn runs makes
         no lock file. False, status 1, when another process has a given id
         open."""
         session_id = self._session_id

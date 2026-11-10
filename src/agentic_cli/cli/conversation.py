@@ -166,8 +166,10 @@ class ConversationCore:
         self.written = False
         #: Its id was made by this run, and nothing holds it yet: no store
         #: lists it before its first write, so no other process can open it,
-        #: and it is held then (``hold_to_write``). A run that writes nothing
-        #: makes no lock file. An id the app was given is held from the start.
+        #: and it is held then (``hold_to_write``). A run in which no turn runs
+        #: makes no lock file (a line typed while the workflow is down takes
+        #: the hold before the start its turn retries, which might write). An
+        #: id the app was given is held from the start.
         self.deferred = deferred
         self.place = place
         self._lock: ConversationLock | None = None

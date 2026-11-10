@@ -179,7 +179,8 @@ process (1234)."; `--continue` passes over it to the newest one free among
 the 50 newest, and says so). A run holds the conversation it was given
 (`--resume`, `--continue`, `/resume`) from the start, also when the workflow
 fails to start, and a new one from its first turn: no store lists it before
-then, and a run that writes nothing leaves no lock file. Fixed with
+then, and a run in which no turn runs leaves no lock file (a line typed
+while the workflow is down takes the hold before its retried start). Fixed with
 `/settings` (another orchestrator, while nothing of the conversation is
 stored), a failed start runs it, and holds it, where the next start runs. The session store is the run's: a change of
 `session_store` takes effect at the next start.

@@ -3281,9 +3281,10 @@ step; each entry says what to use instead.
   start, and one it made (the start's, `/new`'s, an orchestrator change's)
   from its first write (a turn, a job's notice, `/compact`, under the turn
   lock): no store lists it before then, so no other process can open it,
-  and a run that writes nothing makes no lock file (a locks folder the run
-  cannot write leaves the conversation unheld, said once, and its turns
-  run); a line typed before `--continue` or `--resume` has opened its
+  and a run in which no turn runs makes no lock file (a line typed while
+  the workflow is down takes the hold before the start its turn retries;
+  a locks folder the run cannot write leaves the conversation unheld, said
+  once, and its turns run); a line typed before `--continue` or `--resume` has opened its
   conversation waits for it and runs there. It is keyed by the backend and
   the store the conversation runs on: the store is the run's for its whole
   life, and the backend is recorded as the app starts, for a new

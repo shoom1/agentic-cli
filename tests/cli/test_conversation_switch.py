@@ -1421,9 +1421,11 @@ class TestTheExitHintOnAnotherBackend:
 class TestARunThatWritesNothing:
     """An id this run generated (the start's new conversation, ``/new``, an
     orchestrator change's new one) is held from its first write, under the
-    turn lock before the workflow runs it: no store lists it before then, so
-    no other process can open it, and a run that writes nothing makes no lock
-    file in HOME. An id the app was given is held from the start."""
+    turn lock before a turn runs (a line typed while the workflow is down
+    takes it before the start its turn retries): no store lists it before
+    then, so no other process can open it, and a run in which no turn runs
+    makes no lock file in HOME. An id the app was given is held from the
+    start."""
 
     async def test_a_start_new_and_exit_leave_no_lock_file(self, manager):
         session = Session(inputs=["/new"])
