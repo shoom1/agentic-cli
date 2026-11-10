@@ -37,6 +37,7 @@ import pytest
 pytest.importorskip("google.adk")
 
 from agentic_cli.cli.conversation_lock import ConversationLock  # noqa: E402
+from agentic_cli.cli.message_processor import CANCELLED_LINE  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from tests.cli.test_compact_and_new import (  # noqa: E402,F401
     app_on,
@@ -1246,6 +1247,7 @@ class TestACtrlCInAMoveOfBackend:
         assert app.settings.orchestrator.value == "deepagents"
         assert app._workflow_controller.backend == "deepagents"
         assert app._conversation_key(app.session_id) == key and not free(app, key)
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
         await app._workflow_controller.close()
 
     async def test_while_the_controller_waits_for_a_release_nothing_changes(
@@ -1274,6 +1276,7 @@ class TestACtrlCInAMoveOfBackend:
         assert controller.backend == "deepagents"
         assert app._conversation_key(app.session_id) == key and not free(app, key)
         assert free(app, ("adk", *key[1:]))
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
         await controller.close()
 
 

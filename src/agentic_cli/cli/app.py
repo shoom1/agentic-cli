@@ -912,13 +912,15 @@ class BaseCLIApp:
         All or nothing: if any value is invalid, or the workflow cannot be
         reinitialized with the new values, every field is restored and the
         workflow is brought back on the model it was running, so nothing
-        unusable stays in memory to be saved by ``/settings``. A restart
-        interrupted by Ctrl+C is undone the same way, without a word, and the
-        cancel is re-raised. A new conversation on another backend
-        interrupted once that backend runs (while the old one is released,
-        which goes on) is too late to undo: the change stands and is reported
-        as usual before the cancel is re-raised (``/settings`` saves it), so
-        the settings name the backend that runs.
+        unusable stays in memory to be saved by ``/settings``. Ctrl+C stops
+        it wherever it waits (for a start in progress, the turn lock, the
+        rebuild, a new conversation's backend) as it stops a turn:
+        "Operation cancelled..." is said once, the Save is undone the same
+        way, and the cancel is re-raised. A new conversation on another
+        backend interrupted once that backend runs (while the old one is
+        released, which goes on) is too late to undo: the change stands and
+        is reported as usual before the cancel is re-raised (``/settings``
+        saves it), so the settings name the backend that runs.
 
         Each change is set on the settings object (``update_setting``; the
         model pickers and the thinking effort through their own setters) and
@@ -950,8 +952,7 @@ class BaseCLIApp:
         resolved its models from the settings before the change), and so
         does a change of ``orchestrator``, which needs that start's outcome
         (one of ``session_store`` does not wait: the run keeps the store its
-        first start took); Ctrl+C stops the wait, re-raised, and changes
-        nothing. When that start fails, the change is applied as for any
+        first start took); Ctrl+C stops the wait, and changes nothing. When that start fails, the change is applied as for any
         workflow that is not running: nothing is rebuilt, and the next start
         uses it. A change of the orchestrator made while the workflow is
         down, its next start building afresh, has that start run a

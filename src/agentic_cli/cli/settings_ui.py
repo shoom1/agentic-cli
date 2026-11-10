@@ -336,6 +336,12 @@ class SettingsUI:
         """Apply a Save's ``changes``, all or nothing (``BaseCLIApp.apply_settings``,
         whose docstring says when each change takes effect).
 
+        Ctrl+C stops it wherever it waits, as it stops a turn, and
+        "Operation cancelled..." is said once: by ``_says_so_when_stopped``
+        around each wait of its own (a start in progress, the turn lock, the
+        move, the rebuild), and by the new conversation's own
+        (``start_new_session``, as ``/new`` says it) around that one.
+
         Returns:
             True if the changes were applied, False if they were rolled back.
         """
@@ -407,8 +413,9 @@ class SettingsUI:
         movable = False
         if moves_backend:
             try:
-                async with app._turn_lock:
-                    movable = app._conversation.fresh
+                async with _says_so_when_stopped(app.session):
+                    async with app._turn_lock:
+                        movable = app._conversation.fresh
             except asyncio.CancelledError:  # waiting for it: nothing changes
                 _restore_settings(settings, snapshot)
                 raise
@@ -427,7 +434,8 @@ class SettingsUI:
         if moves_here:
             place = dataclasses.replace(app._place(), backend=target)
             try:
-                moved = await self._move_here(place)
+                async with _says_so_when_stopped(app.session):
+                    moved = await self._move_here(place)
             except asyncio.CancelledError:  # it stays where it was
                 _restore_settings(settings, snapshot)
                 raise
@@ -459,11 +467,12 @@ class SettingsUI:
             previous_model = previous.model
             previous_models = dict(getattr(previous, "agent_models", {}))
             try:
-                await controller.reinitialize(model=new_model)
+                async with _says_so_when_stopped(app.session):
+                    await controller.reinitialize(model=new_model)
             except asyncio.CancelledError:
-                # Ctrl+C stopped /settings mid-restart. Nothing of the Save
-                # stays, as on a failure, and nothing is said: the session's
-                # interruption is not a cancel of the dialog.
+                # Ctrl+C stopped /settings mid-restart, which is said as
+                # wherever else the Save waits. Nothing of the Save stays, as
+                # on a failure.
                 _restore_settings(settings, snapshot)
                 if not controller.is_ready:
                     try:
