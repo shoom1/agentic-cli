@@ -1095,11 +1095,12 @@ class BaseCLIApp:
         kept = self._place().kept
         # On the memory store the conversation left is dropped once the switch
         # is made: on another backend its manager goes, and its store with it.
-        # While the workflow is down (the manager a failed reinitialization
-        # kept, its store with it) it is dropped once a workflow is ready.
+        # One not known to be gone (the workflow is down, the manager a failed
+        # reinitialization kept holding it still, or its lookup failed) is
+        # dropped once a workflow is ready.
         leaving = not kept and not moving
         dropping = parts.workflow if stored and leaving else None
-        later = leaving and parts.workflow is None and old is not None
+        later = leaving and not stored and old is not None
         place, interrupted = None, None
         if moving:
             if self._turned:  # proposed while the backend that holds them runs
@@ -1661,9 +1662,12 @@ class BaseCLIApp:
         """Delete ``session_id``'s conversation from ``workflow``'s store: on
         the memory store the CLI keeps one conversation at a time, and
         ``/new`` drops the one it left, once the switch is made (its memories
-        were proposed by then). One it left while the workflow was down is
-        dropped through this too, once a workflow is ready, before it is used
-        (``ConversationCore.drop_left``).
+        were proposed by then). One ``/new`` could not drop then (the workflow
+        was down, its lookup or its delete raised) is dropped through this
+        too, once a workflow is ready (``ConversationCore.drop_left``):
+        before the next turn, or right after the turn whose own start
+        revived the workflow, and always before that turn's delivery of
+        finished jobs, ``/compact`` and the next ``/new``.
 
         Shielded: a Ctrl+C stops the wait, not the delete, so no conversation
         is left half deleted. Never raises but that cancel: a failed delete
@@ -1673,9 +1677,13 @@ class BaseCLIApp:
 
         Returns:
             Whether the store has it no more: dropped, or not there (the
-            manager that kept it was released since); False when the delete
-            raised.
+            manager that kept it was released since, or the workflow keeps
+            no sessions: ``supports_sessions`` False, nothing is asked);
+            False when the delete raised.
         """
+        if not getattr(workflow, "supports_sessions", False):
+            return True  # no store to hold it: its hooks raise NotImplementedError
+
         async def drop() -> bool:
             try:
                 held = await workflow.delete_session(session_id)

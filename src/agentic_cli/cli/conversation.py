@@ -26,7 +26,7 @@ held to write first (an id this run made is held from its first write).
 ``BaseCLIApp`` forwards to them, on its parts as they are (``TurnParts``).
 Each drops first the conversations ``/new`` left on the memory store that
 the workflow's store may still hold, the workflow being down then or their
-delete having raised (``to_drop``, ``drop_left``).
+lookup or delete having raised (``to_drop``, ``drop_left``).
 """
 
 from __future__ import annotations
@@ -270,9 +270,9 @@ class ConversationCore:
         self._said_not_told: set[tuple[str, str | None]] = set()
         #: Conversations ``/new`` left on the memory store that the
         #: workflow's store may still hold (the workflow was down then, or
-        #: their delete raised): dropped once a workflow is ready, before it
-        #: is used (``drop_left``). Nothing lists or opens them, and a job
-        #: of one would never be told.
+        #: their lookup or delete raised): dropped once a workflow is ready,
+        #: before it is used (``drop_left``). Nothing lists or opens them,
+        #: and a job of one would never be told.
         self.to_drop: list[str] = []
 
     @property

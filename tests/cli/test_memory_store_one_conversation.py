@@ -816,6 +816,51 @@ class TestDroppedOnceItsDeleteWorks:
         assert said(app.session, "add_message").count(UNAVAILABLE) == 1
 
 
+class TestDroppedWhenItsLookupFailed:
+    """``/new`` cannot tell whether the conversation left is stored (its
+    ``session_exists`` raised): it is dropped at the next point, as one
+    left while the workflow was down."""
+
+    async def test_the_next_turn_drops_it_and_its_job_is_told_unavailable(self, project):
+        app, workflow, jobs, old = await with_a_finished_job(job_auto_resume=True)
+
+        async def broken(session_id, *, user_id=None) -> bool:
+            raise RuntimeError("the lookup failed")
+
+        workflow.session_exists = broken
+        await app.process_input("/new")
+        new = app.session_id
+        del workflow.session_exists  # lookups work again
+        assert new != old and old in workflow.stored
+
+        await app.process_input("Hello.")
+        await app.process_input("Again.")
+
+        assert not await workflow.session_exists(old)
+        assert jobs.records[0].resume_state == "failed"
+        assert workflow.calls[-3:] == [f"delete_session {old}", f"turn {new}", f"turn {new}"]
+        assert said(app.session, "add_message").count(UNAVAILABLE) == 1
+
+    async def test_a_workflow_without_sessions_has_none_to_drop(self, project):
+        """No session store (``supports_sessions`` False, whose hooks raise
+        ``NotImplementedError``): nothing is asked, at any point."""
+        app, workflow, _, _ = await with_a_finished_job()
+        workflow.supports_sessions = False
+        asked: list[str] = []
+
+        async def unsupported(session_id, *, user_id=None) -> bool:
+            asked.append(session_id)
+            raise NotImplementedError("this backend keeps no sessions")
+
+        workflow.delete_session = unsupported
+
+        await app.process_input("/new")
+        await app.process_input("One.")
+        await app.process_input("Two.")
+
+        assert asked == [] and app._conversation.to_drop == []
+
+
 class TestOnTheRealBackends:
     async def test_adk_drops_it_and_its_job_is_told_unavailable(self, project, monkeypatch):
         from types import SimpleNamespace
