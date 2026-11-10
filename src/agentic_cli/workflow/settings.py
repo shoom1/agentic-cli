@@ -723,7 +723,9 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         title="Session Store",
         description=(
             "Where conversations are persisted: sqlite (default, a single file), "
-            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral). "
+            "postgres (shared/multi-instance via Postgres URI), or memory (ephemeral: "
+            "nothing on disk, and the CLI keeps one conversation at a time, none to "
+            "resume). "
             "ADK keeps them in {workspace}/sessions/sessions.db and Deep Agents in "
             "{workspace}/sessions/checkpoints.db; sessions do not move between "
             "backends: a conversation stays on the backend it began on. Takes "

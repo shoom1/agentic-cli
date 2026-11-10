@@ -1161,8 +1161,9 @@ class BaseCLIApp:
         <id>`` (``cli/session_args.py``) and whatever ``add_arguments`` adds,
         builds the app with ``from_args``, sets its ``session_start``, and runs it.
         The status is 1 when ``--resume <id>`` cannot be opened (not stored,
-        or the store failed) or the backend keeps no sessions, 130 after a
-        Ctrl+C before the prompt, else 0.
+        the store failed, or the session store is memory, which keeps none)
+        or the backend keeps no sessions, 130 after a Ctrl+C before the
+        prompt, else 0.
         """
         command = _command_name()
         parser = SessionArgumentParser(prog=command)

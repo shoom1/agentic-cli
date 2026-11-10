@@ -11,9 +11,10 @@ A job waits for delivery when it has finished, was submitted with
 one being delivered (``RESUMING``) waits no more. Such a job is told in the
 open conversation when it is that conversation's (its session, and its user
 or none), when it has no conversation, or when its conversation is gone
-(``can_resume`` says it cannot be resumed: deleted, or kept in memory by an
-earlier run); the last two are told nowhere else, as unavailable. Another
-conversation's job waits until that conversation is opened.
+(``can_resume`` says it cannot be resumed: deleted, dropped by ``/new`` on
+the memory store, or kept in memory by an earlier run); the last two are
+told nowhere else, as unavailable. Another conversation's job waits until
+that conversation is opened.
 
 A conversation belongs to one backend, and the running manager's
 ``can_resume`` knows its own backend's alone: one another installed backend

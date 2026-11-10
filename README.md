@@ -14,7 +14,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 - **Built-in Tools**: Python execution, stateful sandbox, file operations, web search, web fetch, arXiv search
 - **Knowledge Base**: Semantic + BM25 hybrid search with RRF fusion, per-document markdown sidecars, and agent-authored concept pages
 - **Memory**: markdown files in a user and a project scope, keyword search, history, proposals for review
-- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL or ephemeral memory optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `/resume` in the app for a picker
+- **Durable Sessions**: Conversations persist continuously by default (SQLite; PostgreSQL optional) and resume across CLI restarts: `--continue` (the newest), `--resume <id>`, or `/resume` in the app for a picker; the memory store keeps one conversation at a time and nothing on disk
 - **Context Window Management**: Summarization near the model's input budget on ADK and Deep Agents, requests trimmed to fit, a provider's overflow recovered or explained, and token-usage visibility
 - **A Short Model List**: the app ships the models its pickers offer, and the user and the project add to them; each provider's live listing, cached for a day, checks them, and `/models` shows them and searches the full listings
 - **Type-safe Configuration**: Composable settings mixins (`pydantic-settings`)
@@ -202,6 +202,18 @@ A line typed before `--continue` or `--resume` has opened its
 conversation waits for it, then runs there. An app switches with
 `await app.resume_session(id)` or `await app.start_new_session()`; setting
 `app.session_id` is deprecated.
+
+With `session_store=memory` nothing is written to disk, and the app keeps one
+conversation at a time: `/new` drops the conversation it leaves (after its
+memories are proposed: "Previous: <id>, not kept (session_store is memory)."),
+exit loses it, and a finished background job of a conversation dropped is
+told as unavailable, as a deleted conversation's is. `/resume` (with an id or
+the picker), `/sessions` (its `--delete` too), `--resume <id>` and
+`--continue` are refused with one line: "session_store is memory:
+conversations are not kept. Set it to sqlite to keep and resume them
+(applies at the next start)."; `--resume <id>` then exits with status 1, and
+`--continue` starts a new conversation. A run never switches the store by
+itself (`BaseCLIApp.session_store` names the run's).
 
 `main()` parses the flags, builds the app with `from_args` (by default
 `cls()`), runs it and exits with its `exit_status`. Point the console
@@ -568,7 +580,7 @@ configured is reported (`settings_secrets_dir_ignored`).
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | The backend new conversations run on: `adk`, `deepagents`, or `langgraph` (deprecated); a conversation keeps its own |
-| `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` |
+| `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` (nothing on disk: one conversation at a time, none to resume) |
 | `context_summarize_at` | `AGENTIC_CONTEXT_SUMMARIZE_AT` | 0.85 | Summarize the earlier conversation at this fraction of the model's input budget (0.5 to 0.95) |
 | `context_max_tokens` | `AGENTIC_CONTEXT_MAX_TOKENS` | 200000 | Or once a prompt reaches this many tokens, if that comes first (0: no ceiling; otherwise at least 16000) |
 | `tool_result_max_chars` | `AGENTIC_TOOL_RESULT_MAX_CHARS` | 50000 | A longer tool result is cut, its full output saved in `./.{app_name}/tool-output/` (at least 2000; see [Context management](#context-management)) |
@@ -2037,7 +2049,8 @@ model and its `max_tokens`.
   `auto_extract_session_facts` on, memories proposed for review from the
   conversation being left first when a turn ran in it, as at exit ("Looking for memories to
   propose…" while it runs). Its line names the conversation left when `/sessions` lists it
-  (a turn ran in it). Ctrl+C stops it, and nothing changes. The model, the
+  (a turn ran in it; on the memory store it is dropped instead: "not kept
+  (session_store is memory)"). Ctrl+C stops it, and nothing changes. The model, the
   settings, "Allow for this session" grants, sandbox kernels and background
   jobs carry on, and a job reports to the conversation that started it,
   which its line names. `/clear` only clears the screen. The new
@@ -2066,10 +2079,10 @@ Built-in slash commands available in all apps:
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
-| `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep) |
+| `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep); on the memory store it says none are kept |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
-| `/new [backend]` | | Start a new conversation, on the backend named (`adk`, `deepagents`, `langgraph`) or the settings' `orchestrator`; the current one stays in `/sessions` |
-| `/resume` | | Reopen a saved conversation, on the backend that keeps it: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again |
+| `/new [backend]` | | Start a new conversation, on the backend named (`adk`, `deepagents`, `langgraph`) or the settings' `orchestrator`; the current one stays in `/sessions` (on the memory store it is dropped) |
+| `/resume` | | Reopen a saved conversation, on the backend that keeps it: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again (refused on the memory store) |
 | `/memory` | | Review saved memories: the list of both scopes, one memory (Delete, History), `/memory <id>`, `/memory history` (restore a version), `/memory inbox` (Accept, Discard or Skip the proposals the extractor filed), `/memory stale` (not updated for 90 days) |
 
 Apps can add more of their own. `research_demo`, for instance, registers
