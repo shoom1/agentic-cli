@@ -91,10 +91,13 @@ async def test_one_initialization_validates_the_graph_once(monkeypatch):
     assert validated == [["coordinator", "worker"]] * 2
 
 
-def test_claude_names_are_pointed_at_the_direct_api_once_per_process(monkeypatch):
-    """ADK's model registry is process-wide and a registration lasts: each
-    manager's construction no longer registers again and clears its cache."""
+def test_claude_names_are_pointed_at_the_direct_api_once_per_process(monkeypatch, tmp_path):
+    """ADK's model registry is process-wide and a registration lasts. Only a
+    native ADK YAML app names its models as strings ADK resolves: loading one
+    registers, once per process; agents built from configs never do."""
     from agentic_cli.workflow.adk import anthropic_llm
+    from agentic_cli.workflow.adk.build import load_native_root
+    from tests.workflow.test_adk_context_cache import _native_yaml
 
     registered: list[int] = []
     monkeypatch.setattr(anthropic_llm, "register_direct_anthropic", lambda: registered.append(1))
@@ -104,5 +107,10 @@ def test_claude_names_are_pointed_at_the_direct_api_once_per_process(monkeypatch
             GoogleADKWorkflowManager(
                 agent_configs=[AgentConfig(name="a", prompt="p")], settings=ctx.settings
             )
+    assert registered == []
+
+    path = _native_yaml(tmp_path, "claude-sonnet-4-6")
+    for _ in range(3):
+        load_native_root(path)
 
     assert registered == [1]

@@ -480,7 +480,7 @@ class TestTheManagersBudget:
         manager = _manager("adk", [], adk_config_path=str(hermetic / "root_agent.yaml"))
         await manager.initialize_services()
         try:
-            assert manager.root_agent_name is None
+            assert manager.root_agent_name == "root"
             with pytest.raises(KeyError):
                 manager.context_budget()
         finally:

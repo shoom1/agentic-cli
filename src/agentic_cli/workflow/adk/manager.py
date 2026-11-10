@@ -178,6 +178,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             print(event.content)
     """
 
+    #: A native ADK YAML app's agents, loaded when they were validated, until
+    #: ``_do_initialize`` builds the app on them. A class default, so a
+    #: manager made without ``__init__`` (a test's) has none.
+    _loaded_native_root: LlmAgent | None = None
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -200,11 +205,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 or a model id (see ``BaseWorkflowManager``)
             on_event: Optional hook to transform/filter events before yielding
             adk_config_path: Optional path to a native ADK ``root_agent.yaml``.
-                When set, the agent tree is built via ADK ``from_config`` instead
-                of from ``agent_configs`` (full ADK fidelity; framework service /
-                state tool injection does not apply). Library-only for now: no
+                When set, ADK builds the agent tree from it (``from_config``)
+                instead of the manager building it from ``agent_configs``,
+                which are then ignored, with a warning. Only the building
+                differs: the app runs as one built from configs
+                (``workflow/adk/build.py``). Library-only for now: no
                 ``BaseCLIApp`` starts such an app.
         """
+        if adk_config_path and agent_configs:
+            # ADK builds the agents from the YAML: configs beside it would be
+            # validated, resolved and given services for nothing.
+            logger.warning(
+                "adk_native_configs_ignored",
+                path=str(adk_config_path),
+                agents=[config.name for config in agent_configs],
+            )
+            agent_configs = []
         super().__init__(
             agent_configs=agent_configs,
             settings=settings,
@@ -229,13 +245,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # The raw LLM log's plugin (made in _init_plugins), whose buffer a
         # turn drains: the reference exists before process() is called.
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
-
-        # Resolve bare ``claude-*`` strings (e.g. from agent YAML / native ADK
-        # configs) to the direct-API DirectAnthropicLlm instead of Vertex
-        # Claude: ADK's registry is the process's, so once per process.
-        from agentic_cli.workflow.adk.anthropic_llm import ensure_direct_anthropic
-
-        ensure_direct_anthropic()
 
         logger.debug(
             "workflow_manager_created",
@@ -281,6 +290,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         runner, self._runner = self._runner, None
         self._root_agent = None
+        self._loaded_native_root = None
         if self._llm_logging_plugin:
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
@@ -601,12 +611,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._session_service is None:
             self._session_service = self._make_session_service()
 
-        # Create agent hierarchy — natively from an ADK config, or from configs.
+        # Create agent hierarchy — by ADK from a native YAML, or from configs.
         if self._adk_config_path:
-            from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
-
-            self._root_agent = load_adk_agent_native(self._adk_config_path)
-            logger.info("adk_native_config_loaded", path=self._adk_config_path)
+            self._root_agent = self._take_native_root()
         else:
             self._root_agent = self._create_agents()
 
@@ -810,15 +817,34 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         kept for ``_create_agents``, which builds this initialization's agents
         from it rather than validating again.
 
+        A native ADK YAML app's agents are built here, by ADK
+        (``build.load_native_root``), and kept for ``_do_initialize``: its
+        code is imported now, and a root that is not an ``LlmAgent`` or a
+        task-mode agent is refused before anything else is done.
+
         Returns:
-            The graph; None for a native ADK config, whose topology ADK owns.
+            The graph; for a native ADK YAML app, one naming its root alone
+            (ADK built the tree, from no configs).
         """
         if self._adk_config_path:
-            return None  # native ADK config: ADK owns the topology
+            from agentic_cli.workflow.adk.build import load_native_root
+
+            root = self._loaded_native_root = load_native_root(self._adk_config_path)
+            return AgentGraph(config_map={}, build_order=(), root_name=root.name)
         self._validated_graph = validate_agent_graph(
             self._agent_configs, backend=self.backend_type
         )
         return self._validated_graph
+
+    def _take_native_root(self) -> LlmAgent:
+        """The native ADK YAML app's agents this initialization validated, taken
+        once; loaded now when nothing validated them (a later build loads its own)."""
+        root, self._loaded_native_root = self._loaded_native_root, None
+        if root is None:
+            from agentic_cli.workflow.adk.build import load_native_root
+
+            root = load_native_root(self._adk_config_path)
+        return root
 
     def _backend_ready(self) -> bool:
         """True when the runner, session service and agent tree are all live."""

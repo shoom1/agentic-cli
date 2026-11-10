@@ -156,11 +156,12 @@ class TestEachBackendFailsBeforeBuildingAnything:
             await manager.cleanup()
 
 
-class TestANativeAdkAppManagesNone:
-    async def test_the_configs_the_factory_passes_through_get_no_budget(self, ctx, tmp_path):
+class TestANativeAdkApp:
+    async def test_the_configs_the_factory_passes_through_are_ignored(self, ctx, tmp_path):
         # ``create_workflow_manager_from_settings`` hands a native app's configs to
-        # the manager too, and they are resolved: ADK owns the agents, so a 16,000-
-        # token model on one of them is no reason to refuse the start.
+        # the manager too. ADK builds the agents from the YAML, so they are
+        # ignored: a 16,000-token model on one of them is no reason to refuse
+        # the start.
         path = tmp_path / "root_agent.yaml"
         path.write_text(
             "agent_class: LlmAgent\nname: root\nmodel: gemini-2.5-flash\n"
@@ -173,8 +174,7 @@ class TestANativeAdkAppManagesNone:
             await manager.initialize_services()
 
             assert manager.is_initialized
-            assert manager.agent_models["a"].record.context_window == 16_000
-            assert manager._budgets == {}
+            assert "a" not in manager.agent_models
             with pytest.raises(KeyError, match="does not manage"):
                 manager.context_budget("a")
         finally:
