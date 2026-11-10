@@ -342,6 +342,78 @@ class TestAHandOverThatFails:
         assert closes == Counter({key: 1 for key in CLOSERS})
 
 
+async def _a_turn(manager: BaseWorkflowManager) -> str:
+    """Enter a turn of ``manager`` (every turn's entry, ``_turn``), and leave."""
+    async with manager._turn("s", "u"):
+        return "ran"
+
+
+class TestNoTurnRunsOnServicesItDoesNotOwn:
+    """A manager that holds services another manager owns runs no turn.
+
+    The permission engine's per-call check reads its owner's outside-content
+    marks: the borrower's turn before the give would be checked against the
+    lender's conversations, and the lender's after it against the
+    borrower's, so a memory write from a conversation that read outside
+    content went through unasked. The borrower runs turns once it owns them,
+    and the lender none after the give, until its release.
+    """
+
+    async def test_the_borrower_before_the_give(self, pair, ctx, run):
+        _, borrower_cls = pair
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        try:
+            with pytest.raises(RuntimeError, match="does not own"):
+                await _a_turn(new)
+            assert await _a_turn(run.manager) == "ran"
+
+            await run.manager.give_services(loan)
+
+            assert await _a_turn(new) == "ran"
+        finally:
+            await new.cleanup()
+
+    async def test_the_lender_after_the_give_until_its_release(self, pair, ctx, run):
+        _, borrower_cls = pair
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        await run.manager.give_services(loan)
+        try:
+            with pytest.raises(RuntimeError, match="does not own"):
+                await _a_turn(run.manager)
+            await run.manager.cleanup()
+            assert run.manager._service_set.not_owned == {}
+        finally:
+            await new.cleanup()
+
+    async def test_a_turn_queued_behind_the_give_is_refused(self, pair, ctx, run):
+        """asyncio's locks are FIFO: a turn that queued while the give waited
+        for the lender's turn lock gets it right after the give, before the
+        caller's cleanup."""
+        _, borrower_cls = pair
+        new = _manager(borrower_cls, ctx)
+        loan = run.manager.lend_services()
+        await new.initialize_services(services=loan)
+        await run.manager._turn_lock.acquire()  # a turn of the lender runs
+        try:
+            give = asyncio.create_task(run.manager.give_services(loan))
+            await asyncio.sleep(0.05)
+            turn = asyncio.create_task(_a_turn(run.manager))
+            await asyncio.sleep(0.05)
+            assert not give.done() and not turn.done()
+        finally:
+            run.manager._turn_lock.release()
+        try:
+            await asyncio.wait_for(give, timeout=5)
+            with pytest.raises(RuntimeError, match="does not own"):
+                await asyncio.wait_for(turn, timeout=5)
+        finally:
+            await new.cleanup()
+
+
 class TestTheLoan:
     async def test_it_lends_neither_the_manager_itself_nor_what_it_does_not_own(
         self, pair, ctx, run

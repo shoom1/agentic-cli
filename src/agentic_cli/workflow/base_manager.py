@@ -232,8 +232,11 @@ class BaseWorkflowManager(ABC):
         their owner and moves what they hold of their owner to it: the
         permission engine's prompts and per-call say, the knowledge base's
         summarizer. Each manager keeps its own ``WORKFLOW`` and summarizer
-        entries and builds its own service-bound tools; the old one runs no
-        more turns, and is released.
+        entries and builds its own service-bound tools. A manager that holds
+        services it does not own runs no turn (``_turn_admission`` raises
+        ``RuntimeError``), since the engine's per-call check reads its
+        owner's outside-content marks: the new manager until the give, the
+        old one after it, until it is released.
 
         The base also computes each agent's context numbers (``_budgets``),
         once the models are resolved and before any service is built, so a
@@ -1376,7 +1379,7 @@ class BaseWorkflowManager(ABC):
         builds only what they lack; :meth:`give_services` then makes it
         their owner. Until then this manager owns them, keeps working with
         them and closes them when it releases: a borrower that fails, is
-        cancelled or is cleaned up closes none of them.
+        cancelled or is cleaned up closes none of them, and runs no turn.
         """
         return ServiceLoan(self, self._service_set.lendable(self))
 
@@ -1391,7 +1394,8 @@ class BaseWorkflowManager(ABC):
         borrower (``ServiceSpec.rebind``): the permission engine asks through
         it and takes its per-call say, the knowledge base summarizes through
         it. A service the borrower already had its own of stays this
-        manager's. This manager runs no more turns after it: release it.
+        manager's. This manager runs no turn after it (``_turn_admission``
+        refuses, a turn queued on its turn lock too) until it is released.
 
         Raises:
             ValueError: This manager did not lend them.
@@ -1902,12 +1906,26 @@ class BaseWorkflowManager(ABC):
         retried once — anything worse fails cleanly rather than running against
         released resources.
 
+        No turn runs while the manager holds services another manager owns
+        (a hand-over: borrowed and not yet given, or given and not yet
+        released), checked under the turn lock too, so a turn that queued
+        behind ``give_services`` is refused.
+
         Raises:
-            RuntimeError: If the backend cannot be made ready.
+            RuntimeError: If the backend cannot be made ready, or the
+                manager holds services it does not own.
         """
         for attempt in (1, 2):
             await self._ensure_initialized()
             await self._turn_lock.acquire()
+            if self._service_set.not_owned:
+                self._turn_lock.release()
+                raise RuntimeError(
+                    f"{type(self).__name__} runs no turn while it holds services "
+                    "it does not own: borrowed and not given to it yet, or given "
+                    "to another manager and not released. Their permission "
+                    "checks answer for their owner's conversations."
+                )
             if self._backend_ready():
                 try:
                     yield

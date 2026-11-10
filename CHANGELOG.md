@@ -550,7 +550,9 @@ the start of the entry's title.
   summarizer (`KnowledgeBaseManager.summarizer`, now settable) move to the new
   manager. Until they are given the old manager owns them: a new manager that
   fails to initialize, is cancelled while it does, or is cleaned up closes
-  none of them, and the old one keeps working with them. `ServiceLoan` is in
+  none of them, and the old one keeps working with them. A manager that holds
+  services it does not own runs no turn (`RuntimeError`): the new one before
+  the give, the old one after it until its release. `ServiceLoan` is in
   `agentic_cli.workflow.services`. The CLI does not use it yet: an
   orchestrator change still builds new services.
 
