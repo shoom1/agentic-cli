@@ -1,9 +1,11 @@
 """Which finished jobs wait to be told in the open conversation.
 
 One rule, for the three places that say it: the line an opened conversation
-says (``BaseCLIApp._name_its_waiting_jobs``), the status bar's ``↻N``
-(``JobMonitor``), and the deliveries (``BaseCLIApp.resume_finished_jobs``:
-at a turn's end, after ``/resume``, and by ``/jobs resume``).
+says (``BaseCLIApp._name_its_waiting_jobs``, through
+``ConversationCore.waiting_jobs``), the status bar's ``↻N`` (``JobMonitor``),
+and the deliveries (``ConversationCore.deliver_finished_jobs``, which
+``BaseCLIApp.resume_finished_jobs`` runs: at a turn's end, after ``/resume``,
+and by ``/jobs resume``).
 
 A job waits for delivery when it has finished, was submitted with
 ``resume_on_complete``, and its delivery is still ``PENDING``

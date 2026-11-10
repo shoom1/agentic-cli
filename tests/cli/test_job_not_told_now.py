@@ -13,7 +13,6 @@ opened) say it once per job and conversation.
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 
 from agentic_cli.cli.app import BaseCLIApp
@@ -58,7 +57,6 @@ def app_with() -> BaseCLIApp:
     workflow.job_manager = Jobs()
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._workflow_controller = ReplayController(workflow)
-    app._turn_lock = asyncio.Lock()
     app._message_processor = MessageProcessor()
     app.session = autospec_session()
     app._settings = SimpleNamespace(

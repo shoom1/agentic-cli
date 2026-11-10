@@ -136,7 +136,6 @@ def app_on(workflow, jobs) -> BaseCLIApp:
     workflow.job_manager = jobs
     app = BaseCLIApp.__new__(BaseCLIApp)
     app._workflow_controller = ReplayController(workflow)
-    app._turn_lock = asyncio.Lock()
     app._message_processor = MessageProcessor()
     app.session = autospec_session()
     app._settings = SETTINGS
