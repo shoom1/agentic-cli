@@ -187,7 +187,7 @@ async def failed_app(monkeypatch, error: Exception):
         raise error
 
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
     monkeypatch.setattr(
         "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
         cannot_start,
@@ -230,7 +230,7 @@ async def test_status_shows_why_the_workflow_did_not_start(monkeypatch):
 
 async def test_a_running_workflow_has_no_error(monkeypatch):
     monkeypatch.setattr("agentic_cli.cli.app.configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr("agentic_cli.cli.app._install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr("agentic_cli.cli.app.install_log_filters", lambda: None)
     from agentic_cli.cli import AppInfo
     from agentic_cli.cli.app import BaseCLIApp
 

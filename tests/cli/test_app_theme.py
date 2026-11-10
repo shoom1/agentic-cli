@@ -54,7 +54,7 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for variable in ("AGENTIC_UI_THEME", "AGENTIC_DIALOG_PLACEMENT"):
         monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
 
 
 def _app(cls: type[BaseCLIApp] = BaseCLIApp, **settings: str) -> BaseCLIApp:

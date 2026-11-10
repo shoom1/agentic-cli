@@ -761,17 +761,17 @@ FAILURE_LOGGERS = (
 
 @pytest.fixture
 def notice_hook(monkeypatch):
-    """The CLI's hook, as BaseCLIApp installs it, taken off after the test."""
+    """The CLI's filters, as BaseCLIApp.run() installs them, taken off after the test."""
     import logging
     import warnings
 
-    from agentic_cli.cli.app import _install_adk_notice_hook
+    from agentic_cli.workflow.adk.log_filters import install_log_filters
 
     for name in FAILURE_LOGGERS:
         adk_logger = logging.getLogger(name)
         monkeypatch.setattr(adk_logger, "filters", list(adk_logger.filters))
     monkeypatch.setattr(warnings, "showwarning", warnings.showwarning)
-    _install_adk_notice_hook()
+    install_log_filters()
 
 
 def over_the_ui(caplog) -> list[tuple[str, str]]:

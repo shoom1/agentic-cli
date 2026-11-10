@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-import logging
 import os
 import re
 import shlex
@@ -66,7 +65,8 @@ from agentic_cli.cli.stored_conversations import StoredConversations
 from agentic_cli.cli.usage_tracker import UsageTracker
 from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
-from agentic_cli.logging import LOG_STREAM, Loggers, configure_logging, log_lines_to
+from agentic_cli.logging import Loggers, configure_logging, log_lines_to
+from agentic_cli.workflow.adk.log_filters import install_log_filters
 from agentic_cli.workflow.factory import check_backend, orchestrator_of
 from agentic_cli.workflow.session_readers import reader_backends
 from agentic_cli.workflow.settings import OrchestratorType
@@ -86,119 +86,6 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.config import AgentConfig
 
 logger = Loggers.cli()
-
-# === ADK notices ===
-
-# ADK 2 announces each experimental feature it uses with a UserWarning, in one
-# of two forms: a feature flag ("[EXPERIMENTAL] feature
-# FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled."), or a class or function
-# marked experimental ("[EXPERIMENTAL] GeminiContextCacheManager: This feature
-# is experimental and may change ...", from a Gemini agent's first turn while
-# prompt caching is on).
-_ADK_EXPERIMENTAL_NOTICE = re.compile(
-    r"\[EXPERIMENTAL\] (?:feature (?P<feature>\S+) is enabled|(?P<name>\w+): )"
-)
-
-# ADK 2's runner warns, through stdlib logging, that an app whose agents can
-# transfer to each other has no context_cache_config: a native ADK YAML app
-# with sub-agents (agents built from configs delegate and never transfer). The
-# ADK manager sets one while prompt caching is on and a model caches, so the
-# advice comes only when the user turned caching off or no model caches: it
-# has nothing left to tell them.
-_ADK_RUNNER_LOGGER = "google_adk.google.adk.runners"
-_ADK_UNCACHED_TRANSFER = "can transfer between agents but has no context_cache_config"
-
-
-class _AdkUncachedTransferFilter(logging.Filter):
-    """Turns ADK's context-cache advice into a debug log entry."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if _ADK_UNCACHED_TRANSFER not in message:
-            return True
-        logger.debug("adk_uncached_agent_transfer", message=message)
-        return False
-
-
-# While prompt caching is on, ADK's Gemini context cache warns through stdlib
-# logging when it cannot create a cache or delete an old one (an expired cache
-# is already gone on Google's side). The turn goes on uncached, so the warning
-# has nothing for the user mid-conversation.
-_ADK_CACHE_LOGGER = "google_adk.google.adk.models.gemini_context_cache_manager"
-_ADK_CACHE_FAILURES = (
-    ("Failed to create cache", "adk_cache_create_failed"),
-    ("Failed to cleanup cache", "adk_cache_cleanup_failed"),
-)
-
-
-class _AdkCacheFailureFilter(logging.Filter):
-    """Turns ADK's context-cache failure warnings into debug log entries."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        for prefix, event in _ADK_CACHE_FAILURES:
-            if message.startswith(prefix):
-                logger.debug(event, message=message)
-                return False
-        return True
-
-
-# ADK logs a failure's traceback through stdlib logging where the user is
-# told otherwise. A summary that failed: ADK goes on with the whole history,
-# and the summarizer itself warns the user once a turn (it never lets its own
-# failure reach ADK, so this is a backstop). A model call that failed: the
-# user reads its error as an ERROR event or as the turn's error. ADK logs one
-# twice for the main agent, from the node and from the runner ("Root node %s
-# failed.", matched exactly: "Root node %s was cancelled …" passes), and a
-# failed overflow retry once more, from the plugin manager. ADK also warns on
-# every request of a session holding a call without a result, which it drops:
-# the next turn answers such a call (workflow/adk/interrupted_calls_plugin.py),
-# so the warning has nothing for the user either. Each entry: the logger, what
-# a record's message starts with or (``msg=``) its exact format, and the debug
-# event it becomes.
-_ADK_FAILURES = (
-    ("google_adk.google.adk.apps.compaction", {"prefix": "Event compaction failed"},
-     "adk_compaction_failed"),
-    ("google_adk.google.adk.workflow._node_runner", {"prefix": "Node execution failed"},
-     "adk_node_failed"),
-    ("google_adk.google.adk.runners", {"msg": "Root node %s failed."}, "adk_root_node_failed"),
-    ("google_adk.google.adk.plugins.plugin_manager",
-     {"prefix": "Error in plugin 'context_overflow'"}, "adk_overflow_plugin_failed"),
-    ("google_adk.google.adk.flows.llm_flows.tools._rearranger",
-     {"prefix": "Dropping function calls with no matching function response"},
-     "adk_dropped_open_calls"),
-)
-
-
-class _AdkFailureFilter(logging.Filter):
-    """Turns ADK's failure tracebacks on one logger into a debug log entry.
-
-    A record is matched by the start of its message (``prefix``) or by its
-    format string itself (``msg``).
-    """
-
-    def __init__(self, event: str, *, prefix: str | None = None, msg: str | None = None) -> None:
-        super().__init__()
-        self._event = event
-        self._prefix = prefix
-        self._msg = msg
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if self._msg is not None:
-            matched = record.msg == self._msg
-        else:
-            matched = self._prefix is not None and message.startswith(self._prefix)
-        if not matched:
-            return True
-        error = record.exc_info[1] if record.exc_info else None
-        logger.debug(
-            self._event,
-            message=message,
-            error_type=type(error).__name__ if error is not None else None,
-            error=str(error) if error is not None else None,
-        )
-        return False
 
 
 def _stderr_is_terminal() -> bool:
@@ -223,7 +110,7 @@ def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
     handed to the loop. A line logged while one is being shown goes to
     stderr, so showing never recurses. With stderr redirected (``2>file``),
     the lines stay on it. Python's warnings go the same way
-    (``_install_adk_notice_hook``).
+    (``workflow/adk/log_filters.py::install_log_filters``).
     """
     if not _stderr_is_terminal():
         yield
@@ -259,53 +146,6 @@ def _log_lines_above_prompt(session: ThinkingPromptSession) -> Iterator[None]:
 
     with log_lines_to(sink):
         yield
-
-
-def _install_adk_notice_hook() -> None:
-    """Log ADK's notices instead of printing them.
-
-    While the prompt runs, the log lines ``configure_logging`` sets up print
-    above it (``_log_lines_above_prompt``), and so do Python's warnings: this
-    hook has Python's own hook write them to the same stream (another hook,
-    such as logging's ``captureWarnings``, gets them as given). The hook logs ADK's
-    experimental-feature notices at debug and passes every other warning to
-    the hook it replaced; a filter on ADK's runner logger does the same for
-    its context-cache advice, one on its context-cache logger for a cache it
-    could not create or delete, one each on its compaction, node, runner
-    and plugin-manager loggers for the traceback of a summary, a model call or
-    an overflow retry that failed, and one on its rearranger for a call
-    without a result it drops. Only
-    the CLI installs them, so library users and the test suite keep Python's
-    own handling. Installing twice changes nothing.
-    """
-    for name, kind in (
-        (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),
-        (_ADK_CACHE_LOGGER, _AdkCacheFailureFilter),
-    ):
-        adk_logger = logging.getLogger(name)
-        if not any(isinstance(f, kind) for f in adk_logger.filters):
-            adk_logger.addFilter(kind())
-    for name, match, event in _ADK_FAILURES:
-        adk_logger = logging.getLogger(name)
-        if not any(isinstance(f, _AdkFailureFilter) for f in adk_logger.filters):
-            adk_logger.addFilter(_AdkFailureFilter(event, **match))
-
-    previous = warnings.showwarning
-    if getattr(previous, "_logs_adk_notices", False):
-        return
-
-    def showwarning(message, category, filename, lineno, file=None, line=None):
-        notice = _ADK_EXPERIMENTAL_NOTICE.match(str(message))
-        if notice and issubclass(category, UserWarning):
-            feature = (notice["feature"] or notice["name"]).removeprefix("FeatureName.")
-            logger.debug("adk_experimental_feature", feature=feature)
-            return
-        if file is None and previous is warnings._showwarning_orig:
-            file = LOG_STREAM
-        previous(message, category, filename, lineno, file, line)
-
-    showwarning._logs_adk_notices = True
-    warnings.showwarning = showwarning
 
 
 #: What setting ``BaseCLIApp.session_id`` warns, deprecated in 0.7.0: a setter
@@ -546,7 +386,6 @@ class BaseCLIApp:
         self._app_info = app_info
         self._settings = settings
         configure_logging(self._settings)
-        _install_adk_notice_hook()
 
         logger.info("app_starting", app_name=self._settings.app_name)
 
@@ -2289,8 +2128,14 @@ class BaseCLIApp:
         )
 
     async def run(self) -> None:
-        """Run the main application loop."""
+        """Run the main application loop.
+
+        It installs the filters that log what ADK would print over the
+        prompt (``workflow/adk/log_filters.py``) first: an app that is built
+        but never run, as a library user's, keeps Python's own handling.
+        """
         logger.info("repl_starting")
+        install_log_filters()
 
         job_monitor = self._new_job_monitor()
         self._job_monitor = job_monitor  # told when a conversation is deleted

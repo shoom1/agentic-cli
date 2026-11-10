@@ -1,4 +1,5 @@
-"""The CLI logs ADK's notices instead of printing them over the terminal UI.
+"""The CLI logs ADK's notices instead of printing them over the terminal UI
+(``workflow/adk/log_filters.py``).
 
 ADK 2 announces each experimental feature it uses with a ``UserWarning``
 ("[EXPERIMENTAL] feature FeatureName.X is enabled.", or "[EXPERIMENTAL]
@@ -6,23 +7,33 @@ ClassName: This feature is experimental ..." for a class marked experimental),
 and warns through stdlib logging, when the runner is built, that an app with
 sub-agents has no ``context_cache_config`` (the ADK manager gives the app one
 while prompt caching is on). Python prints both to stderr, which in the CLI
-lands over the terminal UI. ``BaseCLIApp`` installs a ``warnings.showwarning`` hook
-that logs the notices at debug and hands every other warning to the hook it
-replaced, and a filter that does the same for the context-cache advice.
+lands over the terminal UI. ``install_log_filters`` installs a
+``warnings.showwarning`` hook that logs the notices at debug and hands every
+other warning to the hook it replaced, and filters on ADK's loggers that do the
+same for the context-cache advice, the cache failures, the failure tracebacks
+the user is told otherwise, and a dropped call.
+
+``BaseCLIApp.run()`` installs them, once: a library user who never runs the
+CLI, the test suite included, keeps Python's own handling. Importing the module
+imports no ADK (the filters attach to ADK's loggers by name), so the CLI on
+another backend never loads it.
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 import warnings
 
 import pytest
 from thinking_prompt import AppInfo
 
-from agentic_cli.cli import app as app_module
-from agentic_cli.cli.app import BaseCLIApp, _install_adk_notice_hook
+from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.config import BaseSettings
+from agentic_cli.workflow.adk import log_filters
+from agentic_cli.workflow.adk.log_filters import install_log_filters
+from tests.cli.dialog_fakes import autospec_session, opening_boxes
 from tests.conftest import MockContext
 from tests.demo_isolation import suppress_global_logging_config
 
@@ -36,7 +47,7 @@ ADK_REARRANGER_LOGGER = "google_adk.google.adk.flows.llm_flows.tools._rearranger
 
 
 class _LogRecorder:
-    """Stands in for ``cli.app``'s logger and records every call.
+    """Stands in for ``log_filters``' logger and records every call.
 
     ``structlog.testing.capture_logs()`` sees no debug call once an earlier test
     has run ``configure_logging()``: the module's logger is cached as a logger
@@ -57,15 +68,18 @@ class _LogRecorder:
 @pytest.fixture
 def logged(monkeypatch) -> list[dict]:
     recorder = _LogRecorder()
-    monkeypatch.setattr(app_module, "logger", recorder)
+    monkeypatch.setattr(log_filters, "logger", recorder)
     return recorder.events
+
+
+ADK_LOGGERS = (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER, ADK_COMPACTION_LOGGER, ADK_NODE_LOGGER,
+               ADK_PLUGIN_LOGGER, ADK_REARRANGER_LOGGER)
 
 
 @pytest.fixture(autouse=True)
 def _restore_adk_runner_filters(monkeypatch):
     """The hook adds filters to ADK's loggers; take them off after each test."""
-    for name in (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER, ADK_COMPACTION_LOGGER, ADK_NODE_LOGGER,
-                 ADK_PLUGIN_LOGGER):
+    for name in ADK_LOGGERS:
         adk_logger = logging.getLogger(name)
         monkeypatch.setattr(adk_logger, "filters", list(adk_logger.filters))
 
@@ -90,7 +104,7 @@ def _warn(message: str, category: type[Warning] = UserWarning) -> None:
 
 
 def test_an_experimental_notice_is_logged_not_printed(previous_hook, logged, capsys):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     _warn(NOTICE)
 
@@ -119,7 +133,7 @@ def test_an_experimental_class_notice_is_logged_not_printed(
 
     monkeypatch.setattr(feature_decorator, "_WARNED_MESSAGES", set())  # ADK warns once
     monkeypatch.delenv("ADK_SUPPRESS_EXPERIMENTAL_FEATURE_WARNINGS", raising=False)
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with warnings.catch_warnings():
         warnings.simplefilter("always")
@@ -144,7 +158,7 @@ def test_an_experimental_class_notice_is_logged_not_printed(
     ],
 )
 def test_every_other_warning_reaches_the_previous_hook(previous_hook, capsys, message, category):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     _warn(message, category)
 
@@ -153,29 +167,120 @@ def test_every_other_warning_reaches_the_previous_hook(previous_hook, capsys, me
 
 
 def test_installing_twice_keeps_one_hook(previous_hook):
-    _install_adk_notice_hook()
+    install_log_filters()
     installed = warnings.showwarning
     filters = list(logging.getLogger(ADK_RUNNER_LOGGER).filters)
-    _install_adk_notice_hook()
+    install_log_filters()
 
     assert warnings.showwarning is installed
     assert logging.getLogger(ADK_RUNNER_LOGGER).filters == filters
 
 
-def test_the_cli_app_installs_the_hook(previous_hook, tmp_path, monkeypatch):
-    (tmp_path / "home").mkdir()
+# --- who installs them ---------------------------------------------------------------
+
+
+def _ours(name: str) -> list[logging.Filter]:
+    return [f for f in logging.getLogger(name).filters if type(f).__module__ == log_filters.__name__]
+
+
+def _cli_app(tmp_path, monkeypatch) -> BaseCLIApp:
+    (tmp_path / "home").mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
     suppress_global_logging_config(monkeypatch)
-
-    BaseCLIApp(
+    return BaseCLIApp(
         app_info=AppInfo(name="Notice test", version="0"),
         agent_configs=[],
-        settings=BaseSettings(workspace_dir=tmp_path / "workspace"),
+        settings=BaseSettings(workspace_dir=tmp_path / "workspace", session_store="memory"),
     )
+
+
+def test_importing_it_loads_no_adk():
+    """The filters attach to ADK's loggers by name: neither the module nor the
+    CLI, which imports it, loads ADK (a Deep Agents app never does)."""
+    code = (
+        "import sys, agentic_cli.workflow.adk.log_filters, agentic_cli.cli.app; "
+        "print(sorted(m for m in sys.modules if m == 'google.adk' or m.startswith('google.adk.')))"
+    )
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "[]"
+
+
+def test_an_app_that_never_runs_installs_nothing(previous_hook, tmp_path, monkeypatch):
+    """A library user's app, built but never run: Python's own handling stays."""
+    hook = warnings.showwarning
+    filters = {name: list(logging.getLogger(name).filters) for name in ADK_LOGGERS}
+
+    _cli_app(tmp_path, monkeypatch)
     _warn(NOTICE)
 
+    assert warnings.showwarning is hook
+    assert previous_hook == [NOTICE]
+    assert {name: list(logging.getLogger(name).filters) for name in ADK_LOGGERS} == filters
+
+
+class _Manager:
+    backend_type, model, catalog, agent_models = "adk", "google:gemini-2.5-flash", None, {}
+    is_initialized = False
+
+    async def initialize_services(self) -> None:
+        self.is_initialized = True
+
+    async def load_session(self, session_id, user_id=None) -> bool:
+        return False
+
+    async def cleanup(self) -> None:
+        self.is_initialized = False
+
+
+async def test_run_installs_them_once(previous_hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "agentic_cli.cli.workflow_controller.create_workflow_manager_from_settings",
+        lambda **kwargs: _Manager(),
+    )
+
+    async def run() -> None:
+        app = _cli_app(tmp_path, monkeypatch)
+        app.session = opening_boxes(autospec_session())  # a run that ends at once
+        await app.run()
+
+    for name in ADK_LOGGERS:  # as a process that never ran the CLI has them
+        adk_logger = logging.getLogger(name)
+        adk_logger.filters = [f for f in adk_logger.filters if f not in _ours(name)]
+
+    await run()
+    hook = warnings.showwarning
+    await run()  # another app run in the process: nothing added
+
+    assert warnings.showwarning is hook and hook._logs_adk_notices
+    for name in ADK_LOGGERS:
+        assert len(_ours(name)) == (2 if name == ADK_RUNNER_LOGGER else 1), name
+    _warn(NOTICE)
     assert previous_hook == []
+
+
+def test_the_plugin_manager_filter_names_the_overflow_plugin_as_the_plugin_does(
+    logged, caplog, monkeypatch
+):
+    """The text it matches is the overflow plugin's own
+    (``overflow_plugin.OVERFLOW_PLUGIN_FAILED``), read when a record comes."""
+    from agentic_cli.workflow.adk import overflow_plugin
+
+    monkeypatch.setattr(overflow_plugin, "OVERFLOW_PLUGIN_FAILED", "Error in plugin 'renamed'")
+    install_log_filters()
+
+    with caplog.at_level(logging.DEBUG, logger=ADK_PLUGIN_LOGGER):
+        plugin_logger = logging.getLogger(ADK_PLUGIN_LOGGER)
+        plugin_logger.error("Error in plugin 'renamed' during 'on_model_error_callback': %s", "x")
+        plugin_logger.error("Error in plugin 'context_overflow' during 'x': %s", "y")
+
+    assert [r.getMessage() for r in caplog.records if r.name == ADK_PLUGIN_LOGGER] == [
+        "Error in plugin 'context_overflow' during 'x': y"
+    ]
+    assert [e["event"] for e in logged] == ["adk_overflow_plugin_failed"]
 
 
 async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path, monkeypatch, caplog):
@@ -192,7 +297,7 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with MockContext(
         google_api_key="test-key", session_store="memory", prompt_caching_enabled=False
@@ -225,7 +330,7 @@ async def test_adks_context_cache_advice_is_logged_not_printed(logged, tmp_path,
 
 
 def test_adks_dropped_call_warning_is_logged_not_printed(logged, caplog):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with caplog.at_level(logging.WARNING, logger=ADK_REARRANGER_LOGGER):
         logging.getLogger(ADK_REARRANGER_LOGGER).warning(
@@ -255,7 +360,7 @@ def test_adks_dropped_call_warning_is_logged_not_printed(logged, caplog):
     ],
 )
 def test_adks_cache_failures_are_logged_not_printed(logged, caplog, template, value, event):
-    _install_adk_notice_hook()
+    install_log_filters()
     cache_logger = logging.getLogger(ADK_CACHE_LOGGER)
     args = value if isinstance(value, tuple) else (value,)
 
@@ -269,7 +374,7 @@ def test_adks_cache_failures_are_logged_not_printed(logged, caplog, template, va
 
 
 def test_other_cache_warnings_still_reach_their_handlers(logged, caplog):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with caplog.at_level(logging.WARNING, logger=ADK_CACHE_LOGGER):
         logging.getLogger(ADK_CACHE_LOGGER).warning("Something else went wrong")
@@ -298,7 +403,7 @@ def test_other_cache_warnings_still_reach_their_handlers(logged, caplog):
 ], ids=["compaction", "node", "root-node", "overflow-plugin"])
 def test_adks_failure_tracebacks_are_logged_not_printed(logged, caplog, name, level, message,
                                                         args, event):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with caplog.at_level(logging.DEBUG, logger=name):
         try:
@@ -319,7 +424,7 @@ def test_adks_failure_tracebacks_are_logged_not_printed(logged, caplog, name, le
     (ADK_PLUGIN_LOGGER, "Error in plugin 'llm_logging' during 'after_model_callback' callback: %s"),
 ], ids=["compaction", "node", "root-node-cancelled", "another-plugin"])
 def test_their_other_records_pass(logged, caplog, name, message):
-    _install_adk_notice_hook()
+    install_log_filters()
 
     with caplog.at_level(logging.DEBUG, logger=name):
         logging.getLogger(name).warning(message, "solo") if "%s" in message else (
@@ -342,7 +447,7 @@ def test_another_hook_gets_the_warning_as_it_was_given(monkeypatch):
         seen.append(file)
 
     monkeypatch.setattr(warnings, "showwarning", showwarning)
-    _install_adk_notice_hook()
+    install_log_filters()
 
     _warn("an ordinary warning")
 

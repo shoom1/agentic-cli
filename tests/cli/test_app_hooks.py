@@ -35,7 +35,7 @@ def hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
 
 
 def build(cls: type[BaseCLIApp], **kwargs) -> BaseCLIApp:

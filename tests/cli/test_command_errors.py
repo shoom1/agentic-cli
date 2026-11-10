@@ -52,7 +52,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BaseCLIApp:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
     app = BaseCLIApp(
         app_info=AppInfo(name="Command test", version="0"),
         agent_configs=[AgentConfig(name="a", prompt="p")],

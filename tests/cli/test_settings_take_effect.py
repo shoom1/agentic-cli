@@ -80,7 +80,7 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BaseSettings:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+    monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
     return BaseSettings()
 
 
@@ -230,7 +230,7 @@ class TestALiveKey:
             house_style: str = Field(default="plain", title="House Style")
 
         monkeypatch.setattr(app_module, "configure_logging", lambda *a, **k: None)
-        monkeypatch.setattr(app_module, "_install_adk_notice_hook", lambda: None)
+        monkeypatch.setattr(app_module, "install_log_filters", lambda: None)
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         app, manager = running_app(AppSettings())
