@@ -20,6 +20,7 @@ import json
 import sys
 import textwrap
 
+import httpx
 import pytest
 
 pytest.importorskip("google.adk")
@@ -619,6 +620,51 @@ class TestItRunsAsAnyApp:
         assert [m["content"] for m in recent if m["role"] == "assistant"] == [
             "Helper here.", "Still helper.",
         ]
+
+    async def test_a_conversation_an_agent_it_transferred_to_no_longer_fits_ends_the_turn(
+        self, project, monkeypatch
+    ):
+        """The agent holds the conversation and replies, so its overflow is the
+        turn's one clear error, as the main agent's is: not a sub-agent's "I
+        could not do this task" as the reply."""
+        overflow = httpx.Response(400, json={"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: 208310 tokens > 200000 maximum",
+        }})
+        helper_yaml(project)
+        claude = Claude(root=[calls("transfer_to_agent", "toolu_t", agent_name="helper")],
+                        helper=[overflow, overflow])
+        route_anthropic(monkeypatch, claude)
+        manager = native(root_yaml(project, extra="sub_agents:\n  - config_path: helper.yaml\n"))
+        try:
+            events = await turn(manager, "Ask the helper.")
+        finally:
+            await manager.cleanup()
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert (error.metadata["error_code"], error.metadata["recoverable"]) == (
+            "CONTEXT_OVERFLOW", False
+        )
+        assert [e for e in events if e.type is EventType.TEXT] == []
+
+    async def test_a_refusal_by_an_agent_it_transferred_to_ends_the_turn(
+        self, project, monkeypatch
+    ):
+        refusal = anthropic_message(model=MODEL)
+        refusal.update(content=[], stop_reason="refusal")
+        helper_yaml(project)
+        claude = Claude(root=[calls("transfer_to_agent", "toolu_t", agent_name="helper")],
+                        helper=[refusal])
+        route_anthropic(monkeypatch, claude)
+        manager = native(root_yaml(project, extra="sub_agents:\n  - config_path: helper.yaml\n"))
+        try:
+            events = await turn(manager, "Ask the helper.")
+        finally:
+            await manager.cleanup()
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert error.content == "anthropic:claude-sonnet-4-6 returned no answer"
+        assert error.metadata["recoverable"] is False
 
     async def test_the_cap_leaves_out_an_agent_with_its_own_after_tool_callbacks(
         self, project, monkeypatch
