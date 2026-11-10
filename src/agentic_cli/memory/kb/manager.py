@@ -372,6 +372,19 @@ class KnowledgeBaseManager:
                 yield self._db
 
     @property
+    def summarizer(self) -> "Summarizer | None":
+        """What writes this knowledge base's summaries and sidecars; None: previews.
+
+        Settable: an owner that hands the knowledge base on (a workflow
+        manager giving its services to another) gives it the new owner's.
+        """
+        return self._summarizer
+
+    @summarizer.setter
+    def summarizer(self, summarizer: "Summarizer | None") -> None:
+        self._summarizer = summarizer
+
+    @property
     def concepts(self) -> "ConceptStore":
         """Lazy-loaded ConceptStore pointed at ``<kb_dir>/concepts/``.
 

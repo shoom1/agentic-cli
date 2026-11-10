@@ -69,6 +69,7 @@ CLASSES = {
 
 PROPERTIES = {
     ("KnowledgeBaseManager", "concepts"),
+    ("KnowledgeBaseManager", "summarizer"),
     ("EmbeddingService", "embedding_dim"),
     ("EmbeddingService", "model"),
 }
