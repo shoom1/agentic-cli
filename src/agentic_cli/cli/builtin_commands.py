@@ -630,8 +630,26 @@ class SessionsCommand(Command):
     @staticmethod
     async def _delete(app: Any, session_id: str, backend: str | None) -> None:
         """Delete ``session_id`` on the backend that keeps it (``backend``, when named)."""
+        from agentic_cli.workflow.settings import OrchestratorType
+
+        names = sorted(o.value for o in OrchestratorType)
+        if backend is not None and backend not in names:
+            app.session.add_error(
+                f"Unknown backend '{backend}': {', '.join(names[:-1])} or {names[-1]}."
+            )
+            return
         if session_id == app.session_id and backend in (None, app.session_backend):
-            app.session.add_error("You are in this conversation; /new or /resume another first.")
+            twins = sorted(
+                info.backend for info in await app.list_conversations()
+                if info.session_id == session_id and info.backend != app.session_backend
+            )
+            line = "You are in this conversation; /new or /resume another first."
+            if twins:
+                line += (
+                    f" {twins[0]} keeps one with this id too: /sessions "
+                    f"--delete={session_id} --backend={twins[0]} deletes that one."
+                )
+            app.session.add_error(line)
             return
         rows = [
             info for info in await app.list_conversations()

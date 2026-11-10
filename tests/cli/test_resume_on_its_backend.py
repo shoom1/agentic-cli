@@ -610,7 +610,7 @@ class TestTheStartPicksTheBackendFirst:
         assert self.built(two) == ["deepagents"]
         assert app._workflow_controller.backend == "deepagents"
         assert session.said("warning")[0] == (
-            "Could not open 'd1': the workflow did not start. "
+            "Could not open 'd1': its backend, deepagents, did not start. "
             "Fix it with /settings, then /resume d1."
         )
         assert free_after == [True]
@@ -635,7 +635,7 @@ class TestTheStartPicksTheBackendFirst:
 
         assert self.built(two) == ["deepagents"]
         assert session.said("warning")[0] == (
-            "Could not continue 'd1': the workflow did not start. "
+            "Could not continue 'd1': its backend, deepagents, did not start. "
             "Fix it with /settings, then /resume d1."
         )
 

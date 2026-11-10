@@ -2598,17 +2598,24 @@ class BaseCLIApp:
         if chosen is not None:  # --continue chose before the build (on its backend)
             self._pending_hold = chosen[0]
         if not await self._workflow_controller.ensure_initialized(self.session):
+            # The backend the start moved to for the conversation asked for
+            # (not the settings') is named: the run stays on it.
+            backend = self._workflow_controller.backend
+            failed = (
+                "the workflow did not start" if backend == orchestrator_of(self._settings).value
+                else f"its backend, {backend}, did not start"
+            )
             if self._pending_hold is not None:  # the one --continue chose
                 continuing = self._pending_hold.session_id
                 self._conversation.abandon(self._pending_hold)
                 self._pending_hold = None
                 self.session.add_warning(
-                    f"Could not continue '{continuing}': the workflow did not start. "
+                    f"Could not continue '{continuing}': {failed}. "
                     f"Fix it with /settings, then /resume {continuing}."
                 )
                 return await self._adopt_its_own()
             self.session.add_warning({
-                "resume": f"Could not open '{target}': the workflow did not start. "
+                "resume": f"Could not open '{target}': {failed}. "
                           f"Fix it with /settings, then /resume {target}.",
                 "continue": "Could not continue: the workflow did not start. "
                             "Fix it with /settings, then /resume.",

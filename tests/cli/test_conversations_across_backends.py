@@ -327,13 +327,36 @@ class TestTheSessionsCommand:
         app._conversation.session_id = "x"
 
         await app.process_input("/sessions --delete=x")
-        assert said(app.session, "add_error") == [
+        assert said(app.session, "add_error")[0].startswith(
             "You are in this conversation; /new or /resume another first."
-        ]
+        )
+        assert "x" in workflow.stored
 
         await app.process_input("/sessions --delete=x --backend=deepagents")
         assert [r.deleted for r in readers.of("deepagents") if r.deleted] == [["x"]]
         assert "x" in workflow.stored
+
+    async def test_the_one_the_app_is_in_names_how_to_delete_its_twin(self, readers):
+        app, _ = on_adk(conversation("x", "On ADK", 2, hours=2))
+        readers.stored["deepagents"] = [row("x", "On Deep Agents", hours=1)]
+        app._conversation.session_id = "x"
+
+        await app.process_input("/sessions --delete=x")
+
+        assert said(app.session, "add_error") == [
+            "You are in this conversation; /new or /resume another first. deepagents "
+            "keeps one with this id too: /sessions --delete=x --backend=deepagents "
+            "deletes that one."
+        ]
+
+    async def test_an_unknown_backend_is_said_to_be_unknown(self, readers):
+        app, _ = on_adk(conversation("a1", "On ADK", 2))
+
+        await app.process_input("/sessions --delete=a1 --backend=nope")
+
+        assert said(app.session, "add_error") == [
+            "Unknown backend 'nope': adk, deepagents or langgraph."
+        ]
 
     async def test_one_no_backend_keeps_is_not_found(self, readers):
         app, _ = on_adk(conversation("a1", "On ADK", 2))
