@@ -173,11 +173,14 @@ class TestTheCurrentModelIsAlwaysOffered:
     """A picker shows the model its role runs on now. When the list leaves that
     model out (its provider has no key, or does not serve it: a listing
     recorded it as absent, or this process's fresh listing lacks it), the
-    picker still offers it, first, marked "(current; not offered)", and its
-    description says why. So a Save of the dialog as it opened changes no
-    model, and a user who moved off it can pick it back."""
+    picker still offers it, first, marked "(current)", and its description
+    starts with "Not offered" and why. So a Save of the dialog as it opened
+    changes no model, and a user who moved off it can pick it back. The
+    marker is short, as the description says the rest: a long reference with
+    a longer marker cut the picker's label, and the open menu cut the marker
+    away."""
 
-    MARKED = "{} (current; not offered)"
+    MARKED = "{} (current)"
 
     def test_a_model_whose_provider_has_no_key(self):
         settings = BaseSettings(google_api_key="k-g", default_model="anthropic:claude-sonnet-4-6")
@@ -250,8 +253,18 @@ class TestTheCurrentModelIsAlwaysOffered:
         item = _model_item(_app(settings))
 
         assert item.default == "google:gemini-2.5-pro" == item.options[0]
-        assert not any("not offered" in option for option in item.options)
+        assert not any(option.endswith(" (current)") for option in item.options)
         assert item.description == "Agents without a model of their own run on it"
+
+    def test_one_left_out_for_a_reason_the_catalog_does_not_give(self, monkeypatch):
+        """The description still says it is not offered."""
+        monkeypatch.setattr(ModelCatalog, "not_offered", lambda self: {})
+        settings = BaseSettings(google_api_key="k-g", default_model="anthropic:claude-sonnet-4-6")
+
+        item = _model_item(_app(settings))
+
+        assert item.default == item.options[0] == self.MARKED.format("anthropic:claude-sonnet-4-6")
+        assert item.description == "Not offered; agents without a model of their own run on it"
 
     @pytest.mark.parametrize("picked", ["as it opened", "picked again"])
     async def test_saving_it_changes_no_model(self, monkeypatch, picked):

@@ -1,13 +1,15 @@
 """Ctrl+C anywhere in one ``/settings`` Save ends it the same way.
 
 A Save can wait at several points: for a start in progress (a change the
-start reads), while the workflow is rebuilt on the new values, for the turn
-lock (an orchestrator change asks whether the conversation holds anything
-yet), and while the backend of a new conversation starts. Ctrl+C at any of
-them stops the request, as it stops a turn: "Operation cancelled..." is said
+start reads), while the workflow is rebuilt on the new values, while it is
+brought back on the model it ran after that rebuild failed, for the turn lock
+(an orchestrator change asks whether the conversation holds anything yet),
+and while the backend of a new conversation starts. Ctrl+C at any of them
+stops the request, as it stops a turn: "Operation cancelled..." is said
 once, nothing of the Save stays (every setting restored, the workflow on the
 model it ran), and nothing is saved. The wait for a start said so; the
-rebuild and the wait for the turn lock said nothing.
+rebuild, the restore after a failed one and the wait for the turn lock said
+nothing.
 
 A real app around a real ``WorkflowController``; only the managers are fakes,
 and a test holds one at the point where Ctrl+C stops the Save.
@@ -72,6 +74,7 @@ class Manager:
         self.is_initialized = False
         self.agent_models: dict = {}
         self.reinits: list[str | None] = []
+        self.broken: set[str] = set()  # the models a rebuild fails on
 
     async def initialize_services(self) -> None:
         self.model = self._settings.default_model
@@ -82,6 +85,8 @@ class Manager:
         self.reinits.append(model)
         self.model = model or self._settings.default_model
         self.is_initialized = False
+        if self.model in self.broken:
+            raise RuntimeError(f"cannot start {self.model}")
         await self.holds.at("rebuild")
         self.is_initialized = True
 
@@ -194,6 +199,34 @@ async def test_while_the_workflow_is_rebuilt(app, settings, monkeypatch, holds):
     assert controller.state is WorkflowState.READY
     assert controller.workflow.reinits == [NEW, OLD]  # back on the model it ran
     assert controller.workflow.model == OLD
+    await controller.close()
+
+
+async def test_while_the_workflow_is_brought_back_after_a_failed_rebuild(
+    app, settings, monkeypatch, holds
+):
+    """The rebuild failed (said), the settings are restored, and the workflow
+    is being started again on the model it ran: Ctrl+C there stops that too.
+    The workflow stays down on the old model, and the next request starts it
+    (and says why, if it fails then)."""
+    controller = await _running(app)
+    manager = controller.workflow
+    manager.broken = {NEW}
+    restoring = holds.hold("rebuild")  # the rebuild on NEW fails before it
+
+    await _stopped_save(app, monkeypatch, {"model": NEW}, restoring.wait)
+
+    errors = [c.args[0] for c in app.session.add_error.call_args_list]
+    assert errors == [
+        f"Failed to reinitialize workflow: cannot start {NEW}. Settings were not changed."
+    ]
+    messages = [c.args for c in app.session.add_message.call_args_list]
+    assert messages == [("system", CANCELLED_LINE)]
+    assert app.session.add_success.call_count == 0
+    assert settings.default_model == OLD
+    app.save_settings.assert_not_awaited()
+    assert manager.reinits == [NEW, OLD]
+    assert not controller.is_ready
     await controller.close()
 
 

@@ -339,8 +339,9 @@ class SettingsUI:
         Ctrl+C stops it wherever it waits, as it stops a turn, and
         "Operation cancelled..." is said once: by ``_says_so_when_stopped``
         around each wait of its own (a start in progress, the turn lock, the
-        move, the rebuild), and by the new conversation's own
-        (``start_new_session``, as ``/new`` says it) around that one.
+        move, the rebuild, the restore after a failed rebuild), and by the
+        new conversation's own (``start_new_session``, as ``/new`` says it)
+        around that one.
 
         Returns:
             True if the changes were applied, False if they were rolled back.
@@ -488,10 +489,13 @@ class SettingsUI:
                     f"Failed to reinitialize workflow: {e}. Settings were not changed."
                 )
                 # A failed reinitialize leaves the manager down, holding the
-                # new model. Bring it back on the model it had.
+                # new model. Bring it back on the model it had: a wait of the
+                # Save like the others, which Ctrl+C stops (said), leaving it
+                # down on the old model for the next request to start.
                 if not controller.is_ready:
                     try:
-                        await controller.reinitialize(model=previous_model)
+                        async with _says_so_when_stopped(app.session):
+                            await controller.reinitialize(model=previous_model)
                     except Exception as restore_error:
                         app.session.add_error(
                             f"Could not restart the workflow on {previous_model}: "
@@ -623,13 +627,13 @@ def _model_picker(key: str, choices: _ModelChoices) -> Field:
 
     It offers the list, and shows its role's model now. When the list leaves
     that model out (its provider is not defined, has no key, or does not
-    serve it), the picker still offers it, first, as ``<ref> (current; not
-    offered)``, and its description starts with why: the field's value is
-    then that option, so a Save that leaves the picker as it opened, or picks
-    it again, changes nothing (``SettingsCommand`` passes on only a value
-    that differs from the field's own), and a user who moved off it can come
-    back to it. The reason is in the description, not the option: the
-    option would not fit the dialog's row beside its label.
+    serve it), the picker still offers it, first, as ``<ref> (current)``,
+    and its description starts with "Not offered" and why: the field's value
+    is then that option, so a Save that leaves the picker as it opened, or
+    picks it again, changes nothing (``SettingsCommand`` passes on only a
+    value that differs from the field's own), and a user who moved off it
+    can come back to it. The option says no more than that: a longer one
+    cut the label beside it, and the open menu cut it.
     """
     from pydantic.fields import FieldInfo
 
@@ -645,8 +649,8 @@ def _model_picker(key: str, choices: _ModelChoices) -> Field:
     current, options = choices.current.get(role), choices.options
     if current is not None and current not in options:
         why = choices.left_out.get(current)
-        if why is not None:
-            description = f"Not offered ({why}); {description[0].lower()}{description[1:]}"
+        not_offered = f"Not offered ({why})" if why is not None else "Not offered"
+        description = f"{not_offered}; {description[0].lower()}{description[1:]}"
         current = _NOT_OFFERED.format(current)
         options = [current, *options]
     field = FieldInfo(default=None, title=title, description=description)
@@ -660,7 +664,7 @@ def _model_picker(key: str, choices: _ModelChoices) -> Field:
 
 
 #: How a model picker offers its role's model when the list leaves it out.
-_NOT_OFFERED = "{} (current; not offered)"
+_NOT_OFFERED = "{} (current)"
 
 
 # The widest a model picker's dropdown grows: a reference and its padding. A

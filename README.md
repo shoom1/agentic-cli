@@ -972,7 +972,7 @@ settings name that its provider does not serve, and an entry whose provider is
 not defined, is also warned of once, when a listing shows it. Listings never
 add to the list. Each model appears once. A picker shows its role's model
 now; when the list leaves that model out, the picker still offers it, first,
-as `<model> (current; not offered)`, and its description says why, so a Save
+as `<model> (current)`, and its description says it is not offered and why, so a Save
 never changes a model you did not pick. Picking writes
 `default_model`, or the role's `model_roles` entry, to the project settings
 file and restarts the workflow on it, keeping the conversation. Before the

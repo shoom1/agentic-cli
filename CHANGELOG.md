@@ -2612,10 +2612,10 @@ step; each entry says what to use instead.
   `default_model` the model list did not include; now one the list leaves
   out, as its provider is not defined, has no key, or does not serve it), so
   a user who moved off it could not pick it back. The picker now offers it,
-  first, as `<model> (current; not offered)`, and its description says why
-  ("Not offered (no key: set ANTHROPIC_API_KEY); agents without a model of
-  their own run on it"). Left as it opened, or picked again, it changes
-  nothing on Save.
+  first, as `<model> (current)`, and its description says it is not offered,
+  and why ("Not offered (no key: set ANTHROPIC_API_KEY); agents without a
+  model of their own run on it"). Left as it opened, or picked again, it
+  changes nothing on Save.
 
 - **On ADK and Deep Agents, a cleanup no longer freezes the app while the
   sandbox closes.** The sandbox's cleanup (`docker rm -f`, a kernel
@@ -3521,8 +3521,9 @@ step; each entry says what to use instead.
   old one). Interrupted, the restart is now undone as a failed one is: every
   setting is restored and the workflow is brought back on the model it had.
   As for a turn, `Operation cancelled...` is said once, wherever the Save
-  waits: for a start in progress, for the turn lock, for the restart, or for
-  a new conversation's backend.
+  waits: for a start in progress, for the turn lock, for the restart, for
+  the restart on the old model after a failed one (which then stays down
+  until the next request starts it), or for a new conversation's backend.
 - **On ADK, a `/settings` switch to another provider no longer breaks the
   session.** ADK sends an agent's earlier turns back with every request,
   thoughts included, and after the switch they were another provider's:
