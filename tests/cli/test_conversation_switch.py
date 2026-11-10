@@ -908,3 +908,46 @@ class TestWhetherAConversationMayMove:
         assert said(app.session, "add_success")[-1] == (
             "Orchestrator: deepagents (applies to the next /new)"
         )
+
+
+class TestABackendThatCannotRun:
+    """No backend that cannot run is accepted: an ``orchestrator`` change to
+    one whose extra is not installed is refused, whatever the conversation
+    (it was saved for the next /new, which then failed, as did the next
+    start), and plain ``/new`` on such a setting says why in one line."""
+
+    New = TestANewConversationOnAnotherBackend
+    MISSING = (
+        "The deepagents orchestrator needs the 'deepagents' extra. "
+        "Install with: pip install 'agentic-cli[deepagents]'"
+    )
+
+    async def test_the_setting_is_refused_in_a_used_conversation(self, home, monkeypatch):
+        import sys
+
+        app, adk, built = self.New.on_adk(monkeypatch)
+        await app.process_input("Hello.")
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
+
+        assert await app.apply_settings({"orchestrator": "deepagents"}) is False
+
+        assert app.settings.orchestrator.value == "adk" and built == []
+        assert said(app.session, "add_error") == [f"Failed to set Orchestrator: {self.MISSING}"]
+
+    async def test_plain_new_on_it_says_why_and_changes_nothing(self, home, monkeypatch):
+        """Checked before anything changes: the conversation left proposes
+        no memories for a /new that does not happen."""
+        import sys
+
+        app, adk, built = self.New.on_adk(
+            monkeypatch, BaseSettings(session_store="sqlite", auto_extract_session_facts=True)
+        )
+        await app.process_input("Hello.")
+        old = app.session_id
+        app.settings.update_setting("orchestrator", "deepagents")  # as a file left it
+        monkeypatch.setitem(sys.modules, "agentic_cli.workflow.deepagents", None)
+
+        await app.process_input("/new")
+
+        assert app.session_id == old and built == [] and "on_session_end" not in adk.calls
+        assert said(app.session, "add_error") == [self.MISSING]

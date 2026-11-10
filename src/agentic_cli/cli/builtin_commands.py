@@ -710,7 +710,10 @@ class NewCommand(Command):
 
         backend = self.parse_args(args).positional.strip()
         if not backend:
-            await app.start_new_session()
+            try:
+                await app.start_new_session()  # on the settings' orchestrator
+            except ImportError as error:  # its extra is not installed
+                app.session.add_error(str(error).split("\n")[0])
             return
         try:
             check_backend(backend)

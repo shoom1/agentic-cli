@@ -1266,6 +1266,14 @@ class BaseCLIApp:
         # start builds afresh, has that start run it there (below); else the
         # change waits for /new, and the conversation stays where it is.
         target = orchestrator_of(self._settings).value
+        if "orchestrator" in changes:
+            try:  # no backend that cannot run is taken, for now or the next /new
+                check_backend(target)
+            except ImportError as error:
+                _restore_settings(self._settings, snapshot)
+                label = _setting_label("orchestrator", self._settings)
+                self.session.add_error(f"Failed to set {label}: {_first_line(error)}")
+                return False
         moves_backend = "orchestrator" in changes and target != backend_before
         movable = False
         if moves_backend:
@@ -1338,7 +1346,7 @@ class BaseCLIApp:
                 interrupted = cancel
             except Exception as error:
                 _restore_settings(self._settings, snapshot)
-                reason = (str(error) or type(error).__name__).split("\n")[0]
+                reason = _first_line(error)
                 self.session.add_error(
                     f"Could not start a new conversation on {target}: {reason}. "
                     "Settings were not changed."
@@ -2491,6 +2499,12 @@ class BaseCLIApp:
         if resumable:
             self.session.add_message("system", self._resume_hint())
         self.session.add_message("system", "Goodbye!")
+
+
+def _first_line(error: BaseException) -> str:
+    """What a line says of ``error``: its first line (a backend's missing extra
+    adds the import's own error after it), or its type when it has no words."""
+    return (str(error) or type(error).__name__).split("\n")[0]
 
 
 def _model_picker(key: str, choices: _ModelChoices) -> Field:
