@@ -1184,6 +1184,101 @@ class TestACtrlCInAMoveOfBackend:
         await controller.close()
 
 
+class TestAWorkflowThatCameUpWhileTheChangeWaited:
+    """``/settings`` decided to move the conversation (the workflow down, its
+    next start building afresh), then waited for the turn lock while an app's
+    task started the workflow without a turn. The move re-decides under the
+    lock, as for a running workflow: a new conversation on the new backend
+    (``start_new_session``), so a Ctrl+C there ends as ``/new``'s does, the
+    app in one conversation on the backend that runs, which the settings
+    name. Before, the move went on: a Ctrl+C once the controller ran the new
+    backend left the conversation and the settings on the old one."""
+
+    Down = TestAPlaceChangeWhileTheWorkflowIsDown
+    New = TestANewConversationOnAnotherBackend
+
+    async def came_up_meanwhile(self, monkeypatch, *, slow_release: bool, gate_load: bool):
+        """The reviewer's W12 (``slow_release``: Ctrl+C while the old manager
+        is released) and W12b (``gate_load``: Ctrl+C at the new backend's
+        load); returns the app, its first id and the managers built."""
+        built = self.Down.builds(monkeypatch, lambda n, b: n == 0)
+        app = await self.Down.started(
+            BaseSettings(session_store="sqlite", orchestrator="deepagents")
+        )
+        controller = app._workflow_controller
+        first = app.session_id
+        gate_a, b_done = asyncio.Event(), asyncio.Event()
+        releasing, release_gate, loading = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def task_a():
+            async with app._turn_lock:
+                await gate_a.wait()
+
+        async def task_b():  # an app's task: starts the workflow, writes nothing
+            async with app._turn_lock:
+                assert await controller.ensure_initialized()
+                if slow_release:
+                    async def slow():
+                        releasing.set()
+                        await release_gate.wait()
+                    controller.workflow.cleanup = slow
+                b_done.set()
+
+        if gate_load:
+            load = self.New.Manager.load_session
+
+            async def load_session(manager, session_id, user_id=None):
+                if manager.backend_type == "adk":
+                    loading.set()
+                    await asyncio.Event().wait()
+                return await load(manager, session_id, user_id)
+
+            monkeypatch.setattr(self.New.Manager, "load_session", load_session)
+
+        a = asyncio.create_task(task_a())
+        await asyncio.sleep(0)
+        applying = asyncio.create_task(app.apply_settings({"orchestrator": "adk"}))
+        await asyncio.sleep(0.01)
+        b = asyncio.create_task(task_b())
+        await asyncio.sleep(0.01)
+        gate_a.set()
+        await asyncio.wait_for(b_done.wait(), 5)
+        await asyncio.wait_for((releasing if slow_release else loading).wait(), 5)
+        applying.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await applying
+        release_gate.set()
+        await asyncio.gather(a, b)
+        return app, first, built
+
+    def ends_in_one_place(self, app, first: str, built: list) -> None:
+        controller = app._workflow_controller
+        assert app.session_id != first  # a new conversation, as on a running workflow
+        assert app.settings.orchestrator.value == "adk" == controller.backend
+        assert app._conversation.place.backend == "adk"
+        assert f"New conversation {app.session_id} on adk." in said(app.session, "add_message")
+
+    async def test_ctrl_c_while_the_old_backend_is_released(self, home, monkeypatch):
+        app, first, built = await self.came_up_meanwhile(
+            monkeypatch, slow_release=True, gate_load=False
+        )
+
+        self.ends_in_one_place(app, first, built)
+        await app.process_input("hello")
+        assert built[-1].backend_type == "adk" and built[-1].turns == [app.session_id]
+        assert not free(app, app._conversation_key(app.session_id))
+        assert said(app.session, "add_success") == ["Orchestrator: adk"]
+        await app._workflow_controller.close()
+
+    async def test_ctrl_c_at_the_new_backends_load(self, home, monkeypatch):
+        app, first, built = await self.came_up_meanwhile(
+            monkeypatch, slow_release=False, gate_load=True
+        )
+
+        self.ends_in_one_place(app, first, built)
+        await app._workflow_controller.close()
+
+
 class TestTheExitHintOnAnotherBackend:
     """``--resume`` opens a conversation on the settings' orchestrator, the
     backend of new conversations: one ``/new <backend>`` started elsewhere is

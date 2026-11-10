@@ -400,6 +400,15 @@ _AT_NEXT_NEW = "(applies to the next /new)"
 #: read by the app's constructor only: a change of them does not wait.
 _READ_BY_THE_START = frozenset({"orchestrator"})
 
+#: What ``_move_here`` returns when it finds, under the turn lock, that the
+#: move no longer applies, decided as for a running workflow: something of
+#: the conversation is stored by now, or the next start no longer builds
+#: afresh (it stays; the change applies to the next ``/new``) ...
+_STAYS = "stays"
+#: ... or the workflow came up meanwhile, nothing of it stored (a new
+#: conversation on the new backend, ``start_new_session``).
+_STARTS_ANEW = "starts anew"
+
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
@@ -1295,6 +1304,38 @@ class BaseCLIApp:
         }
         at_next_new = waits_for_new if moves_backend and not (starts_anew or moves_here) else set()
 
+        # The workflow is down, its next start builds afresh, and nothing of
+        # the conversation is stored: that start runs it on the new backend,
+        # where it is held (from its first write, when nothing holds it yet).
+        # Decided again under the turn lock, which the move waits for: what
+        # it finds then is decided as for a running workflow.
+        if moves_here:
+            place = dataclasses.replace(self._place(), backend=target)
+            try:
+                moved = await self._move_here(place)
+            except asyncio.CancelledError:  # it stays where it was
+                _restore_settings(self._settings, snapshot)
+                raise
+            except Exception as error:
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Could not set Orchestrator: {str(error) or type(error).__name__}. "
+                    "Settings were not changed."
+                )
+                return False
+            if moved == _STAYS:  # a turn wrote to it meanwhile, say: it stays
+                at_next_new = waits_for_new
+            elif moved == _STARTS_ANEW:  # the workflow came up meanwhile
+                starts_anew = True
+            elif not moved.made:  # open there in another process: nothing changes
+                _restore_settings(self._settings, snapshot)
+                self.session.add_error(
+                    f"Could not set Orchestrator: conversation '{self._session_id}' is open "
+                    f"in another process ({moved.holder}) on {place.backend} ({place.store}). "
+                    "Settings were not changed."
+                )
+                return False
+
         # Reinitialize workflow if needed
         switched: list[str] = []
         interrupted: asyncio.CancelledError | None = None
@@ -1359,34 +1400,6 @@ class BaseCLIApp:
                 )
                 return False
 
-        # The workflow is down, its next start builds afresh, and nothing of
-        # the conversation is stored: that start runs it on the new backend,
-        # where it is held (from its first write, when nothing holds it yet).
-        if moves_here:
-            place = dataclasses.replace(self._place(), backend=target)
-            try:
-                moved = await self._move_here(place)
-            except asyncio.CancelledError:  # it stays where it was
-                _restore_settings(self._settings, snapshot)
-                raise
-            except Exception as error:
-                _restore_settings(self._settings, snapshot)
-                self.session.add_error(
-                    f"Could not set Orchestrator: {str(error) or type(error).__name__}. "
-                    "Settings were not changed."
-                )
-                return False
-            if moved is None:  # a turn wrote to it meanwhile: it stays
-                at_next_new = waits_for_new
-            elif not moved.made:  # open there in another process: nothing changes
-                _restore_settings(self._settings, snapshot)
-                self.session.add_error(
-                    f"Could not set Orchestrator: conversation '{self._session_id}' is open "
-                    f"in another process ({moved.holder}) on {place.backend} ({place.store}). "
-                    "Settings were not changed."
-                )
-                return False
-
         # Report changes
         for key, value in changes.items():
             line = f"{_setting_label(key, self._settings)}: {value}"
@@ -1408,30 +1421,43 @@ class BaseCLIApp:
             raise interrupted
         return True
 
-    async def _move_here(self, place: Place) -> Switch | None:
+    async def _move_here(self, place: Place) -> Switch | str:
         """Have the next start run the conversation on ``place``'s backend.
 
-        Only while the workflow is down and its next start builds a manager
-        afresh, and only for a conversation with nothing stored
-        (``ConversationCore.fresh``, checked again under the turn lock): one
-        with anything stored never changes backend. One this run made is held
-        from its first write, so mostly there is no hold to move; when one
-        holds it (a line typed while the workflow was down), its lock is
-        taken there. The controller is told the backend its next start builds
-        (``switch_backend``), then the switch to the same id there is made at
-        once (no workflow runs: no await), letting go of where it was held.
-        A cancel while it waits (for the turn lock, or for the controller)
-        leaves it where it was, on the backend it had.
+        Decided again under the turn lock, which it waits for (an app's task
+        may hold it, and run a turn or start the workflow meanwhile): it
+        moves only while the workflow is down, its next start builds a
+        manager afresh, and nothing of the conversation is stored
+        (``ConversationCore.fresh``): one with anything stored never changes
+        backend. Else it returns what it found, decided as for a running
+        workflow: ``_STAYS`` (something of it is stored, or the next start
+        revives a manager kept on its backend: the change waits for
+        ``/new``) or ``_STARTS_ANEW`` (the workflow came up, nothing of it
+        stored: the caller starts a new conversation there, as on a running
+        workflow; this one stays where it ran).
+
+        One this run made is held from its first write, so mostly there is
+        no hold to move; when one holds it (a line typed while the workflow
+        was down), its lock is taken there. The controller is told the
+        backend its next start builds (``switch_backend``), then the switch
+        to the same id there is made at once (no workflow runs: no await),
+        letting go of where it was held. A cancel while it waits (for the
+        turn lock, or for the controller) leaves it where it was, on the
+        backend it had.
 
         Returns:
-            None when something of it is stored by now (nothing changed);
-            else how the switch ended: made, or refused (another process has
-            it open there, and nothing changed).
+            How the switch ended: made, or refused (another process has it
+            open there, and nothing changed); else ``_STAYS`` or
+            ``_STARTS_ANEW`` (nothing changed).
         """
-        core = self._conversation
+        core, controller = self._conversation, self._workflow_controller
         async with self._turn_lock:
             if not core.fresh:
-                return None
+                return _STAYS
+            if controller.is_ready:
+                return _STARTS_ANEW
+            if not controller.next_start_builds:
+                return _STAYS
             if core.deferred:  # nothing holds it yet: none to move
                 hold: Hold | int = Hold(self._session_id, place, None)
             else:
@@ -1439,7 +1465,7 @@ class BaseCLIApp:
             if isinstance(hold, int):
                 return Switch(made=False, holder=hold)
             try:
-                await self._workflow_controller.switch_backend(place.backend)
+                await controller.switch_backend(place.backend)
             except BaseException:
                 core.abandon(hold)
                 raise
