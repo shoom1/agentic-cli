@@ -176,10 +176,12 @@ sandbox kernels and the task list are not restored. One conversation is
 open in one process at a time: two would lose a turn, so a conversation
 another run has open is refused ("Conversation '<id>' is open in another
 process (1234)."; `--continue` passes over it to the newest one free among
-the 50 newest, and says so). A run holds its conversation from the start,
-also when the workflow fails to start; fixed with `/settings` (another
-orchestrator, while nothing of the conversation is stored), it is held where
-the next start runs it. The session store is the run's: a change of
+the 50 newest, and says so). A run holds the conversation it was given
+(`--resume`, `--continue`, `/resume`) from the start, also when the workflow
+fails to start, and a new one from its first turn: no store lists it before
+then, and a run that writes nothing leaves no lock file. Fixed with
+`/settings` (another orchestrator, while nothing of the conversation is
+stored), a failed start runs it, and holds it, where the next start runs. The session store is the run's: a change of
 `session_store` takes effect at the next start.
 A line typed before `--continue` or `--resume` has opened its
 conversation waits for it, then runs there. An app switches with

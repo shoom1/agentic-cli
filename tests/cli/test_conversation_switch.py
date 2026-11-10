@@ -151,7 +151,8 @@ class TestACtrlCWhileTheTargetIsLookedUpAgain:
 
 
 class TestTheConversationARunStartsIn:
-    """Held from the start, whatever the start does: the turns write to it."""
+    """The one the app was given is held from the start, whatever the start
+    does; the run's own new one from its first write (``TestARunThatWritesNothing``)."""
 
     @staticmethod
     def looked_at(app_ref: list, *session_ids: str):
@@ -174,11 +175,13 @@ class TestTheConversationARunStartsIn:
         return looked, seen
 
     @pytest.mark.parametrize("start", [SessionStart(), SessionStart("resume", "abc")])
-    async def test_it_is_held_when_the_workflow_did_not_start(
+    async def test_its_own_is_held_from_its_first_write_when_the_workflow_did_not_start(
         self, manager, tmp_path, monkeypatch, start
     ):
-        """The user fixes the start with ``/settings`` and goes on in it: a
-        second terminal's ``--continue`` must not open it meanwhile."""
+        """The user fixes the start with ``/settings`` and goes on in it. No
+        store lists it before its first turn, so a second terminal's
+        ``--continue`` cannot open it meanwhile: nothing holds it yet, and
+        its first turn does (``TestARunThatWritesNothing``)."""
         (tmp_path / "init-fails").touch()
         (tmp_path / "ready").touch()  # a later retry would start
         monkeypatch.setattr(ScriptedManager, "initializations", 0)
@@ -191,7 +194,7 @@ class TestTheConversationARunStartsIn:
         await app.run()
 
         assert app.session_id != "abc"  # it starts in a new one
-        assert seen == [[os.getpid()]]
+        assert seen == [[None]]  # free: nothing holds it before its first write
 
     async def test_it_is_held_while_the_one_asked_for_opens_then_let_go(self, manager):
         store(manager, "abc", "Plan the trip", "Sure.", hours=2)
@@ -379,10 +382,12 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     say), and ``/settings`` changes the orchestrator or the session store,
     as the warning invites. The workflow is not running, so nothing is
     rebuilt: the next message's start builds a manager from the settings as
-    they are then. The lock stayed on the place recorded as the app started,
-    so a second terminal could open the conversation where the turns now
-    write. It now moves there with the change, through the switch every
-    change of conversation makes (nothing of it is stored anywhere yet)."""
+    they are then. The store is fixed for the run, so only an orchestrator
+    change moves the conversation, and only one with nothing stored
+    (``fresh``): it moves with the change, through the switch every change of
+    conversation makes. Its own new one is held from its first write, so
+    there is no hold to move; one a line typed while the workflow was down
+    held (``typed_while_down``) is held where the turns will write."""
 
     class Manager(Workflow):
         """A manager of one backend; ``fails`` makes its start fail."""
@@ -445,6 +450,16 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     def key_where(app, backend: str, store: str) -> tuple:
         return (backend, store, *app._conversation_key(app.session_id)[2:])
 
+    @staticmethod
+    async def typed_while_down(app) -> None:
+        """A line typed while the workflow is down: its turn retries the
+        start, which fails, so nothing is written; it held the conversation
+        first, since the start it tried might have written it."""
+        key = app._conversation_key(app.session_id)
+        await app.process_input("hello")
+        assert not app._workflow_controller.is_ready
+        assert app._conversation.fresh and not free(app, key)
+
     async def test_an_orchestrator_change_moves_the_lock_where_the_turns_run(
         self, home, monkeypatch
     ):
@@ -481,6 +496,7 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
     async def test_one_open_there_elsewhere_refuses_the_change(self, home, monkeypatch):
         self.builds(monkeypatch, lambda n, backend: backend == "deepagents")
         app = await self.started(BaseSettings(session_store="sqlite", orchestrator="deepagents"))
+        await self.typed_while_down(app)
         other = open_elsewhere(app, self.key_where(app, "adk", "sqlite"))
 
         applied = await app.apply_settings({"orchestrator": "adk"})
@@ -494,6 +510,27 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
             f"another process ({os.getpid()}) on adk (sqlite). Settings were not changed."
         )
         assert not free(app, self.key_where(app, "deepagents", "sqlite"))
+
+    async def test_its_own_unwritten_one_moves_and_its_first_turn_holds_it(
+        self, home, monkeypatch
+    ):
+        """Nothing holds the run's own new one yet: the change moves it, and
+        its first turn holds it where it runs (refused here: another process
+        has that id open there, which only a collision of ids could do)."""
+        built = self.builds(monkeypatch, lambda n, backend: backend == "deepagents")
+        app = await self.started(BaseSettings(session_store="sqlite", orchestrator="deepagents"))
+        other = open_elsewhere(app, self.key_where(app, "adk", "sqlite"))
+
+        applied = await app.apply_settings({"orchestrator": "adk"})
+        await app.process_input("hello")
+        other.release()
+        await app._workflow_controller.close()
+
+        assert applied and app._conversation_key(app.session_id)[0] == "adk"
+        assert built[-1].turns == []
+        assert said(app.session, "add_error")[-1] == (
+            f"Conversation '{app.session_id}' is open in another process ({os.getpid()})."
+        )
 
     async def test_a_manager_kept_to_revive_keeps_the_lock_on_its_backend(
         self, home, monkeypatch
@@ -552,7 +589,8 @@ class TestANewConversationOnAnotherBackend:
         assert [m.backend_type for m in built] == ["deepagents"]
         assert built[0].calls == [f"load_session {new}"]
         assert app._conversation_key(new)[0] == "deepagents"
-        assert not free(app, app._conversation_key(new)) and free(app, old_key)
+        assert free(app, app._conversation_key(new))  # held from its first write
+        assert free(app, old_key)
         adk.cleanup  # released by the controller
         assert app._message_processor._last_task_progress is None
         assert app.usage_tracker.invocation_count == 0
@@ -569,7 +607,8 @@ class TestANewConversationOnAnotherBackend:
 
         assert self.running(app) == "deepagents" and built[0].session_store == "sqlite"
         assert app._conversation.place.store == "sqlite"
-        assert not free(app, app._conversation_key(app.session_id))
+        await app.process_input("Hello.")  # its first write holds it there
+        assert not free(app, ("deepagents", "sqlite", *app._conversation_key(app.session_id)[2:]))
 
     async def test_a_model_switch_then_keeps_that_backend(self, home, monkeypatch):
         app, _, built = self.on_adk(monkeypatch)
@@ -692,6 +731,8 @@ class TestANewConversationOnAnotherBackend:
 
         assert app.session_id != old and self.running(app) == "deepagents"
         assert app._conversation_key(app.session_id)[0] == "deepagents"
+        await app.process_input("Hello.")
+        assert built[0].turns == [app.session_id]  # its turns write there, held there
         assert not free(app, app._conversation_key(app.session_id))
         await app._workflow_controller.close()
 
@@ -768,7 +809,8 @@ class TestAnOrchestratorChange:
         assert new != old and self.running(app) == "deepagents"
         assert [m.backend_type for m in built] == ["deepagents"]
         assert app._conversation_key(new)[0] == "deepagents"
-        assert not free(app, app._conversation_key(new)) and free(app, old_key)
+        assert free(app, app._conversation_key(new))  # held from its first write
+        assert free(app, old_key)
         saved.assert_awaited_once_with(keys={"orchestrator"})
         assert said(app.session, "add_message")[-1] == f"New conversation {new} on deepagents."
         assert said(app.session, "add_success")[0] == "Orchestrator: deepagents"
@@ -1075,21 +1117,22 @@ class TestACtrlCInAMoveOfBackend:
             await new
 
         assert app.session_id != old and self.New.running(app) == "deepagents"
-        assert not free(app, app._conversation_key(app.session_id))
+        assert app._conversation_key(app.session_id)[0] == "deepagents"
         assert f"New conversation {app.session_id} on deepagents." in said(
             app.session, "add_message"
         )
 
     @staticmethod
     async def down_on_deepagents(monkeypatch):
-        """An app whose first start failed on deepagents (it would start on adk)."""
-        TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: n == 0)
+        """An app whose start fails on deepagents (it would start on adk)."""
+        TestAPlaceChangeWhileTheWorkflowIsDown.builds(monkeypatch, lambda n, b: b == "deepagents")
         return await TestAPlaceChangeWhileTheWorkflowIsDown.started(
             BaseSettings(session_store="sqlite", orchestrator="deepagents")
         )
 
     async def test_while_the_turn_lock_is_held_elsewhere_nothing_changes(self, home, monkeypatch):
         app = await self.down_on_deepagents(monkeypatch)
+        await TestAPlaceChangeWhileTheWorkflowIsDown.typed_while_down(app)
         key = app._conversation_key(app.session_id)
         gate = asyncio.Event()
 
@@ -1118,6 +1161,7 @@ class TestACtrlCInAMoveOfBackend:
         """A release still running makes the controller wait before it takes
         the new backend: the lock taken there is let go again."""
         app = await self.down_on_deepagents(monkeypatch)
+        await TestAPlaceChangeWhileTheWorkflowIsDown.typed_while_down(app)
         controller = app._workflow_controller
         key = app._conversation_key(app.session_id)
         releasing = asyncio.Event()
@@ -1162,3 +1206,64 @@ class TestTheExitHintOnAnotherBackend:
         await app.process_input("/new")
 
         assert app._resume_hint() == f"Resume this conversation with /resume {app.session_id}"
+
+
+class TestARunThatWritesNothing:
+    """An id this run generated (the start's new conversation, ``/new``, an
+    orchestrator change's new one) is held from its first write, under the
+    turn lock before the workflow runs it: no store lists it before then, so
+    no other process can open it, and a run that writes nothing makes no lock
+    file in HOME. An id the app was given is held from the start."""
+
+    async def test_a_start_new_and_exit_leave_no_lock_file(self, manager):
+        session = Session(inputs=["/new"])
+        app = app_with(session)
+
+        await app.run()
+
+        assert session.prompted
+        assert not (app.settings.sessions_dir / "locks").exists()
+
+    async def test_the_runs_own_is_held_at_its_first_turn(self, home):
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        key = app._conversation_key(app.session_id)
+
+        assert free(app, key)
+        await app.process_input("Hello.")
+        assert workflow.turns == [app.session_id] and not free(app, key)
+
+    async def test_its_first_turn_is_refused_if_another_process_has_it(self, home):
+        """Its id could only be another's by a collision of random ids."""
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        other = open_elsewhere(app, app._conversation_key(app.session_id))
+
+        await app.process_input("Hello.")
+        other.release()
+
+        assert workflow.turns == []
+        assert said(app.session, "add_error") == [
+            f"Conversation '{app.session_id}' is open in another process ({os.getpid()})."
+        ]
+
+    async def test_a_compact_holds_it_before_it_writes(self, home):
+        workflow = Workflow()
+        app = app_on(workflow, BaseSettings(session_store="sqlite"))
+        other = open_elsewhere(app, app._conversation_key(app.session_id))
+
+        await app.process_input("/compact")
+        other.release()
+        await app.process_input("/compact")
+
+        assert len(workflow.compacted) == 1  # the first refused
+        assert not free(app, app._conversation_key(app.session_id))
+
+    async def test_a_new_conversation_is_held_at_its_first_turn(self, home, monkeypatch):
+        app, _, _ = TestANewConversationOnAnotherBackend.on_adk(monkeypatch)
+        await app.process_input("/new")
+        new = app.session_id
+
+        assert free(app, app._conversation_key(new))
+        await app.process_input("Hello.")
+        assert not free(app, app._conversation_key(new))

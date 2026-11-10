@@ -3265,17 +3265,22 @@ step; each entry says what to use instead.
   keeps the right one held. The lock follows the conversation the turns
   write to, however it changes (`cli/conversation.py`: `ConversationCore`,
   one switch for `/new`, on any backend, `/resume` and the start): a run
-  holds its conversation from the start, also when the workflow fails to
-  start; a line typed before `--continue` or `--resume` has opened its
+  holds a conversation it was given (`--resume`, `--continue`,
+  `session_id=`, `/resume`) from the start, also when the workflow fails to
+  start, and one it made (the start's, `/new`'s, an orchestrator change's)
+  from its first write (a turn, a job's notice, `/compact`, under the turn
+  lock): no store lists it before then, so no other process can open it,
+  and a run that writes nothing makes no lock file; a line typed before `--continue` or `--resume` has opened its
   conversation waits for it and runs there. It is keyed by the backend and
   the store the conversation runs on: the store is the run's for its whole
   life, and the backend is recorded as the app starts, for a new
   conversation on another backend, and when `/settings` changes the
   orchestrator while the workflow is down and nothing of the conversation
   is stored (a failed start, which the user fixes there and goes on: the
-  next start builds the new backend, so the lock moves there at once, and
-  the change is refused, "Settings were not changed.", when another process
-  has the conversation open there). ADK's stale
+  next start builds the new backend, so the conversation moves there at
+  once; when a line typed meanwhile holds it, its lock moves, and the change
+  is refused, "Settings were not changed.", when another process has it
+  open there). ADK's stale
   session (a writer without the lock) is now
   `workflow.sessions.ConversationChangedError`, said plainly: "Conversation
   '<id>' was changed by another process during this turn. Send your message

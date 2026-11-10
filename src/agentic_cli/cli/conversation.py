@@ -143,6 +143,8 @@ class ConversationCore:
         opened_empty: Nothing of it was stored when it was opened: an id this
             run made (an id given to the app is not, until a load finds it
             empty).
+        deferred: Its id was made by this run: nothing holds it until its
+            first write (``hold_to_write``).
     """
 
     def __init__(
@@ -151,6 +153,7 @@ class ConversationCore:
         place: Place | None = None,
         *,
         opened_empty: bool = False,
+        deferred: bool = False,
     ) -> None:
         self.session_id = session_id
         #: A turn ran in it since it was opened: its memories are proposed on
@@ -161,6 +164,11 @@ class ConversationCore:
         #: A turn of it ran on a ready workflow, which stores it: the app says
         #: so (a turn the workflow was not up for stores nothing).
         self.written = False
+        #: Its id was made by this run, and nothing holds it yet: no store
+        #: lists it before its first write, so no other process can open it,
+        #: and it is held then (``hold_to_write``). A run that writes nothing
+        #: makes no lock file. An id the app was given is held from the start.
+        self.deferred = deferred
         self.place = place
         self._lock: ConversationLock | None = None
 
@@ -198,8 +206,26 @@ class ConversationCore:
         """Keep ``hold`` alone: the conversation held before is let go."""
         if hold.taken is not None:
             self._lock_for(hold.place).commit(hold.taken)
-        elif self._lock is not None:  # the memory store: nothing to hold there
+        elif self._lock is not None:  # nothing to hold (the memory store, or not yet)
             self._lock.release()
+
+    def hold_to_write(self) -> int | None:
+        """Hold the conversation before its first write, when its id was made
+        by this run (``deferred``); the caller holds the turn lock.
+
+        Returns:
+            None once it is held (or was, or nothing holds one here); else the
+            process id of another process that has it open (a collision of
+            random ids), and nothing changed: the write must not happen.
+        """
+        if not self.deferred or self.session_id is None:
+            return None
+        taken = self.acquire(self.session_id)
+        if isinstance(taken, int):
+            return taken
+        self.commit(taken)
+        self.deferred = False
+        return None
 
     def abandon(self, hold: Hold) -> None:
         """Let ``hold`` go: the switch to it did not happen."""
@@ -217,6 +243,8 @@ class ConversationCore:
         if isinstance(taken, int):
             return taken
         self.commit(taken)
+        if session_id == self.session_id:
+            self.deferred = False
         return None
 
     def release(self) -> None:
@@ -233,6 +261,7 @@ class ConversationCore:
         stored: bool = False,
         propose: bool = True,
         hold: Hold | None = None,
+        generated: bool = False,
     ) -> Switch:
         """Make ``to`` the conversation the turns run in: the one protocol.
 
@@ -276,6 +305,11 @@ class ConversationCore:
                 holds them ran).
             hold: ``to``'s lock, already taken (``acquire``); the switch keeps
                 it or lets it go.
+            generated: ``to`` is an id this run made (``/new``): no store
+                lists it, so nothing is held for it until its first write
+                (``deferred``); the one left is let go once the switch is
+                made. The conversation the app is in stays as it is: a
+                ``deferred`` one is not held for a switch to itself either.
 
         Returns:
             How it ended: made, refused (``holder``), or gone.
@@ -285,7 +319,9 @@ class ConversationCore:
             status line raises once the switch is made.
         """
         left = self.session_id
-        if hold is None:
+        if hold is None and (generated or (to == left and self.deferred)):
+            hold = Hold(to, self._at(place), None)  # held from its first write
+        elif hold is None:
             taken = self.acquire(to, place)
             if isinstance(taken, int):
                 return Switch(made=False, holder=taken)
@@ -297,7 +333,9 @@ class ConversationCore:
         loaded: bool | None = None
         try:
             if to == left or elsewhere:  # nothing else to stay in: made whatever the load says
-                self._make(hold, parts, moved=moved, opened_empty=not stored)
+                self._make(
+                    hold, parts, moved=moved, opened_empty=not stored, deferred=generated
+                )
                 made = True
             elif propose and self.turned:
                 await parts.propose(left)
@@ -312,7 +350,10 @@ class ConversationCore:
                 elif to == left and not stored:  # an id given to the app, found empty
                     self.opened_empty = True
             if not made:
-                self._make(hold, parts, moved=moved, opened_empty=not (stored or loaded))
+                self._make(
+                    hold, parts, moved=moved, opened_empty=not (stored or loaded),
+                    deferred=generated,
+                )
                 made = True
         finally:
             if not made:
@@ -351,17 +392,23 @@ class ConversationCore:
                 holder = self.hold(loaded)
                 if holder is not None:
                     return holder
-            self.session_id = None
+            self.session_id, self.deferred = None, False
             return None
         taken = self.acquire(to)
         if isinstance(taken, int):
             return taken
-        self._make(taken, parts, moved=False, opened_empty=False)  # what it holds is unknown
+        self._make(taken, parts, moved=False, opened_empty=False, deferred=False)
         parts.status()
         return None
 
     def _make(
-        self, hold: Hold, parts: SwitchParts, *, moved: bool, opened_empty: bool
+        self,
+        hold: Hold,
+        parts: SwitchParts,
+        *,
+        moved: bool,
+        opened_empty: bool,
+        deferred: bool,
     ) -> None:
         """The switch itself, all at once (no await): the lock, the id, and
         the conversation's task list and usage counters. The same
@@ -373,6 +420,7 @@ class ConversationCore:
         self.turned = False
         if not same:
             self.opened_empty, self.written = opened_empty, False
+            self.deferred = deferred
         _start_over(parts, moved=moved)
 
     def _at(self, place: Place | None) -> Place:

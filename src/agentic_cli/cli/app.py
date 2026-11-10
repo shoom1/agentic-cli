@@ -674,6 +674,7 @@ class BaseCLIApp:
         self._conversation_core = ConversationCore(
             session_id or uuid.uuid4().hex[:12], Place.of(settings),
             opened_empty=session_id is None,  # one given may be stored
+            deferred=session_id is None,  # held from its first write
         )
         # How run() starts (``session_start``), and what it opens once the prompt is up.
         self._session_start = SessionStart()
@@ -1360,7 +1361,7 @@ class BaseCLIApp:
 
         # The workflow is down, its next start builds afresh, and nothing of
         # the conversation is stored: that start runs it on the new backend,
-        # which holds it from now on.
+        # where it is held (from its first write, when nothing holds it yet).
         if moves_here:
             place = dataclasses.replace(self._place(), backend=target)
             try:
@@ -1413,12 +1414,14 @@ class BaseCLIApp:
         Only while the workflow is down and its next start builds a manager
         afresh, and only for a conversation with nothing stored
         (``ConversationCore.fresh``, checked again under the turn lock): one
-        with anything stored never changes backend. Its lock is taken there,
-        the controller is told the backend its next start builds
+        with anything stored never changes backend. One this run made is held
+        from its first write, so mostly there is no hold to move; when one
+        holds it (a line typed while the workflow was down), its lock is
+        taken there. The controller is told the backend its next start builds
         (``switch_backend``), then the switch to the same id there is made at
         once (no workflow runs: no await), letting go of where it was held.
         A cancel while it waits (for the turn lock, or for the controller)
-        leaves it held where it was, on the backend it had.
+        leaves it where it was, on the backend it had.
 
         Returns:
             None when something of it is stored by now (nothing changed);
@@ -1429,7 +1432,10 @@ class BaseCLIApp:
         async with self._turn_lock:
             if not core.fresh:
                 return None
-            hold = core.acquire(self._session_id, place)
+            if core.deferred:  # nothing holds it yet: none to move
+                hold: Hold | int = Hold(self._session_id, place, None)
+            else:
+                hold = core.acquire(self._session_id, place)
             if isinstance(hold, int):
                 return Switch(made=False, holder=hold)
             try:
@@ -1548,6 +1554,8 @@ class BaseCLIApp:
             raise
         try:
             self.session.add_message("user", message)
+            if not self._held_to_write():
+                return
             self._turned = True  # the conversation now holds this message
             reached = False  # the turn reached a ready workflow, which stores it
             try:
@@ -1703,6 +1711,8 @@ class BaseCLIApp:
             async with self._turn_lock:
                 if not await self._told_here(record):
                     return None
+                if not self._held_to_write():  # its notice is written here
+                    return None
                 result = await self._message_processor.process_resume(
                     record=record,
                     workflow_controller=self._workflow_controller,
@@ -1774,6 +1784,8 @@ class BaseCLIApp:
             What the summary did; None when nothing was summarized.
         """
         async with self._turn_lock:
+            if not self._held_to_write():
+                return None
             return await self._message_processor.process_compact(
                 focus,
                 workflow_controller=self._workflow_controller,
@@ -1886,7 +1898,7 @@ class BaseCLIApp:
 
         try:
             switched = await self._conversation.switch(
-                new, parts, place=place, propose=not moving
+                new, parts, place=place, propose=not moving, generated=True
             )
         except asyncio.CancelledError:
             if self._session_id == new:
@@ -2056,6 +2068,19 @@ class BaseCLIApp:
         self.session.add_message("system", line)
         show_replay(self.session, replay)
         return True
+
+    def _held_to_write(self) -> bool:
+        """Hold the conversation before it is written, when its id was made by
+        this run (``ConversationCore.hold_to_write``); the caller holds the
+        turn lock. False, said, when another process has it open (a collision
+        of random ids): the write must not happen."""
+        holder = self._conversation.hold_to_write()
+        if holder is None:
+            return True
+        self.session.add_error(
+            f"Conversation '{self._session_id}' is open in another process ({holder})."
+        )
+        return False
 
     def _switch_parts(self, *, drawn: bool = True) -> SwitchParts:
         """What a switch acts on besides the conversation, as the app has it now.
@@ -2290,10 +2315,13 @@ class BaseCLIApp:
         return await self._adopt_its_own()
 
     async def _adopt_its_own(self) -> bool:
-        """Hold and load the conversation the run starts in (the switch to it,
-        before the prompt: no memories to propose, no status line yet, which
-        the start draws); False, status 1, when another process has it open
-        (an id given to the constructor)."""
+        """Load the conversation the run starts in (the switch to it, before
+        the prompt: no memories to propose, no status line yet, which the
+        start draws), holding an id given to the constructor; one this run
+        made is in no store, so it is held from its first write
+        (``ConversationCore.deferred``) and a run that writes nothing makes
+        no lock file. False, status 1, when another process has a given id
+        open."""
         session_id = self._session_id
         try:
             switched = await self._conversation.switch(
@@ -2304,7 +2332,7 @@ class BaseCLIApp:
             self.session.add_warning(
                 f"Cannot adopt session — {str(error) or type(error).__name__}"
             )
-            return True  # held all the same: the switch is made before the load
+            return True  # made all the same: the switch is made before the load
         if not switched.made:
             if self._pending_hold is not None:
                 self._conversation.abandon(self._pending_hold)

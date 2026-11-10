@@ -625,7 +625,8 @@ class TestAConversationOpenElsewhere:
 
     async def test_a_startup_open_that_fails_gives_it_back(self, manager, monkeypatch):
         """The resume once the prompt is up fails: the app runs in its new
-        conversation, which it holds, and lets the one it did not open go."""
+        conversation, held from its first write, and lets the one it did not
+        open go."""
         from agentic_cli.cli.conversation_lock import ConversationLock
 
         store(manager, "abc", "Plan the trip", "Sure.", hours=2)
@@ -649,7 +650,7 @@ class TestAConversationOpenElsewhere:
         await app.run()
 
         assert app.session_id != "abc"
-        assert held == [False, True]  # abc free, its own conversation held
+        assert held == [False, False]  # abc free; its own not held before its first write
 
     async def test_the_app_holds_the_conversation_it_opened(self, manager):
         from agentic_cli.cli.conversation_lock import ConversationLock

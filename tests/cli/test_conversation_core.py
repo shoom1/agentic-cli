@@ -366,6 +366,55 @@ class TestTheSwitch:
         assert "tasks reset" not in around.done
 
 
+class TestHeldFromItsFirstWrite:
+    """An id this run generated is in no store until its first write, so no
+    other process can open it before then: nothing holds it (no lock file is
+    made) until ``hold_to_write``, which the app calls under the turn lock
+    before a turn, a job's notice or ``/compact`` writes it."""
+
+    async def test_a_generated_id_is_switched_to_unheld(self, tmp_path):
+        core, around = TestTheSwitch.core_in(tmp_path), Around(FakeWorkflow())
+
+        switched = await core.switch("b", around.parts(), generated=True)
+
+        assert switched.made and core.session_id == "b" and core.deferred
+        assert held_elsewhere(place(tmp_path), "a") is None  # the one left let go
+        assert held_elsewhere(place(tmp_path), "b") is None
+
+    def test_it_is_held_at_its_first_write(self, tmp_path):
+        core = ConversationCore("a", place(tmp_path), opened_empty=True, deferred=True)
+
+        assert core.hold_to_write() is None
+
+        assert not core.deferred
+        assert held_elsewhere(place(tmp_path), "a") == os.getpid()
+        assert core.hold_to_write() is None  # held already: nothing more
+
+    def test_one_open_elsewhere_by_then_is_refused(self, tmp_path):
+        ConversationLock(tmp_path).take(place(tmp_path).key("a"))
+        core = ConversationCore("a", place(tmp_path), opened_empty=True, deferred=True)
+
+        assert core.hold_to_write() == os.getpid()
+        assert core.deferred
+
+    async def test_a_run_that_writes_nothing_makes_no_lock_file(self, tmp_path):
+        locks = tmp_path / "locks"
+        core = ConversationCore("a", place(locks), opened_empty=True, deferred=True)
+
+        await core.switch("a", Around(FakeWorkflow()).parts())  # the start adopts it
+        await core.switch("b", Around(FakeWorkflow()).parts(), generated=True)  # /new
+        core.release()
+
+        assert not locks.exists()
+
+    async def test_a_given_id_is_held_from_the_start(self, tmp_path):
+        core = ConversationCore("a", place(tmp_path))
+
+        await core.switch("a", Around(FakeWorkflow()).parts())
+
+        assert not core.deferred and held_elsewhere(place(tmp_path), "a") == os.getpid()
+
+
 class TestNothingStored:
     """``fresh``: nothing of the conversation is stored. It began in this run
     as a new one (or a load found it empty), and no turn of it ran on a ready
