@@ -180,9 +180,12 @@ class Workflow:
 
 
 def fake_settings(**values):
+    """The app's settings on the default store, sqlite, which keeps the
+    conversations left (the fake workflow writes nothing to it; on the
+    memory store ``/new`` drops them: ``test_memory_store_one_conversation.py``)."""
     from agentic_cli.config import BaseSettings
 
-    return BaseSettings(session_store="memory", **values)
+    return BaseSettings(session_store="sqlite", **values)
 
 
 # --- /compact -------------------------------------------------------------------------------
@@ -740,7 +743,7 @@ class TestANewSessionOnADK:
             agent_configs=[AgentConfig(name="solo", prompt=PROMPTS["solo"],
                                        tools=[new_session_probe_start_job],
                                        include_state_tools=False)],
-            settings=settings(),
+            settings=settings(session_store="sqlite"),  # keeps the conversation left
         )
         await manager.initialize_services()
         app = app_on(manager, manager._settings)

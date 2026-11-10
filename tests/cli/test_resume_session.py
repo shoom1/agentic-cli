@@ -685,10 +685,7 @@ class TestPickSession:
 
         assert await app.pick_session() is None
         assert app.session.show_dialog.call_count == 0
-        assert said(app.session, "add_message") == [
-            "No other conversations to resume. "
-            "(session_store is memory: conversations end with the app)"
-        ]
+        assert said(app.session, "add_message") == ["No other conversations to resume."]
 
     async def test_it_holds_the_newest_fifty(self, project):
         workflow = Workflow(*(
@@ -775,7 +772,7 @@ class TestOnRealBackends:
 
     async def test_on_adk(self, project, monkeypatch):
         serve(monkeypatch, Claude(solo=[says("A1."), says("A2."), says("B1."), says("A3.")]))
-        manager = solo()
+        manager = solo(session_store="sqlite")  # the memory store keeps one conversation
         await manager.initialize_services()
         app = app_on(manager, manager._settings)
         try:
@@ -796,7 +793,7 @@ class TestOnRealBackends:
                             ScriptedModels(solo=[ai("A1."), ai("A2."), ai("B1."), ai("A3.")]))
         # The settings name the backend it runs: /new starts on the settings'.
         with MockContext(
-            google_api_key="test-key", session_store="memory", orchestrator="deepagents"
+            google_api_key="test-key", session_store="sqlite", orchestrator="deepagents"
         ) as context:
             manager = DeepAgentsWorkflowManager(
                 agent_configs=[AgentConfig(name="solo", prompt="You help.")],

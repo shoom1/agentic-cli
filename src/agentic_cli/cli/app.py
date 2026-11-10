@@ -414,6 +414,9 @@ _STARTS_ANEW = "starts anew"
 #: Why nothing is stored on the memory store, after a startup line.
 _MEMORY_NOTE = " (session_store is memory: conversations end with the app)"
 
+#: Where ``/new``'s line says the conversation left is on the memory store.
+_NOT_KEPT_LEFT = "not kept (session_store is memory)"
+
 
 def _passed_over_line(passed_over: list[tuple[str, int]], *, continuing: str | None) -> str:
     """What ``--continue`` says of the newer conversations other processes have
@@ -1899,6 +1902,14 @@ class BaseCLIApp:
         conversation that started it (a finished job waits until that
         conversation is opened).
 
+        On the memory store (``session_store=memory``, which writes no
+        conversation to disk) the app keeps one conversation at a time: the
+        one left is dropped from the workflow's store once the switch is
+        made, after its memories are proposed (its ``delete_session``; a
+        Ctrl+C then stops the wait, not the drop), and the line says
+        ``"Previous: <old>, not kept (session_store is memory)."``. A finished
+        job of it is told as unavailable, as a deleted conversation's is.
+
         A conversation runs on one backend for its whole life (each keeps
         its history in its own store), so the new one runs on ``backend``,
         by default the settings' ``orchestrator``, the backend of new
@@ -1908,11 +1919,12 @@ class BaseCLIApp:
         (``WorkflowController.switch_backend``: a failure there changes
         nothing), and the line names it: ``"New conversation <new> on
         deepagents."``, with ``" Previous: <old>, kept by adk."`` when the
-        conversation left is stored; one on LangGraph is told it is
-        deprecated. A Ctrl+C once the new backend runs (the old one is being
-        released) is too late to undo: the new conversation is opened there
-        first, then the cancel goes on. The backend chosen is not saved to
-        any settings file.
+        conversation left is stored (on the memory store it goes with the
+        manager released, store and all: "not kept"); one on LangGraph is
+        told it is deprecated. A Ctrl+C once the new backend runs (the old
+        one is being released) is too late to undo: the new conversation is
+        opened there first, then the cancel goes on. The backend chosen is
+        not saved to any settings file.
 
         Args:
             backend: The backend the new conversation runs on: ``adk``,
@@ -1944,6 +1956,10 @@ class BaseCLIApp:
             check_backend(target)  # before anything changes
         parts = self._switch_parts()
         stored = parts.workflow is not None and await self._is_stored(parts.workflow, old)
+        kept = self._place().kept
+        # On the memory store the conversation left is dropped once the switch
+        # is made: on another backend its manager goes, and its store with it.
+        dropping = parts.workflow if stored and not kept and not moving else None
         place, interrupted = None, None
         if moving:
             if self._turned:  # proposed while the backend that holds them runs
@@ -1964,11 +1980,13 @@ class BaseCLIApp:
             if moving:
                 line = f"New conversation {new} on {target}."
                 if stored:
-                    line += f" Previous: {old}, kept by {old_backend}."
+                    where = f"kept by {old_backend}" if kept else _NOT_KEPT_LEFT
+                    line += f" Previous: {old}, {where}."
             else:
                 line = f"New conversation {new}."
                 if stored:
-                    line += f" Previous: {old}, listed in /sessions."
+                    where = "listed in /sessions" if kept else _NOT_KEPT_LEFT
+                    line += f" Previous: {old}, {where}."
             self.session.add_message("system", line)
             if moving and target == OrchestratorType.LANGGRAPH.value:
                 self.session.add_warning(_LANGGRAPH_DEPRECATION)
@@ -1977,10 +1995,13 @@ class BaseCLIApp:
             switched = await self._conversation.switch(
                 new, parts, place=place, propose=not moving, generated=True
             )
+            if switched.made and dropping is not None:
+                await self._drop(dropping, old)
         except asyncio.CancelledError:
             if self._session_id == new:
                 # On another backend the switch is made before the load, which
-                # the cancel stopped: the app is there, and says so.
+                # the cancel stopped, and a drop goes on to its end: the app
+                # is there, and says so.
                 opened()
                 _show_new_context(controller, self.session)
             raise
@@ -2522,6 +2543,31 @@ class BaseCLIApp:
         line = proposals_line(count)
         if line:
             self.session.add_message("system", line)
+
+    async def _drop(self, workflow: Any, session_id: str) -> None:
+        """Delete ``session_id``'s conversation from ``workflow``'s store: on
+        the memory store the CLI keeps one conversation at a time, and
+        ``/new`` drops the one it left, once the switch is made (its memories
+        were proposed by then).
+
+        Shielded: a Ctrl+C stops the wait, not the delete, so no conversation
+        is left half deleted. Never raises but that cancel: a conversation a
+        failed delete leaves is one no command lists or opens (logged). The
+        status bar's job monitor then forgets what it knew of jobs'
+        conversations: one of this conversation's jobs is told as
+        unavailable now.
+        """
+        async def drop() -> None:
+            try:
+                await workflow.delete_session(session_id)
+            except Exception:  # noqa: BLE001 - the new conversation goes on
+                logger.debug("conversation_drop_failed", session_id=session_id, exc_info=True)
+            else:
+                logger.info("conversation_dropped", session_id=session_id)
+            if self._job_monitor is not None:
+                self._job_monitor.forget_conversations()
+
+        await asyncio.shield(asyncio.ensure_future(drop()))
 
     @staticmethod
     async def _is_stored(workflow: Any, session_id: str) -> bool:

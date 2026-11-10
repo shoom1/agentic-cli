@@ -69,6 +69,13 @@ class Place:
         process's alone."""
         return self.store != "memory"
 
+    @property
+    def kept(self) -> bool:
+        """Whether the CLI keeps its conversations once they are left. Not on
+        the memory store, which writes none to disk: the app is in one
+        conversation at a time there, and ``/new`` drops the one it leaves."""
+        return self.store != "memory"
+
     def key(self, session_id: str) -> tuple:
         """What names ``session_id``'s conversation for its lock."""
         return (self.backend, self.store, self.app_name, self.user, session_id)

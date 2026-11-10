@@ -731,14 +731,14 @@ class CompactCommand(Command):
 
 class NewCommand(Command):
     """Start a new conversation, on another backend if one is named; the one
-    left stays in /sessions."""
+    left stays in /sessions (on the memory store it is dropped)."""
 
     def __init__(self) -> None:
         super().__init__(
             name="new",
             description=(
-                "Start a new conversation (the current one stays in /sessions); "
-                "name a backend to run it there"
+                "Start a new conversation (the current one stays in /sessions, "
+                "unless session_store is memory); name a backend to run it there"
             ),
             usage="/new [adk|deepagents|langgraph]",
             examples=["/new", "/new deepagents"],

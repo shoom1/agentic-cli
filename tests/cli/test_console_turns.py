@@ -288,16 +288,37 @@ def test_resume_picks_a_conversation_and_shows_where_it_left_off(console):
     assert resumed != new
 
 
+def test_new_on_the_memory_store_drops_the_conversation_left(tmp_path):
+    """One conversation at a time: the line says the one left is not kept."""
+    home, cwd = tmp_path / "home", tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    console = Console(cwd, home, args=("--store", "memory"))
+    try:
+        console.type_line("Plan the trip")
+        console.expect("Echo: Plan the trip")
+        console.type_line("/new")
+        console.expect("not kept (session_store is memory).")
+        console.exit()
+    finally:
+        console.child.close(force=True)
+
+    assert re.search(
+        r"New conversation [0-9a-f]{12}\. Previous: [0-9a-f]{12}, "
+        r"not kept \(session_store is memory\)\.",
+        console.transcript,
+    )
+    assert "Resume this conversation" not in console.transcript
+
+
 def test_resume_of_a_conversation_that_is_not_stored_exits_before_the_prompt(tmp_path):
     import pexpect
 
     (tmp_path / "home").mkdir()
     console = Console(tmp_path, tmp_path / "home", args=("--resume", "zzz"), prompt=False)
     try:
-        # The console app keeps its conversations in memory: nothing to open instead.
-        console.expect("No conversation 'zzz' found. "
-                       "(session_store is memory: conversations end with the app)",
-                       timeout=STARTUP_TIMEOUT)
+        console.expect("No conversation 'zzz' found: ", timeout=STARTUP_TIMEOUT)
+        console.expect(" --continue opens the newest, /resume in the app picks one.")
         console.child.expect(pexpect.EOF, timeout=STEP_TIMEOUT)
         console.child.close()
     finally:
