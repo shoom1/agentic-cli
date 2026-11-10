@@ -1412,8 +1412,8 @@ the start of the entry's title.
     `AgentGraphError` ("Duplicate agent name(s): …"). Rename one.
   - A task-mode agent (ADK 2's `mode="task"`, through a `code:` sub-agent)
     raises `AgentGraphError`: "agent 'x' is in task mode, which is not
-    supported; use single_turn or chat". ADK runs its delegation outside the
-    tool pipeline and keeps the call open across turns.
+    supported; use a chat-mode sub-agent". ADK runs its delegation outside
+    the tool pipeline and keeps the call open across turns.
   - Agent configs passed with `adk_config_path` (as
     `create_workflow_manager_from_settings` passes an app's) are ignored, with
     a warning (`adk_native_configs_ignored`), where 0.6 built the services

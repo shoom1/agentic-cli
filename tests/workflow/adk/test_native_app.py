@@ -153,7 +153,7 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
             await manager.initialize_services()
 
         assert str(raised.value) == (
-            "agent 'asker' is in task mode, which is not supported; use single_turn or chat"
+            "agent 'asker' is in task mode, which is not supported; use a chat-mode sub-agent"
         )
         assert manager._session_service is None
 

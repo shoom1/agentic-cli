@@ -135,9 +135,12 @@ def load_native_root(path: str | Path) -> LlmAgent:
         )
     for agent in walk(root):
         if _mode(agent) == _TASK:
+            # A chat-mode one, ADK's default for a sub-agent: a YAML has no
+            # `mode`, and the gate denies a single-turn `code:` sub-agent's
+            # tool, which the framework did not build.
             raise AgentGraphError(
                 f"agent {agent.name!r} is in task mode, which is not supported; "
-                "use single_turn or chat"
+                "use a chat-mode sub-agent"
             )
     logger.info("adk_native_config_loaded", path=str(path), root=root.name)
     return root

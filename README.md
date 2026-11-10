@@ -1368,13 +1368,14 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
     `code:` agent cannot be loaded twice), and an edit of the YAML takes
     effect in a new manager. A YAML that cannot be loaded raises
     `AgentGraphError` naming the file and ADK's error. A root that is not
-    an `LlmAgent` (a workflow or
-    another agent class) is refused there, and so is a name used twice in
-    the tree (ADK requires unique names only among siblings) and a
-    task-mode agent anywhere in the tree: `AgentGraphError`, naming the
-    agent ("agent 'x'
-    is in task mode, which is not supported; use single_turn or chat").
-    Agent configs passed with it are ignored, with a warning.
+    an `LlmAgent` (a workflow or another agent class) is refused there, and
+    so is a name used twice in the tree (ADK requires unique names only
+    among siblings) and a task-mode agent anywhere in the tree:
+    `AgentGraphError`, naming the agent ("agent 'x' is in task mode, which
+    is not supported; use a chat-mode sub-agent"; a YAML has no `mode`
+    field, and the permission gate denies a single-turn `code:` sub-agent,
+    which the framework did not build). Agent configs passed with it are
+    ignored, with a warning.
   - **Models.** Each agent runs on the model ADK resolves for it (its
     YAML's `model` or `model_code`, else its parent's, else ADK's default,
     never the app's `default_model`); that model's name is resolved through
