@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import anthropic
 import openai
@@ -365,6 +366,26 @@ def read_file_tool() -> FunctionTool:
 
 
 class TestThePlugin:
+    async def test_an_agent_with_its_own_after_tool_callbacks_is_left_out(self, project):
+        """ADK runs an agent's own after-tool callbacks only when no plugin
+        returned a value, so a cut would skip them: such an agent (a native ADK
+        YAML app's) gets its results whole."""
+        cap = ToolResultCapPlugin(20_000, folder(), skip_agents={"own"})
+
+        def context(agent: str):
+            return SimpleNamespace(agent_name=agent, function_call_id="c1")
+
+        whole = await cap.after_tool_callback(
+            tool=read_file_tool(), tool_args={}, tool_context=context("own"), result="x" * 50_000
+        )
+        cut = await cap.after_tool_callback(
+            tool=read_file_tool(), tool_args={}, tool_context=context("other"),
+            result="x" * 50_000,
+        )
+
+        assert whole is None
+        assert CUT.search(cut["result"])
+
     async def test_a_result_that_fits_is_left_alone(self, project):
         assert await after(plugin(), read_file_tool(), {"success": True, "content": "x"}) is None
         assert not folder().exists()

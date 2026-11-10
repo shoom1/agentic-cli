@@ -237,3 +237,51 @@ class TestItsAgentsRunOnTheirOwnModels:
             assert manager.services.get("memory_store") is not None
         finally:
             await manager.cleanup()
+
+
+class TestWhatTheRunReadsOfTheTree:
+    """What the run needs of a tree is read from the tree, whoever built it."""
+
+    async def test_the_agents_that_reply_and_those_with_their_own_after_tool_callbacks(
+        self, project
+    ):
+        from agentic_cli.workflow.adk.build import (
+            load_native_root,
+            own_after_tool_agents,
+            reply_agents,
+        )
+
+        write(project, "helper.yaml", """
+            agent_class: LlmAgent
+            name: helper
+            model: claude-sonnet-4-6
+            instruction: You help.
+            after_tool_callbacks:
+              - name: tests.workflow.adk.native_agents.after_tool
+        """)
+        root = load_native_root(root_yaml(project, extra=(
+            "sub_agents:\n  - config_path: helper.yaml\n"
+            "  - code: tests.workflow.adk.native_agents.solver\n"
+        )))
+
+        # The helper is chat-mode (ADK's default for a sub-agent): it takes
+        # the conversation. The solver is a single-turn tool of the root's.
+        assert reply_agents(root) == {"root", "helper"}
+        assert own_after_tool_agents(root) == {"helper"}
+
+    async def test_an_app_built_from_configs_has_its_root_reply_alone(self, project):
+        from agentic_cli.workflow.adk.build import own_after_tool_agents, reply_agents
+
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[
+                AgentConfig(name="lead", prompt="Lead.", sub_agents=["aide"]),
+                AgentConfig(name="aide", prompt="Aid.", description="Aids."),
+            ],
+            settings=settings(),
+        )
+        await manager.initialize_services()
+        try:
+            root = manager._root_agent
+            assert (reply_agents(root), own_after_tool_agents(root)) == ({"lead"}, set())
+        finally:
+            await manager.cleanup()

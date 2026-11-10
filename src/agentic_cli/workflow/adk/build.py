@@ -3,7 +3,21 @@
 An app's agents are built from agent configs (``GoogleADKWorkflowManager``
 builds them) or by ADK from a native ADK YAML (``adk_config_path``). That is
 construction, and the only place the two differ: once the tree is built, the
-run reads what it needs from the tree itself.
+run reads what it needs from the tree itself:
+
+- **The agents that reply to the user** (``reply_agents``): the root, and
+  every chat-mode agent it can transfer to. ``transfer_to_agent`` hands such
+  an agent the conversation; it answers the user, and ADK starts the next
+  turn at it. Their text is the reply, the conversation they hold is the
+  user's, and a conversation their model no longer takes is the turn's
+  error; only the root's is summarized, and only the root carries the memory
+  index. A single-turn sub-agent is a tool of its parent's (every agent
+  built from configs but the root is one): its text is its work, and the
+  agents under it run inside its call.
+- **The agents with after-tool callbacks of their own**
+  (``own_after_tool_agents``, a native ADK YAML app's): ADK runs them only
+  when no plugin answered the call, so the result cap leaves these agents'
+  results whole.
 
 A native tree is loaded when the manager validates its agents
 (``load_native_root``), before any model, service or store, so its agents'
@@ -29,6 +43,7 @@ logger = Loggers.workflow()
 
 #: ADK's agent modes (``google.adk.utils._agent_mode.AgentMode``), as values.
 _TASK = "task"
+_SINGLE_TURN = "single_turn"
 
 
 def walk(agent: Any) -> Iterator[Any]:
@@ -73,3 +88,28 @@ def load_native_root(path: str | Path) -> LlmAgent:
             )
     logger.info("adk_native_config_loaded", path=str(path), root=root.name)
     return root
+
+
+def reply_agents(root: Any) -> frozenset[str]:
+    """The agents that reply to the user: ``root`` and every agent it can transfer to.
+
+    An agent ADK runs as a tool of its parent's (single-turn, or task mode)
+    is left out, with every agent under it: they run inside that call. Any
+    other agent is reached by a transfer (a chat-mode ``LlmAgent``, ADK's
+    default for a sub-agent, or an agent that has no mode), and so is
+    every agent it runs.
+    """
+    names = {root.name}
+    for sub_agent in getattr(root, "sub_agents", None) or ():
+        if _mode(sub_agent) not in (_SINGLE_TURN, _TASK):
+            names |= reply_agents(sub_agent)
+    return frozenset(names)
+
+
+def own_after_tool_agents(root: Any) -> frozenset[str]:
+    """The agents in ``root``'s tree with after-tool callbacks of their own."""
+    return frozenset(
+        agent.name
+        for agent in walk(root)
+        if getattr(agent, "canonical_after_tool_callbacks", None)
+    )

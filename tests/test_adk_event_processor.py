@@ -138,6 +138,45 @@ class TestSubAgentActivity:
         assert [e async for e in ADKEventProcessor(model="m").process_event(failed, "s1")] == []
 
 
+class TestTheAgentsThatReply:
+    """The agents that reply to the user (``reply_agents``): the root and every
+    chat-mode agent it can transfer to, which takes the conversation and
+    answers the user (a native ADK YAML app's). Only an agent outside them
+    is a sub-agent, whose text is its work."""
+
+    REPLY = {"root", "helper"}
+
+    async def test_each_ones_text_is_the_reply(self):
+        processor = ADKEventProcessor(model="m", root="root", reply_agents=self.REPLY)
+
+        helper = await _events(processor, "helper")
+        worker = await _events(processor, "worker")
+
+        assert "subagent" not in helper[EventType.TEXT].metadata
+        assert "purpose" not in helper[EventType.LLM_USAGE].metadata
+        assert worker[EventType.TEXT].metadata["subagent"] is True
+        assert worker[EventType.LLM_USAGE].metadata["purpose"] == "subagent"
+
+    async def test_a_reply_that_is_no_answer_ends_the_turn_whichever_one_wrote_it(self):
+        processor = ADKEventProcessor(model="m", root="root", reply_agents=self.REPLY)
+        blocked = Event(author="helper", invocation_id="i1", error_code="SAFETY")
+
+        (event,) = [e async for e in processor.process_event(blocked, "s1")]
+
+        assert (event.type, event.content) == (EventType.ERROR, "m returned no answer")
+        assert event.metadata["recoverable"] is False
+
+    async def test_a_context_overflow_is_the_turns_error_whichever_one_had_it(self):
+        processor = ADKEventProcessor(model="m", root="root", reply_agents=self.REPLY)
+        overflowed = TestAContextOverflow._overflowed("helper")
+
+        (event,) = [e async for e in processor.process_event(overflowed, "s1")]
+
+        assert (event.metadata["recoverable"], event.metadata["error_code"]) == (
+            False, "CONTEXT_OVERFLOW"
+        )
+
+
 #: Each agent's model and context numbers, as the manager hands them over:
 #: the coordinator's window is known, the researcher's (an endpoint model
 #: declared without one) is the 128k floor.
