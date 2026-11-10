@@ -157,6 +157,34 @@ class TestTheYAMLIsLoadedWhenItIsValidated:
         )
         assert manager._session_service is None
 
+    async def test_a_name_used_twice_in_the_tree_is_refused(self, project):
+        """ADK requires unique names only among siblings, but the run reads
+        every agent by name (its model, budget, the agents that reply), and
+        ADK's own transfer finds the first: as in a config-built graph."""
+        for parent in ("a", "b"):
+            write(project, f"{parent}.yaml", f"""
+                agent_class: LlmAgent
+                name: {parent}
+                model: claude-sonnet-4-6
+                instruction: You lead.
+                sub_agents:
+                  - config_path: dup_{parent}.yaml
+            """)
+            write(project, f"dup_{parent}.yaml", """
+                agent_class: LlmAgent
+                name: dup
+                model: claude-sonnet-4-6
+                instruction: You help.
+            """)
+        manager = native(root_yaml(project, extra=(
+            "sub_agents:\n  - config_path: a.yaml\n  - config_path: b.yaml\n"
+        )))
+
+        with pytest.raises(AgentGraphError, match=r"Duplicate agent name\(s\): dup\."):
+            await manager.initialize_services()
+
+        assert manager._session_service is None
+
     async def test_its_code_sees_the_settings_keys_when_it_is_imported(
         self, project, monkeypatch
     ):

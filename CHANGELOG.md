@@ -1402,6 +1402,9 @@ the start of the entry's title.
     `ParallelAgent`, a workflow or another class at the root raises
     `AgentGraphError` naming it: make an `LlmAgent` the root, with the other
     agent as its sub-agent.
+  - Agent names must be unique across the tree, as in a config-built graph
+    (ADK requires it only among siblings): a name used twice raises
+    `AgentGraphError` ("Duplicate agent name(s): …"). Rename one.
   - A task-mode agent (ADK 2's `mode="task"`, through a `code:` sub-agent)
     raises `AgentGraphError`: "agent 'x' is in task mode, which is not
     supported; use single_turn or chat". ADK runs its delegation outside the

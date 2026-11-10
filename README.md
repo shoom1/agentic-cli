@@ -1367,8 +1367,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
     on the same agents (ADK gives an agent one parent, so a module-level
     `code:` agent cannot be loaded twice), and an edit of the YAML takes
     effect in a new manager. A root that is not an `LlmAgent` (a workflow or
-    another agent class) is refused there, and so is a task-mode agent
-    anywhere in the tree: `AgentGraphError`, naming the agent ("agent 'x'
+    another agent class) is refused there, and so is a name used twice in
+    the tree (ADK requires unique names only among siblings) and a
+    task-mode agent anywhere in the tree: `AgentGraphError`, naming the
+    agent ("agent 'x'
     is in task mode, which is not supported; use single_turn or chat").
     Agent configs passed with it are ignored, with a warning.
   - **Models.** Each agent runs on the model ADK resolves for it (its

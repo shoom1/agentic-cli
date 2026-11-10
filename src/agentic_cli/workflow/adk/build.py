@@ -22,10 +22,13 @@ run reads what it needs from the tree itself:
 A native tree is loaded when the manager validates its agents
 (``load_native_root``), before any model, service or store, so its agents'
 models are resolved and their services built as a config-built app's are.
-Two shapes are refused there, with the agent named: a root that is not an
+Three shapes are refused there, with the agent named: a root that is not an
 ``LlmAgent`` (a workflow or another agent class, which ADK runs on another
-path), and a task-mode agent, whose delegation ADK runs outside the tool
-pipeline and keeps open across turns until the agent calls ``finish_task``.
+path); a name used twice in the tree (ADK requires unique names only among
+siblings, but the run reads every agent by name, and ADK's transfer finds
+the first), as a config-built graph refuses one; and a task-mode agent,
+whose delegation ADK runs outside the tool pipeline and keeps open across
+turns until the agent calls ``finish_task``.
 """
 
 from __future__ import annotations
@@ -99,8 +102,8 @@ def load_native_root(path: str | Path) -> LlmAgent:
     (``anthropic_llm.ensure_direct_anthropic``).
 
     Raises:
-        AgentGraphError: The root is not an ``LlmAgent``, or an agent is in
-            task mode.
+        AgentGraphError: The root is not an ``LlmAgent``, a name is used
+            twice in the tree, or an agent is in task mode.
     """
     from agentic_cli.workflow.adk.anthropic_llm import ensure_direct_anthropic
     from agentic_cli.workflow.adk_config_bridge import load_adk_agent_native
@@ -111,6 +114,13 @@ def load_native_root(path: str | Path) -> LlmAgent:
         raise AgentGraphError(
             f"the root agent {getattr(root, 'name', None)!r} is a {type(root).__name__}, "
             "not an LlmAgent: a native ADK YAML app's root must be an LlmAgent"
+        )
+    names = [agent.name for agent in walk(root)]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise AgentGraphError(
+            f"Duplicate agent name(s): {', '.join(duplicates)}. Agent names must be "
+            "unique across a native ADK YAML app's tree."
         )
     for agent in walk(root):
         if _mode(agent) == _TASK:
