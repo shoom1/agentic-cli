@@ -14,34 +14,39 @@ set -u
 # What every job is built from: a change here runs them all.
 EVERY='^(\.github/workflows/ci\.yml|\.github/scripts/ci-jobs\.sh|pyproject\.toml|environment\.yml)$'
 
-# The kb extra (sentence-transformers, trafilatura) changes what the memory
-# package, web_fetch's page conversion and the knowledge tools do, and the
-# logging setup quiets its loggers.
-KB='^(src/agentic_cli/memory/|src/agentic_cli/tools/webfetch/|src/agentic_cli/tools/(knowledge_tools|_knowledge_base|arxiv_tools|pdf_utils)\.py$|src/agentic_cli/workflow/memory_services\.py$|src/agentic_cli/logging\.py$|tests/memory/|tests/tools/test_(kb_|webfetch|async_tools_never_block))'
+# The kb extra adds sentence-transformers and torch (environment.yml installs
+# trafilatura for every job): real embeddings, in the memory package, the
+# knowledge tools and what builds their services.
+KB='^(src/agentic_cli/memory/|src/agentic_cli/tools/(knowledge_tools|_knowledge_base|arxiv_tools)\.py$|src/agentic_cli/workflow/memory_services\.py$|tests/memory/|tests/tools/test_kb_)'
 
-# The built wheel: what it packages (examples/research_demo) and the tests
+# The built wheel: what it packages (examples/research_demo), .gitignore
+# (hatchling leaves out what it matches, package data included) and the tests
 # that build it. A module added or removed under src/, and a file there that
 # is not Python (package data), are checked below.
-WHEEL='^(examples/research_demo/|tests/examples/(console_smoke\.py|test_[a-z_]*_wheel\.py)$)'
+WHEEL='^(examples/research_demo/|\.gitignore$|tests/examples/(console_smoke\.py|test_[a-z_]*_wheel\.py)$)'
 
 # compile_document, the path resolution it judges by, and its engine tests.
 LATEX='^(src/agentic_cli/tools/document/|src/agentic_cli/paths\.py$|tests/tools/test_document_compile)'
 
-# The sandbox, the descriptor-safe copies it stages through, the settings
-# that name its image (CI pre-pulls that tag), and its live tests.
-DOCKER='^(src/agentic_cli/tools/sandbox/|src/agentic_cli/file_utils\.py$|src/agentic_cli/workflow/settings\.py$|tests/tools/test_sandbox_docker)'
+# The sandbox, the descriptor-safe copies it stages through, its live tests
+# and the MockContext they build their settings with (its workspace holds the
+# sandbox's mounts). The settings file counts only where a changed line names
+# the sandbox (below): sandbox_image is the tag CI pre-pulls.
+DOCKER='^(src/agentic_cli/tools/sandbox/|src/agentic_cli/file_utils\.py$|tests/tools/test_sandbox_docker|tests/conftest\.py$)'
+SETTINGS='src/agentic_cli/workflow/settings.py'
 
 every() {
   for job in kb wheel latex docker; do echo "$job=true"; done
 }
 
-if [ $# -lt 2 ]; then
+if [ $# -lt 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
   every
   exit 0
 fi
 # --no-renames: a moved file is a removal and an addition, which the wheel
-# check below counts.
-if ! changes=$(git diff --name-status --no-renames "$1...$2" 2>/dev/null); then
+# check below counts. core.quotePath=false: a name with a non-ASCII letter is
+# printed as it is, not quoted, so the patterns see it.
+if ! changes=$(git -c core.quotePath=false diff --name-status --no-renames "$1...$2" 2>/dev/null); then
   echo "ci-jobs: cannot read the diff $1...$2; running every job" >&2
   every
   exit 0
@@ -50,6 +55,12 @@ paths=$(printf '%s\n' "$changes" | cut -f2)
 
 touches() {
   printf '%s\n' "$paths" | grep -qE "$1"
+}
+
+sandbox() {
+  touches "$DOCKER" && return 0
+  git -c core.quotePath=false diff "$1...$2" -- "$SETTINGS" \
+    | grep -vE '^(\+\+\+|---) ' | grep -qE '^[+-].*(sandbox|stateful_executor)'
 }
 
 packaging() {
@@ -69,4 +80,4 @@ fi
 echo "kb=$(flag touches "$KB")"
 echo "wheel=$(flag packaging)"
 echo "latex=$(flag touches "$LATEX")"
-echo "docker=$(flag touches "$DOCKER")"
+echo "docker=$(flag sandbox "$1" "$2")"

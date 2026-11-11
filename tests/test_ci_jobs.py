@@ -43,6 +43,9 @@ def commit(repo: Path, files: dict[str, str | None], message: str = "change") ->
     return git(repo, "rev-parse", "HEAD")
 
 
+#: The settings file, whose sandbox lines run the docker job.
+SETTINGS = "src/agentic_cli/workflow/settings.py"
+
 #: One file of each part, and the files the tests change: a change below
 #: modifies a file, since adding or removing one under ``src/`` runs the wheel.
 PARTS = {
@@ -52,16 +55,24 @@ PARTS = {
     "src/agentic_cli/cli/app.py": "a = 1\n",
     "tests/cli/test_app.py": "a = 1\n",
     "README.md": "x\n",
+    SETTINGS: 'model = "a"\nsandbox_image = "a"\n',
     **dict.fromkeys(
         (
+            ".github/scripts/ci-jobs.sh",
+            ".gitignore",
+            "tests/conftest.py",
             "src/agentic_cli/memory/kb/convert.py",
             "src/agentic_cli/memory/_core/embeddings.py",
-            "src/agentic_cli/tools/webfetch/converter.py",
             "src/agentic_cli/tools/knowledge_tools.py",
+            "src/agentic_cli/tools/arxiv_tools.py",
             "src/agentic_cli/workflow/memory_services.py",
-            "src/agentic_cli/logging.py",
             "tests/memory/test_kb_extra.py",
+            "tests/tools/test_kb_ingest_file.py",
+            "src/agentic_cli/tools/webfetch/converter.py",
+            "src/agentic_cli/tools/pdf_utils.py",
+            "src/agentic_cli/logging.py",
             "tests/tools/test_webfetch_summary_text.py",
+            "tests/tools/test_async_tools_never_block.py",
             "src/agentic_cli/tools/sandbox/manager.py",
             "src/agentic_cli/tools/sandbox/backends/jupyter_docker.py",
             "src/agentic_cli/file_utils.py",
@@ -72,6 +83,7 @@ PARTS = {
             "examples/research_demo/app.py",
             "tests/examples/console_smoke.py",
             "tests/examples/test_research_demo_wheel.py",
+            "tests/examples/test_deepagents_wheel.py",
             "src/agentic_cli/models/data/table.json",
         ),
         "a = 1\n",
@@ -118,30 +130,64 @@ def test_a_test_or_doc_change_elsewhere_runs_none_of_them(repo):
     [
         ("src/agentic_cli/memory/kb/convert.py", "kb"),
         ("src/agentic_cli/memory/_core/embeddings.py", "kb"),
-        ("src/agentic_cli/tools/webfetch/converter.py", "kb"),
         ("src/agentic_cli/tools/knowledge_tools.py", "kb"),
+        ("src/agentic_cli/tools/arxiv_tools.py", "kb"),
         ("src/agentic_cli/workflow/memory_services.py", "kb"),
-        ("src/agentic_cli/logging.py", "kb"),
         ("tests/memory/test_kb_extra.py", "kb"),
-        ("tests/tools/test_webfetch_summary_text.py", "kb"),
+        ("tests/tools/test_kb_ingest_file.py", "kb"),
         ("src/agentic_cli/tools/sandbox/manager.py", "docker"),
         ("src/agentic_cli/tools/sandbox/backends/jupyter_docker.py", "docker"),
         ("src/agentic_cli/file_utils.py", "docker"),
         ("tests/tools/test_sandbox_docker_live.py", "docker"),
+        ("tests/conftest.py", "docker"),
         ("src/agentic_cli/tools/document/compile.py", "latex"),
         ("src/agentic_cli/paths.py", "latex"),
         ("tests/tools/test_document_compile_latex.py", "latex"),
         ("examples/research_demo/app.py", "wheel"),
         ("tests/examples/console_smoke.py", "wheel"),
         ("tests/examples/test_research_demo_wheel.py", "wheel"),
+        ("tests/examples/test_deepagents_wheel.py", "wheel"),
         ("src/agentic_cli/models/data/table.json", "wheel"),
+        (".gitignore", "wheel"),
     ],
 )
 def test_a_change_to_one_part_runs_its_job(repo, path, job):
     assert changed(repo, {path: "a = 2\n"}) == {**NONE, job: True}
 
 
-@pytest.mark.parametrize("path", ["pyproject.toml", "environment.yml", ".github/workflows/ci.yml"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        # trafilatura is in environment.yml, so every job has it: the kb job
+        # adds only sentence-transformers and torch.
+        "src/agentic_cli/tools/webfetch/converter.py",
+        "src/agentic_cli/logging.py",
+        "tests/tools/test_webfetch_summary_text.py",
+        "tests/tools/test_async_tools_never_block.py",
+        "src/agentic_cli/tools/pdf_utils.py",
+    ],
+)
+def test_what_only_trafilatura_touches_runs_no_kb_job(repo, path):
+    assert changed(repo, {path: "a = 2\n"}) == NONE
+
+
+def test_a_sandbox_setting_runs_docker(repo):
+    """CI pre-pulls the image ``sandbox_image`` names."""
+    assert changed(repo, {SETTINGS: 'model = "a"\nsandbox_image = "b"\n'}) == {**NONE, "docker": True}
+
+
+def test_another_setting_runs_none_of_them(repo):
+    assert changed(repo, {SETTINGS: 'model = "b"\nsandbox_image = "a"\n'}) == NONE
+
+
+def test_a_module_whose_name_git_would_quote_runs_the_wheel(repo):
+    assert changed(repo, {"src/agentic_cli/cli/caf\u00e9.py": "a = 1\n"}) == {**NONE, "wheel": True}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["pyproject.toml", "environment.yml", ".github/workflows/ci.yml", ".github/scripts/ci-jobs.sh"],
+)
 def test_a_change_to_what_every_job_builds_from_runs_them_all(repo, path):
     assert changed(repo, {path: "changed\n"}) == EVERY
 
@@ -179,6 +225,22 @@ def test_only_the_pull_requests_own_changes_count(repo):
 
 def test_a_push_runs_them_all(repo):
     assert jobs(repo) == EVERY
+
+
+def test_empty_commits_run_them_all(repo):
+    assert jobs(repo, "", "") == EVERY
+
+
+def test_ci_pre_pulls_the_image_the_sandbox_runs():
+    """The docker job pre-pulls the default ``sandbox_image``, so a first run
+    does not wait on the pull past ``sandbox_start_timeout``."""
+    import re
+
+    from agentic_cli.config import BaseSettings
+
+    workflow = (SCRIPT.parents[1] / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    pulled = re.findall(r"docker pull (\S+)", workflow)
+    assert pulled == [BaseSettings.model_fields["sandbox_image"].default]
 
 
 def test_a_diff_that_cannot_be_read_runs_them_all(repo):
