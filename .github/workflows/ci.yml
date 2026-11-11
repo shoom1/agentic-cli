@@ -10,6 +10,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The offline suite runs on every change. The four jobs that each test one
+  # part (the kb extra, the built wheel, the LaTeX engine, Docker) run on a
+  # pull request only when it touches that part (.github/scripts/ci-jobs.sh,
+  # tests/test_ci_jobs.py), and on every push to develop and main, so the
+  # merged tree always gets all five.
+  changes:
+    name: Jobs this change needs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kb: ${{ steps.pick.outputs.kb }}
+      wheel: ${{ steps.pick.outputs.wheel }}
+      latex: ${{ steps.pick.outputs.latex }}
+      docker: ${{ steps.pick.outputs.docker }}
+    steps:
+      # A pull request's diff needs the history back to where it left its
+      # base. A string: a number 0 would read as false in the expression.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Pick the jobs
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        # pipefail: a script that fails fails this job (and so the run),
+        # rather than leaving every part job skipped.
+        run: |
+          set -o pipefail
+          if [ "$EVENT" = pull_request ]; then
+            bash .github/scripts/ci-jobs.sh "$BASE" "$HEAD" | tee -a "$GITHUB_OUTPUT"
+          else
+            bash .github/scripts/ci-jobs.sh | tee -a "$GITHUB_OUTPUT"
+          fi
+
   offline:
     name: Offline tests (no Docker)
     runs-on: ubuntu-latest
@@ -44,6 +81,8 @@ jobs:
 
   kb-extra:
     name: Offline tests with the kb extra
+    needs: changes
+    if: needs.changes.outputs.kb == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -92,6 +131,8 @@ jobs:
 
   wheel-acceptance:
     name: Built-wheel acceptance (console smoke, deepagents extra)
+    needs: changes
+    if: needs.changes.outputs.wheel == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -132,6 +173,8 @@ jobs:
 
   latex-engine:
     name: LaTeX engine tests
+    needs: changes
+    if: needs.changes.outputs.latex == 'true'
     runs-on: ubuntu-latest
     # Installing TeX Live from the apt mirrors has taken 22 minutes.
     timeout-minutes: 45
@@ -166,6 +209,8 @@ jobs:
 
   docker-isolation:
     name: Docker isolation tests
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
