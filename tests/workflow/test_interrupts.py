@@ -5,7 +5,10 @@ open is answered at that conversation's next run (Deep Agents), so what one
 conversation's calls did must survive a turn in another, and a failed turn's
 calls that returned keep their results. A job answers only a call of its own
 conversation: the job store is the user's, kept across runs, and a provider
-that numbers its call ids repeats them in every conversation.
+that numbers its call ids repeats them in every conversation. Within a
+conversation a call is the run's that made it (the root's own, or a
+sub-agent's), since such a provider also gives a sub-agent's call the id of
+its parent's delegation.
 """
 
 from __future__ import annotations
@@ -26,9 +29,17 @@ from agentic_cli.workflow.interrupts import (
     interrupted,
     job_for_call,
     job_started,
+    unrecorded,
 )
 from agentic_cli.workflow.service_registry import JOB_MANAGER, set_service_registry
-from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn
+from agentic_cli.workflow.sessions import (
+    RunRef,
+    SessionRef,
+    reset_active_run,
+    reset_active_turn,
+    set_active_run,
+    set_active_turn,
+)
 
 
 def ref(session_id: str, user_id: str = "u") -> SessionRef:
@@ -140,3 +151,109 @@ class TestJobForCall:
 
         with turn_of(None, jobs):
             assert job_for_call("call_0") is None
+
+
+@contextmanager
+def run_as(ref: RunRef | None) -> Iterator[None]:
+    """Run the block as ``ref``'s calls (None: the root's own)."""
+    token = set_active_run(ref)
+    try:
+        yield
+    finally:
+        reset_active_run(token)
+
+
+RESEARCHER = RunRef(
+    agent="researcher", instance="researcher-1", run="researcher-1#1", parent_run=None, depth=1
+)
+
+
+class TestEachRunsCallsAreItsOwn:
+    """A provider that numbers its call ids per agent (``call_0``, ...) gives a
+    sub-agent's first call the id of the delegation that started it: neither
+    call ever stands for the other."""
+
+    def test_a_sub_agents_finished_call_never_answers_its_parents(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                calls.finished("call_0", "the researcher's lookup")
+
+            assert calls.answer("call_0", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            with run_as(RESEARCHER):
+                assert calls.answer("call_0", by_user=True) == "the researcher's lookup"
+
+    def test_a_parents_finished_call_never_answers_its_sub_agents(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            calls.finished("call_0", "the delegation's answer")
+
+            with run_as(RESEARCHER):
+                assert calls.answer("call_0", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            assert calls.answer("call_0", by_user=True) == "the delegation's answer"
+
+    def test_a_sub_agents_call_at_its_prompt_is_not_its_parents(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                cancelled_at_its_prompt(calls, "call_0")
+
+            assert calls.answer("call_0", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            with run_as(RESEARCHER):
+                assert calls.answer("call_0", by_user=True) == interrupted(NOT_RUN)
+
+    def test_a_run_named_outright_is_the_run_in_progress(self):
+        """ADK words a stopped turn's seals outside the run that made the
+        call: it names the run its branch is."""
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                calls.finished("call_0", "the researcher's lookup")
+                cancelled_at_its_prompt(calls, "call_1")
+
+            assert calls.recorded("call_0", run="researcher-1#1") == "the researcher's lookup"
+            assert calls.recorded("call_0", run=None) is None
+            assert calls.answer("call_0", by_user=True, run="researcher-1#1") == (
+                "the researcher's lookup"
+            )
+            assert calls.answer("call_1", by_user=True, run="researcher-1#1") == interrupted(NOT_RUN)
+            assert calls.answer("call_1", by_user=True, run=None) == interrupted(
+                INTERRUPTED_BY_USER
+            )
+
+    def test_a_turn_that_ends_forgets_every_runs_calls(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            calls.finished("call_0", "the delegation's answer")
+            with run_as(RESEARCHER):
+                calls.finished("call_0", "the researcher's lookup")
+                cancelled_at_its_prompt(calls, "call_1")
+
+        calls.clear(ref("a"))
+
+        assert calls._finished == {} and calls._asking == {}
+
+    def test_a_failed_turn_keeps_every_runs_finished_calls(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                calls.finished("call_0", "the researcher's lookup")
+                cancelled_at_its_prompt(calls, "call_1")
+
+        calls.failed(ref("a"))
+
+        with turn_of(ref("a")), run_as(RESEARCHER):
+            assert calls.answer("call_0", by_user=False) == "the researcher's lookup"
+            assert calls.answer("call_1", by_user=False) == interrupted(INTERRUPTED)
+
+
+class TestUnrecorded:
+    def test_a_call_no_record_holds_is_answered_as_interrupted(self):
+        with turn_of(ref("a")):
+            assert unrecorded("call_0", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            assert unrecorded("call_0", by_user=False) == interrupted(INTERRUPTED)
+
+    def test_one_whose_job_was_submitted_is_answered_with_the_job(self):
+        jobs = Jobs(job("j1", "call_0", "a"))
+        with turn_of(ref("a"), jobs):
+            assert unrecorded("call_0", by_user=True) == job_started(jobs.records[0])
