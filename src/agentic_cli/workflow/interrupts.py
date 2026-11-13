@@ -41,6 +41,7 @@ import enum
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+from agentic_cli.workflow.agents.runs import run_instance
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
 from agentic_cli.workflow.sessions import get_active_run, get_active_turn, instance_of
 
@@ -151,13 +152,12 @@ def _run_id(run: str | None | _Active) -> str | None:
 def _instance(run: str | None | _Active) -> str | None:
     """The instance whose call ``run`` names, as a job's ``started_by`` records it.
 
-    The run in progress by default (``instance_of``); a run named by its id,
-    ``<instance>#<n>`` (``workflow/agents/runs.py``), is its instance's; None
-    is the root's own.
+    The run in progress by default (``instance_of``); a run named by its id
+    is its instance's (``agents.runs.run_instance``); None is the root's own.
     """
     if run is ACTIVE_RUN:
         return instance_of(get_active_run())
-    return run.rpartition("#")[0] if run else None
+    return run_instance(run) if run else None
 
 
 class OpenCalls:

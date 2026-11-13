@@ -116,6 +116,21 @@ class RunRecord:
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
+def _run_id(instance: str, number: int) -> str:
+    """A run's id: its instance and the run's number there (``researcher-2#1``)."""
+    return f"{instance}#{number}"
+
+
+def run_instance(run: str) -> str:
+    """The instance a run id names (``researcher-2#1``: ``researcher-2``).
+
+    The id ``AgentRuns.run_for`` gives, read back: what a job's
+    ``started_by`` is matched by when a call's run is named by its id
+    (``workflow/interrupts.py``).
+    """
+    return run.rpartition("#")[0]
+
+
 class AgentRuns:
     """A manager's sub-agent runs, kept by conversation, in memory for the process."""
 
@@ -148,7 +163,7 @@ class AgentRuns:
         ref = RunRef(
             agent=agent,
             instance=instance,
-            run=f"{instance}#1",
+            run=_run_id(instance, 1),
             parent_run=parent_run,
             depth=(parent.depth if parent is not None else 0) + 1,
         )
