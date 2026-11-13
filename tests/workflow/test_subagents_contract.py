@@ -27,6 +27,7 @@ import httpx
 import pytest
 
 from agentic_cli.config import BaseSettings
+from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
@@ -1113,3 +1114,48 @@ class TestASubAgentsFailure:
         assert [(r.ref, r.status) for r in crew.records()] == [
             (middle, RUN_COMPLETED), (leaf, RUN_FAILED),
         ]
+
+
+# -- a delegation's result: shown alike on both backends ------------------------------------
+
+
+class TestDelegationResult:
+    async def test_a_delegations_result_shows_what_the_sub_agent_answered(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.\nThe handbook says so.")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        assert (result.content, result.metadata["success"]) == ("X is 42.", True)
+
+    async def test_a_failed_delegation_shows_why(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("It failed.")],
+            researcher=[fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        read = crew.results_read("coordinator")["c1"]
+        reason = read.removeprefix("Error running sub-agent: ")
+        first = truncate(reason.strip().splitlines()[0], TOOL_SUMMARY_MAX_LENGTH)
+        assert result.content == f"Failed: {first}"
+        assert (result.metadata["success"], result.metadata["error"]) == (False, read)
+        if crew.backend == "adk":
+            # A named difference: ADK's private delegation tool words the
+            # parent's reason itself.
+            assert result.content == "Failed: Dynamic node researcher failed"
+        else:
+            assert "overloaded" in reason

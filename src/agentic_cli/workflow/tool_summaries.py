@@ -189,3 +189,39 @@ def format_tool_summary(tool_name: str, result: dict[str, Any]) -> str | None:
         except (KeyError, TypeError, IndexError, ValueError, AttributeError):
             return None
     return None
+
+
+#: What a delegation whose sub-agent answered no text shows.
+NO_ANSWER = "No answer"
+
+
+def delegation_summary(answer: str, *, error: str | None = None) -> str:
+    """A delegation's result in one line, the same on every backend.
+
+    What the sub-agent answered: its first line that is not blank, cut to
+    ``TOOL_SUMMARY_MAX_LENGTH`` (``NO_ANSWER`` for none), as
+    ``execute_python``'s output is shown. A sub-agent that failed shows
+    ``Failed: <error>``, as any failed result does.
+
+    Each backend's event processor gives a delegation's ``TOOL_RESULT`` this
+    as its content where it knows the call is a delegation (it ends the run's
+    ``AGENT_RUN`` there, ``workflow/agents/runs.py::show_as_delegation``):
+    ADK names the tool after the sub-agent and hands back ``{"result":
+    text}``, Deep Agents calls it ``task`` and hands back the text, so
+    neither the name nor the result tells.
+
+    Args:
+        answer: What the sub-agent answered, as its parent read it.
+        error: Why the sub-agent failed, when it did.
+    """
+    if error is not None:
+        return f"Failed: {_first_line(error) or 'the sub-agent failed'}"
+    return _first_line(answer) or NO_ANSWER
+
+
+def _first_line(text: str) -> str:
+    """``text``'s first line that is not blank, cut to ``TOOL_SUMMARY_MAX_LENGTH``; "" for none."""
+    for line in text.splitlines():
+        if line.strip():
+            return truncate(line.strip(), TOOL_SUMMARY_MAX_LENGTH)
+    return ""

@@ -26,6 +26,7 @@ from typing import Any
 
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, SessionRef, get_active_turn
+from agentic_cli.workflow.tool_summaries import delegation_summary
 
 #: A run's statuses: started, then one end.
 RUN_STARTED = "started"
@@ -56,6 +57,29 @@ def run_title(request: str) -> str:
 def result_head(result: str) -> str:
     """What a run keeps of its result: its first ``RESULT_MAX`` characters."""
     return result[:RESULT_MAX]
+
+
+def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
+    """Show a delegation's ``TOOL_RESULT`` as every backend shows it.
+
+    ``ended`` is the ``AGENT_RUN`` the result ends the run with, and
+    ``answer`` what the sub-agent answered, as its parent read it. The
+    content becomes ``tool_summaries.delegation_summary``'s: the answer's
+    first line, or, for a sub-agent that failed, ``Failed: <reason>``, the
+    result failing too (``success`` false; its ``error`` the text the parent
+    read, as Deep Agents' error result has it). A stopped turn's seal
+    (``interrupted``) keeps the seal's rendering. ``metadata["result"]``
+    stays as the backend gave it.
+    """
+    status = ended.metadata.get("status")
+    if status == RUN_INTERRUPTED:
+        return
+    if status == RUN_FAILED:
+        result.content = delegation_summary(answer, error=ended.metadata.get("error") or "")
+        result.metadata["success"] = False
+        result.metadata["error"] = result.metadata.get("error") or answer
+        return
+    result.content = delegation_summary(answer)
 
 
 @dataclass

@@ -31,10 +31,11 @@ call runs at, named by the manager's runs (``AgentRuns.run_for``) from the
 call the ``tasks`` stream announced; a turn's own ``ERROR`` names none. A
 ``task`` call to one of the calling agent's own sub-agents is followed by the
 ``AGENT_RUN`` that starts its run, and its result by the one that ends it
-(``failed`` for an error result, with its error), each recorded as it is
-made, before ``on_event``. A ``task`` call to any other type runs no
-sub-agent (Deep Agents answers that it does not exist): it is an ordinary
-tool call, with no run.
+(``failed`` for an error result, with its error), the result shown as on ADK
+(``agents/runs.py::show_as_delegation``), each recorded as it is made, before
+``on_event``. A ``task`` call to any other type runs no sub-agent (Deep
+Agents answers that it does not exist): it is an ordinary tool call, with no
+run.
 
 What happens inside a node and is no node output (a summary call and the
 summary it made, and with ``raw_llm_logging`` every model call) reaches
@@ -68,6 +69,7 @@ from agentic_cli.workflow.agents.runs import (
     AgentRuns,
     result_head,
     run_title,
+    show_as_delegation,
 )
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
@@ -289,9 +291,11 @@ class DeepAgentsEventProcessor:
         for message in values.get("messages") or ():
             if isinstance(message, ToolMessage):
                 self._answered(message, run)
-                events.append(self._tool_result(message, run))
+                result = self._tool_result(message, run)
+                events.append(result)
                 ended = self._ended(message, run)
                 if ended is not None:
+                    show_as_delegation(result, message.text, ended)
                     events.append(ended)
                     # A run cut short is followed by its one warning.
                     warning = cut_off_warning(ended)

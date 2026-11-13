@@ -429,3 +429,40 @@ class TestSandboxExecute:
     def test_failure_falls_back_to_stderr(self):
         result = {"success": False, "error": "", "stderr": "Traceback here", "stdout": ""}
         assert format_tool_summary("sandbox_execute", result) == "Traceback here"
+
+
+class TestDelegationSummary:
+    """A delegation's result, as one line: the same on every backend."""
+
+    def test_the_answers_first_line(self):
+        from agentic_cli.workflow.tool_summaries import delegation_summary
+
+        assert delegation_summary("X is 42.\nThe handbook says so.") == "X is 42."
+
+    def test_blank_lines_are_passed_over(self):
+        from agentic_cli.workflow.tool_summaries import delegation_summary
+
+        assert delegation_summary("\n  \n  X is 42.  \nMore.") == "X is 42."
+
+    def test_a_long_line_is_cut(self):
+        from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH
+        from agentic_cli.workflow.tool_summaries import delegation_summary
+
+        assert delegation_summary("y" * 300) == "y" * TOOL_SUMMARY_MAX_LENGTH + "..."
+
+    def test_no_text_is_no_answer(self):
+        from agentic_cli.workflow.tool_summaries import NO_ANSWER, delegation_summary
+
+        assert delegation_summary("") == delegation_summary(" \n ") == NO_ANSWER == "No answer"
+
+    def test_a_failed_sub_agent_shows_its_reason(self):
+        from agentic_cli.workflow.tool_summaries import delegation_summary
+
+        assert delegation_summary("", error="529 overloaded\nretry later") == (
+            "Failed: 529 overloaded"
+        )
+
+    def test_a_failure_without_a_reason_still_says_so(self):
+        from agentic_cli.workflow.tool_summaries import delegation_summary
+
+        assert delegation_summary("", error="") == "Failed: the sub-agent failed"
