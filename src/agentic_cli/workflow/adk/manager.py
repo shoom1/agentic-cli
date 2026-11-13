@@ -433,9 +433,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         Every agent but the root is a sub-agent its parent delegates to and
         gets back in the same turn (``single_turn``, no transfers; its
-        ``context`` decides what it sees; a placeholder description when it
-        has none), and ADK offers each of ``sub_agents`` to this agent as a
-        tool named after it; those tools are bound to the delegation
+        ``inherit_context`` decides what it sees; a placeholder description
+        when it has none), and ADK offers each of ``sub_agents`` to this agent
+        as a tool named after it; those tools are bound to the delegation
         declaration as soon as this agent exists. Only the root's
         long-running tools are wrapped: a pending one would pause a
         delegation for good. See ``workflow/adk/delegation.py``. The root

@@ -201,7 +201,7 @@ class TestRows:
 
     async def test_a_delegated_request_is_no_turn(self, project, monkeypatch):
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(delegating()))
-        manager = manager_for(team("inherit"))
+        manager = manager_for(team(inherit_context=True))
         try:
             for text in TURNS:
                 await turn(manager, text)

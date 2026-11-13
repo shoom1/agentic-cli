@@ -1,8 +1,8 @@
 """A sub-agent's context on Deep Agents: a fresh brief, or a fork of the conversation.
 
-A ``fresh`` sub-agent (the default) is Deep Agents' isolated
-``CompiledSubAgent``: its first request holds the brief alone. An ``inherit``
-one is a fork (``mode="fork"``): it gets the coordinator's effective
+A sub-agent with ``inherit_context`` False (the default) is Deep Agents'
+isolated ``CompiledSubAgent``: its first request holds the brief alone. One
+with ``inherit_context=True`` is a fork (``mode="fork"``): it gets the coordinator's effective
 conversation (after any summary), without the message that called ``task``,
 then Deep Agents' preamble and the brief. It keeps its own prompt, tools and
 model. Deep Agents marks forks beta with a ``LangChainBetaWarning`` that
@@ -74,12 +74,12 @@ def hermetic(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
-def team(context: str | None, *, researcher_tools: bool = False) -> list[AgentConfig]:
+def team(inherit_context: bool, *, researcher_tools: bool = False) -> list[AgentConfig]:
     return [
         AgentConfig(name="coordinator", prompt="You coordinate.", sub_agents=["researcher"],
                     description="Leads.", include_state_tools=False),
         AgentConfig(name="researcher", prompt="You research.", description="Finds facts.",
-                    include_state_tools=researcher_tools, context=context),
+                    include_state_tools=researcher_tools, inherit_context=inherit_context),
     ]
 
 
@@ -128,7 +128,7 @@ async def two_turns(monkeypatch, configs, scripts) -> tuple[ScriptedModels, list
 
 class TestWhatTheSubAgentSees:
     async def test_an_inheriting_one_continues_the_conversation(self, hermetic, monkeypatch):
-        models, events = await two_turns(monkeypatch, team("inherit"), delegating())
+        models, events = await two_turns(monkeypatch, team(True), delegating())
         researcher = models.chats["researcher"]
 
         sent = shape(researcher.conversation(0))
@@ -144,9 +144,8 @@ class TestWhatTheSubAgentSees:
             "The researcher says X is 42."
         )
 
-    @pytest.mark.parametrize("context", [None, "fresh"])
-    async def test_a_fresh_one_sees_only_the_brief(self, hermetic, monkeypatch, context):
-        models, _ = await two_turns(monkeypatch, team(context), delegating())
+    async def test_a_fresh_one_sees_only_the_brief(self, hermetic, monkeypatch):
+        models, _ = await two_turns(monkeypatch, team(False), delegating())
 
         assert shape(models.chats["researcher"].conversation(0)) == [("human", BRIEF)]
 
@@ -157,11 +156,11 @@ class TestUsagePerAgent:
     fresh or inherits: a fork's prompt holds the conversation, but it is not
     the main agent's context."""
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_a_delegating_turns_usage_is_each_agents_own(
-        self, hermetic, monkeypatch, context
+        self, hermetic, monkeypatch, inherit_context
     ):
-        coordinator, researcher = team(context)
+        coordinator, researcher = team(inherit_context)
         configs = [coordinator, dataclasses.replace(researcher, model="anthropic:claude-opus-4-7")]
         scripted(monkeypatch, **delegating())
         manager = manager_for(configs)
@@ -188,9 +187,9 @@ class TestUsagePerAgent:
             ("coordinator", "anthropic:claude-sonnet-4-5", None, triggers["coordinator"], True),
         ]
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_the_status_bar_shows_only_the_main_agents_context(
-        self, hermetic, monkeypatch, context
+        self, hermetic, monkeypatch, inherit_context
     ):
         def sized(prompt_tokens: int) -> dict:
             return {"input_tokens": prompt_tokens, "output_tokens": 5,
@@ -205,7 +204,7 @@ class TestUsagePerAgent:
             # it is still not the main agent's context.
             "researcher": [ai("X is 42.", usage=sized(150_000))],
         })
-        manager = manager_for(team(context))
+        manager = manager_for(team(inherit_context))
         try:
             events = await turn(manager, TURNS[1])
             trigger = manager.context_budget().trigger
@@ -240,7 +239,7 @@ class TestTheBetaWarning:
         recorder = _Recorder()
         monkeypatch.setattr(agent_builder, "logger", recorder)
         scripted(monkeypatch, **delegating())
-        manager = manager_for(team("inherit"))
+        manager = manager_for(team(True))
         try:
             await manager.initialize_services()
         finally:
@@ -253,7 +252,7 @@ class TestTheBetaWarning:
         recorder = _Recorder()
         monkeypatch.setattr(agent_builder, "logger", recorder)
         scripted(monkeypatch, **delegating())
-        manager = manager_for(team("fresh"))
+        manager = manager_for(team(False))
         try:
             await manager.initialize_services()
         finally:
@@ -305,7 +304,7 @@ class TestReasoning:
                 claude("X is 42.", "Answer now.", "sig-r2"),
             ],
         )
-        manager = manager_for(team("inherit", researcher_tools=True))
+        manager = manager_for(team(True, researcher_tools=True))
         try:
             for text in TURNS:
                 await turn(manager, text)
@@ -340,7 +339,7 @@ class TestReasoning:
             ],
             researcher=[],
         )
-        manager = manager_for(team("inherit"))
+        manager = manager_for(team(True))
         try:
             for text in TURNS:
                 await turn(manager, text)

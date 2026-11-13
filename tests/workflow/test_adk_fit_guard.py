@@ -204,7 +204,7 @@ class TestASmallerSubAgent:
                             sub_agents=["researcher"], description="Leads.",
                             include_state_tools=False),
                 AgentConfig(name="researcher", prompt="You research.", description="Finds.",
-                            model="local:small", context="inherit", include_state_tools=False),
+                            model="local:small", inherit_context=True, include_state_tools=False),
             ],
             settings=BaseSettings(session_store="memory", model_providers=ENDPOINTS,
                                   models=MODELS, default_model="claude-sonnet-4-6"),

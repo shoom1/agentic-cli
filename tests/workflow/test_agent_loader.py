@@ -102,9 +102,9 @@ class TestLoadAgentsFromYaml:
         assert cfg.model is None
         assert cfg.model_settings is None
         assert cfg.include_state_tools is True
-        assert cfg.context is None
+        assert cfg.inherit_context is False
 
-    def test_a_sub_agents_context(self, tmp_path):
+    def test_a_sub_agents_inherit_context(self, tmp_path):
         path = _write(
             tmp_path,
             """
@@ -114,23 +114,39 @@ class TestLoadAgentsFromYaml:
                 sub_agents: [reviewer, researcher]
               - name: reviewer
                 instruction: Review what was said.
-                context: inherit
+                inherit_context: true
               - name: researcher
                 instruction: Find facts.
-                context: fresh
+                inherit_context: false
             """,
         )
         configs = {c.name: c for c in load_agents_from_yaml(path)}
-        assert configs["reviewer"].context == "inherit"
-        assert configs["researcher"].context == "fresh"
-        assert configs["coordinator"].context is None
+        assert configs["reviewer"].inherit_context is True
+        assert configs["researcher"].inherit_context is False
+        assert configs["coordinator"].inherit_context is False
 
-    def test_an_unknown_context_is_rejected(self, tmp_path):
+    def test_an_inherit_context_that_is_not_a_bool_is_rejected(self, tmp_path):
         path = _write(
-            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    context: shared\n"
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    inherit_context: shared\n"
         )
-        with pytest.raises(ValidationError, match="context"):
+        with pytest.raises(ValidationError) as exc:
             load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "inherit_context" in message and "valid boolean" in message
+
+    @pytest.mark.parametrize("value", ["fresh", "inherit"])
+    def test_the_old_context_key_is_refused(self, tmp_path, value):
+        # Renamed before it shipped, with no alias: a YAML written against a
+        # develop build fails naming the key, rather than starting fresh by
+        # mistake.
+        path = _write(
+            tmp_path, f"agents:\n  - name: a\n    instruction: hi\n    context: {value}\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.context" in message
+        assert "Extra inputs are not permitted" in message
 
     def test_missing_prompt_raises(self, tmp_path):
         path = _write(tmp_path, "agents:\n  - name: a\n")

@@ -603,12 +603,12 @@ class TestACachingGeminiAgent:
 # --- a sub-agent: its answer, and one warning ------------------------------------------------
 
 
-def team(context: str | None) -> list[AgentConfig]:
+def team(inherit_context: bool) -> list[AgentConfig]:
     return [
         AgentConfig(name="coordinator", prompt="You coordinate.", sub_agents=["researcher"],
                     description="Leads.", include_state_tools=False),
         AgentConfig(name="researcher", prompt="You research.", description="Finds facts.",
-                    context=context, include_state_tools=False),
+                    inherit_context=inherit_context, include_state_tools=False),
     ]
 
 
@@ -690,7 +690,7 @@ class TestASubAgentsOverflow:
                    researcher=[httpx.Response(status, json=body)])
         route(monkeypatch, anthropic, "AsyncAnthropic", api)
         manager = GoogleADKWorkflowManager(
-            agent_configs=team("fresh"),
+            agent_configs=team(False),
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
                                   prompt_caching_enabled=False),
         )
@@ -725,7 +725,7 @@ class TestASubAgentsOverflow:
         # The coordinator's first turn would be worth a summary (a 16,000-token
         # ceiling keeps 1,920): a sub-agent's overflow must not write one.
         manager = GoogleADKWorkflowManager(
-            agent_configs=team("inherit"),
+            agent_configs=team(True),
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
                                   context_max_tokens=16_000, prompt_caching_enabled=False),
         )
@@ -762,7 +762,7 @@ class TestASubAgentsOverflow:
         )
         route(monkeypatch, anthropic, "AsyncAnthropic", api)
         manager = GoogleADKWorkflowManager(
-            agent_configs=team("inherit"),
+            agent_configs=team(True),
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
                                   prompt_caching_enabled=False),
         )
@@ -1018,7 +1018,7 @@ async def test_a_parallel_delegations_retry_carries_its_own_task(project, monkey
     api = FakeAPI(claude)
     route(monkeypatch, anthropic, "AsyncAnthropic", api)
     manager = GoogleADKWorkflowManager(
-        agent_configs=team("inherit"),
+        agent_configs=team(True),
         settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
                               prompt_caching_enabled=False),
     )

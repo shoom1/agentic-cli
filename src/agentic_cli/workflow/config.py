@@ -2,17 +2,12 @@
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Callable, Any, Literal, TYPE_CHECKING, get_args
+from typing import Callable, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.model_settings import ModelSettings
     from agentic_cli.workflow.mcp import MCPServerConfig
-
-#: What a sub-agent sees of its parent's conversation (``AgentConfig.context``).
-SubAgentContext = Literal["fresh", "inherit"]
-#: The values ``AgentConfig.context`` takes besides None.
-SUBAGENT_CONTEXTS: tuple[str, ...] = get_args(SubAgentContext)
 
 
 @dataclass
@@ -46,14 +41,15 @@ class AgentConfig:
             ``settings.skills_dirs`` (never in the working directory). Consumed
             by the ADK and Deep Agents backends; LangGraph ignores them.
         include_state_tools: Whether to auto-inject plan/task state tools (default True)
-        context: What this agent sees when its parent delegates to it.
-            ``"fresh"`` (what None means): only the request it is given.
-            ``"inherit"``: also the parent's conversation as it stands, after
-            any summarizing and without the parent's reasoning. A sub-agent
-            works and returns its answer to its parent in the same turn on
-            both backends; only the root replies to the user. Set only on
-            sub-agents, and in 0.7.0 ``"inherit"`` only on an agent without
-            sub-agents of its own (``validate_agent_graph`` checks both).
+        inherit_context: Whether this agent also sees its parent's
+            conversation when its parent delegates to it. False (the
+            default): only the request it is given. True: also the parent's
+            conversation as it stands, after any summarizing and without the
+            parent's reasoning. A sub-agent works and returns its answer to
+            its parent in the same turn on both backends; only the root
+            replies to the user. True only on sub-agents, and in 0.7.0 only
+            on the root's own sub-agents without sub-agents of their own
+            (``validate_agent_graph`` checks it).
     """
 
     name: str
@@ -66,7 +62,7 @@ class AgentConfig:
     mcp_servers: "list[MCPServerConfig]" = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     include_state_tools: bool = True
-    context: SubAgentContext | None = None
+    inherit_context: bool = False
 
     def get_prompt(self, settings: "BaseSettings | None" = None) -> str:
         """Get the prompt string, calling the factory if the prompt is callable.
@@ -190,11 +186,14 @@ def validate_agent_graph(
     6. no agent is a sub-agent of two parents — ADK agents hold a single
        ``parent_agent``, so a shared child is a tree the backend cannot build;
     7. exactly one root;
-    8. each agent's ``context`` is None, ``"fresh"`` or ``"inherit"``;
-    9. the root sets no ``context``: it has no parent's conversation;
-    10. ``"inherit"`` only on an agent without sub-agents. In 0.7.0 a forked
-        Deep Agents coordinator is told that delegating will be refused,
-        which is false for ours, so a real model might never delegate.
+    8. each agent's ``inherit_context`` is True or False;
+    9. the root does not set ``inherit_context``: it has no parent's
+       conversation;
+    10. ``inherit_context`` only on an agent without sub-agents, and only on
+        the root's own sub-agents. In 0.7.0 a forked Deep Agents coordinator
+        is told that delegating will be refused, which is false for ours, so
+        a real model might never delegate; and below another sub-agent ADK
+        would show it the main agent's whole conversation.
 
     Args:
         configs: The declared agents.
@@ -268,45 +267,47 @@ def validate_agent_graph(
             "single root, so agents under any other root are unreachable. Add "
             "the extra root(s) to a coordinator's sub_agents."
         )
-    _check_contexts(config_map, roots[0])
+    _check_inherit_context(config_map, roots[0])
     return AgentGraph(config_map=config_map, build_order=order, root_name=roots[0])
 
 
-def _check_contexts(config_map: dict[str, AgentConfig], root: str) -> None:
-    """Each agent's ``context`` fits its place in the tree.
+def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> None:
+    """Each agent's ``inherit_context`` fits its place in the tree.
 
     Raises:
         AgentGraphError: Naming the agent(s) and what to change.
     """
+    # Not coerced: "fresh", a value of the field's unreleased predecessor, is
+    # truthy, and would show a sub-agent the whole conversation.
     unknown = [
-        f"{name!r} ({config.context!r})"
+        f"{name!r} ({config.inherit_context!r})"
         for name, config in config_map.items()
-        if config.context is not None and config.context not in SUBAGENT_CONTEXTS
+        if not isinstance(config.inherit_context, bool)
     ]
     if unknown:
         raise AgentGraphError(
-            f"Unknown context value(s): {', '.join(unknown)}. "
-            "A sub-agent's context is 'fresh' (the request alone) or 'inherit' "
-            "(the parent's conversation too)."
+            f"inherit_context must be True or False: {', '.join(unknown)}. "
+            "True shows a sub-agent its parent's conversation too; False (the "
+            "default) the request alone."
         )
 
-    if config_map[root].context is not None:
+    if config_map[root].inherit_context:
         raise AgentGraphError(
-            f"Agent {root!r} is the root agent, but sets context "
-            f"{config_map[root].context!r}: context applies to sub-agents only. "
-            "Remove it from the root."
+            f"Agent {root!r} is the root agent, but sets inherit_context=True: "
+            "inherit_context applies to sub-agents only. Remove it from the root."
         )
 
     inheriting = sorted(
         name
         for name, config in config_map.items()
-        if config.context == "inherit" and config.sub_agents
+        if config.inherit_context and config.sub_agents
     )
     if inheriting:
         raise AgentGraphError(
-            f"Agent(s) {', '.join(repr(n) for n in inheriting)} set context "
-            "'inherit' and have sub-agents of their own: in 0.7.0, 'inherit' is "
-            "for agents without sub-agents. Use 'fresh' for a coordinator."
+            f"Agent(s) {', '.join(repr(n) for n in inheriting)} set "
+            "inherit_context=True and have sub-agents of their own: in 0.7.0, "
+            "inherit_context is for agents without sub-agents. Leave it False "
+            "on a coordinator."
         )
 
     # ADK shows an inheriting agent the main agent's conversation, whatever its
@@ -317,13 +318,14 @@ def _check_contexts(config_map: dict[str, AgentConfig], root: str) -> None:
         for name, config in config_map.items()
         if name != root
         for sub in config.sub_agents
-        if config_map[sub].context == "inherit"
+        if config_map[sub].inherit_context
     })
     if nested:
         raise AgentGraphError(
-            f"Agent(s) {', '.join(repr(n) for n in nested)} set context 'inherit' "
-            f"below another sub-agent: in 0.7.0, 'inherit' is for the main agent's "
-            f"({root!r}) own sub-agents. Use 'fresh', or make it a sub-agent of {root!r}."
+            f"Agent(s) {', '.join(repr(n) for n in nested)} set inherit_context=True "
+            f"below another sub-agent: in 0.7.0, inherit_context is for the main "
+            f"agent's ({root!r}) own sub-agents. Leave it False, or make it a "
+            f"sub-agent of {root!r}."
         )
 
 

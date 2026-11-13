@@ -386,9 +386,9 @@ def _team(**extra) -> list[AgentConfig]:
     return [
         AgentConfig(name="coordinator", prompt=_COORDINATOR, sub_agents=["archivist", "clerk"],
                     include_state_tools=False, **extra),
-        AgentConfig(name="archivist", prompt=_HELPER, context="inherit", include_state_tools=False,
+        AgentConfig(name="archivist", prompt=_HELPER, inherit_context=True, include_state_tools=False,
                     description="Answers questions about the conversation so far."),
-        AgentConfig(name="clerk", prompt=_HELPER, context="fresh", include_state_tools=False,
+        AgentConfig(name="clerk", prompt=_HELPER, inherit_context=False, include_state_tools=False,
                     description="Answers general questions."),
     ]
 
