@@ -381,7 +381,7 @@ What it supports:
   gets Deep Agents' `task` tool, which lists each sub-agent as
   `- name: description`, so give sub-agents real descriptions. A sub-agent
   sees the brief the coordinator writes and the coordinator's plan and tasks;
-  with `context="inherit"` it is a fork that also continues the
+  with `inherit_context=True` it is a fork that also continues the
   coordinator's conversation (see [Sub-agent context](#sub-agent-context)).
   Its last answer is the call's result, and the coordinator answers the user.
   Two sub-agents can run at once. `task` is a reserved tool name.
@@ -480,7 +480,7 @@ Requires: `pip install agentic-cli[langgraph]`
 | Install | Core | `deepagents` extra | `langgraph` extra |
 | Model providers | Gemini, Claude, GPT (Responses API), and OpenRouter and OpenAI-compatible hosts (`model_providers`) | The same | The same |
 | Delegation | `<sub-agent>(request=...)`: the sub-agent answers its parent, the coordinator answers the user | `task`: the same | Routing between agent nodes |
-| Sub-agent context | `fresh` or `inherit` | `fresh` or `inherit` (a fork) | Ignored |
+| Sub-agent context | `inherit_context` false or true | `inherit_context` false or true (a fork) | Ignored |
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
@@ -1271,20 +1271,21 @@ configs = [coordinator, researcher, analyst]
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
 | `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
-| `context` | `"fresh"` \| `"inherit"` \| None | What a sub-agent sees when its parent delegates to it: the request alone (`"fresh"`, what None means) or its parent's conversation too (`"inherit"`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
+| `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: the request alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
 references, self-references, delegation cycles, a sub-agent shared by two
 parents, and **more than one root** raise `AgentGraphError` naming the
 offending agents. Exactly one agent may be unreferenced: the runner starts from
-a single root, so agents under any other root would never run. A `context` on
-the root, `"inherit"` on an agent with sub-agents of its own and an unknown
-`context` value raise it too, and on ADK, when the agents are built, so does a
-sub-agent named like one of its parent's tools. Agents are built
-in dependency order, so declaration order does not matter. Then every agent's
-model is resolved, with the default model, before anything is built: an agent
-whose model cannot run fails startup, named in the error.
+a single root, so agents under any other root would never run.
+`inherit_context=True` on the root or on an agent with sub-agents of its own,
+and an `inherit_context` that is not True or False, raise it too, and on ADK,
+when the agents are built, so does a sub-agent named like one of its parent's
+tools. Agents are built in dependency order, so declaration order does not
+matter. Then every agent's model is resolved, with the default model, before
+anything is built: an agent whose model cannot run fails startup, named in
+the error.
 
 A callable `prompt` may take **no arguments** (including all-defaulted ones) or
 **exactly one argument**, which receives the manager's settings. Other
@@ -1303,12 +1304,12 @@ again. Delegating needs no permission; each tool the sub-agent calls is gated
 like the main agent's. Give each sub-agent a `description`: its parent chooses
 by it, and one without is offered as "The <name> agent.", with a warning.
 
-Each sub-agent's `context` sets what it sees:
+Each sub-agent's `inherit_context` sets what it sees:
 
-| `context` | The sub-agent sees |
-|-----------|--------------------|
-| `"fresh"` (the default) | The request alone (and on Deep Agents the parent's plan and tasks) |
-| `"inherit"` | Also its parent's conversation as it stands: after any summary, without the parent's reasoning |
+| `inherit_context` | The sub-agent sees |
+|-------------------|--------------------|
+| `False` (the default) | The request alone (and on Deep Agents the parent's plan and tasks) |
+| `True` | Also its parent's conversation as it stands: after any summary, without the parent's reasoning |
 
 ```python
 coordinator = AgentConfig(
@@ -1318,9 +1319,9 @@ coordinator = AgentConfig(
     sub_agents=["researcher", "reviewer"],
 )
 researcher = AgentConfig(name="researcher", prompt="Find facts.",
-                         description="Finds facts.")                  # fresh
+                         description="Finds facts.")                  # the request alone
 reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
-                       description="Reviews the conversation.", context="inherit")
+                       description="Reviews the conversation.", inherit_context=True)
 ```
 
 - **Prompts say "delegate to X".** The tool the parent calls is named after
@@ -1340,10 +1341,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   (Deep Agents' `mode="fork"`, in beta): the conversation, then Deep Agents'
   preamble and the request. Its own summarization compacts an inherited
   conversation too large for its model.
-- **The limits in 0.7.0.** `context` is for sub-agents only, and `"inherit"`
+- **The limits in 0.7.0.** `inherit_context` is for sub-agents only, and
   only for an agent without sub-agents of its own: Deep Agents tells a forked
   sub-agent that delegating "will be refused", which a coordinator would
-  believe. And `"inherit"` only for the main agent's own sub-agents: below
+  believe. And only for the main agent's own sub-agents: below
   another sub-agent, ADK would show it the main agent's whole conversation,
   what its fresh parent was kept from. A sub-agent on ADK cannot share its
   name with one of its parent's tools. Each raises `AgentGraphError` at
@@ -1427,7 +1428,7 @@ agents:
     sub_agents: [researcher]
   - name: researcher
     description: Analyzes text it is given and reports the figures.
-    context: fresh
+    inherit_context: false
     prompt: |
       You are a researcher. Count words with the word_count tool, never by
       eye, and report the figure to the agent that asked.
@@ -1454,7 +1455,7 @@ are `AgentConfig`'s, and an unknown one is an error:
 | `model`, `model_settings` | A model reference or role, and `ModelSettings` as a mapping (`temperature`, `max_tokens`, `thinking: {mode: high}`, ...) |
 | `tools` | A list of names: a registered tool's name (`web_search`, or your own), or a dotted path `my_pkg.tools.fn` to a function registered with `@register_tool` |
 | `mcp_servers`, `skills` | As on `AgentConfig`: MCP servers (`name`, `transport`, `command`/`args` or `url`, ...) and skill names |
-| `sub_agents`, `context` | The agents it may delegate to, and what a sub-agent sees: `fresh` or `inherit` (see [Sub-agent context](#sub-agent-context)) |
+| `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (the request alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
 | `include_state_tools` | `true` by default: the plan and task tools are added |
 
 - **A tool is a name, resolved when the manager is built.** A bare name is

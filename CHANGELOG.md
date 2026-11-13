@@ -73,7 +73,7 @@ the start of the entry's title.
   capability…**; Added: **`task` is a reserved…**)
 - In an ADK app built from configs, a sub-agent is called as a tool and
   returns (no `transfer_to_agent`), seeing only its request unless
-  `context="inherit"`; a synchronous tool must be safe in a worker thread
+  `inherit_context=True`; a synchronous tool must be safe in a worker thread
   beside other calls; a prompt's `{name}` is not filled from session state.
   (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
   ADK, an agent's prompt…**)
@@ -860,9 +860,10 @@ the start of the entry's title.
     lists each sub-agent as `- name: description`; one without a
     description is offered as "The <name> agent." with a warning. A
     sub-agent sees the brief and the coordinator's `plan` and `tasks`, and
-    one whose `context` is `"inherit"` the conversation too (see
-    `AgentConfig.context`); its last text is the call's result, and its own
-    text shows as activity, not as the reply. Two sub-agents may run at once.
+    one with `inherit_context=True` the conversation too (see
+    `AgentConfig.inherit_context`); its last text is the call's result, and
+    its own text shows as activity, not as the reply. Two sub-agents may run
+    at once.
   - **Tools.** Every tool call, in every agent, passes the permission gate,
     which identifies the tool by the object the registry issued and asks
     through the input callback, sub-agents' calls included. A tool that
@@ -1136,10 +1137,10 @@ the start of the entry's title.
   tool's own limits stay; this is the net beneath them. ADK's Claude and
   OpenAI Responses adapters send a model only a result's `content`, or else
   its `result`, so on ADK the note is put there as well.
-- **`AgentConfig.context`: a sub-agent starts `"fresh"` or `"inherit"`s its
-  parent's conversation**, set per agent on ADK and Deep Agents (`context:`
-  in the framework's agent YAML too). `"fresh"`, what None means, sees only
-  the request its parent gives it; `"inherit"` also sees the parent's
+- **`AgentConfig.inherit_context`: a sub-agent sees the request alone, or its
+  parent's conversation too**, set per agent on ADK and Deep Agents
+  (`inherit_context:` in the framework's agent YAML too). False, the default,
+  sees only the request its parent gives it; True also sees the parent's
   conversation as it stands, after any summary and without the parent's
   reasoning. On ADK an inheriting sub-agent is built with
   `include_contents="default"`, which ADK keeps for a `single_turn` agent
@@ -1156,10 +1157,10 @@ the start of the entry's title.
   summarization compacts an inherited conversation too large for its
   model, and `ForeignReasoningMiddleware` leaves out the reasoning of AI
   messages another agent wrote, so a fork is never sent its coordinator's.
-  `validate_agent_graph` raises `AgentGraphError` for a `context` on the
-  root, `"inherit"` on an agent with sub-agents of its own (in 0.7.0: Deep
+  `validate_agent_graph` raises `AgentGraphError` for `inherit_context=True`
+  on the root or on an agent with sub-agents of its own (in 0.7.0: Deep
   Agents tells a fork that delegating "will be refused", which a
-  coordinator would believe), and an unknown value.
+  coordinator would believe), and for a value that is not True or False.
 - **`BaseWorkflowManager.context_budget(agent_name=None)` and
   `root_agent_name`**: an agent's context numbers as its backend summarizes
   and trims by them, the root agent's by default. A frozen `ContextBudget`
@@ -1829,9 +1830,9 @@ the start of the entry's title.
   same turn; the root answers the user, and the next turn starts at the
   root. No agent built from a config is offered `transfer_to_agent` any
   more, so a sub-agent no longer takes over the conversation on later
-  turns. Sub-agents start `"fresh"`: they see only the request, where they
-  saw the whole conversation (set `context="inherit"` for that).
-  `"inherit"` is for the main agent's own sub-agents in 0.7.0:
+  turns. Sub-agents see only the request, where they saw the whole
+  conversation (set `inherit_context=True` for that).
+  `inherit_context` is for the main agent's own sub-agents in 0.7.0:
   `validate_agent_graph` refuses it below another sub-agent, on every
   backend, since ADK would show such an agent the main agent's whole
   conversation rather than its parent's. A prompt

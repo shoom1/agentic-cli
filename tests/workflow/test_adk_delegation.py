@@ -6,10 +6,10 @@ is offered it as a tool named after it (``<agent>(request=...)``, ADK's
 private ``_SingleTurnAgentTool``), calls it, and reads its answer as the
 tool's result, ``{"result": <its last text>}``; the root then answers the
 user, and the next turn starts at the root again. No agent built from a
-config is offered ``transfer_to_agent``. A ``fresh`` sub-agent sees only the
-request; an ``inherit`` one also sees its parent's conversation, which ADK
-gives a ``single_turn`` agent only when ``include_contents`` is passed
-explicitly.
+config is offered ``transfer_to_agent``. A sub-agent with ``inherit_context``
+False (the default) sees only the request; one with ``inherit_context=True``
+also sees its parent's conversation, which ADK gives a ``single_turn`` agent
+only when ``include_contents`` is passed explicitly.
 
 ADK builds the delegation tool in the parent's constructor, and it calls no
 ``func`` the permission plugin could verify, so the manager binds each one to

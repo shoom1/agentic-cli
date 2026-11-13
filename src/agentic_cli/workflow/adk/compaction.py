@@ -12,9 +12,9 @@ of the events the summary's range covers; the session keeps them all, for
 
 - **The main agent only.** ``MainAgentPlugin`` records the agent that is
   running (``running_agent()``), and nothing is written for another one. A
-  delegated sub-agent's check would compact the shared session under it: a
-  ``fresh`` one then lost its brief and looped (100 requests in one turn,
-  offline). A sub-agent too big for its own model is the fit guard's.
+  delegated sub-agent's check would compact the shared session under it: one
+  that sees only its request then lost its brief and looped (100 requests in
+  one turn, offline). A sub-agent too big for its own model is the fit guard's.
 - **The range** (``summary_range``) keeps the newest ``keep`` tokens word for
   word and cuts where a user turn starts, never between a call and its
   result, never inside the current turn. It is chosen before anything is
