@@ -12,10 +12,24 @@ permission prompt was not run, a call whose job was submitted runs on, and
 any other was interrupted by the user; the content-less event becomes the
 main agent's reply ``MARKER``.
 
-``left_open`` answers, on the next turn, the calls nothing sealed: a crash,
-or a cancel from before this plugin. ADK would keep a long-running one
+ADK's seals pair a result with a call by id alone, so a call whose id a
+sub-agent's result used (a provider that numbers its call ids per agent
+gives a sub-agent's first call its parent's delegation's id) is taken for
+answered and left open. ``unsealed`` answers those as the turn stops, from
+the record, as a seal is answered (the manager writes them before the turn
+clears its record): a finished call keeps its result, one at its prompt was
+not run.
+
+``left_open`` answers, on the next turn, the calls nothing answered: a
+crash's, a cancel's from before this plugin, or a stop's whose answers
+could not be written as it stopped. ADK would keep a long-running one
 without its result in every later request, which Claude and OpenAI refuse,
 and drop any other one, logging "Dropping function calls" on every request.
+
+Each call is recorded and answered as the run's that made it, the run its
+branch names (``workflow/adk/branches.py``; the root's own calls are no
+run), so a sub-agent's call never stands for its parent's of the same id
+(``OpenCalls``).
 
 ADK stops at the first plugin whose ``after_tool_callback`` returns a value,
 so this one is registered before ``ToolResultCapPlugin``, which tells it each
@@ -28,14 +42,23 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from google.adk.events import Event
+from google.adk.events import Event, EventActions
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from agentic_cli.workflow.adk.branches import branch_run
 from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
-from agentic_cli.workflow.interrupts import INTERRUPTED, MARKER, OpenCalls
+from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow.interrupts import (
+    INTERRUPTED,
+    INTERRUPTED_BY_USER,
+    MARKER,
+    OpenCalls,
+    unrecorded,
+)
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
+    get_active_turn,
     reset_active_tool_call,
     set_active_tool_call,
 )
@@ -46,6 +69,7 @@ if TYPE_CHECKING:
     from google.adk.tools.tool_context import ToolContext
 
     from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
+    from agentic_cli.workflow.sessions import RunRef
 
 #: ADK's ``error_code`` on the events that seal an aborted invocation
 #: (``google/adk/events/_abort_events.py``, private; contract-tested).
@@ -73,16 +97,27 @@ class InterruptedCallsPlugin(BasePlugin):
         cap: The tool result cap, registered after this plugin: it tells
             this plugin each cut it makes, which a finished call's seal
             sends.
+        runs: The manager's runs, which name the run a seal's branch is
+            (the names the active run has, ``MainAgentPlugin``'s); a
+            registry of its own when None.
     """
 
-    def __init__(self, open_calls: OpenCalls, cap: "ToolResultCapPlugin | None" = None) -> None:
+    def __init__(
+        self,
+        open_calls: OpenCalls,
+        cap: "ToolResultCapPlugin | None" = None,
+        *,
+        runs: AgentRuns | None = None,
+    ) -> None:
         super().__init__(name="interrupted_calls")
         self._open = open_calls
         self._cap = cap
+        self._runs = runs if runs is not None else AgentRuns()
         if cap is not None:
             cap.on_cut = self._keep_cut
-        # Each running call's active-tool-call token, by call id.
-        self._active: dict[str, Any] = {}
+        # Each running call's active-tool-call token, by its branch and id:
+        # a sub-agent's call can have the id of its parent's delegation.
+        self._active: dict[tuple[str | None, str], Any] = {}
 
     async def before_tool_callback(
         self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext | None"
@@ -95,7 +130,9 @@ class InterruptedCallsPlugin(BasePlugin):
         """
         call_id = getattr(tool_context, "function_call_id", None)
         if call_id and not is_unknown_tool(tool):
-            self._active[call_id] = set_active_tool_call(ToolCallRef(call_id, tool.name))
+            self._active[(_branch(tool_context), call_id)] = set_active_tool_call(
+                ToolCallRef(call_id, tool.name)
+            )
         return None
 
     async def after_tool_callback(
@@ -108,7 +145,7 @@ class InterruptedCallsPlugin(BasePlugin):
     ) -> None:
         if tool_context is None:
             return None
-        self._done(tool_context.function_call_id)
+        self._done(_branch(tool_context), tool_context.function_call_id)
         if result is None and getattr(tool, "is_long_running", False):
             # ADK gives a long-running call that returned nothing no result:
             # its job answers it (OpenCalls.answer), never null.
@@ -129,8 +166,8 @@ class InterruptedCallsPlugin(BasePlugin):
         if isinstance(finished, _Finished):
             self._open.finished(call_id, replace(finished, cut=cut))
 
-    def _done(self, call_id: str | None) -> None:
-        token = self._active.pop(call_id, None) if call_id else None
+    def _done(self, branch: str | None, call_id: str | None) -> None:
+        token = self._active.pop((branch, call_id), None) if call_id else None
         if token is not None:
             try:
                 reset_active_tool_call(token)
@@ -148,34 +185,54 @@ class InterruptedCallsPlugin(BasePlugin):
                 role="model", parts=[types.Part(text=MARKER)],
             )})
         actions = event.actions.model_copy(deep=True)
-        parts = [await self._answered(part, actions) for part in content.parts]
+        ref = self._branch_run(event.branch)
+        run = ref.run if ref is not None else None
+        parts = [await self._answered(part, actions, run) for part in content.parts]
         return event.model_copy(update={
             "content": types.Content(role=content.role, parts=parts), "actions": actions,
         })
 
-    async def _answered(self, part: types.Part, actions: Any) -> types.Part:
+    def _branch_run(self, branch: str | None) -> "RunRef | None":
+        """The run ``branch`` is (None for the root's own calls).
+
+        A seal is written outside the run whose call it answers (in the
+        runner's own context), so its run is its branch's, not the active
+        one. Asked while that run is open: ADK seals every branch of a
+        stopped turn before any seal reaches the event processor that ends
+        its run.
+        """
+        return branch_run(self._runs, get_active_turn(), branch)
+
+    async def _answered(self, part: types.Part, actions: Any, run: str | None) -> types.Part:
         call = part.function_response
         if call is None:
             return part
-        answer = self._open.answer(call.id, by_user=True)
-        if isinstance(answer, _Finished):
-            # Its state change is stored with the seal, as with its result.
-            actions.state_delta.update(answer.state_delta)
-            actions.artifact_delta.update(answer.artifact_delta)
-            answer = await self._capped(answer)
         return types.Part(function_response=types.FunctionResponse(
-            id=call.id, name=call.name, response=_as_response(answer),
+            id=call.id, name=call.name,
+            response=_as_response(_from_record(self._open, call.id, run, actions)),
         ))
 
-    async def _capped(self, finished: _Finished) -> Any:
-        """What the model would have read for ``finished``: the cap's cut, or
-        the result as it was. Never cut again, which would save its full
-        output a second time."""
-        return finished.result if finished.cut is None else finished.cut
+
+def _branch(tool_context: Any) -> str | None:
+    """The branch a tool call runs on (None for the root's own calls)."""
+    return getattr(tool_context, "branch", None)
 
 
-def _result(answer: Any) -> Any:
-    return answer.result if isinstance(answer, _Finished) else answer
+def _from_record(open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any) -> Any:
+    """A stopped turn's call answered from the record, as ``run``'s.
+
+    A finished call keeps what the model would have read: the cap's cut, or
+    the result as it was (never cut again, which would save its full output
+    a second time); the state it changed goes into ``actions``, stored with
+    the answer as with its result. Any other is answered as
+    ``OpenCalls.answer`` says.
+    """
+    answer = open_calls.answer(call_id, by_user=True, run=run)
+    if not isinstance(answer, _Finished):
+        return answer
+    actions.state_delta.update(answer.state_delta)
+    actions.artifact_delta.update(answer.artifact_delta)
+    return answer.result if answer.cut is None else answer.cut
 
 
 def _as_response(result: Any) -> dict[str, Any]:
@@ -183,39 +240,109 @@ def _as_response(result: Any) -> dict[str, Any]:
     return result if isinstance(result, dict) else {"result": result}
 
 
-def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
-    """The events that answer the calls nothing answered: a crash's, or an old cancel's.
+#: Where an open call was made: its event's invocation, author, branch and
+#: scope, in which its answer is written so it pairs with the call in that
+#: agent's view.
+_Place = tuple[str, str, str | None, str | None]
 
-    Each is answered ``INTERRUPTED`` (or as ``OpenCalls.answer`` says: a
-    job's state), in the author, branch, scope and invocation of the event
-    that made it, so it pairs with its call in that agent's view; calls that
-    share those are answered in one event, marked as ADK marks a seal.
+
+def _unanswered(events: list[Event]) -> dict[_Place, list[types.FunctionCall]]:
+    """The calls in ``events`` that no result answers, by where each was made.
+
+    A result answers only a call on its own branch: a sub-agent's result
+    never answers its parent's call of the same id.
     """
     answered = {
-        response.id for event in events for response in event.get_function_responses()
-        if response.id
+        (event.branch, response.id) for event in events
+        for response in event.get_function_responses() if response.id
     }
-    grouped: dict[tuple, list[types.FunctionCall]] = {}
+    grouped: dict[_Place, list[types.FunctionCall]] = {}
     for event in events:
         for call in event.get_function_calls():
-            if call.id and call.id not in answered:
+            if call.id and (event.branch, call.id) not in answered:
                 key = (event.invocation_id, event.author, event.branch, event.isolation_scope)
                 grouped.setdefault(key, []).append(call)
+    return grouped
+
+
+def _answer_event(
+    place: _Place, responses: list[types.FunctionResponse], error: str, actions: Any = None
+) -> Event:
+    """One event that answers calls made at ``place``, marked as ADK marks a seal."""
+    invocation_id, author, branch, scope = place
+    return Event(
+        invocation_id=invocation_id,
+        author=author,
+        branch=branch,
+        isolation_scope=scope,
+        content=types.Content(
+            role="user", parts=[types.Part(function_response=r) for r in responses],
+        ),
+        actions=actions if actions is not None else EventActions(),
+        error_code=ABORTED,
+        error_message=error,
+    )
+
+
+def unsealed(events: list[Event], open_calls: OpenCalls, runs: AgentRuns) -> list[Event]:
+    """The events that answer, as a turn stops, the calls ADK's seals missed.
+
+    ADK seals a stopped invocation's open calls pairing a result with a call
+    by id alone, so a call whose id a sub-agent's result used stays open.
+    Each is answered as a seal is (``InterruptedCallsPlugin``), from the
+    record, as the call of the run its branch names (``branch_run``: still
+    open, since the turn ends its runs after this): a finished call with its
+    result and the state it changed, one at its prompt ``NOT_RUN``, any
+    other ``INTERRUPTED_BY_USER``. The manager writes them before the turn
+    clears its record.
+
+    Only once ADK has sealed the stopped invocation (its seals are the
+    session's last events): seals written after these answers would answer
+    a call twice. ``left_open`` answers, at the next turn, what is left.
+    """
+    if not events or events[-1].error_code != ABORTED:
+        return []
+    stopped = [event for event in events if event.invocation_id == events[-1].invocation_id]
+    conversation = get_active_turn()
+    answers: list[Event] = []
+    for place, calls in _unanswered(stopped).items():
+        ref = branch_run(runs, conversation, place[2])
+        run = ref.run if ref is not None else None
+        actions = EventActions()
+        answers.append(_answer_event(place, [
+            types.FunctionResponse(
+                id=call.id, name=call.name,
+                response=_as_response(_from_record(open_calls, call.id, run, actions)),
+            )
+            for call in calls
+        ], INTERRUPTED_BY_USER, actions))
+    return answers
+
+
+def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
+    """The events that answer the calls nothing answered: a crash's, or a stop's left over.
+
+    A result answers only a call on its own branch: a sub-agent's result
+    never answers its parent's call of the same id. Each call left open is
+    answered as no record holds it (``interrupts.unrecorded``: a job's state,
+    else ``INTERRUPTED_BY_USER`` when the user stopped the conversation's
+    last turn, ``OpenCalls.take_cancel``, which this asks once, else
+    ``INTERRUPTED``): every turn clears its conversation's record as it ends
+    (``OpenCalls.clear``), and a new process has none. A stopped turn
+    answers what ADK's seals missed itself (``unsealed``), so a stop leaves
+    a call here only when those answers could not be written. The answer is
+    in the author, branch, scope and invocation of the event that made the
+    call, so it pairs with its call in that agent's view; calls that share
+    those are answered in one event, marked as ADK marks a seal.
+    """
+    by_user = open_calls.take_cancel(get_active_turn())
     return [
-        Event(
-            invocation_id=invocation_id,
-            author=author,
-            branch=branch,
-            isolation_scope=scope,
-            content=types.Content(role="user", parts=[
-                types.Part(function_response=types.FunctionResponse(
-                    id=call.id, name=call.name,
-                    response=_as_response(_result(open_calls.answer(call.id, by_user=False))),
-                ))
-                for call in calls
-            ]),
-            error_code=ABORTED,
-            error_message=INTERRUPTED,
-        )
-        for (invocation_id, author, branch, scope), calls in grouped.items()
+        _answer_event(place, [
+            types.FunctionResponse(
+                id=call.id, name=call.name,
+                response=_as_response(unrecorded(call.id, by_user=by_user)),
+            )
+            for call in calls
+        ], INTERRUPTED)
+        for place, calls in _unanswered(events).items()
     ]

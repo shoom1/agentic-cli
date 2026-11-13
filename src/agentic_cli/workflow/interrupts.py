@@ -23,19 +23,24 @@ go on, and their results arrive later. A call whose job was submitted is
 answered with the job's state (``job_started``), so the model knows it runs.
 
 ``OpenCalls`` is a manager's record of what became of its calls, kept by
-conversation: the backends answer from it (ADK as the cancelled turn stops,
-through its ``abort_signal``; Deep Agents before that conversation's next
-run's first model call, however many turns ran in others since).
+conversation and, within it, by the run that made each call (the root's
+own, or a sub-agent's: ``workflow.sessions.get_active_run``), since a
+provider that numbers its call ids per agent gives a sub-agent's call the
+id of its parent's delegation: the backends answer from it (ADK as the
+cancelled turn stops, through its ``abort_signal``; Deep Agents before the
+first model call of that conversation's next turn, however many turns ran
+in others since).
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
-from agentic_cli.workflow.sessions import get_active_turn
+from agentic_cli.workflow.sessions import get_active_run, get_active_turn
 
 #: A call that was running when the user pressed Ctrl+C.
 INTERRUPTED_BY_USER = (
@@ -94,6 +99,41 @@ def job_for_call(call_id: str | None) -> Any | None:
     ), None)
 
 
+def unrecorded(call_id: str | None, *, by_user: bool) -> dict[str, Any]:
+    """The answer for an open call no record holds: its job's state, else why it has none.
+
+    ``OpenCalls.answer`` gives it for a call it holds nothing for; ADK's
+    ``left_open`` for every call it answers, since each turn clears its
+    conversation's record as it ends, and a new process has none.
+    """
+    record = job_for_call(call_id)
+    if record is not None:
+        return job_started(record)
+    return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
+
+
+class _Active(enum.Enum):
+    """The default of ``OpenCalls``' ``run=``: the run in progress."""
+
+    RUN = "the run in progress"
+
+
+#: ``run=`` left out: the run whose call is in progress
+#: (``workflow.sessions.get_active_run``; the root's own calls are no run).
+ACTIVE_RUN = _Active.RUN
+
+#: A call's place in its conversation's record: the run that made it (None
+#: for the root's own), and its id.
+_Mark = tuple[str | None, str]
+
+
+def _run_id(run: str | None | _Active) -> str | None:
+    if run is ACTIVE_RUN:
+        active = get_active_run()
+        return active.run if active is not None else None
+    return run
+
+
 class OpenCalls:
     """What became of a manager's tool calls, for answering those a cancel leaves open.
 
@@ -102,30 +142,45 @@ class OpenCalls:
     when the user stops its turn. Calls are kept by conversation, the active
     turn's (``workflow.sessions.get_active_turn``), which ``answer`` reads:
     Deep Agents answers a stopped turn's calls at that conversation's next
-    run, after turns in others. ``answer`` forgets nothing: that run may be
-    stopped too before its answers are saved, and the next one answers them
-    again. A turn that ends without a cancel has every call answered and
+    turn, after turns in others. ``answer`` forgets nothing: that turn may
+    be stopped too before its answers are saved, and the one after answers
+    them again. A turn that ends without a cancel has every call answered and
     saved, so ``clear`` forgets its conversation's calls; one that fails
     keeps those that finished (``failed``).
+
+    Within its conversation a call is the run's that made it (``run=``: by
+    default the run in progress, ``get_active_run()``; None for the root's
+    own calls), so a sub-agent's call never stands for its parent's: a
+    provider that numbers its call ids per agent (``call_0``, ...) gives a
+    sub-agent's first call the id of the delegation that started it.
     """
 
     def __init__(self) -> None:
-        self._finished: dict[Any, dict[str, Any]] = {}
-        self._asking: dict[Any, set[str]] = {}
+        self._finished: dict[Any, dict[_Mark, Any]] = {}
+        self._asking: dict[Any, set[_Mark]] = {}
         self._cancelled: set[Any] = set()
 
-    def finished(self, call_id: str | None, result: Any) -> None:
+    def finished(
+        self, call_id: str | None, result: Any, *, run: str | None | _Active = ACTIVE_RUN
+    ) -> None:
+        """Record that ``call_id`` of ``run`` returned ``result``."""
         if call_id:
-            self._finished.setdefault(get_active_turn(), {})[call_id] = result
+            self._finished.setdefault(get_active_turn(), {})[(_run_id(run), call_id)] = result
 
-    def recorded(self, call_id: str | None) -> Any | None:
-        """What ``finished`` recorded for ``call_id`` in the active turn's
-        conversation, or None."""
-        return self._finished.get(get_active_turn(), {}).get(call_id) if call_id else None
+    def recorded(
+        self, call_id: str | None, *, run: str | None | _Active = ACTIVE_RUN
+    ) -> Any | None:
+        """What ``finished`` recorded for ``call_id`` of ``run`` in the active
+        turn's conversation, or None."""
+        if not call_id:
+            return None
+        return self._finished.get(get_active_turn(), {}).get((_run_id(run), call_id))
 
     @contextmanager
-    def asking(self, call_id: str | None) -> Iterator[None]:
-        """Mark ``call_id`` as waiting at its prompt while the block runs.
+    def asking(
+        self, call_id: str | None, *, run: str | None | _Active = ACTIVE_RUN
+    ) -> Iterator[None]:
+        """Mark ``call_id`` of ``run`` as waiting at its prompt while the block runs.
 
         A cancel leaves the mark for ``answer`` to read; any other end clears it.
         """
@@ -133,38 +188,41 @@ class OpenCalls:
             yield
             return
         key = get_active_turn()
-        self._asking.setdefault(key, set()).add(call_id)
+        mark = (_run_id(run), call_id)
+        self._asking.setdefault(key, set()).add(mark)
         try:
             yield
         except asyncio.CancelledError:
             raise
         except BaseException:
-            self._unmark(key, call_id)
+            self._unmark(key, mark)
             raise
-        self._unmark(key, call_id)
+        self._unmark(key, mark)
 
-    def answer(self, call_id: str | None, *, by_user: bool) -> Any:
+    def answer(
+        self, call_id: str | None, *, by_user: bool, run: str | None | _Active = ACTIVE_RUN
+    ) -> Any:
         """An open call's result: what it returned if it finished, else why it has none.
 
-        The call is the active turn's conversation's. It stays recorded until
-        that conversation's turn ends (``clear``): the step that answers it
-        may be stopped before it is saved.
+        The call is ``run``'s, in the active turn's conversation. It stays
+        recorded until that conversation's turn ends (``clear``): the step
+        that answers it may be stopped before it is saved.
 
         Args:
             call_id: The call.
             by_user: Whether the user stopped its turn (else a crash did, or
                 a cancel this process did not see).
+            run: The run that made the call: by default the run in progress.
         """
-        key = get_active_turn()
-        finished = self._finished.get(key, {})
-        if call_id in finished:
-            return finished[call_id]
-        if call_id in self._asking.get(key, ()):
-            return interrupted(NOT_RUN)
-        record = job_for_call(call_id)
-        if record is not None:
-            return job_started(record)
-        return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
+        if call_id:
+            key = get_active_turn()
+            mark = (_run_id(run), call_id)
+            finished = self._finished.get(key, {})
+            if mark in finished:
+                return finished[mark]
+            if mark in self._asking.get(key, ()):
+                return interrupted(NOT_RUN)
+        return unrecorded(call_id, by_user=by_user)
 
     def cancelled(self, key: Any) -> None:
         """The user stopped the turn of conversation ``key``."""
@@ -178,12 +236,13 @@ class OpenCalls:
         return False
 
     def clear(self, key: Any) -> None:
-        """Forget conversation ``key``'s calls: its turn ended with every one answered."""
+        """Forget conversation ``key``'s calls, every run's: its turn ended
+        with every one answered."""
         self._finished.pop(key, None)
         self._asking.pop(key, None)
 
     def failed(self, key: Any) -> None:
-        """The turn of conversation ``key`` failed: its next run answers its calls.
+        """The turn of conversation ``key`` failed: its next turn answers its calls.
 
         The finished ones keep their results; the others are answered
         ``INTERRUPTED``, one that waited at its prompt too, since the user
@@ -191,10 +250,10 @@ class OpenCalls:
         """
         self._asking.pop(key, None)
 
-    def _unmark(self, key: Any, call_id: str) -> None:
+    def _unmark(self, key: Any, mark: _Mark) -> None:
         marks = self._asking.get(key)
         if marks is None:
             return
-        marks.discard(call_id)
+        marks.discard(mark)
         if not marks:
             del self._asking[key]

@@ -259,7 +259,11 @@ async def recorded(manager, call_id: str) -> None:
     the signal can still find the call running.
     """
     async def wait() -> None:
-        while not any(call_id in calls for calls in manager._open_calls._finished.values()):
+        # Each conversation's record keys a call by (its run, its id).
+        while not any(
+            recorded_id == call_id
+            for calls in manager._open_calls._finished.values() for _, recorded_id in calls
+        ):
             await asyncio.sleep(0.005)
 
     await asyncio.wait_for(wait(), timeout=5)

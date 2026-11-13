@@ -46,7 +46,11 @@ from agentic_cli.workflow.adk.compaction import (
 )
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
-from agentic_cli.workflow.adk.interrupted_calls_plugin import InterruptedCallsPlugin, left_open
+from agentic_cli.workflow.adk.interrupted_calls_plugin import (
+    InterruptedCallsPlugin,
+    left_open,
+    unsealed,
+)
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
 from agentic_cli.workflow.adk.overflow_plugin import OVERFLOW_PLUGIN_FAILED, OverflowPlugin
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
@@ -635,7 +639,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             tool_output_dir(self._settings.app_name),
             skip_agents=own_after_tool_agents(root),
         )
-        plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
+        plugins.append(InterruptedCallsPlugin(self._open_calls, cap, runs=self.agent_runs))
         plugins.append(cap)
         if self._memory_index_wanted(root.name):
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
@@ -1052,8 +1056,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Answer the calls nothing answered (``interrupted_calls_plugin.left_open``).
 
         A crash, or a cancel from before ``abort_signal`` was set, leaves
-        them; ADK would keep a long-running one in every request, which
-        Claude and OpenAI refuse, and drop any other one with a warning.
+        them, and so does a stop whose own answers to the calls ADK's seals
+        missed could not be written (``_answer_unsealed``); ADK would keep a
+        long-running one in every request, which Claude and OpenAI refuse,
+        and drop any other one with a warning.
 
         ADK keeps two kinds of call open on purpose. A task-mode agent's
         delegation cannot be built (a native ADK YAML app with one is
@@ -1079,6 +1085,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 len(event.content.parts) for event in answers
             ))
         return session
+
+    async def _answer_unsealed(self, ref: SessionRef) -> None:
+        """Answer, from the record, the calls a stopped turn's seals missed; then clear it.
+
+        ADK seals a stopped invocation's open calls pairing a result with a
+        call by id alone, so a call whose id a sub-agent's result used is
+        left open (``interrupted_calls_plugin.unsealed``): answered here, a
+        finished one keeps its result and one at its prompt was not run.
+        Run shielded, so a second Ctrl+C neither loses the answers nor
+        clears the record before they are read. Answers that cannot be
+        written are given at the next turn (``left_open``), from no record.
+        """
+        try:
+            session = await self._session_service.get_session(
+                app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+            )
+            answers = (
+                unsealed(session.events, self._open_calls, self.agent_runs)
+                if session is not None else []
+            )
+            for event in answers:
+                await self._session_service.append_event(session, event)
+            if answers:
+                logger.debug("unsealed_calls_answered", count=sum(
+                    len(event.content.parts) for event in answers
+                ))
+        except Exception as error:
+            logger.debug(
+                "unsealed_calls_not_answered", error_type=type(error).__name__, exc_info=error,
+            )
+        finally:
+            self._open_calls.clear(ref)
 
     def _seed_outside_content(self, ref: SessionRef, session: Session) -> dict[str, Any]:
         """Seed the marks from the session's state; the state delta a turn writes.
@@ -1129,7 +1167,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async with self._turn(session_id, user_id) as ref:
             logger.info("processing_message", message_length=len(message))
             session = await self._get_or_create_session(ref.user_id, ref.session_id)
-            # A crash (or an old cancel) may have left calls without a result.
+            # A crash, an old cancel, or a stop whose answers could not be
+            # written may have left calls without a result.
             session = await self._answer_left_open(session)
             state_delta = {
                 **turn_state(session, message),
@@ -1228,11 +1267,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     except Exception as error:
                         failure = error
             finally:
-                # Every call of the turn is answered now, sealed or returned.
-                # One a failure left open is answered at the next turn
-                # (left_open) as interrupted: the state it changed, which
-                # ADK stores with its result, is gone.
-                self._open_calls.clear(self.session_ref(session_id, user_id))
+                # Every call of the turn is answered now, sealed or returned,
+                # but for one a stop's seals took for answered (they pair by
+                # id alone): it is answered here, from the record, before the
+                # record is cleared. One a failure left open is answered at
+                # the next turn (left_open) as interrupted: the state it
+                # changed, which ADK stores with its result, is gone.
+                ref = self.session_ref(session_id, user_id)
+                if aborted.is_set():
+                    # Should those answers not be written, left_open gives
+                    # them as the user's.
+                    self._open_calls.cancelled(ref)
+                    await asyncio.shield(self._answer_unsealed(ref))
+                else:
+                    self._open_calls.clear(ref)
 
         # Drain any remaining LLM events after processing completes
         if self._llm_logging_plugin:

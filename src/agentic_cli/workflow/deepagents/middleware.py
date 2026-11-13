@@ -488,6 +488,10 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     any other was interrupted, by the user when this manager saw the cancel.
     On the main agent, a turn the user stopped before any reply leaves
     ``MARKER`` as its reply, so the next turn answers only the new message.
+    Each call is recorded and answered as the run's that made it
+    (``OpenCalls``, by the active run: a sub-agent's whole stack runs inside
+    its coordinator's ``task`` call), so a sub-agent's call never answers its
+    parent's delegation of the same id.
 
     Args:
         open_calls: The manager's record of its calls.
