@@ -20,7 +20,11 @@ import pytest
 pytest.importorskip("google.adk")
 
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.sessions import SessionRef, get_active_turn  # noqa: E402
+from agentic_cli.workflow.sessions import (  # noqa: E402
+    SessionRef,
+    get_active_turn,
+    turn_has_ended,
+)
 
 
 def _bare_manager() -> GoogleADKWorkflowManager:
@@ -106,3 +110,30 @@ async def test_turn_identity_visible_to_spawned_tasks():
         result = await asyncio.create_task(_tool())
 
     assert result == ("sess-1", "alice")
+
+
+async def test_a_task_that_outlives_its_turn_sees_it_ended():
+    """It copied the turn's context; the turn's span tells it the turn is over."""
+    mgr = _bare_manager()
+    go = asyncio.Event()
+
+    async def _left_behind() -> tuple[bool, bool]:
+        during = turn_has_ended()
+        await go.wait()
+        return during, turn_has_ended()
+
+    with mgr._workflow_context(session_id="sess-1", user_id="alice"):
+        task = asyncio.create_task(_left_behind())
+        await asyncio.sleep(0)  # it starts while the turn runs
+    go.set()
+
+    assert await task == (False, True)
+    assert turn_has_ended() is False  # outside any turn there is no span
+
+
+def test_a_nested_turn_ends_only_its_own_span():
+    mgr = _bare_manager()
+    with mgr._workflow_context(session_id="outer", user_id="alice"):
+        with mgr._workflow_context(session_id="inner", user_id="alice"):
+            assert turn_has_ended() is False
+        assert turn_has_ended() is False

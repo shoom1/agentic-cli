@@ -11,7 +11,9 @@ A stored conversation is listed as a ``SessionInfo`` row, its title made by
 
 Three context-local markers say what is running now: the turn (its
 ``SessionRef``), inside it the sub-agent run (``RunRef``; none in the root's
-own calls), and the tool call (``ToolCallRef``).
+own calls), and the tool call (``ToolCallRef``). A fourth, the turn's span,
+outlives the turn in a task it started, and tells that task its turn has
+ended.
 """
 
 from __future__ import annotations
@@ -137,6 +139,57 @@ def reset_active_turn(token: Token) -> None:
 def get_active_turn() -> "SessionRef | None":
     """The turn executing in this context, or None when idle."""
     return _active_turn.get()
+
+
+class _TurnScope:
+    """One turn's span: open while the turn runs, ended as it ends.
+
+    A task a turn starts copies the turn's context, this object with it; the
+    active turn alone (the same ``SessionRef`` before and after) cannot tell
+    such a task that the turn it came from is over, this can.
+    """
+
+    __slots__ = ("ended",)
+
+    def __init__(self) -> None:
+        self.ended = False
+
+
+_turn_scope: ContextVar["_TurnScope | None"] = ContextVar(
+    "agentic_cli_turn_scope", default=None
+)
+
+
+def open_turn_scope() -> Token:
+    """Begin a turn's span in this context (``BaseWorkflowManager._workflow_context``).
+
+    Returns:
+        Token for :func:`close_turn_scope`.
+    """
+    return _turn_scope.set(_TurnScope())
+
+
+def close_turn_scope(token: Token) -> None:
+    """End the span ``token`` began, and restore the one before it.
+
+    Every context copied from inside the span (a task the turn started that
+    outlives it) now sees it ended: :func:`turn_has_ended`.
+    """
+    scope = _turn_scope.get()
+    if scope is not None:
+        scope.ended = True
+    _turn_scope.reset(token)
+
+
+def turn_has_ended() -> bool:
+    """Whether this context belongs to a turn that has ended.
+
+    True only in a context copied from inside a turn after that turn ended:
+    an asyncio task the turn started that outlived it. False inside a turn,
+    and outside any.
+    """
+    scope = _turn_scope.get()
+    return scope is not None and scope.ended
 
 
 @dataclass(frozen=True, slots=True)

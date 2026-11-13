@@ -62,10 +62,13 @@ from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_co
 from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
+    close_turn_scope,
     get_active_tool_call,
     get_active_turn,
+    open_turn_scope,
     reset_active_turn,
     set_active_turn,
+    turn_has_ended,
 )
 from agentic_cli.workflow.service_registry import (
     get_service,
@@ -1286,23 +1289,28 @@ class BaseWorkflowManager(ABC):
     ) -> Iterator[None]:
         """Context manager that exposes the service registry to tools.
 
-        Sets ContextVars (settings, the service registry, and the active turn)
-        so tools can call ``get_service(key)`` during execution and the
-        JobManager can associate a launched job with the conversation that
-        started it.
+        Sets ContextVars (settings, the service registry, the active turn and
+        the turn's span) so tools can call ``get_service(key)`` during
+        execution and the JobManager can associate a launched job with the
+        conversation that started it.
 
-        All three are restored from tokens on exit, so a nested context
+        All four are restored from tokens on exit, so a nested context
         restores the outer turn rather than clearing it, and concurrent turns
-        on one manager never see each other's identity.
+        on one manager never see each other's identity. The span ends as the
+        block does (``workflow/sessions.py::close_turn_scope``): a task the
+        turn started that outlives it can ask no question
+        (:meth:`request_user_input`).
         """
         from agentic_cli.config import set_context_settings
 
         settings_token = set_context_settings(self._settings)
         registry_token = set_service_registry(self._services)
         turn_token = set_active_turn(self.session_ref(session_id, user_id))
+        scope_token = open_turn_scope()
         try:
             yield
         finally:
+            close_turn_scope(scope_token)
             reset_active_turn(turn_token)
             registry_token.var.reset(registry_token)
             settings_token.var.reset(settings_token)
@@ -2366,6 +2374,14 @@ class BaseWorkflowManager(ABC):
         resolved from the *current context*, so a tool always reaches the
         consumer that started its turn.
 
+        The callback answers only inside its turn. A task a turn started
+        (``asyncio.create_task`` copies the context, the callback with it)
+        that asks after the turn ended reaches no one: the consumer has moved
+        on, and its dialog would open outside any turn. It gets
+        ``UserInputUnavailable``, as when no approver is attached, so a
+        question has no answer and a permission prompt is denied (the
+        engine's no-approver rule).
+
         Args:
             request: The user input request.
 
@@ -2373,7 +2389,8 @@ class BaseWorkflowManager(ABC):
             User's response string.
 
         Raises:
-            UserInputUnavailable: If no callback is registered (a RuntimeError).
+            UserInputUnavailable: If no callback is registered, or the turn
+                this context comes from has ended (a RuntimeError).
         """
         logger.debug(
             "user_input_requested",
@@ -2386,6 +2403,15 @@ class BaseWorkflowManager(ABC):
             raise UserInputUnavailable(
                 "No user input callback registered. "
                 "Call set_input_callback() before invoking tools that require user input."
+            )
+        if turn_has_ended():
+            logger.info(
+                "user_input_after_its_turn",
+                request_id=request.request_id,
+                tool_name=request.tool_name,
+            )
+            raise UserInputUnavailable(
+                "The turn this request comes from has ended; no one is there to answer it."
             )
 
         # A call cancelled at its question was not run (workflow/interrupts.py).

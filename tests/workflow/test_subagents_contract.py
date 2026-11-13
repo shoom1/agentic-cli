@@ -39,9 +39,14 @@ from agentic_cli.workflow.agents import (
     RunRecord,
 )
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.events import EventType, UserInputRequest, WorkflowEvent
+from agentic_cli.workflow.events import (
+    EventType,
+    UserInputRequest,
+    UserInputUnavailable,
+    WorkflowEvent,
+)
 from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER, NOT_RUN
-from agentic_cli.workflow.permissions import EXEMPT
+from agentic_cli.workflow.permissions import EXEMPT, Capability
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE
 from agentic_cli.workflow.sessions import (
     RunRef,
@@ -51,6 +56,12 @@ from agentic_cli.workflow.sessions import (
     reset_active_turn,
     root_run,
     set_active_turn,
+)
+from agentic_cli.workflow.service_registry import (
+    JOB_MANAGER,
+    PERMISSION_ENGINE,
+    WORKFLOW,
+    get_service,
 )
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 from tests.workflow.test_manager_models import route
@@ -440,6 +451,53 @@ async def contract_block() -> dict:
     BLOCKING["started"].set()
     await asyncio.Event().wait()
     return {"success": True}
+
+
+#: What ``contract_leave_behind`` did: ``LEFT["during"]`` is the answer to the
+#: question it asked in its turn, ``LEFT["go"]`` lets its task go on,
+#: ``LEFT["task"]`` is the task.
+LEFT: dict[str, Any] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Leave a task behind (a contract-test tool).")
+async def contract_leave_behind() -> dict:
+    """Ask the user once, then start a task that outlives the turn; once let go,
+    that task asks the user and the gate."""
+    workflow = get_service(WORKFLOW)
+    engine = get_service(PERMISSION_ENGINE)
+    LEFT["during"] = await workflow.request_user_input(UserInputRequest(
+        request_id="during", tool_name="contract_leave_behind", prompt="Here?",
+    ))
+    go = LEFT["go"] = asyncio.Event()
+
+    async def later() -> dict[str, Any]:
+        await go.wait()
+        try:
+            await workflow.request_user_input(UserInputRequest(
+                request_id="late", tool_name="contract_leave_behind", prompt="Still there?",
+            ))
+            question = "answered"
+        except UserInputUnavailable:
+            question = "unavailable"
+        checked = await engine.check(
+            "write_file", [Capability("filesystem.write", target_arg="path")],
+            {"path": "late.txt"},
+        )
+        return {"question": question, "permission": (checked.allowed, checked.reason)}
+
+    LEFT["task"] = asyncio.create_task(later())
+    return {"success": True}
+
+
+@register_tool(capabilities=EXEMPT, description="Ask the user (a contract-test tool).")
+async def contract_ask() -> dict:
+    """Ask the user a question, its request named after this call; return the answer."""
+    call = get_active_tool_call()
+    answer = await get_service(WORKFLOW).request_user_input(UserInputRequest(
+        request_id=call.call_id if call is not None else "ask",
+        tool_name="contract_ask", prompt="Which one?",
+    ))
+    return {"success": True, "answer": answer}
 
 
 # -- fixtures --------------------------------------------------------------------
@@ -1231,3 +1289,69 @@ class TestRawLog:
             json.dumps({"agent": "researcher", "instance": "researcher-1",
                         "run": "researcher-1#1", "parent_run": None, "depth": 1}, sort_keys=True)
         }
+
+
+# -- the input callback after its turn, and a sub-agent's jobs ----------------------------
+
+
+class TestAfterItsTurn:
+    async def test_a_task_a_turn_left_behind_asks_no_one(self, make_crew, project):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_leave_behind,))],
+            coordinator=[calls(delegate("researcher", "Leave a task behind.", "c1")),
+                         says("Done.")],
+            researcher=[calls(use("contract_leave_behind", "r1")), says("Left one.")],
+        )
+        asked: list[UserInputRequest] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            asked.append(request)
+            return "yes"
+
+        crew.answer_with(answer)  # installed outside any turn, as a script does
+        await crew.turn()
+        LEFT["go"].set()
+        late = await asyncio.wait_for(LEFT["task"], 10)
+
+        assert late == {
+            "question": "unavailable",
+            "permission": (False, "no rule + no interactive approver to ask"),
+        }
+        # Inside its turn the callback answered; after it, nothing reached it.
+        assert LEFT["during"] == "yes"
+        assert [request.request_id for request in asked] == ["during"]
+        assert not (project / "late.txt").exists()
+
+    async def test_a_stopped_turns_question_leaves_the_next_turn_asking(self, make_crew):
+        # A pin: the span refuses only a request from a turn that has ended,
+        # never the next turn's, even after a cancel at a dialog.
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_ask,))],
+            coordinator=[calls(delegate("researcher", "Ask.", "c1")),
+                         calls(delegate("researcher", "Ask again.", "c2")),
+                         says("Done.")],
+            researcher=[calls(use("contract_ask", "r1")),
+                        calls(use("contract_ask", "r2")), says("Got yes.")],
+        )
+        asked: list[str] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            asked.append(request.request_id)
+            if len(asked) == 1:
+                BLOCKING["started"].set()
+                await asyncio.Event().wait()  # at its dialog until the turn is stopped
+            return "yes"
+
+        crew.answer_with(answer)
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        events = await crew.turn("Again.")
+
+        assert asked == ["r1", "r2"]
+        assert json.loads(crew.results_read("researcher")["r2"])["answer"] == "yes"
+        assert [e.content for e in events if e.type is EventType.TEXT][-1] == "Done."
