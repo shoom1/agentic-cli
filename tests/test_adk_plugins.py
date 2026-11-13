@@ -532,15 +532,44 @@ class TestEachModelCall:
         ]
         assert latencies == [20_000.0, 20_000.0]
 
-    async def test_a_failed_call_lets_its_clock_go(self, plugin):
+    async def test_an_answered_error_is_timed_to_its_answer(self, plugin, clock):
+        # The overflow handler answers a call refused as too long, and ADK
+        # hands its answer to every plugin's after_model_callback with the
+        # call's EventActions: the request went out at 0 s, the answer came
+        # back at 5 s.
+        clock.extend([0.0, 5.0])
         call = _call_context()
         await plugin.before_model_callback(
             callback_context=call, llm_request=_make_mock_llm_request()
         )
 
         await plugin.on_model_error_callback(
+            callback_context=call, llm_request=_make_mock_llm_request(),
+            error=RuntimeError("prompt is too long"),
+        )
+        await plugin.after_model_callback(
+            callback_context=call, llm_response=_make_mock_llm_response(usage_metadata=_usage())
+        )
+
+        latencies = [
+            r["metadata"].get("latency_ms") for r in _logged(plugin) if r["type"] == "llm_usage"
+        ]
+        assert latencies == [5_000.0]
+        assert plugin._request_timestamps == {}
+
+    async def test_an_unanswered_errors_clock_goes_at_the_next_run(self, plugin):
+        # Nothing answers the error, so no response comes: the clock waits
+        # for an answer until the next run lets it go.
+        call = _call_context(invocation_id="inv-1")
+        await plugin.before_model_callback(
+            callback_context=call, llm_request=_make_mock_llm_request()
+        )
+        await plugin.on_model_error_callback(
             callback_context=call, llm_request=_make_mock_llm_request(), error=RuntimeError("529")
         )
+        assert len(plugin._request_timestamps) == 1
+
+        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
 
         assert plugin._request_timestamps == {}
 

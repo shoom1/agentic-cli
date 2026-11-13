@@ -61,10 +61,12 @@ class LLMLoggingPlugin(BasePlugin):
     for each call and hands to all three of its callbacks, as the fit guard
     keeps its copy of a request. Parallel delegations to one sub-agent share
     their invocation and their agent's name, so a clock kept by invocation
-    timed one call from another's request. A failed call's clock is let go
-    (``on_model_error_callback``), and each run lets go of what another
-    invocation left: before google-adk 2.14 a call cancelled mid-request
-    fires neither callback.
+    timed one call from another's request. A failed call keeps its clock
+    (``on_model_error_callback``): a plugin after this one may answer the
+    error (the overflow handler), and that answer reaches
+    ``after_model_callback`` like any response, timed. Each run lets go of
+    what another invocation left: an error nobody answered, and a call
+    cancelled mid-request, which before google-adk 2.14 fires no callback.
 
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
@@ -256,13 +258,20 @@ class LLMLoggingPlugin(BasePlugin):
         llm_request: "LlmRequest",
         error: Exception,
     ) -> None:
-        """Let a failed call's clock go; the error is the next plugin's to answer."""
-        self._latency(callback_context, done=True)
+        """Keep a failed call's clock: the error is the next plugin's to answer.
+
+        The overflow handler answers a call refused as too long, and ADK
+        hands its answer to every plugin's ``after_model_callback`` with the
+        call's ``EventActions``, so the answer is timed and lets the clock
+        go. An error nobody answers leaves its clock to the next run's
+        ``before_run_callback``.
+        """
         return None
 
     async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
-        # What a call cancelled mid-request left: before google-adk 2.14 it
-        # fired neither callback (turns run one at a time).
+        # What another invocation left (turns run one at a time): a call
+        # whose error nobody answered, and one cancelled mid-request, which
+        # before google-adk 2.14 fired no callback.
         invocation = invocation_context.invocation_id
         self._request_timestamps = {
             key: clock for key, clock in self._request_timestamps.items()
