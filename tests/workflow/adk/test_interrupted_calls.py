@@ -35,12 +35,18 @@ from agentic_cli.workflow.adk.interrupted_calls_plugin import (  # noqa: E402
     unsealed,
 )
 from agentic_cli.workflow.agents import AgentRuns  # noqa: E402
+from agentic_cli.tools.jobs.backends import JobState  # noqa: E402
 from agentic_cli.workflow.interrupts import (  # noqa: E402
     INTERRUPTED,
     INTERRUPTED_BY_USER,
     NOT_RUN,
     OpenCalls,
     interrupted,
+    job_started,
+)
+from agentic_cli.workflow.service_registry import (  # noqa: E402
+    JOB_MANAGER,
+    set_service_registry,
 )
 from agentic_cli.workflow.sessions import (  # noqa: E402
     SessionRef,
@@ -262,3 +268,31 @@ class TestLeftOpen:
 
         assert _answers(first) == {"c1": interrupted(INTERRUPTED_BY_USER)}
         assert _answers(again) == {"c1": interrupted(INTERRUPTED)}
+
+    def test_a_sub_agents_call_is_never_answered_with_the_roots_job(self):
+        """A provider that numbers its call ids repeats them across agents.
+        The root's call keeps its job; a sub-agent's call of the same id is
+        answered as interrupted, its run being numbered no more (a crash's,
+        or one a stop ended), so no job is matched to it."""
+        root_job = SimpleNamespace(
+            job_id="j-root", call_id="call_0", session_id="s", user_id="u",
+            state=JobState.RUNNING, started_by=None,
+        )
+        events = [
+            _calls("coordinator", None, ("contract_start_job", "call_0"), ("researcher", "call_9")),
+            _calls("researcher", "researcher@call_9", ("contract_lookup", "call_0")),
+            _calls("leaf", "researcher@call_9.leaf@call_1", ("contract_lookup", "call_0")),
+        ]
+
+        registry = set_service_registry({JOB_MANAGER: SimpleNamespace(snapshot=lambda: [root_job])})
+        try:
+            with turn_of(CONVERSATION):
+                answers = {answer.branch: _answers(answer) for answer in left_open(events, OpenCalls())}
+        finally:
+            registry.var.reset(registry)
+
+        assert answers == {
+            None: {"call_0": job_started(root_job), "call_9": interrupted(INTERRUPTED)},
+            "researcher@call_9": {"call_0": interrupted(INTERRUPTED)},
+            "researcher@call_9.leaf@call_1": {"call_0": interrupted(INTERRUPTED)},
+        }

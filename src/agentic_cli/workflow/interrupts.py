@@ -81,11 +81,12 @@ def job_for_call(call_id: str | None, *, started_by: str | None = None) -> Any |
     Only a job of the active turn's conversation (its session and user), and
     none outside a turn: the job store holds all the user's jobs, from every
     run, and a provider that numbers its call ids (``call_0``, ...) repeats
-    them in every conversation. And only a job the same run's call started
-    (``started_by``: the sub-agent instance whose call it is, None for the
-    root's, as ``JobRecord.started_by`` records it): such a provider repeats
-    them across agents too, and a sub-agent's job must not answer its
-    parent's call.
+    them in every conversation. And only a job ``started_by`` started: the
+    caller names the run whose call it is by its instance (None for the
+    root's own call), as ``JobRecord.started_by`` records it, since such a
+    provider repeats them across agents too, and a sub-agent's job must not
+    answer its parent's call. A caller that cannot name the run (ADK's
+    ``left_open``, for a sub-agent's call) asks for no job.
 
     Looked up among the jobs the manager holds (``JobManager.snapshot``), with
     no lock: it is asked on the event loop (ADK answers a stopped turn's
@@ -114,10 +115,10 @@ def unrecorded(
 
     ``OpenCalls.answer`` gives it for a call it holds nothing for, matching
     the job by the instance of the call's run (``started_by``). ADK's
-    ``left_open`` gives it for every call it answers, since each turn clears
-    its conversation's record as it ends, and a new process has none; it
-    names no run (runs are numbered per process), so only the root's own
-    calls get their jobs' state there.
+    ``left_open`` gives it for the root's own calls it answers (``started_by``
+    None), since each turn clears its conversation's record as it ends, and
+    a new process has none; a sub-agent's call there gets no job, its run
+    being numbered no more.
     """
     record = job_for_call(call_id, started_by=started_by)
     if record is not None:
