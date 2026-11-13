@@ -30,6 +30,7 @@ from structlog.testing import capture_logs
 pytest.importorskip("deepagents")
 
 from langchain.agents.middleware import ToolCallRequest  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import ToolMessage  # noqa: E402
 from langchain_core.tools import BaseTool, StructuredTool  # noqa: E402
 from langgraph.errors import GraphInterrupt  # noqa: E402
@@ -43,12 +44,17 @@ from agentic_cli.tools.registry import (  # noqa: E402
     get_registry,
     register_tool,
 )
+from agentic_cli.workflow import live_events  # noqa: E402
+from agentic_cli.workflow.agents import AgentRuns  # noqa: E402
 from agentic_cli.workflow.base_manager import BaseWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     PermissionMiddleware,
     ToolCallErrorMiddleware,
 )
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE  # noqa: E402
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
+from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
+from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT, PermissionEngine  # noqa: E402
 from agentic_cli.workflow.permissions.capabilities import Capability  # noqa: E402
 from agentic_cli.workflow.permissions.prompt import (  # noqa: E402
@@ -614,18 +620,6 @@ class TestToolCallErrorMiddleware:
                 _request(_Native()), _raising(GraphInterrupt())
             )
 
-    async def test_a_failed_delegation_ends_the_turn(self):
-        """What escapes ``task`` is the sub-agent's model or run failing — its
-        own tools' errors were already results — so it ends the turn as a
-        model failure at the root would."""
-        delegation = _Native(name="task")
-        bind_tool_identity(delegation, get_registry().get("task"))
-
-        with pytest.raises(RuntimeError, match="provider said 400"):
-            await ToolCallErrorMiddleware().awrap_tool_call(
-                _request(delegation, name="task"), _raising(RuntimeError("provider said 400"))
-            )
-
     async def test_a_tool_merely_named_task_is_an_ordinary_tool(self):
         error = RuntimeError("boom")
 
@@ -634,3 +628,141 @@ class TestToolCallErrorMiddleware:
         )
 
         assert _content(message) == tool_error_result("task", error)
+
+
+def _delegation(subagent: str = "researcher") -> ToolCallRequest:
+    """A ``task`` call delegating to ``subagent``, its tool the framework's own."""
+    tool = _Native(name="task")
+    bind_tool_identity(tool, get_registry().get("task"))
+    return ToolCallRequest(
+        tool_call={"name": "task", "args": {"description": "Find X.", "subagent_type": subagent},
+                   "id": "call-9", "type": "tool_call"},
+        tool=tool,
+        state={},
+        runtime=SimpleNamespace(tools=[]),
+    )
+
+
+async def _warned(act) -> list[WorkflowEvent]:
+    """What ``act`` (an async callable) reports through a turn's live events."""
+    live = LiveEvents()
+
+    async def source():
+        with live_events.reporting(live):
+            await act()
+        if False:  # pragma: no cover - a source that yields nothing itself
+            yield
+
+    return [item async for item in merged(source(), live)]
+
+
+class TestAFailedDelegation:
+    """What escapes ``task`` is the sub-agent's model or run failing (its own
+    tools' errors were already results): the call is answered as ADK's
+    delegation tool answers it, the user is warned, and the turn goes on."""
+
+    async def test_its_result_is_adks_error_text(self):
+        message = await ToolCallErrorMiddleware().awrap_tool_call(
+            _delegation(), _raising(RuntimeError("provider said 400"))
+        )
+
+        assert isinstance(message, ToolMessage)
+        assert (message.content, message.status, message.name, message.tool_call_id) == (
+            "Error running sub-agent: provider said 400", "error", "task", "call-9",
+        )
+
+    async def test_an_error_without_text_is_named_by_its_type(self):
+        message = await ToolCallErrorMiddleware().awrap_tool_call(
+            _delegation(), _raising(TimeoutError())
+        )
+
+        assert message.content == "Error running sub-agent: TimeoutError"
+
+    async def test_the_user_is_warned_once_as_the_sub_agents_run(self):
+        runs = AgentRuns()
+        started = runs.run_for(None, None, "call-9", "researcher")
+
+        async def act():
+            await ToolCallErrorMiddleware(runs).awrap_tool_call(
+                _delegation(), _raising(RuntimeError("provider said 400"))
+            )
+
+        (warning,) = await _warned(act)
+
+        assert warning.type is EventType.ERROR
+        assert warning.content == "researcher failed: provider said 400"
+        assert (warning.metadata["recoverable"], warning.metadata["agent"],
+                warning.metadata["error_code"]) == (True, "researcher", "RuntimeError")
+        assert warning.run == started
+
+    async def test_a_call_to_a_type_not_its_own_numbers_no_instance(self):
+        """Only a ``task`` call to one of the agent's own sub-agents is a run
+        (``ActiveToolCallMiddleware``'s rule): another's failure numbers no
+        instance of that type. (Its warning is still given; in a turn it
+        names the caller's run, as any live event that names none does.)"""
+        runs = AgentRuns()
+
+        async def act():
+            await ToolCallErrorMiddleware(runs, sub_agents=("writer",)).awrap_tool_call(
+                _delegation("researcher"), _raising(RuntimeError("provider said 400"))
+            )
+
+        (warning,) = await _warned(act)
+
+        assert warning.content == "researcher failed: provider said 400"
+        assert runs.run_for(None, None, "call-10", "researcher").instance == "researcher-1"
+
+    @pytest.mark.parametrize("models, model", [
+        ({"researcher": "anthropic:claude-sonnet-4-6"}, "anthropic:claude-sonnet-4-6"),
+        ({}, "the model"),
+    ])
+    async def test_an_overflow_is_said_as_on_adk(self, models, model):
+        """A request too long for the sub-agent's model, after its summary:
+        the warning ADK's overflow handler gives, its code ``CONTEXT_OVERFLOW``;
+        the parent reads the error, as for any other failure."""
+        runs = AgentRuns()
+        started = runs.run_for(None, None, "call-9", "researcher")
+        error = ContextOverflowError("Model input still does not fit after recovery.")
+        answered: list[ToolMessage] = []
+
+        async def act():
+            answered.append(await ToolCallErrorMiddleware(runs, models=models).awrap_tool_call(
+                _delegation(), _raising(error)
+            ))
+
+        (warning,) = await _warned(act)
+
+        assert warning.content == (
+            f"researcher: the request no longer fits {model}'s context window."
+        )
+        assert warning.metadata == {
+            "recoverable": True, "error_code": OVERFLOW_ERROR_CODE, "agent": "researcher",
+        }
+        assert warning.run == started
+        assert answered[0].content == (
+            "Error running sub-agent: Model input still does not fit after recovery."
+        )
+
+    async def test_it_is_logged_below_a_warning(self):
+        """The ``ERROR`` is the report: nothing is said twice over the CLI's prompt."""
+        with capture_logs() as logs:
+            await ToolCallErrorMiddleware().awrap_tool_call(
+                _delegation(), _raising(RuntimeError("provider said 400"))
+            )
+
+        assert {log["log_level"] for log in logs if log["event"] == "subagent_failed"} == {
+            "info", "debug",
+        }
+        assert not [log for log in logs if log["log_level"] in ("warning", "error")]
+
+    async def test_cancelling_still_cancels(self):
+        with pytest.raises(asyncio.CancelledError):
+            await ToolCallErrorMiddleware().awrap_tool_call(
+                _delegation(), _raising(asyncio.CancelledError())
+            )
+
+    async def test_graph_control_flow_still_propagates(self):
+        with pytest.raises(GraphInterrupt):
+            await ToolCallErrorMiddleware().awrap_tool_call(
+                _delegation(), _raising(GraphInterrupt())
+            )

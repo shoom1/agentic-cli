@@ -39,7 +39,9 @@ the call goes on with the conversation in full, and the turn's later calls
 skip that range (``FailedSummaries``, keyed by the turn's live events) until
 it has grown by ``MIN_SAVING`` of the trigger; the next turn tries again.
 Any other failure of the summary call, after LangChain's retries, ends the
-turn: there is no later call in it to skip for.
+agent's run: there is no later call in it to skip for. The main agent's
+ends the turn; a sub-agent's answers its ``task`` call with the error
+(``ToolCallErrorMiddleware``), and its coordinator goes on.
 
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start

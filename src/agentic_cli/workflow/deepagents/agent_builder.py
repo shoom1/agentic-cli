@@ -178,7 +178,9 @@ def build_agent_tree(
             the request that carries the summary is sent.
         runs: The manager's sub-agent runs: every agent's
             ``ActiveToolCallMiddleware`` makes a ``task`` call to one of the
-            agent's sub-agents the run of the sub-agent it starts.
+            agent's sub-agents the run of the sub-agent it starts, and its
+            ``ToolCallErrorMiddleware`` names that run in the warning a
+            failed one gives.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -224,6 +226,10 @@ def build_agent_tree(
                 tool_side=_tool_side(
                     config, settings, bound=bound, open_calls=open_calls, marks=marks,
                     runs=runs,
+                    models={
+                        sub: str(resolved[sub].ref)
+                        for sub in config.sub_agents if resolved.get(sub) is not None
+                    },
                 ),
             ),
             state_schema=AgentCliState,
@@ -272,8 +278,13 @@ def _tool_side(
     open_calls: OpenCalls | None = None,
     marks: OutsideContentMarks | None = None,
     runs: AgentRuns | None = None,
+    models: Mapping[str, str] | None = None,
 ) -> list["AgentMiddleware"]:
-    """What runs each of the agent's tool calls, outermost first."""
+    """What runs each of the agent's tool calls, outermost first.
+
+    ``models``: each of the agent's sub-agents' model references, which a
+    failed delegation's overflow warning names.
+    """
     stack: list[AgentMiddleware] = [
         PermissionMiddleware(config.name, bound=bound, open_calls=open_calls, marks=marks)
     ]
@@ -286,7 +297,7 @@ def _tool_side(
             )
         )
     stack += [
-        ToolCallErrorMiddleware(),
+        ToolCallErrorMiddleware(runs, sub_agents=config.sub_agents, models=models),
         ActiveToolCallMiddleware(runs, sub_agents=config.sub_agents),
     ]
     return stack

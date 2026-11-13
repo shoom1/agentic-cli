@@ -47,6 +47,7 @@ from agentic_cli.workflow.context import (
     context_budget,
     is_context_overflow,
     overflow_message,
+    subagent_overflow_message,
 )
 from agentic_cli.workflow.events import EventType
 from tests.models.fakes import providers as fake_providers
@@ -707,6 +708,13 @@ def test_the_overflow_message():
     assert overflow_message("anthropic:claude-sonnet-4-5") == (
         "This conversation no longer fits anthropic:claude-sonnet-4-5's context window. "
         "Use /compact or /new."
+    )
+
+
+def test_a_sub_agents_overflow_message():
+    """The warning a sub-agent's request too long for its model gives, on both backends."""
+    assert subagent_overflow_message("researcher", "anthropic:claude-sonnet-4-5") == (
+        "researcher: the request no longer fits anthropic:claude-sonnet-4-5's context window."
     )
 
 
