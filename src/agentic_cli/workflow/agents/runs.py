@@ -67,9 +67,14 @@ def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent)
     content becomes ``tool_summaries.delegation_summary``'s: the answer's
     first line, or, for a sub-agent that failed, ``Failed: <reason>``, the
     result failing too (``success`` false; its ``error`` the text the parent
-    read, as Deep Agents' error result has it). A stopped turn's seal
-    (``interrupted``) keeps the seal's rendering. ``metadata["result"]``
-    stays as the backend gave it.
+    read, as Deep Agents' error result has it). ``metadata["result"]`` stays
+    as the backend gave it.
+
+    A result that ends its run ``interrupted`` (ADK's seal of a call a
+    stopped turn left open) is left as the tool result made it. No turn
+    shows one: ADK writes its seals as the stopped run closes, after the
+    turn has stopped reading its events, so only a processor handed a seal
+    directly meets the case.
     """
     status = ended.metadata.get("status")
     if status == RUN_INTERRUPTED:

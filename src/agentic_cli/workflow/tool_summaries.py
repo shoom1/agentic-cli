@@ -1,8 +1,12 @@
 """Tool-specific result summary formatters.
 
-Provides meaningful one-line summaries for tool results instead of
-generic "Returned N fields" messages. Used by both ADK and LangGraph
-event processing paths.
+Meaningful one-line summaries of tool results, in place of the generic
+"Result: N items", the same on every backend. ``format_tool_summary`` words
+a known tool's result dict: ``WorkflowEvent.tool_result`` asks it for each
+``TOOL_RESULT`` the event processors make (ADK's and Deep Agents').
+``delegation_summary`` words a delegation's result: both event processors
+give it to the ``TOOL_RESULT`` that ends a sub-agent's run
+(``workflow/agents/runs.py::show_as_delegation``).
 """
 
 from __future__ import annotations

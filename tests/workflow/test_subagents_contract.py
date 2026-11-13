@@ -1136,6 +1136,41 @@ class TestDelegationResult:
         ]
         assert (result.content, result.metadata["success"]) == ("X is 42.", True)
 
+    async def test_a_refused_delegation_shows_the_notices_first_line(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("It refused.")],
+            researcher=[says("", stop="refusal")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        # The notice is one line, longer than a summary: it is cut.
+        assert "\n" not in REFUSAL and len(REFUSAL) > TOOL_SUMMARY_MAX_LENGTH
+        assert (result.content, result.metadata["success"]) == (
+            REFUSAL[:TOOL_SUMMARY_MAX_LENGTH] + "...", True,
+        )
+
+    async def test_a_cut_delegation_shows_the_kept_texts_first_line(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Partly done.")],
+            researcher=[says("X is", stop="max_tokens")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        assert crew.results_read("coordinator")["c1"] == CUT_OFF
+        assert (result.content, result.metadata["success"]) == ("X is", True)
+
     async def test_a_failed_delegation_shows_why(self, make_crew):
         crew = make_crew(
             team(),
