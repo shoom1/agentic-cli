@@ -78,6 +78,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ForeignReasoningMiddleware,
     MemoryIndexMiddleware,
     PermissionMiddleware,
+    SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
 )
@@ -400,15 +401,16 @@ class TestTheStack:
         assert (lead[2].kind, lead[2].agent) == (ProviderKind.ANTHROPIC, "lead")
         assert lead[3].agent == "lead"
         assert (lead[5].ttl, lead[5].unsupported_model_behavior) == ("5m", "ignore")
+        # A sub-agent's model side starts with SubAgentOutcomeMiddleware.
         assert [type(m) for m in created["helper"]["middleware"]] == [
-            PatchToolCallsMiddleware, ForeignReasoningMiddleware,
+            PatchToolCallsMiddleware, SubAgentOutcomeMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, ContextOverflowMiddleware,
             PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware,
             ActiveToolCallMiddleware,
         ]
-        assert (created["helper"]["middleware"][1].kind,
-                created["helper"]["middleware"][1].agent) == (ProviderKind.GOOGLE, "helper")
-        assert created["helper"]["middleware"][2].agent == "helper"
+        assert (created["helper"]["middleware"][2].kind,
+                created["helper"]["middleware"][2].agent) == (ProviderKind.GOOGLE, "helper")
+        assert created["helper"]["middleware"][3].agent == "helper"
 
     def test_the_root_gets_the_memory_index_middleware(self, created, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -441,7 +443,8 @@ class TestTheStack:
         _build(TEAM, {"lead": claude, "helper": unknown}, settings)
 
         lead = created["lead"]["middleware"][3]._lc_helper
-        helper = created["helper"]["middleware"][2]._lc_helper
+        # A sub-agent's model side starts with SubAgentOutcomeMiddleware.
+        helper = created["helper"]["middleware"][3]._lc_helper
         assert (lead.trigger, lead.keep) == thresholds_of(claude, settings)
         assert (helper.trigger, helper.keep) == thresholds_of(unknown, settings)
         assert lead.trigger == ("tokens", 200_000)

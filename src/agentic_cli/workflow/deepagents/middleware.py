@@ -18,6 +18,8 @@ gets these; sub-agents are gated as strictly as the root.
   ``ContextOverflowError``, so it summarizes and retries.
 - :class:`MemoryIndexMiddleware`, on the model side inside the summarization,
   puts the main agent's memory index first in each request.
+- :class:`SubAgentOutcomeMiddleware`, outermost on a sub-agent's model side,
+  says a refused or cut final answer so, for its parent and its run.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
@@ -42,6 +44,7 @@ from typing import Any
 
 from langchain.agents.middleware import (
     AgentMiddleware,
+    ExtendedModelResponse,
     ModelRequest,
     ModelResponse,
     ToolCallRequest,
@@ -67,6 +70,12 @@ from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.context import is_context_overflow
+from agentic_cli.workflow.agents.outcome import (
+    REFUSED,
+    cut_off,
+    outcome_of,
+    refusal_notice,
+)
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
@@ -751,3 +760,115 @@ class ForeignReasoningMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> Any:
         return await handler(self._own(request))
+
+
+#: Where a rewritten answer's ``response_metadata`` carries its outcome:
+#: ``{"agentic_cli": {"outcome": ...}}`` (the framework's key, as a job
+#: notice's ``kind`` is). No provider adapter sends it.
+_MARK = "agentic_cli"
+
+
+class SubAgentOutcomeMiddleware(AgentMiddleware):
+    """A sub-agent's refused or cut final answer, said so (``workflow/agents/outcome.py``).
+
+    Deep Agents' ``task`` hands the parent the sub-agent's last text: a
+    refusal reached it as an empty result (before deepagents 0.7.34, which
+    words its own notice), and an answer cut at the output limit as a
+    complete one. Outermost on each sub-agent's model side (never the
+    root's: its refusal or cut ends the turn, as before), this rewrites a
+    final answer (one without tool calls) that a model refused (a refusal
+    block, Claude's ``refusal`` stop, OpenAI's ``content_filter``, a Gemini
+    block) into the refusal notice, and one cut at the output limit into its
+    text followed by the cut-off note, and marks it with its outcome
+    (``answer_outcome``), which the event processor ends the run by. The
+    rewritten answer holds no refusal block, so deepagents 0.7.34+ finds none
+    to word again: the result is the same whichever version is installed. A
+    model call that raises is not its business: the error goes on to
+    ``task`` untouched.
+    """
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        return _with_outcome(await handler(request))
+
+
+def answer_outcome(message: AnyMessage) -> str | None:
+    """The outcome ``SubAgentOutcomeMiddleware`` marked ``message`` with, else None."""
+    if not isinstance(message, AIMessage):
+        return None
+    mark = message.response_metadata.get(_MARK)
+    return mark.get("outcome") if isinstance(mark, dict) else None
+
+
+def marked_answer(message: AIMessage) -> AIMessage:
+    """``message`` as a sub-agent's final answer: refused or cut, said so and marked; else itself.
+
+    The stop reason is Claude's ``stop_reason``, OpenAI's ``finish_reason``
+    (the Responses API's ``incomplete_details.reason``) or Gemini's
+    ``finish_reason``; a refusal the message holds (``_refusal``) is a
+    refusal whatever the reason, its text the notice's explanation and its
+    category the notice's, as Deep Agents 0.7.34 words them.
+    """
+    if message.tool_calls:
+        return message
+    metadata = message.response_metadata or {}
+    refusal = _refusal(message)
+    reason = (
+        metadata.get("stop_reason")
+        or metadata.get("finish_reason")
+        or (metadata.get("incomplete_details") or {}).get("reason")
+    )
+    outcome = REFUSED if refusal is not None else outcome_of(reason)
+    if outcome is None:
+        return message
+    if outcome == REFUSED:
+        held = refusal or {}
+        text = refusal_notice(
+            category=(held.get("extras") or {}).get("category"),
+            explanation=held.get("refusal"),
+        )
+    else:
+        text = cut_off(message.text)
+    return message.model_copy(update={
+        "content": text,
+        "additional_kwargs": {
+            key: value for key, value in message.additional_kwargs.items() if key != "refusal"
+        },
+        "response_metadata": {**metadata, _MARK: {"outcome": outcome}},
+    })
+
+
+def _refusal(message: AIMessage) -> dict | None:
+    """The refusal ``message`` holds, as a refusal block; None for none.
+
+    LangChain's standard refusal block (``{"type": "refusal", ...}``, the one
+    Deep Agents 0.7.34 rewords; langchain-core 1.7+), a provider's refusal
+    block an older langchain-core keeps as ``non_standard``, or ChatOpenAI's
+    ``additional_kwargs["refusal"]`` (Chat Completions).
+    """
+    for block in message.content_blocks:
+        if block.get("type") == "non_standard":
+            block = block.get("value") or {}
+        if isinstance(block, dict) and block.get("type") == "refusal":
+            return block
+    refusal = message.additional_kwargs.get("refusal")
+    return {"type": "refusal", "refusal": refusal} if refusal else None
+
+
+def _with_outcome(response: Any) -> Any:
+    """``response`` (any form a model call returns) with its answers through ``marked_answer``."""
+    if isinstance(response, AIMessage):
+        return marked_answer(response)
+    if isinstance(response, ModelResponse):
+        return dataclasses.replace(response, result=[
+            marked_answer(message) if isinstance(message, AIMessage) else message
+            for message in response.result
+        ])
+    if isinstance(response, ExtendedModelResponse):
+        return dataclasses.replace(
+            response, model_response=_with_outcome(response.model_response)
+        )
+    return response

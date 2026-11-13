@@ -78,6 +78,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     InterruptedCallsMiddleware,
     MemoryIndexMiddleware,
     PermissionMiddleware,
+    SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
 )
@@ -200,6 +201,10 @@ def build_agent_tree(
             memory_index_cached=memory_index_cached if name == root else None,
             memory_index_forget=memory_index_forget if name == root else None,
         )
+        if name != root:
+            # Outermost: it sees the answer every other model-side
+            # middleware let through, as the coordinator will read it.
+            model_side = [SubAgentOutcomeMiddleware(), *model_side]
         if summarizers is not None:
             summarizers.update(
                 (name, middleware) for middleware in model_side

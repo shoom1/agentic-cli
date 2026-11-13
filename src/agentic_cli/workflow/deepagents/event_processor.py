@@ -58,9 +58,11 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
+from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
 from agentic_cli.workflow.agents.runs import (
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_REFUSED,
     RUN_STARTED,
     SUBAGENT_ERROR_PREFIX,
     AgentRuns,
@@ -74,8 +76,9 @@ from agentic_cli.workflow.context import (
     overflow_message,
     usage_fields,
 )
+from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
-from agentic_cli.workflow.events import EventType, WorkflowEvent
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
 
 if TYPE_CHECKING:
@@ -153,6 +156,9 @@ class DeepAgentsEventProcessor:
             None if sub_agents is None
             else {name: frozenset(own) for name, own in sub_agents.items()}
         )
+        # A sub-agent run's last answer's outcome (SubAgentOutcomeMiddleware's
+        # mark), by run id, until its task call's result ends the run.
+        self._outcomes: dict[str, str] = {}
 
     def agent(self, namespace: Iterable[str]) -> str:
         """The agent whose graph runs at ``namespace``."""
@@ -233,6 +239,9 @@ class DeepAgentsEventProcessor:
         for message in values.get("messages") or ():
             if not isinstance(message, AIMessage):
                 continue
+            outcome = answer_outcome(message)
+            if outcome is not None and run.run is not None:
+                self._outcomes[run.run] = outcome
             for block in message.content_blocks:
                 if block.get("type") == "reasoning" and block.get("reasoning"):
                     events.append(
@@ -266,6 +275,10 @@ class DeepAgentsEventProcessor:
                 ended = self._ended(message, run)
                 if ended is not None:
                     events.append(ended)
+                    # A run cut short is followed by its one warning.
+                    warning = cut_off_warning(ended)
+                    if warning is not None:
+                        events.append(warning)
         if "tasks" in values:
             events += self._progress(values["tasks"])
         return self._all_attributed(events, agent, run)
@@ -273,9 +286,10 @@ class DeepAgentsEventProcessor:
     def _all_attributed(
         self, events: list[WorkflowEvent], agent: str, run: RunRef
     ) -> list[WorkflowEvent]:
-        """``events`` as ``agent``'s, in ``run``; an ``AGENT_RUN`` is its sub-agent's already."""
+        """``events`` as ``agent``'s, in ``run``; one that names a run (an
+        ``AGENT_RUN``, a cut run's warning) is its sub-agent's already."""
         return [
-            event if event.type is EventType.AGENT_RUN else self._attributed(event, agent, run)
+            event if event.run is not None else self._attributed(event, agent, run)
             for event in events
         ]
 
@@ -309,11 +323,14 @@ class DeepAgentsEventProcessor:
 
         ``failed`` for ``Error running sub-agent: <reason>`` (its ``error``
         the reason) or another error result (an error message, or one that
-        says ``success`` false: its error), else ``completed``.
+        says ``success`` false: its error), ``refused`` when
+        ``SubAgentOutcomeMiddleware`` marked the run's last answer refused,
+        else ``completed`` (``partial`` when it marked the answer cut).
         """
         child = self._delegated.pop((run.run, message.tool_call_id), None)
         if child is None:
             return None
+        outcome = self._outcomes.pop(child.run or "", None)
         text = message.text
         _, succeeded, error = _result_of(message)
         if text.startswith(SUBAGENT_ERROR_PREFIX):
@@ -326,9 +343,15 @@ class DeepAgentsEventProcessor:
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
                 error=error or text,
             )
+        elif outcome == REFUSED:
+            event = WorkflowEvent.agent_run(
+                child, RUN_REFUSED, call_id=message.tool_call_id, result=result_head(text),
+                error=REFUSAL_ERROR,
+            )
         else:
             event = WorkflowEvent.agent_run(
-                child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text)
+                child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text),
+                partial=outcome == CUT,
             )
         self._runs.observe(event)
         return event

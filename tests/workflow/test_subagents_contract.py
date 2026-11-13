@@ -30,6 +30,7 @@ from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
     RUN_INTERRUPTED,
+    RUN_REFUSED,
     RUN_STARTED,
     RunRecord,
 )
@@ -147,7 +148,8 @@ def _claude_answer(step: Step) -> dict[str, Any]:
 
 
 def _scripted_answer(step: Step) -> Any:
-    """``step`` as a ``ScriptedChat`` answers, for Deep Agents."""
+    """``step`` as a ``ScriptedChat`` answers, for Deep Agents: its stop
+    reason in ``response_metadata``, where ChatAnthropic reports Claude's."""
     from tests.workflow.deepagents.fakes import ai, task
 
     made = [
@@ -155,7 +157,9 @@ def _scripted_answer(step: Step) -> Any:
         else (call.tool, dict(call.args), call.call_id)
         for call in step.calls
     ]
-    return ai(step.text, calls=made)
+    answer = ai(step.text, calls=made)
+    stop = "tool_use" if step.calls else step.stop
+    return answer.model_copy(update={"response_metadata": {"stop_reason": stop}})
 
 
 class _ClaudeTeam:
@@ -832,3 +836,103 @@ class TestACallIsItsOwnRuns:
         answered = crew.results_read("coordinator")
         assert answered["c1"] == "X is 42."
         assert INTERRUPTED_BY_USER in answered["c2"]
+
+
+# -- a sub-agent's refusal and cut-off answer: said so to its parent, and in its run --------
+
+#: What a parent reads for a sub-agent whose model refused: Deep Agents 0.7.34's notice.
+REFUSAL = (
+    "The subagent stopped because a model refused the request. "
+    "Retrying the same request is unlikely to succeed; rephrase it or continue without it."
+)
+#: What a parent reads for a sub-agent whose answer "X is" was cut at the output limit.
+CUT_OFF = "X is\n\n[cut off at the output limit]"
+
+
+class TestRefusalAndCutOff:
+    async def test_a_refusal_reaches_the_parent_as_the_notice_and_the_run_is_refused(
+        self, make_crew
+    ):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("It refused.")],
+            researcher=[says("", stop="refusal")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.results_read("coordinator")["c1"] == REFUSAL
+        (ended,) = runs_of(events, RUN_REFUSED)
+        assert ended.run == RESEARCHER
+        assert (ended.metadata["result"], ended.metadata["error"], ended.metadata["partial"]) == (
+            REFUSAL, "a model refused the request", False,
+        )
+        assert [e for e in events if e.type is EventType.ERROR] == []
+        (record,) = crew.records()
+        assert (record.status, record.result, record.error) == (
+            RUN_REFUSED, REFUSAL, "a model refused the request",
+        )
+
+    async def test_a_cut_answer_is_kept_marked_partial_and_warned_once(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Partly done.")],
+            researcher=[says("X is", stop="max_tokens")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.results_read("coordinator")["c1"] == CUT_OFF
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert (ended.run, ended.metadata["result"], ended.metadata["partial"]) == (
+            RESEARCHER, CUT_OFF, True,
+        )
+        warnings = [e for e in events if e.type is EventType.ERROR]
+        assert [
+            (w.content, w.metadata["recoverable"], w.metadata["error_code"],
+             w.metadata["agent"], w.run)
+            for w in warnings
+        ] == [(
+            "researcher-1's answer was cut off at the output limit", True, "MAX_TOKENS",
+            "researcher", RESEARCHER,
+        )]
+        assert events.index(warnings[0]) == events.index(ended) + 1
+        (record,) = crew.records()
+        assert (record.status, record.partial, record.result) == (RUN_COMPLETED, True, CUT_OFF)
+
+    async def test_parallel_runs_each_end_by_their_own_last_answer(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find A.", "c1"),
+                               delegate("researcher", "Find B.", "c2")),
+                         says("One of them answered.")],
+            researcher=[says("", stop="refusal"), says("B is 7.")],
+        )
+
+        events = await crew.turn()
+
+        read = crew.results_read("coordinator")
+        assert sorted(read[call] for call in ("c1", "c2")) == sorted([REFUSAL, "B is 7."])
+        ended = {
+            e.metadata["call_id"]: (e.metadata["status"], e.metadata["result"])
+            for e in runs_of(events) if e.metadata["status"] != RUN_STARTED
+        }
+        assert ended == {
+            call: (RUN_REFUSED if read[call] == REFUSAL else RUN_COMPLETED, read[call])
+            for call in ("c1", "c2")
+        }
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+    async def test_an_answer_that_ended_well_is_not_touched(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.", stop="end_turn")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.results_read("coordinator")["c1"] == "X is 42."
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert ended.metadata["partial"] is False
+        assert [e for e in events if e.type is EventType.ERROR] == []
