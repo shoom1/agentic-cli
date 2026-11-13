@@ -32,6 +32,7 @@ from agentic_cli.workflow.adk_config_bridge import (
 )
 from agentic_cli.workflow.settings import WorkflowSettingsMixin
 from agentic_cli.workflow.service_registry import get_service, get_service_registry
+from agentic_cli.workflow.sessions import RunRef, get_active_run, root_run
 
 # Heavy imports - lazy loaded on first access
 _lazy_imports = {
@@ -69,6 +70,10 @@ __all__ = [
     "EventType",
     "UserInputRequest",
     "UserInputUnavailable",
+    # Sub-agent runs
+    "RunRef",
+    "root_run",
+    "get_active_run",
     # Factory
     "create_workflow_manager_from_settings",
     "create_workflow_manager_from_yaml",

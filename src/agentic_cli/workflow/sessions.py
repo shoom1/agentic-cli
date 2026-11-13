@@ -9,8 +9,9 @@ listed, or deleted as another user's by accident.
 A stored conversation is listed as a ``SessionInfo`` row, its title made by
 ``session_title`` on every backend.
 
-Two context-local markers say what is running now: the turn (its
-``SessionRef``) and, inside it, the tool call (``ToolCallRef``).
+Three context-local markers say what is running now: the turn (its
+``SessionRef``), inside it the sub-agent run (``RunRef``; none in the root's
+own calls), and the tool call (``ToolCallRef``).
 """
 
 from __future__ import annotations
@@ -180,3 +181,67 @@ def reset_active_tool_call(token: Token) -> None:
 def get_active_tool_call() -> "ToolCallRef | None":
     """The tool call running in this context, or None outside one."""
     return _active_tool_call.get()
+
+
+@dataclass(frozen=True, slots=True)
+class RunRef:
+    """Which agent run an event, a call or a request belongs to.
+
+    A sub-agent's run is named within its conversation
+    (``workflow/agents/runs.py``): its instance ``<agent>-<n>`` and its run
+    ``<instance>#<n>``, under its parent's run. The root's own work is no
+    run (``root_run``): instance ``root``, ``run`` None.
+
+    Attributes:
+        agent: The agent's name (its ``AgentConfig.name``; an ADK agent's name).
+        instance: ``root`` for the root; ``<agent>-<n>`` for a sub-agent's instance.
+        run: ``<instance>#<n>``; None for the root's own work (and a depth-0
+            agent's, one the root transfers to).
+        parent_run: The parent's run id; None when the parent is the root.
+        depth: 0 for the root, the parent's depth + 1.
+    """
+
+    agent: str
+    instance: str
+    run: str | None
+    parent_run: str | None
+    depth: int
+
+    @property
+    def is_root(self) -> bool:
+        """Whether this is the root's own work: no sub-agent run."""
+        return self.run is None
+
+
+def root_run(agent: str) -> RunRef:
+    """The root agent ``agent``'s own work: instance ``root``, no run, depth 0."""
+    return RunRef(agent=agent, instance="root", run=None, parent_run=None, depth=0)
+
+
+# The sub-agent run whose call is in progress in this context: set inside a
+# sub-agent's run (ADK: as the agent starts, from its branch; Deep Agents:
+# around its coordinator's ``task`` call), so its model calls, tool calls,
+# permission checks and questions see it. None in the root's own calls. A
+# ContextVar for the same reason as the active turn: parallel runs each run
+# in their own context and never see one another's.
+_active_run: ContextVar["RunRef | None"] = ContextVar("agentic_cli_active_run", default=None)
+
+
+def set_active_run(ref: "RunRef | None") -> Token:
+    """Mark ``ref`` as the sub-agent run in progress in this context.
+
+    Returns:
+        Token for :func:`reset_active_run`, which restores the run that was
+        active before (a nested run's parent).
+    """
+    return _active_run.set(ref)
+
+
+def reset_active_run(token: Token) -> None:
+    """Restore the run recorded before the matching :func:`set_active_run`."""
+    _active_run.reset(token)
+
+
+def get_active_run() -> "RunRef | None":
+    """The sub-agent run in progress in this context, or None (the root's own calls)."""
+    return _active_run.get()
