@@ -17,6 +17,7 @@ import pytest
 
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.llm_log import LLMLogWriter, redact_secrets
+from agentic_cli.workflow.sessions import RunRef
 
 ANTHROPIC_KEY = "sk-ant-api03-ABCDEFGH1234567890ZYXW"
 GOOGLE_KEY = "AIzaSyABCDEFGH1234567890ZYXW"
@@ -86,6 +87,22 @@ class TestRecords:
         writer.write(WorkflowEvent.llm_response(model="m", content="hello"))
 
         assert [r["type"] for r in _records(writer)] == ["llm_request", "llm_response"]
+
+    def test_a_sub_agents_record_names_its_run(self, home):
+        writer = LLMLogWriter("test_app")
+        event = WorkflowEvent.llm_request(model="m")
+        event.run = RunRef(
+            agent="researcher", instance="researcher-1", run="researcher-1#1",
+            parent_run=None, depth=1,
+        )
+
+        writer.write(event)
+
+        [record] = _records(writer)
+        assert record["run"] == {
+            "agent": "researcher", "instance": "researcher-1", "run": "researcher-1#1",
+            "parent_run": None, "depth": 1,
+        }
 
     def test_values_json_cannot_hold_are_written_as_text(self, home):
         writer = LLMLogWriter("test_app")

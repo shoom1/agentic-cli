@@ -2705,6 +2705,22 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A delegation's result looks the same on both backends.** ADK showed a
+  sub-agent's answer as "Result: 1 items" (its delegation tool hands back
+  `{"result": text}`) and Deep Agents as up to 200 characters of the whole
+  answer. Both now show its first line
+  (`tool_summaries.delegation_summary`), and a sub-agent that failed as a
+  failed result, `Failed: <reason>` (on ADK too, where it was a success
+  holding "Error running sub-agent: …"). `metadata["result"]` is unchanged.
+  The tool's name still differs: ADK's is the sub-agent's.
+- **The raw LLM log times each model call on its own, and names its run.**
+  On ADK, a call's `latency_ms` was measured from a clock kept by
+  invocation, which every call of a turn shares: with parallel delegations
+  one call was timed from another's request and the other not at all. Each
+  call now has its own clock. Every raw record names its agent
+  (`metadata["agent"]`, new on ADK) and, for a sub-agent's call, its run: in
+  the stream (`WorkflowEvent.run`) and in `llm_events.jsonl` (`run`: agent,
+  instance, run, parent run, depth), on both backends.
 - **A sub-agent's refused or cut answer is said so, on both backends.** A
   sub-agent whose model refused reached its parent as an empty result with
   no warning (ADK; Deep Agents before 0.7.34), and an answer cut at the

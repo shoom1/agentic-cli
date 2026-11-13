@@ -32,6 +32,7 @@ from agentic_cli.workflow.agents.runs import (
     AgentRuns,
     result_head,
     run_title,
+    show_as_delegation,
 )
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
@@ -126,10 +127,12 @@ class ADKEventProcessor:
     error, ``interrupted`` for the seal of a stopped turn, ``refused`` when
     ``SubAgentOutcomePlugin`` marked the run's last answer refused, else
     ``completed`` (``partial``, and followed by one warning,
-    ``cut_off_warning``, when it marked the answer cut). Any other call is an
-    ordinary tool call, with no run: a name the caller has no such sub-agent
-    for runs none (ADK answers an unknown tool). Each ``AGENT_RUN`` is
-    recorded in ``runs`` as it is made, before ``on_event``.
+    ``cut_off_warning``, when it marked the answer cut); the result itself is
+    shown as on Deep Agents (``agents/runs.py::show_as_delegation``: the
+    answer's first line, a failed one as a failed result). Any other call is
+    an ordinary tool call, with no run: a name the caller has no such
+    sub-agent for runs none (ADK answers an unknown tool). Each ``AGENT_RUN``
+    is recorded in ``runs`` as it is made, before ``on_event``.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -285,15 +288,20 @@ class ADKEventProcessor:
 
         parts = adk_event.content.parts if adk_event.content else None
         for part in parts or ():
+            # Made before the part's own event, which a delegation's end shows.
+            run_event = self._delegation_run(part, run, sealed=error_code == ABORTED)
             workflow_event = self.process_part(part, session_id)
             if workflow_event:
                 workflow_event.run = run
                 if subagent is not None and workflow_event.type is EventType.TEXT:
                     workflow_event.metadata.update(agent=subagent, subagent=True)
+                if run_event is not None and workflow_event.type is EventType.TOOL_RESULT:
+                    show_as_delegation(
+                        workflow_event, _result_text(part.function_response.response), run_event
+                    )
                 workflow_event = self._apply_hook(workflow_event)
                 if workflow_event:
                     yield workflow_event
-            run_event = self._delegation_run(part, run, sealed=error_code == ABORTED)
             if run_event is not None:
                 # A run cut short is followed by its one warning.
                 for event in (run_event, cut_off_warning(run_event)):

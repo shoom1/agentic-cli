@@ -31,6 +31,7 @@ from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  #
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
+from agentic_cli.workflow.sessions import RunRef  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, chat_completion  # noqa: E402
 from tests.workflow.langchain_fakes import anthropic_reply, route  # noqa: E402
 
@@ -192,6 +193,36 @@ class TestEveryCall:
         assert [(r["type"], r["metadata"]["agent"], r["metadata"]["purpose"])
                 for r in records] == [
             (e.type.value, e.metadata["agent"], e.metadata["purpose"]) for e in logged
+        ]
+
+    async def test_a_sub_agents_records_name_its_run(self, home, monkeypatch):
+        settings = _settings(raw_llm_logging=True)
+        _delegating_server(monkeypatch)
+
+        events = await _delegating_turn(settings)
+
+        worker = RunRef(
+            agent="worker", instance="worker-1", run="worker-1#1", parent_run=None, depth=1
+        )
+        # Every call the worker's run makes, its tool's and its summary's too,
+        # is that run's; the lead's own are the root's, no run.
+        assert [
+            (e.metadata["agent"], e.metadata["purpose"], e.run)
+            for e in of(events, EventType.LLM_REQUEST)
+        ] == [
+            ("lead", "agent", None),
+            ("worker", "agent", worker),
+            ("worker", "tool", worker),
+            ("worker", "agent", worker),
+            ("worker", "agent", worker),
+            ("worker", "summarization", worker),
+            ("worker", "agent", worker),
+            ("lead", "agent", None),
+        ]
+        records = [r for r in _records(home, settings)
+                   if r["type"] in ("llm_request", "llm_response")]
+        assert [(r["metadata"]["agent"], (r.get("run") or {}).get("run")) for r in records] == [
+            (e.metadata["agent"], e.run.run if e.run else None) for e in of(events, *LOGGED)
         ]
 
     async def test_a_record_holds_what_was_sent_and_what_came_back(self, home, monkeypatch):

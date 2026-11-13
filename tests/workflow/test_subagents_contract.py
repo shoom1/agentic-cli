@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,7 @@ import httpx
 import pytest
 
 from agentic_cli.config import BaseSettings
+from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
@@ -1113,3 +1115,119 @@ class TestASubAgentsFailure:
         assert [(r.ref, r.status) for r in crew.records()] == [
             (middle, RUN_COMPLETED), (leaf, RUN_FAILED),
         ]
+
+
+# -- a delegation's result shown alike, and the raw log per model call ---------------------
+
+
+class TestDelegationResult:
+    async def test_a_delegations_result_shows_what_the_sub_agent_answered(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.\nThe handbook says so.")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        assert (result.content, result.metadata["success"]) == ("X is 42.", True)
+
+    async def test_a_refused_delegation_shows_the_notices_first_line(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("It refused.")],
+            researcher=[says("", stop="refusal")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        # The notice is one line, longer than a summary: it is cut.
+        assert "\n" not in REFUSAL and len(REFUSAL) > TOOL_SUMMARY_MAX_LENGTH
+        assert (result.content, result.metadata["success"]) == (
+            REFUSAL[:TOOL_SUMMARY_MAX_LENGTH] + "...", True,
+        )
+
+    async def test_a_cut_delegation_shows_the_kept_texts_first_line(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Partly done.")],
+            researcher=[says("X is", stop="max_tokens")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        assert crew.results_read("coordinator")["c1"] == CUT_OFF
+        assert (result.content, result.metadata["success"]) == ("X is", True)
+
+    async def test_a_failed_delegation_shows_why(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("It failed.")],
+            researcher=[fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        read = crew.results_read("coordinator")["c1"]
+        reason = read.removeprefix("Error running sub-agent: ")
+        first = truncate(reason.strip().splitlines()[0], TOOL_SUMMARY_MAX_LENGTH)
+        assert result.content == f"Failed: {first}"
+        assert (result.metadata["success"], result.metadata["error"]) == (False, read)
+        if crew.backend == "adk":
+            # A named difference: ADK's private delegation tool words the
+            # parent's reason itself.
+            assert result.content == "Failed: Dynamic node researcher failed"
+        else:
+            assert "overloaded" in reason
+
+
+class TestRawLog:
+    async def test_each_record_names_its_agent_and_its_run(self, make_crew, monkeypatch):
+        settings = BaseSettings(
+            session_store="memory", default_model="claude-sonnet-4-6", raw_llm_logging=True
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda: settings)
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        coordinator = [("llm_request", "coordinator", None), ("llm_response", "coordinator", None)]
+        researcher = [
+            ("llm_request", "researcher", "researcher-1#1"),
+            ("llm_response", "researcher", "researcher-1#1"),
+        ]
+        expected = sorted(coordinator * 2 + researcher)
+        streamed = [e for e in events if e.type in (EventType.LLM_REQUEST, EventType.LLM_RESPONSE)]
+        assert sorted(
+            (e.type.value, e.metadata["agent"], e.run.run if e.run else None) for e in streamed
+        ) == expected
+        log = Path.home() / f".{settings.app_name}" / "logs" / "llm_events.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        logged = [r for r in records if r["type"] in ("llm_request", "llm_response")]
+        assert sorted(
+            (r["type"], r["metadata"]["agent"], (r.get("run") or {}).get("run")) for r in logged
+        ) == expected
+        assert {json.dumps(r["run"], sort_keys=True) for r in logged if "run" in r} == {
+            json.dumps({"agent": "researcher", "instance": "researcher-1",
+                        "run": "researcher-1#1", "parent_run": None, "depth": 1}, sort_keys=True)
+        }
