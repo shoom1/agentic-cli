@@ -493,6 +493,10 @@ class TestUsage:
 
 class TestError:
     def test_a_failed_turn_is_one_error_from_the_agent_that_failed(self):
+        """A sub-agent's failure that escaped its ``task`` call. In a turn the
+        framework builds none does (``ToolCallErrorMiddleware`` answers the
+        call; only a cancel or LangGraph's control flow escapes it): this
+        branch of the processor is defensive."""
         processor = _processor()
         _delegated(processor, (), SUB, "researcher")
         error = RuntimeError("Error code: 400 - bad request")
@@ -517,7 +521,10 @@ class TestError:
         assert event.metadata["agent"] == "coordinator"
 
     def test_an_overflow_names_the_failing_agents_model(self):
-        # Deep Agents' own error when a summary still does not fit.
+        """Deep Agents' own error when a summary still does not fit, escaping
+        a sub-agent's ``task`` call: in a turn the framework builds,
+        ``ToolCallErrorMiddleware`` answers that call instead (a defensive
+        branch; the root's own overflow is the next test's)."""
         processor = _processor()
         _delegated(processor, (), SUB, "researcher")
         error = ContextOverflowError(

@@ -77,6 +77,7 @@ from agentic_cli.workflow.context import (
     is_context_overflow,
     is_overflow_text,
     overflow_message,
+    subagent_overflow_message,
 )
 from agentic_cli.workflow.events import WorkflowEvent
 
@@ -238,7 +239,7 @@ class OverflowPlugin(BasePlugin):
                 error_code=OVERFLOW_ERROR_CODE, error_message=overflow_message(model)
             )
         warning = WorkflowEvent.error(
-            f"{agent}: the request no longer fits {model}'s context window.",
+            subagent_overflow_message(agent, model),
             error_code=OVERFLOW_ERROR_CODE,
             recoverable=True,
         )

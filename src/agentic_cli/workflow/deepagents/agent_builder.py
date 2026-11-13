@@ -226,6 +226,10 @@ def build_agent_tree(
                 tool_side=_tool_side(
                     config, settings, bound=bound, open_calls=open_calls, marks=marks,
                     runs=runs,
+                    models={
+                        sub: str(resolved[sub].ref)
+                        for sub in config.sub_agents if resolved.get(sub) is not None
+                    },
                 ),
             ),
             state_schema=AgentCliState,
@@ -274,8 +278,13 @@ def _tool_side(
     open_calls: OpenCalls | None = None,
     marks: OutsideContentMarks | None = None,
     runs: AgentRuns | None = None,
+    models: Mapping[str, str] | None = None,
 ) -> list["AgentMiddleware"]:
-    """What runs each of the agent's tool calls, outermost first."""
+    """What runs each of the agent's tool calls, outermost first.
+
+    ``models``: each of the agent's sub-agents' model references, which a
+    failed delegation's overflow warning names.
+    """
     stack: list[AgentMiddleware] = [
         PermissionMiddleware(config.name, bound=bound, open_calls=open_calls, marks=marks)
     ]
@@ -288,7 +297,7 @@ def _tool_side(
             )
         )
     stack += [
-        ToolCallErrorMiddleware(runs, sub_agents=config.sub_agents),
+        ToolCallErrorMiddleware(runs, sub_agents=config.sub_agents, models=models),
         ActiveToolCallMiddleware(runs, sub_agents=config.sub_agents),
     ]
     return stack

@@ -1032,3 +1032,84 @@ class TestASubAgentsFailure:
         assert [e.content for e in events if e.type is EventType.TEXT] == [
             "Asked again: still no answer."
         ]
+
+    async def test_an_overflow_is_warned_of_alike(self, make_crew):
+        """A request too long for the sub-agent's model: one warning, in the
+        same words, its code ``CONTEXT_OVERFLOW``, as the sub-agent's run."""
+        too_long = "prompt is too long: 208310 tokens > 200000 maximum"
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("The researcher could not do it.")],
+            # Enough for either backend's retry, should it make one.
+            researcher=[fails(too_long), fails(too_long)],
+        )
+
+        events = await crew.turn()
+
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert warning.content == (
+            "researcher: the request no longer fits anthropic:claude-sonnet-4-6's "
+            "context window."
+        )
+        assert (warning.metadata["recoverable"], warning.metadata["error_code"],
+                warning.metadata["agent"], warning.run) == (
+            True, "CONTEXT_OVERFLOW", "researcher", RESEARCHER,
+        )
+        read = crew.results_read("coordinator")["c1"]
+        (ended,) = [e for e in runs_of(events) if e.metadata["status"] != RUN_STARTED]
+        if crew.backend == "adk":
+            # A named difference: ADK's overflow handler answers the
+            # sub-agent's model call with text, so its run completes; on
+            # Deep Agents the parent reads the error, and the run fails.
+            assert read.startswith("I could not do this task: the request no longer fits ")
+            assert ended.metadata["status"] == RUN_COMPLETED
+        else:
+            assert read.startswith("Error running sub-agent: ")
+            assert ended.metadata["status"] == RUN_FAILED
+        assert [e.content for e in events
+                if e.type is EventType.TEXT and e.run == COORDINATOR] == [
+            "The researcher could not do it."
+        ]
+
+    async def test_a_nested_failure_is_the_leafs_and_its_parent_answers(self, make_crew):
+        """coordinator → middle → leaf, the leaf's model failing: the warning
+        names the leaf's run, the middle reads why and answers, and the turn
+        completes."""
+        crew = make_crew(
+            [
+                agent("coordinator", sub_agents=("middle",)),
+                agent("middle", sub_agents=("leaf",)),
+                agent("leaf"),
+            ],
+            coordinator=[calls(delegate("middle", "Plan X.", "c1")),
+                         says("Planned without the leaf.")],
+            middle=[calls(delegate("leaf", "Look X up.", "m1")),
+                    says("The leaf could not look X up.")],
+            leaf=[fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        middle = RunRef(agent="middle", instance="middle-1", run="middle-1#1",
+                        parent_run=None, depth=1)
+        leaf = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1",
+                      parent_run="middle-1#1", depth=2)
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert warning.content.startswith("leaf failed: ")
+        assert "overloaded" in warning.content
+        assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
+            True, "leaf", leaf,
+        )
+        assert crew.results_read("middle")["m1"].startswith("Error running sub-agent: ")
+        assert [(e.run, e.metadata["status"]) for e in runs_of(events)] == [
+            (middle, RUN_STARTED), (leaf, RUN_STARTED), (leaf, RUN_FAILED), (middle, RUN_COMPLETED),
+        ]
+        assert crew.results_read("coordinator")["c1"] == "The leaf could not look X up."
+        assert [e.content for e in events
+                if e.type is EventType.TEXT and e.run == COORDINATOR] == [
+            "Planned without the leaf."
+        ]
+        assert [(r.ref, r.status) for r in crew.records()] == [
+            (middle, RUN_COMPLETED), (leaf, RUN_FAILED),
+        ]

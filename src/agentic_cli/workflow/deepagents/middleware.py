@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -71,16 +71,20 @@ from agentic_cli.models import ProviderKind
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
-from agentic_cli.workflow.context import is_context_overflow
-from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.outcome import (
     REFUSED,
     cut_off,
     outcome_of,
     refusal_notice,
 )
-from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.runs import SUBAGENT_ERROR_PREFIX, AgentRuns
+from agentic_cli.workflow.context import (
+    OVERFLOW_ERROR_CODE,
+    is_context_overflow,
+    subagent_overflow_message,
+)
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
@@ -462,6 +466,19 @@ def _is_delegation(tool: BaseTool | None) -> bool:
     return declaration is not None and identify_tool(tool) is declaration
 
 
+def _own_sub_agent(call: ToolCall, sub_agents: frozenset[str] | None) -> str | None:
+    """The sub-agent a ``task`` call runs, when it is one of the caller's own; else None.
+
+    Only such a call is a run: a call to any other type runs no sub-agent
+    (Deep Agents answers that it does not exist). ``sub_agents`` None takes
+    every call's ``subagent_type`` as the caller's own.
+    """
+    subagent = (call.get("args") or {}).get("subagent_type")
+    if not isinstance(subagent, str):
+        return None
+    return subagent if sub_agents is None or subagent in sub_agents else None
+
+
 class ToolCallErrorMiddleware(AgentMiddleware):
     """A tool that raises fails its call, not the turn.
 
@@ -480,7 +497,10 @@ class ToolCallErrorMiddleware(AgentMiddleware):
     model call: one recoverable ``ERROR``, ``<agent> failed: <reason>``,
     through the turn's live events, the sub-agent's run's (given the
     manager's runs). The coordinator reads why and carries on; the turn ends
-    only when the root's own model or run fails.
+    only when the root's own model or run fails. A request too long for the
+    sub-agent's model, still after its summary, is warned of in ADK's words,
+    ``<agent>: the request no longer fits <model>'s context window.``, with
+    ``error_code`` ``CONTEXT_OVERFLOW``.
 
     Args:
         runs: The manager's sub-agent runs, which name the run a failed
@@ -488,14 +508,21 @@ class ToolCallErrorMiddleware(AgentMiddleware):
         sub_agents: The agent's own sub-agents: only a ``task`` call to one
             of them is a run, as ``ActiveToolCallMiddleware`` has it; None
             takes every call's ``subagent_type`` as the agent's own.
+        models: Each sub-agent's model reference, as the user is told it, by
+            name, for an overflow's warning ("the model" for one not named).
     """
 
     def __init__(
-        self, runs: AgentRuns | None = None, *, sub_agents: Collection[str] | None = None
+        self,
+        runs: AgentRuns | None = None,
+        *,
+        sub_agents: Collection[str] | None = None,
+        models: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._runs = runs
         self._sub_agents = None if sub_agents is None else frozenset(sub_agents)
+        self._models = dict(models or {})
 
     async def awrap_tool_call(
         self,
@@ -528,17 +555,26 @@ class ToolCallErrorMiddleware(AgentMiddleware):
             error=truncate(reason, MAX_TOOL_ERROR),
         )
         logger.debug("subagent_failed", exc_info=error)
-        warning = WorkflowEvent.error(
-            f"{agent} failed: {reason}", error_code=type(error).__name__, recoverable=True
-        )
+        if is_context_overflow(error):
+            # ADK's overflow handler's warning. What differs: ADK answers
+            # the sub-agent's model call with text ("I could not do this
+            # task: ..."), so its run completes; here the parent reads the
+            # error, and the run fails.
+            warning = WorkflowEvent.error(
+                subagent_overflow_message(agent, self._models.get(agent, "the model")),
+                error_code=OVERFLOW_ERROR_CODE,
+                recoverable=True,
+            )
+        else:
+            warning = WorkflowEvent.error(
+                f"{agent} failed: {reason}", error_code=type(error).__name__, recoverable=True
+            )
         warning.metadata["agent"] = agent
-        delegates = isinstance(subagent, str) and (
-            self._sub_agents is None or subagent in self._sub_agents
-        )
-        if self._runs is not None and delegates:
+        own = _own_sub_agent(call, self._sub_agents)
+        if self._runs is not None and own is not None:
             # The run the task call started (still open: its result is this).
             warning.run = self._runs.run_for(
-                get_active_turn(), get_active_run(), call["id"], subagent
+                get_active_turn(), get_active_run(), call["id"], own
             )
         live_events.report(warning)
         return ToolMessage(
@@ -698,11 +734,8 @@ class ActiveToolCallMiddleware(AgentMiddleware):
         call = request.tool_call
         token = set_active_tool_call(_call_ref(call))
         run_token = None
-        subagent = (call.get("args") or {}).get("subagent_type")
-        delegates = isinstance(subagent, str) and (
-            self._sub_agents is None or subagent in self._sub_agents
-        )
-        if self._runs is not None and call["name"] == TASK_TOOL and delegates:
+        subagent = _own_sub_agent(call, self._sub_agents)
+        if self._runs is not None and call["name"] == TASK_TOOL and subagent is not None:
             run = self._runs.run_for(get_active_turn(), get_active_run(), call["id"], subagent)
             run_token = set_active_run(run)
         try:

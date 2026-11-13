@@ -30,6 +30,7 @@ from structlog.testing import capture_logs
 pytest.importorskip("deepagents")
 
 from langchain.agents.middleware import ToolCallRequest  # noqa: E402
+from langchain_core.exceptions import ContextOverflowError  # noqa: E402
 from langchain_core.messages import ToolMessage  # noqa: E402
 from langchain_core.tools import BaseTool, StructuredTool  # noqa: E402
 from langgraph.errors import GraphInterrupt  # noqa: E402
@@ -50,6 +51,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     PermissionMiddleware,
     ToolCallErrorMiddleware,
 )
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE  # noqa: E402
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
@@ -693,9 +695,11 @@ class TestAFailedDelegation:
                 warning.metadata["error_code"]) == (True, "researcher", "RuntimeError")
         assert warning.run == started
 
-    async def test_a_call_to_a_type_not_its_own_names_no_run(self):
+    async def test_a_call_to_a_type_not_its_own_numbers_no_instance(self):
         """Only a ``task`` call to one of the agent's own sub-agents is a run
-        (``ActiveToolCallMiddleware``'s rule): another's failure numbers none."""
+        (``ActiveToolCallMiddleware``'s rule): another's failure numbers no
+        instance of that type. (Its warning is still given; in a turn it
+        names the caller's run, as any live event that names none does.)"""
         runs = AgentRuns()
 
         async def act():
@@ -705,8 +709,39 @@ class TestAFailedDelegation:
 
         (warning,) = await _warned(act)
 
-        assert (warning.content, warning.run) == ("researcher failed: provider said 400", None)
+        assert warning.content == "researcher failed: provider said 400"
         assert runs.run_for(None, None, "call-10", "researcher").instance == "researcher-1"
+
+    @pytest.mark.parametrize("models, model", [
+        ({"researcher": "anthropic:claude-sonnet-4-6"}, "anthropic:claude-sonnet-4-6"),
+        ({}, "the model"),
+    ])
+    async def test_an_overflow_is_said_as_on_adk(self, models, model):
+        """A request too long for the sub-agent's model, after its summary:
+        the warning ADK's overflow handler gives, its code ``CONTEXT_OVERFLOW``;
+        the parent reads the error, as for any other failure."""
+        runs = AgentRuns()
+        started = runs.run_for(None, None, "call-9", "researcher")
+        error = ContextOverflowError("Model input still does not fit after recovery.")
+        answered: list[ToolMessage] = []
+
+        async def act():
+            answered.append(await ToolCallErrorMiddleware(runs, models=models).awrap_tool_call(
+                _delegation(), _raising(error)
+            ))
+
+        (warning,) = await _warned(act)
+
+        assert warning.content == (
+            f"researcher: the request no longer fits {model}'s context window."
+        )
+        assert warning.metadata == {
+            "recoverable": True, "error_code": OVERFLOW_ERROR_CODE, "agent": "researcher",
+        }
+        assert warning.run == started
+        assert answered[0].content == (
+            "Error running sub-agent: Model input still does not fit after recovery."
+        )
 
     async def test_it_is_logged_below_a_warning(self):
         """The ``ERROR`` is the report: nothing is said twice over the CLI's prompt."""

@@ -373,6 +373,15 @@ def overflow_message(model: str) -> str:
     return f"This conversation no longer fits {model}'s context window. Use /compact or /new."
 
 
+def subagent_overflow_message(agent: str, model: str) -> str:
+    """What the user is warned of when a sub-agent's request no longer fits ``model``.
+
+    A recoverable warning, ``error_code`` ``OVERFLOW_ERROR_CODE``, on both
+    backends: the turn goes on, and the sub-agent's parent is answered.
+    """
+    return f"{agent}: the request no longer fits {model}'s context window."
+
+
 def _raised_by(error: BaseException, package: str) -> bool:
     """Whether ``error``'s class, or a class it derives from, is ``package``'s."""
     return any(cls.__module__.partition(".")[0] == package for cls in type(error).__mro__)

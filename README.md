@@ -401,8 +401,12 @@ What it supports:
   12% of that word for word. A model whose window is unknown counts as
   128,000 tokens. A request the provider refuses as too long is summarized
   and retried once; a conversation that still does not fit ends the turn
-  with one error naming the model (a sub-agent's fails only its `task`
-  call: its parent reads why). The checkpoint keeps every message.
+  with one error naming the model. A sub-agent's fails only its `task`
+  call: its parent reads the error, its run fails, and the user is warned
+  as on ADK, `<agent>: the request no longer fits <model>'s context
+  window.` (ADK answers the sub-agent's call with text instead, "I could not
+  do this task: …", and its run completes). The checkpoint keeps every
+  message.
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
@@ -1349,7 +1353,11 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   sub-agent: …" as the call's error result, the user sees a warning,
   `<agent> failed: <the provider's reason>`, and the parent answers. Only
   the main agent's own failure ends the turn. (On ADK, ADK's delegation
-  tool words the parent's reason "Dynamic node <agent> failed".)
+  tool words the parent's reason "Dynamic node <agent> failed".) A
+  sub-agent's request too long for its model is warned of alike, `<agent>:
+  the request no longer fits <model>'s context window.`; on ADK the
+  sub-agent answers "I could not do this task: …" and its run completes,
+  on Deep Agents the parent reads the error and the run fails.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of

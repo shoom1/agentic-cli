@@ -918,7 +918,10 @@ the start of the entry's title.
     conversation that still does not fit ends the turn with one `ERROR`,
     `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
     <model>'s context window. Use /compact or /new." (a sub-agent's fails
-    only its `task` call, whose parent reads why). The checkpoint
+    only its `task` call: its parent reads the error and its run fails,
+    where ADK answers it with text and its run completes; the user's
+    warning is ADK's, "<agent>: the request no longer fits <model>'s
+    context window.", `CONTEXT_OVERFLOW`). The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals
@@ -1870,7 +1873,12 @@ the start of the entry's title.
   ADK's own, "Dynamic node <agent> failed"), and the user gets
   a recoverable `ERROR`, `<agent> failed: <the provider's reason>`, with its
   error code, while the coordinator answers. Only the main agent's own
-  failure ends the turn; cancelling still stops it all.
+  failure ends the turn; cancelling still stops it all. A sub-agent's
+  request still too long for its model is warned of in the same words on
+  both backends, `<agent>: the request no longer fits <model>'s context
+  window.`, `error_code` `CONTEXT_OVERFLOW`; on ADK its call is answered
+  with text ("I could not do this task: …") and its run completes, on Deep
+  Agents its parent reads the error and the run fails.
 - **Models are named by reference or role, and resolved once, at startup.**
   `default_model`, `AgentConfig.model`, `Manager(model=...)` and
   `reinitialize(model=...)` take a `provider:model` reference or a bare model
