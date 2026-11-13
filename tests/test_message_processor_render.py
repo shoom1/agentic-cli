@@ -24,6 +24,7 @@ import pytest
 
 from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.sessions import RunRef
 from tests.event_replay import RecordingSession, ReplayController, ReplayWorkflow
 
 
@@ -443,3 +444,24 @@ class TestMemoryWriteLine:
             ),
         ])
         assert ui.of("success") == []
+
+
+class TestAgentRunEvents:
+    async def test_the_cli_renders_a_turn_with_them_as_without(self):
+        """``AGENT_RUN`` is for ``/agents`` (0.7.0's PR 9): until then the CLI
+        renders nothing of it, and a turn that holds it as one that does not."""
+        child = RunRef(
+            agent="researcher", instance="researcher-1", run="researcher-1#1",
+            parent_run=None, depth=1,
+        )
+        with_runs = [
+            GOLDEN_PLANNING_TURN[0],
+            WorkflowEvent.agent_run(child, "started", title="Find X.", call_id="c1"),
+            *GOLDEN_PLANNING_TURN[1:],
+            WorkflowEvent.agent_run(child, "completed", call_id="c1", result="X is 42."),
+        ]
+
+        plain, _, _ = await _render(GOLDEN_PLANNING_TURN)
+        seen, _, _ = await _render(with_runs)
+
+        assert seen.calls == plain.calls

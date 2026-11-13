@@ -19,6 +19,7 @@ import pytest
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.live_events import LiveEvents, current, merged, report, reporting
+from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run
 
 
 def note(text: str) -> WorkflowEvent:
@@ -292,3 +293,48 @@ class TestReporting:
         assert live.first("fit_guard") is True
         assert LiveEvents().first("summary_failed") is True  # per instance
 
+
+
+class TestTheRunAnEventIsReportedIn:
+    """What a sub-agent's run reports from inside a model call is that run's."""
+
+    async def test_an_event_emitted_in_a_run_is_that_runs(self):
+        researcher = RunRef(
+            agent="researcher", instance="researcher-1", run="researcher-1#1",
+            parent_run=None, depth=1,
+        )
+        live = LiveEvents()
+
+        async def source():
+            token = set_active_run(researcher)
+            try:
+                live.emit(note("in the run"))
+            finally:
+                reset_active_run(token)
+            live.emit(note("the root's"))
+            yield "done"
+
+        items = await consume(merged(source(), live))
+
+        assert [(item.content, item.run) for item in items if isinstance(item, WorkflowEvent)] == [
+            ("in the run", researcher), ("the root's", None),
+        ]
+
+    async def test_an_event_that_names_its_run_keeps_it(self):
+        named = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1", parent_run=None, depth=1)
+        other = RunRef(agent="other", instance="other-1", run="other-1#1", parent_run=None, depth=1)
+        live = LiveEvents()
+
+        async def source():
+            event = note("named")
+            event.run = named
+            token = set_active_run(other)
+            try:
+                live.emit(event)
+            finally:
+                reset_active_run(token)
+            yield "done"
+
+        items = await consume(merged(source(), live))
+
+        assert [item.run for item in items if isinstance(item, WorkflowEvent)] == [named]
