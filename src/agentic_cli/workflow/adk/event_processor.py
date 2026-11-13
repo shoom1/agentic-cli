@@ -15,10 +15,18 @@ from google.genai import types
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.adk.branches import branch_run
 from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
+from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY
+from agentic_cli.workflow.agents.outcome import (
+    CUT,
+    REFUSAL_ERROR,
+    REFUSED,
+    cut_off_warning,
+)
 from agentic_cli.workflow.agents.runs import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_REFUSED,
     RUN_STARTED,
     SUBAGENT_ERROR_PREFIX,
     AgentRuns,
@@ -115,11 +123,13 @@ class ADKEventProcessor:
     sub-agent's run, and its result by the one that ends it: ``failed`` for
     ADK's answer for a sub-agent that failed (``Error running sub-agent:
     …``) or an error result (``success`` false: the tool raised), with its
-    error, ``interrupted`` for the seal of a stopped turn, else
-    ``completed``. Any other call is an ordinary tool call, with no run: a
-    name the caller has no such sub-agent for runs none (ADK answers an
-    unknown tool). Each ``AGENT_RUN`` is recorded in ``runs`` as it is made,
-    before ``on_event``.
+    error, ``interrupted`` for the seal of a stopped turn, ``refused`` when
+    ``SubAgentOutcomePlugin`` marked the run's last answer refused, else
+    ``completed`` (``partial``, and followed by one warning,
+    ``cut_off_warning``, when it marked the answer cut). Any other call is an
+    ordinary tool call, with no run: a name the caller has no such sub-agent
+    for runs none (ADK answers an unknown tool). Each ``AGENT_RUN`` is
+    recorded in ``runs`` as it is made, before ``on_event``.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -168,6 +178,9 @@ class ADKEventProcessor:
         else:
             by_agent = {root: frozenset(delegates)} if root is not None and delegates else {}
         self.delegates: dict[str, frozenset[str]] = by_agent
+        # A sub-agent run's last answer's outcome (SubAgentOutcomePlugin's
+        # mark), by run id, until its delegation's result ends the run.
+        self._outcomes: dict[str, str] = {}
 
     @property
     def model(self) -> str:
@@ -186,8 +199,10 @@ class ADKEventProcessor:
         self._on_event = value
 
     def start_turn(self) -> None:
-        """Forget the task list reported: a turn reports the first one it sees."""
+        """Forget the task list reported (a turn reports the first one it
+        sees), and the outcomes of runs a stopped turn left open."""
         self._reported_tasks = None
+        self._outcomes.clear()
 
     async def process_event(
         self,
@@ -205,6 +220,9 @@ class ADKEventProcessor:
         """
         subagent = self._subagent(adk_event)
         run = self._run_ref(adk_event)
+        outcome = (getattr(adk_event, "custom_metadata", None) or {}).get(OUTCOME_KEY)
+        if outcome and run is not None and run.run is not None:
+            self._outcomes[run.run] = outcome
 
         error_code = getattr(adk_event, "error_code", None)
         if subagent is not None and error_code:
@@ -277,9 +295,11 @@ class ADKEventProcessor:
                     yield workflow_event
             run_event = self._delegation_run(part, run, sealed=error_code == ABORTED)
             if run_event is not None:
-                run_event = self._apply_hook(run_event)
-                if run_event:
-                    yield run_event
+                # A run cut short is followed by its one warning.
+                for event in (run_event, cut_off_warning(run_event)):
+                    event = self._apply_hook(event) if event is not None else None
+                    if event:
+                        yield event
 
         progress = self._progress(adk_event)
         if progress is not None:
@@ -366,6 +386,7 @@ class ADKEventProcessor:
         elif response is not None and response.name in own and response.id:
             child = self.runs.run_for(get_active_turn(), parent, response.id, response.name)
             text = _result_text(response.response)
+            outcome = self._outcomes.pop(child.run or "", None)
             succeeded, error = _outcome(response.response)
             if sealed:
                 event = WorkflowEvent.agent_run(
@@ -380,9 +401,15 @@ class ADKEventProcessor:
                 event = WorkflowEvent.agent_run(
                     child, RUN_FAILED, call_id=response.id, result="", error=error or text
                 )
+            elif outcome == REFUSED:
+                event = WorkflowEvent.agent_run(
+                    child, RUN_REFUSED, call_id=response.id, result=result_head(text),
+                    error=REFUSAL_ERROR,
+                )
             else:
                 event = WorkflowEvent.agent_run(
-                    child, RUN_COMPLETED, call_id=response.id, result=result_head(text)
+                    child, RUN_COMPLETED, call_id=response.id, result=result_head(text),
+                    partial=outcome == CUT,
                 )
         else:
             return None

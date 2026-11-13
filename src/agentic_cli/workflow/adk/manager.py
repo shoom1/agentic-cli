@@ -597,6 +597,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
           summarizer reads, and makes its sub-agent run the active run.
         - ``_init_plugins``: the permission gate (a denial is the call's
           answer), the tool-error answer, the raw log as the model answers.
+        - ``SubAgentOutcomePlugin``, when the tree delegates: a sub-agent's
+          final answer that a model refused or cut is said so (and marked) as
+          its parent reads it; after the raw log, which records the answer as
+          given, and it returns nothing, so every plugin after it still runs.
         - ``ForeignReasoningPlugin``: a model switch keeps the session, and no
           model is sent the thoughts another provider wrote (which it would
           refuse), before the request is measured.
@@ -623,12 +627,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             replies: The agents that reply to the user (``build.reply_agents``).
             cache: The app's context cache, or None.
         """
-        from agentic_cli.workflow.adk.build import own_after_tool_agents
+        from agentic_cli.workflow.adk.build import delegated_agents, own_after_tool_agents
         from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
 
         root = self._root_agent
         kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
         plugins: list = [MainAgentPlugin(self.agent_runs), *self._init_plugins()]
+        if delegated_agents(root):
+            from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
+
+            plugins.append(SubAgentOutcomePlugin())
         plugins.append(ForeignReasoningPlugin({name: kind.value for name, kind in kinds.items()}))
         if cache is not None:
             from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin

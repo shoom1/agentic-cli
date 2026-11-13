@@ -13,6 +13,9 @@ and these tests pin it whole, so a move anywhere fails one of them:
   answer;
 - ``tool_error`` answers a call that raised (and one to an unknown tool);
 - ``llm_logging`` records each call as the model answers it;
+- ``subagent_outcome``, when the tree delegates, after the raw log (which
+  records an answer as the model gave it): a sub-agent's refused or cut answer
+  is said so, in place, so every plugin after it still runs;
 - ``foreign_reasoning`` drops the thoughts another provider wrote, before
   the request is measured;
 - ``context_cache`` makes one Gemini cache attempt a turn;
@@ -109,6 +112,32 @@ async def test_a_plain_config_built_app(project):
         "tool_result_cap",
         "context_overflow",
         "fit_guard",
+    ]
+
+
+async def test_a_delegating_app(project):
+    """A tree with a sub-agent: its answers pass ``subagent_outcome``."""
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
+            AgentConfig(name="helper", prompt="Help.", description="Helps."),
+        ],
+        settings=_settings(extras=True),
+    )
+
+    assert await _chain(manager) == [
+        "main_agent",
+        "permission",
+        "tool_error",
+        "llm_logging",
+        "subagent_outcome",
+        "foreign_reasoning",
+        "context_cache",
+        "interrupted_calls",
+        "tool_result_cap",
+        "context_overflow",
+        "fit_guard",
+        "llm_logging_sent",
     ]
 
 
