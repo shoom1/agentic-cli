@@ -559,6 +559,14 @@ the start of the entry's title.
 
 ### Added
 
+- **A job records the sub-agent that started it.** `JobRecord.started_by`
+  is the instance id of the sub-agent run whose call submitted the job
+  (`researcher-2`; `get_active_run()` at submit), None for the root's and
+  for a record written before it; it is saved in `meta.json`. The notice
+  that tells the root a finished job names that sub-agent: "A background
+  job researcher-2 started has finished. Tell the user what it means."
+  (`tools/jobs/resume.py`: `job_notice_ask`, `JOB_NOTICE_ASK_FOR`); the
+  root's own job keeps `JOB_NOTICE_ASK`.
 - **Sub-agent runs have an identity, on both backends.** Every
   `WorkflowEvent` an agent wrote names its run (`WorkflowEvent.run`, a frozen
   `RunRef`: the agent, its instance `<agent>-<n>` and run `<instance>#<n>`
@@ -2706,6 +2714,23 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A task that outlives its turn asks no one.** The input callback is
+  context-local, and a task a turn started (`asyncio.create_task` copies the
+  context) still held it after the turn ended: asked then, it opened a dialog
+  outside any turn. Each turn now has a span, opened and closed by
+  `BaseWorkflowManager._workflow_context` (`workflow/sessions.py`:
+  `open_turn_scope`, `close_turn_scope`, `turn_has_ended`), which a copied
+  context carries; `request_user_input` from a context whose turn has ended
+  raises `UserInputUnavailable`, as with no approver attached: a question
+  goes unanswered (`ask_clarification` says so) and a permission prompt is
+  denied ("no rule + no interactive approver to ask"). Outside any turn,
+  nothing changes.
+- **A sub-agent's job no longer answers its parent's call.** After Ctrl+C,
+  a call left open is answered with the state of the job it submitted
+  (`workflow/interrupts.py::job_for_call`), matched by conversation and call
+  id; a provider that repeats call ids across agents made a sub-agent's job
+  the answer to its coordinator's open call. The job's `started_by` must now
+  be the instance of the run whose call is answered (None for the root's).
 - **A delegation's result looks the same on both backends.** ADK showed a
   sub-agent's answer as "Result: 1 items" (its delegation tool hands back
   `{"result": text}`) and Deep Agents as up to 200 characters of the whole
