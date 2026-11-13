@@ -34,6 +34,7 @@ from agentic_cli.workflow.adk.branches import (  # noqa: E402
     delegations,
     parent_branch_run,
 )
+from agentic_cli.workflow.adk.build import delegated_agents  # noqa: E402
 from agentic_cli.workflow.adk.compaction import MainAgentPlugin, running_agent  # noqa: E402
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor  # noqa: E402
 from agentic_cli.workflow.adk.interrupted_calls_plugin import (  # noqa: E402
@@ -52,6 +53,7 @@ from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER  # noqa: E402
 from agentic_cli.workflow.sessions import RunRef, get_active_run, root_run  # noqa: E402
+from agentic_cli.workflow.tool_errors import unknown_tool_result  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -246,6 +248,72 @@ class TestDelegationRuns:
 
     async def test_another_tool_starts_no_run(self):
         events = await _process(_processor(), _calls("coordinator", ("lookup", "toolu_1", {})))
+
+        assert [e.type for e in events] == [EventType.TOOL_CALL]
+
+    async def test_an_error_result_ends_it_failed(self):
+        """The delegation tool raised: ``ToolErrorPlugin`` answers an error result."""
+        processor = _processor()
+        await _delegated(processor)
+
+        (_, ended) = await _process(processor, _results(
+            "coordinator",
+            ("researcher", "toolu_c1", {"success": False, "error": "researcher failed: boom"}),
+        ))
+
+        assert ended.metadata["status"] == RUN_FAILED
+        assert (ended.metadata["error"], ended.metadata["result"]) == (
+            "researcher failed: boom", "",
+        )
+
+
+class TestOnlyTheCallersOwnSubAgents:
+    """A run starts only for a delegation to one of the calling agent's own
+    single-turn sub-agents (``delegates``, by the caller, the event's author)."""
+
+    def test_each_agent_names_its_own_single_turn_sub_agents(self):
+        leaf = SimpleNamespace(name="leaf", mode="single_turn", sub_agents=[])
+        helper = SimpleNamespace(name="helper", mode="chat", sub_agents=[])
+        middle = SimpleNamespace(name="middle", mode="single_turn", sub_agents=[leaf])
+        root = SimpleNamespace(name="coordinator", mode=None, sub_agents=[middle, helper])
+
+        assert delegated_agents(root) == {"coordinator": {"middle"}, "middle": {"leaf"}}
+        assert delegated_agents(helper) == {}
+
+    async def test_a_call_of_another_agents_sub_agent_is_a_tool_call(self):
+        processor = ADKEventProcessor(
+            model="m", root="coordinator",
+            delegates={"coordinator": {"middle"}, "middle": {"leaf"}},
+        )
+
+        called = await _process(
+            processor, _calls("coordinator", ("leaf", "toolu_c1", {"request": "x"}))
+        )
+        answered = await _process(processor, _results(
+            "coordinator", ("leaf", "toolu_c1", unknown_tool_result("leaf", ["middle"]))
+        ))
+
+        assert [e.type for e in called + answered] == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+        assert processor.runs.records(None) == []
+
+    async def test_a_sub_agent_delegates_to_its_own(self):
+        processor = ADKEventProcessor(
+            model="m", root="coordinator",
+            delegates={"coordinator": {"middle"}, "middle": {"leaf"}},
+        )
+
+        events = await _process(processor, _calls(
+            "middle", ("leaf", "m1", {"request": "x"}), branch="middle@c1"
+        ))
+
+        assert [(e.type, e.run) for e in events] == [
+            (EventType.TOOL_CALL, MIDDLE), (EventType.AGENT_RUN, LEAF),
+        ]
+
+    async def test_a_set_of_names_is_the_roots(self):
+        events = await _process(_processor(), _calls(
+            "middle", ("researcher", "m1", {"request": "x"}), branch="middle@c1"
+        ))
 
         assert [e.type for e in events] == [EventType.TOOL_CALL]
 

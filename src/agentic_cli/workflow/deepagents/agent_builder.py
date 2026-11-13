@@ -176,8 +176,8 @@ def build_agent_tree(
             root's summarization calls it when it writes a summary, before
             the request that carries the summary is sent.
         runs: The manager's sub-agent runs: every agent's
-            ``ActiveToolCallMiddleware`` makes a ``task`` call the run of the
-            sub-agent it starts.
+            ``ActiveToolCallMiddleware`` makes a ``task`` call to one of the
+            agent's sub-agents the run of the sub-agent it starts.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -280,7 +280,10 @@ def _tool_side(
                 settings.tool_result_max_chars, tool_output_dir(settings.app_name)
             )
         )
-    stack += [ToolCallErrorMiddleware(), ActiveToolCallMiddleware(runs)]
+    stack += [
+        ToolCallErrorMiddleware(),
+        ActiveToolCallMiddleware(runs, sub_agents=config.sub_agents),
+    ]
     return stack
 
 

@@ -12,6 +12,7 @@ the ``AGENT_RUN`` that starts and ends the run, and records it;
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -143,6 +144,20 @@ class TestDelegationRuns:
         assert ended.metadata["status"] == RUN_FAILED
         assert (ended.metadata["error"], ended.metadata["result"]) == ("overloaded", "")
 
+    def test_a_result_that_says_it_failed_ends_it_failed(self):
+        processor = _processor()
+        processor.process((), "updates", _delegating())
+
+        _, ended = processor.process((), "updates", _tools_update(ToolMessage(
+            json.dumps({"success": False, "error": "researcher failed: boom"}),
+            tool_call_id="c1", name="task",
+        )))
+
+        assert ended.metadata["status"] == RUN_FAILED
+        assert (ended.metadata["error"], ended.metadata["result"]) == (
+            "researcher failed: boom", "",
+        )
+
     def test_a_long_result_is_cut(self):
         processor = _processor()
         processor.process((), "updates", _delegating())
@@ -189,6 +204,45 @@ class TestDelegationRuns:
             (EventType.TOOL_RESULT, "task"), (EventType.AGENT_RUN, None),
         ]
         assert (outer[1].run, outer[1].metadata["result"]) == (RESEARCHER, "X is 42.")
+
+
+class TestOnlyTheCallersOwnSubAgents:
+    """A run starts only for a ``task`` call to one of the calling agent's own
+    sub-agents (``sub_agents``); Deep Agents answers any other type that it
+    does not exist, and no sub-agent runs."""
+
+    TREE = {"coordinator": ("middle",), "middle": ("leaf",)}
+
+    def test_a_task_call_to_another_agents_sub_agent_is_a_tool_call(self):
+        runs = AgentRuns()
+        processor = _processor(runs=runs, sub_agents=self.TREE)
+        brief = {"description": "Look X up.", "subagent_type": "leaf"}
+
+        called = processor.process((), "updates", _model_update(
+            AIMessage("", tool_calls=[_call("task", brief, "c1")])
+        ))
+        processor.process((), "tasks", _task_started("4f2c", _call("task", brief, "c1")))
+        answered = processor.process((), "updates", _tools_update(ToolMessage(
+            "We cannot invoke subagent leaf because it does not exist, the only allowed "
+            "types are `middle`", tool_call_id="c1", name="task",
+        )))
+
+        assert _types(called + answered) == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+        assert runs.records(None) == []
+        assert runs.run_for(None, None, "c9", "leaf").run == "leaf-1#1"
+
+    def test_a_sub_agent_delegates_to_its_own(self):
+        processor = _processor(sub_agents=self.TREE)
+        _delegated(processor, (), SUB, "middle")
+
+        events = processor.process((SUB,), "updates", _model_update(AIMessage("", tool_calls=[
+            _call("task", {"description": "Look X up.", "subagent_type": "leaf"}, "m1"),
+        ])))
+
+        assert _types(events) == [EventType.TOOL_CALL, EventType.AGENT_RUN]
+        assert events[1].run == RunRef(
+            agent="leaf", instance="leaf-1", run="leaf-1#1", parent_run="middle-1#1", depth=2
+        )
 
 
 def _request(name: str = "task", args: dict | None = None, call_id: str = "c1") -> ToolCallRequest:
@@ -274,3 +328,31 @@ class TestTheActiveRun:
             await ActiveToolCallMiddleware(AgentRuns()).awrap_tool_call(_request(), handler)
 
         assert get_active_run() is None
+
+    async def test_a_task_call_to_another_agents_sub_agent_runs_as_no_run(self):
+        runs = AgentRuns()
+        seen = []
+
+        async def handler(request):
+            seen.append(get_active_run())
+            return "We cannot invoke subagent leaf because it does not exist"
+
+        await ActiveToolCallMiddleware(runs, sub_agents=("middle",)).awrap_tool_call(
+            _request(args={"description": "d", "subagent_type": "leaf"}), handler
+        )
+
+        assert seen == [None]
+        assert runs.run_for(None, None, "c9", "leaf").run == "leaf-1#1"
+
+    async def test_a_task_call_to_its_own_sub_agent_runs_as_its_run(self):
+        seen = []
+
+        async def handler(request):
+            seen.append(get_active_run())
+            return "done"
+
+        await ActiveToolCallMiddleware(AgentRuns(), sub_agents=("researcher",)).awrap_tool_call(
+            _request(), handler
+        )
+
+        assert seen == [RESEARCHER]

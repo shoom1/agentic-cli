@@ -448,8 +448,8 @@ class TestMemoryWriteLine:
 
 class TestAgentRunEvents:
     async def test_the_cli_renders_a_turn_with_them_as_without(self):
-        """``AGENT_RUN`` is for ``/agents`` (0.7.0's PR 9): until then the CLI
-        renders nothing of it, and a turn that holds it as one that does not."""
+        """The CLI renders nothing of ``AGENT_RUN``: a turn that holds it
+        renders as one that does not."""
         child = RunRef(
             agent="researcher", instance="researcher-1", run="researcher-1#1",
             parent_run=None, depth=1,

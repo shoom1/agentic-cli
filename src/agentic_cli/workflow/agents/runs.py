@@ -2,8 +2,8 @@
 
 Each run is named readably within its conversation: its instance
 ``<agent>-<n>`` (``researcher-2``, numbered per agent) and its run
-``<instance>#<n>`` (in 0.7.0 every instance runs once: ``#1``). Both backends
-find a run where its events come from (ADK's invocation branch, Deep Agents'
+``<instance>#<n>`` (each instance runs once: ``#1``). Both backends find a
+run where its events come from (ADK's invocation branch, Deep Agents'
 stream namespace) and ask ``run_for`` for its name, keyed by (conversation,
 parent run, the parent's call id): the same key names the same run until it
 has ended, and a new one after (a provider that numbers its call ids repeats

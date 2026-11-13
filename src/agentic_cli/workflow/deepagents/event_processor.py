@@ -29,9 +29,12 @@ Every event carries ``metadata["agent"]`` and its run (``WorkflowEvent.run``):
 the root's own at ``()``, and a sub-agent's under the namespace its ``task``
 call runs at, named by the manager's runs (``AgentRuns.run_for``) from the
 call the ``tasks`` stream announced; a turn's own ``ERROR`` names none. A
-``task`` call is followed by the ``AGENT_RUN`` that starts its run, and its
-result by the one that ends it (``failed`` for an error result), each
-recorded as it is made, before ``on_event``.
+``task`` call to one of the calling agent's own sub-agents is followed by the
+``AGENT_RUN`` that starts its run, and its result by the one that ends it
+(``failed`` for an error result, with its error), each recorded as it is
+made, before ``on_event``. A ``task`` call to any other type runs no
+sub-agent (Deep Agents answers that it does not exist): it is an ordinary
+tool call, with no run.
 
 What happens inside a node and is no node output (a summary call and the
 summary it made, and with ``raw_llm_logging`` every model call) reaches
@@ -44,7 +47,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -113,6 +116,9 @@ class DeepAgentsEventProcessor:
             ``LLM_USAGE`` carries; none without.
         runs: The manager's sub-agent runs, which this processor names and
             records; its own when not given.
+        sub_agents: Each agent's sub-agents, by name: a ``task`` call starts
+            a run only for one of the caller's own. None takes every
+            ``task`` call's ``subagent_type`` as the caller's.
     """
 
     def __init__(
@@ -123,6 +129,7 @@ class DeepAgentsEventProcessor:
         session_id: str | None = None,
         budgets: Mapping[str, ContextBudget] | None = None,
         runs: AgentRuns | None = None,
+        sub_agents: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         self._root = root
         self._agent_models = agent_models
@@ -142,6 +149,10 @@ class DeepAgentsEventProcessor:
         # until its result: call ids are only an agent's own (a provider that
         # numbers them gives a sub-agent's first call its parent's task call's).
         self._delegated: dict[tuple[str | None, str], RunRef] = {}
+        self._sub_agents: dict[str, frozenset[str]] | None = (
+            None if sub_agents is None
+            else {name: frozenset(own) for name, own in sub_agents.items()}
+        )
 
     def agent(self, namespace: Iterable[str]) -> str:
         """The agent whose graph runs at ``namespace``."""
@@ -204,9 +215,9 @@ class DeepAgentsEventProcessor:
             return
         if "input" in payload:  # a task starts
             call = _delegation_call(payload) if payload.get("name") == "tools" else None
-            if call is not None:
+            subagent = call["args"]["subagent_type"] if call is not None else None
+            if subagent is not None and self._delegates_to(self.agent(namespace), subagent):
                 where = (*namespace, f"tools:{payload['id']}")
-                subagent = call["args"]["subagent_type"]
                 self._agents[where] = subagent
                 if call.get("id"):
                     self._refs[where] = self._runs.run_for(
@@ -268,11 +279,20 @@ class DeepAgentsEventProcessor:
             for event in events
         ]
 
+    def _delegates_to(self, caller: str, subagent: str) -> bool:
+        """Whether ``subagent`` is one of ``caller``'s own sub-agents."""
+        return self._sub_agents is None or subagent in self._sub_agents.get(caller, ())
+
     def _started(self, call: dict, parent: RunRef) -> WorkflowEvent | None:
-        """The ``AGENT_RUN`` a ``task`` call of ``parent``'s starts, recorded; else None."""
+        """The ``AGENT_RUN`` a ``task`` call of ``parent``'s starts, recorded; else None.
+
+        Only a call to one of ``parent``'s agent's own sub-agents starts one.
+        """
         args = call.get("args") or {}
         subagent = args.get("subagent_type")
         if call.get("name") != TASK_TOOL or not isinstance(subagent, str) or not call.get("id"):
+            return None
+        if not self._delegates_to(parent.agent, subagent):
             return None
         child = self._runs.run_for(get_active_turn(), parent, call["id"], subagent)
         self._delegated[(parent.run, call["id"])] = child
@@ -287,17 +307,24 @@ class DeepAgentsEventProcessor:
     def _ended(self, message: ToolMessage, run: RunRef) -> WorkflowEvent | None:
         """The ``AGENT_RUN`` the result of a ``task`` call ``run`` made ends, recorded; else None.
 
-        ``failed`` for an error result (``Error running sub-agent: <reason>``,
-        its ``error`` the reason), else ``completed``.
+        ``failed`` for ``Error running sub-agent: <reason>`` (its ``error``
+        the reason) or another error result (an error message, or one that
+        says ``success`` false: its error), else ``completed``.
         """
         child = self._delegated.pop((run.run, message.tool_call_id), None)
         if child is None:
             return None
         text = message.text
-        if message.status == "error" or text.startswith(SUBAGENT_ERROR_PREFIX):
+        _, succeeded, error = _result_of(message)
+        if text.startswith(SUBAGENT_ERROR_PREFIX):
             event = WorkflowEvent.agent_run(
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
                 error=text.removeprefix(SUBAGENT_ERROR_PREFIX),
+            )
+        elif not succeeded:
+            event = WorkflowEvent.agent_run(
+                child, RUN_FAILED, call_id=message.tool_call_id, result="",
+                error=error or text,
             )
         else:
             event = WorkflowEvent.agent_run(
@@ -310,22 +337,7 @@ class DeepAgentsEventProcessor:
         name = (
             message.name or self._call_names.get((run.run, message.tool_call_id)) or "unknown"
         )
-        result: Any = message.content
-        if isinstance(result, str):
-            try:
-                parsed = json.loads(result)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                result = parsed
-        success = message.status != "error"
-        error: str | None = None
-        if isinstance(result, dict):
-            success = success and result.get("success") is not False
-            if not success and isinstance(result.get("error"), str):
-                error = result["error"]
-        elif not success:
-            error = message.text
+        result, success, error = _result_of(message)
         event = WorkflowEvent.tool_result(name, result, success=success, error=error)
         event.metadata["tool_call_id"] = message.tool_call_id
         return event
@@ -393,6 +405,31 @@ def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> Work
         cached_tokens=inputs.get("cache_read"),
         cache_creation_tokens=by_ttl or inputs.get("cache_creation"),
     )
+
+
+def _result_of(message: ToolMessage) -> tuple[Any, bool, str | None]:
+    """A tool message's result (a JSON dict parsed back), whether it succeeded, and its error.
+
+    It failed when it is an error message or a dict that says ``success``
+    false; its error is the dict's ``error``, else an error message's text.
+    """
+    result: Any = message.content
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            result = parsed
+    success = message.status != "error"
+    error: str | None = None
+    if isinstance(result, dict):
+        success = success and result.get("success") is not False
+        if not success and isinstance(result.get("error"), str):
+            error = result["error"]
+    elif not success:
+        error = message.text
+    return result, success, error
 
 
 def _delegation_call(payload: dict) -> dict | None:

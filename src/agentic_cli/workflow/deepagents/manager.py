@@ -623,6 +623,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             session_id=ref.session_id,
             budgets=self._budgets,
             runs=self.agent_runs,
+            sub_agents={config.name: config.sub_agents for config in self.agent_configs},
         )
         live = LiveEvents()
         callback = RunCallback(

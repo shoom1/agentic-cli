@@ -144,6 +144,10 @@ class MainAgentPlugin(BasePlugin):
     fails, its parent's run is made the active one again: the call's
     after-tool callbacks are the parent's. It is set by value, the parent's
     run from the branch, so no token from the start's context is needed.
+    Since it is first in the chain and its after-agent callback returns
+    nothing, every later plugin's ``after_agent_callback`` (awaited after it,
+    in the same context), and a native app agent's own after-agent
+    callbacks, see the parent's run, not the ending agent's.
 
     ``running_agent()`` keeps the sub-agent's name in that call's task until
     the task ends; only the summarizer reads it, at an agent's model call,

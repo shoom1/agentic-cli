@@ -294,7 +294,6 @@ class TestReporting:
         assert LiveEvents().first("summary_failed") is True  # per instance
 
 
-
 class TestTheRunAnEventIsReportedIn:
     """What a sub-agent's run reports from inside a model call is that run's."""
 

@@ -1,8 +1,8 @@
 """Sub-agents, as the framework keeps them: their runs.
 
-A sub-agent run is one piece of work a sub-agent does for its parent: in
-0.7.0, one delegation (its parent's tool call). ``runs`` names each run within
-its conversation and records it from its ``AGENT_RUN`` events.
+A sub-agent run is one piece of work a sub-agent does for its parent: one
+delegation (its parent's tool call). ``runs`` names each run within its
+conversation and records it from its ``AGENT_RUN`` events.
 """
 
 from agentic_cli.workflow.agents.runs import (

@@ -2,10 +2,9 @@
 
 Each scenario runs a scripted turn on ADK (Claude, through ``FakeAPI``) and on
 Deep Agents (``ScriptedChat``) and expects the same events, run records and
-results: the two backends behave alike (the sub-agent spec, section 13). A
-scenario's model answers are written once, in backend-neutral steps
-(``says``; ``calls`` with ``delegate`` and ``use``), which the harness turns
-into each backend's: on ADK a delegation is a call of the tool named after
+results: the two backends behave alike. A scenario's model answers are
+written once, in backend-neutral steps (``says``; ``calls`` with ``delegate``
+and ``use``), which the harness turns into each backend's: on ADK a delegation is a call of the tool named after
 the sub-agent (``request``), on Deep Agents a ``task`` call
 (``description``, ``subagent_type``). Each agent's prompt is
 ``You are <name>.``, by which ADK's fake API tells the agents apart.
@@ -391,7 +390,7 @@ def team() -> list[AgentConfig]:
     ]
 
 
-# -- PR 1: run identity (spec 6.1, 6.2, 3.5) ----------------------------------------------
+# -- run identity: each run named, recorded, and active in its own calls ------------------
 
 
 class TestRunIdentity:
@@ -495,6 +494,45 @@ class TestRunIdentity:
         assert [e.run for e in events if e.type is EventType.TEXT] == [
             leaf, middle, root_run("coordinator"),
         ]
+
+    async def test_a_call_to_another_agents_sub_agent_is_no_run(self, make_crew):
+        """Only a delegation to one of the caller's own sub-agents is a run.
+
+        The coordinator delegates to ``leaf``, the middle's sub-agent: no
+        sub-agent runs (ADK answers an unknown tool, Deep Agents an unknown
+        type), so the call is an ordinary tool call, with no ``AGENT_RUN``,
+        no record and no active run, and ``leaf``'s numbering is untouched
+        when the middle runs the real one.
+        """
+        crew = make_crew(
+            [
+                agent("coordinator", sub_agents=("middle",), tools=(contract_whoami,)),
+                agent("middle", sub_agents=("leaf",)),
+                agent("leaf", tools=(contract_whoami,)),
+            ],
+            coordinator=[calls(delegate("leaf", "Look X up.", "c1")),
+                         calls(use("contract_whoami", "c2")),
+                         calls(delegate("middle", "Plan X.", "c3")),
+                         says("Planned.")],
+            middle=[calls(delegate("leaf", "Look X up.", "m1")), says("X is 42, says the leaf.")],
+            leaf=[calls(use("contract_whoami", "l1")), says("42.")],
+        )
+
+        events = await crew.turn()
+
+        middle = RunRef(agent="middle", instance="middle-1", run="middle-1#1",
+                        parent_run=None, depth=1)
+        leaf = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1",
+                      parent_run="middle-1#1", depth=2)
+        assert [(e.run, e.metadata["status"]) for e in runs_of(events)] == [
+            (middle, RUN_STARTED), (leaf, RUN_STARTED),
+            (leaf, RUN_COMPLETED), (middle, RUN_COMPLETED),
+        ]
+        assert [r.ref for r in crew.records()] == [middle, leaf]
+        assert SEEN == [(None, "c2"), (leaf, "l1")]
+        answered = [e for e in events if e.type is EventType.TOOL_RESULT
+                    and e.metadata.get("tool_call_id") == "c1"]
+        assert [e.run for e in answered] == [COORDINATOR]
 
     async def test_a_sub_agents_tools_and_prompts_run_as_its_run(self, make_crew, project):
         crew = make_crew(

@@ -108,13 +108,18 @@ class ADKEventProcessor:
     the agent's own at depth 0 (``root_run`` for the root; an agent the root
     transfers to is ``RunRef(<name>, <name>, None, None, 0)``); the user's
     message names none, nor does the turn's own ``ERROR``. A tool's call and
-    result name the call (``tool_call_id``), as on Deep Agents. A call of a
-    sub-agent's delegation tool (``delegates``: ADK names it after the
-    sub-agent) is followed by the ``AGENT_RUN`` that starts the sub-agent's
-    run, and its result by the one that ends it: ``failed`` for ADK's answer
-    for a sub-agent that failed (``Error running sub-agent: …``),
-    ``interrupted`` for the seal of a stopped turn, else ``completed``. Each
-    is recorded in ``runs`` as it is made, before ``on_event``.
+    result name the call (``tool_call_id``), as on Deep Agents. A call that
+    delegates to one of the calling agent's own single-turn sub-agents
+    (``delegates``, by the caller, the event's author: ADK names the tool
+    after the sub-agent) is followed by the ``AGENT_RUN`` that starts the
+    sub-agent's run, and its result by the one that ends it: ``failed`` for
+    ADK's answer for a sub-agent that failed (``Error running sub-agent:
+    …``) or an error result (``success`` false: the tool raised), with its
+    error, ``interrupted`` for the seal of a stopped turn, else
+    ``completed``. Any other call is an ordinary tool call, with no run: a
+    name the caller has no such sub-agent for runs none (ADK answers an
+    unknown tool). Each ``AGENT_RUN`` is recorded in ``runs`` as it is made,
+    before ``on_event``.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -128,8 +133,10 @@ class ADKEventProcessor:
             (``workflow/adk/build.py::reply_agents``); None for the root alone.
         runs: The manager's sub-agent runs, which this processor names and
             records; its own when not given.
-        delegates: The sub-agents delegated to through a tool named after
-            each (``build.delegated_agents``).
+        delegates: Each agent's single-turn sub-agents, which it delegates
+            to through a tool named after each, by the agent's name
+            (``build.delegated_agents``); a collection of names alone is the
+            root's.
 
     The manager builds one at each initialization, from the app it built.
     """
@@ -143,7 +150,7 @@ class ADKEventProcessor:
         budgets: Mapping[str, ContextBudget] | None = None,
         reply_agents: Collection[str] | None = None,
         runs: AgentRuns | None = None,
-        delegates: Collection[str] = (),
+        delegates: Mapping[str, Collection[str]] | Collection[str] = (),
     ) -> None:
         self._model = model
         self._on_event = on_event
@@ -156,7 +163,11 @@ class ADKEventProcessor:
         # The task list this turn last reported, None before any.
         self._reported_tasks: list | None = None
         self.runs = runs if runs is not None else AgentRuns()
-        self.delegates: frozenset[str] = frozenset(delegates)
+        if isinstance(delegates, Mapping):
+            by_agent = {name: frozenset(own) for name, own in delegates.items()}
+        else:
+            by_agent = {root: frozenset(delegates)} if root is not None and delegates else {}
+        self.delegates: dict[str, frozenset[str]] = by_agent
 
     @property
     def model(self) -> str:
@@ -333,6 +344,9 @@ class ADKEventProcessor:
     ) -> WorkflowEvent | None:
         """The ``AGENT_RUN`` a delegation ``part`` starts or ends, recorded; else None.
 
+        A delegation is a call of one of ``parent``'s agent's own single-turn
+        sub-agents (``delegates``); any other part is none.
+
         Args:
             part: A part of an event of ``parent``'s.
             parent: The run that made the call (or got its result).
@@ -341,16 +355,18 @@ class ADKEventProcessor:
         """
         call = getattr(part, "function_call", None)
         response = getattr(part, "function_response", None)
-        if call is not None and call.name in self.delegates and call.id:
+        own = self.delegates.get(parent.agent, frozenset()) if parent is not None else frozenset()
+        if call is not None and call.name in own and call.id:
             child = self.runs.run_for(get_active_turn(), parent, call.id, call.name)
             request = (call.args or {}).get("request")
             event = WorkflowEvent.agent_run(
                 child, RUN_STARTED, call_id=call.id,
                 title=run_title(request if isinstance(request, str) else ""),
             )
-        elif response is not None and response.name in self.delegates and response.id:
+        elif response is not None and response.name in own and response.id:
             child = self.runs.run_for(get_active_turn(), parent, response.id, response.name)
             text = _result_text(response.response)
+            succeeded, error = _outcome(response.response)
             if sealed:
                 event = WorkflowEvent.agent_run(
                     child, RUN_INTERRUPTED, call_id=response.id, result=result_head(text)
@@ -359,6 +375,10 @@ class ADKEventProcessor:
                 event = WorkflowEvent.agent_run(
                     child, RUN_FAILED, call_id=response.id, result="",
                     error=text.removeprefix(SUBAGENT_ERROR_PREFIX),
+                )
+            elif not succeeded:
+                event = WorkflowEvent.agent_run(
+                    child, RUN_FAILED, call_id=response.id, result="", error=error or text
                 )
             else:
                 event = WorkflowEvent.agent_run(

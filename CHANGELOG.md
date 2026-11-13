@@ -577,7 +577,7 @@ the start of the entry's title.
   from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
   run whose call is in progress, None in the root's own: a sub-agent's
   tools, permission checks and questions see it. A consumer that does not
-  know `AGENT_RUN` ignores it, as the CLI does until `/agents`.
+  know `AGENT_RUN` ignores it; the CLI ignores it.
 
 - **A backend's conversations, read without its manager:
   `agentic_cli.workflow.session_readers`.** `await

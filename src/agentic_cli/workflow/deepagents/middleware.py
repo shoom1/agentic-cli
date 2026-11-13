@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -595,16 +595,22 @@ class ActiveToolCallMiddleware(AgentMiddleware):
     task, so parallel calls never see each other's; a sub-agent's call runs
     inside its coordinator's ``task`` call and restores it when done.
 
-    Given the manager's runs, a ``task`` call is also the run of the
-    sub-agent it starts (``workflow.sessions.set_active_run``, named by
-    ``AgentRuns.run_for`` under the run it is made in): the whole sub-agent
-    runs inside the call, so its model calls, tool calls, permission checks
-    and questions see it.
+    Given the manager's runs, a ``task`` call to one of the agent's own
+    ``sub_agents`` is also the run of the sub-agent it starts
+    (``workflow.sessions.set_active_run``, named by ``AgentRuns.run_for``
+    under the run it is made in): the whole sub-agent runs inside the call,
+    so its model calls, tool calls, permission checks and questions see it.
+    A ``task`` call to any other type runs no sub-agent (Deep Agents answers
+    that it does not exist), so it is no run. ``sub_agents`` None takes every
+    ``task`` call's ``subagent_type`` as the agent's own.
     """
 
-    def __init__(self, runs: AgentRuns | None = None) -> None:
+    def __init__(
+        self, runs: AgentRuns | None = None, *, sub_agents: Collection[str] | None = None
+    ) -> None:
         super().__init__()
         self._runs = runs
+        self._sub_agents = None if sub_agents is None else frozenset(sub_agents)
 
     async def awrap_tool_call(
         self,
@@ -615,7 +621,10 @@ class ActiveToolCallMiddleware(AgentMiddleware):
         token = set_active_tool_call(_call_ref(call))
         run_token = None
         subagent = (call.get("args") or {}).get("subagent_type")
-        if self._runs is not None and call["name"] == TASK_TOOL and isinstance(subagent, str):
+        delegates = isinstance(subagent, str) and (
+            self._sub_agents is None or subagent in self._sub_agents
+        )
+        if self._runs is not None and call["name"] == TASK_TOOL and delegates:
             run = self._runs.run_for(get_active_turn(), get_active_run(), call["id"], subagent)
             run_token = set_active_run(run)
         try:
