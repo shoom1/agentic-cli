@@ -2693,6 +2693,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **After Ctrl+C, a sub-agent's call never answers its parent's delegation,
+  on both backends.** A provider that numbers its tool call ids per agent
+  (`call_0`, ...) gives a sub-agent's first call the id of the delegation
+  that started it. On Deep Agents the delegation was then answered with the
+  sub-agent's tool result, and on ADK it was left unanswered (ADK's seals,
+  and the framework's answer to calls left open, paired a result with a call
+  by id alone) and dropped from the next request. The record of a turn's
+  calls (`OpenCalls`) now keeps each call under the run that made it
+  (`run=`, by default `get_active_run()`), ADK pairs a result with a call on
+  its own branch, and the stopped delegation is answered "Interrupted by the
+  user before it finished", at any depth.
 - **A `/settings` model picker offers the model it shows.** A picker showed
   its role's model even when that model was not among its choices (in 0.6, a
   `default_model` the model list did not include; now one the list leaves
