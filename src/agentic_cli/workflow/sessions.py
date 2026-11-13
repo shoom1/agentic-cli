@@ -298,3 +298,14 @@ def reset_active_run(token: Token) -> None:
 def get_active_run() -> "RunRef | None":
     """The sub-agent run in progress in this context, or None (the root's own calls)."""
     return _active_run.get()
+
+
+def instance_of(run: "RunRef | None") -> str | None:
+    """The instance whose call ``run`` names: a sub-agent run's instance id,
+    None for the root's own (no run, or ``root_run``).
+
+    What a job a call of ``run`` starts records as its ``started_by``
+    (``tools/jobs/manager.py``), and what a call's job is matched by
+    (``workflow/interrupts.py::job_for_call``).
+    """
+    return None if run is None or run.is_root else run.instance

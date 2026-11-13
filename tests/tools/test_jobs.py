@@ -585,6 +585,51 @@ class TestTheActiveToolCall:
         assert (rec.call_id, rec.call_name) == (None, None)
 
 
+@contextlib.contextmanager
+def _active_run(ref):
+    """Run the block inside the sub-agent run ``ref`` (or the root's, None)."""
+    from agentic_cli.workflow.sessions import reset_active_run, set_active_run
+
+    token = set_active_run(ref)
+    try:
+        yield
+    finally:
+        reset_active_run(token)
+
+
+class TestTheRunThatStartedIt:
+    """``started_by``: the sub-agent instance whose call submitted the job (spec 9)."""
+
+    def test_a_sub_agents_job_records_its_instance(self, jm: JobManager):
+        from agentic_cli.workflow.sessions import RunRef
+
+        researcher = RunRef("researcher", "researcher-2", "researcher-2#1", None, 1)
+        with _active_run(researcher):
+            rec = jm.submit(tool="t", backend="subprocess", spec={"command": "echo x"})
+
+        assert rec.started_by == "researcher-2"
+        assert JobManager(base_dir=jm.base_dir).get(rec.job_id).started_by == "researcher-2"
+
+    def test_the_roots_job_records_none(self, jm: JobManager):
+        from agentic_cli.workflow.sessions import root_run
+
+        outside = jm.submit(tool="t", backend="subprocess", spec={"command": "echo x"})
+        with _active_run(root_run("coordinator")):
+            own = jm.submit(tool="t", backend="subprocess", spec={"command": "echo y"})
+
+        assert (outside.started_by, own.started_by) == (None, None)
+
+    def test_a_record_written_before_it_reads_none(self, jm: JobManager):
+        rec = jm.submit(tool="t", backend="subprocess", spec={"command": "echo x"})
+        _wait(jm, rec.job_id)
+        meta = jm.base_dir / rec.job_id / "meta.json"
+        data = json.loads(meta.read_text())
+        del data["started_by"]
+        meta.write_text(json.dumps(data))
+
+        assert JobManager(base_dir=jm.base_dir).get(rec.job_id).started_by is None
+
+
 class TestResumeLifecycle:
     """pending → resuming → delivered/failed, with crash recovery."""
 

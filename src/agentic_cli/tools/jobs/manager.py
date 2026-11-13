@@ -259,6 +259,11 @@ class JobRecord:
     # process that outlived SIGTERM): it stays RUNNING, holding its slot, and
     # is recorded CANCELLED when it ends.
     cancel_requested: bool = False
+    # The sub-agent instance whose call submitted the job ("researcher-2"),
+    # from the active run at submit; None for the root's (and for a record
+    # written before it existed). Its notice names it, and only that run's
+    # call is answered with the job (workflow/interrupts.py::job_for_call).
+    started_by: str | None = None
 
     @property
     def resumed(self) -> bool:
@@ -410,6 +415,7 @@ _FIELD_RULES: dict[str, _FieldRule] = {
     "resume_owner": _FieldRule.CLAIM,
     "exec_owner": _FieldRule.OWNER,
     "cancel_requested": _FieldRule.STICKY,
+    "started_by": _FieldRule.IMMUTABLE,
 }
 
 # The fields a manager may change after submit: a transaction writes the
@@ -533,11 +539,14 @@ class JobManager:
         auto-resume the agent with the result once it finishes (phase 2). The
         originating ``session_id``/``user_id`` are auto-filled from the active
         workflow turn when not supplied. ``call_id``/``call_name`` identify the
-        tool call that started the job (ADK answers it on resume); without a
-        ``call_id`` they come from the active tool call, which Deep Agents sets
-        around each call, so a tool that reads its id from ADK's
-        ``tool_context`` (None there) is linked all the same. A ``call_id`` or
-        ``call_name`` the tool passes wins.
+        tool call that started the job; without a ``call_id`` they come from
+        the active tool call, which both backends set around each call (ADK's
+        ``InterruptedCallsPlugin``, Deep Agents' ``ActiveToolCallMiddleware``),
+        so a tool that reads its id from ADK's ``tool_context`` (None on Deep
+        Agents) is linked all the same. A ``call_id`` or ``call_name`` the
+        tool passes wins. ``started_by`` is the sub-agent run in progress
+        (``workflow/sessions.py::get_active_run``): its instance, None for the
+        root's call.
 
         The backend pins the spec now (``JobBackend.pin``): a queued job may
         be launched by another CLI, so a subprocess job's working directory
@@ -572,6 +581,7 @@ class JobManager:
                 call_name=call_name or (tool if resume_on_complete else None),
                 session_id=session_id,
                 user_id=user_id,
+                started_by=self._starting_instance(),
                 exec_owner=(
                     None if runs_on.survives_restart else self._exec_owner_token()
                 ),
@@ -615,11 +625,18 @@ class JobManager:
         return session_id, user_id
 
     @staticmethod
+    def _starting_instance() -> str | None:
+        """The sub-agent instance whose call submits the job now; None for the root's."""
+        from agentic_cli.workflow.sessions import get_active_run, instance_of
+
+        return instance_of(get_active_run())
+
+    @staticmethod
     def _fill_tool_call(call_name: str | None) -> tuple[str | None, str | None]:
         """The active tool call's id, and its name unless the tool gave one.
 
-        Outside a tool call (ADK, LangGraph, a job started by the harness)
-        there is none, and both are left as they are.
+        Outside a tool call (LangGraph, a job started by the harness) there
+        is none, and both are left as they are.
         """
         from agentic_cli.workflow.sessions import get_active_tool_call
 
