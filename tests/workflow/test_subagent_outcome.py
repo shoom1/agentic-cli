@@ -32,6 +32,9 @@ class TestOutcomeOf:
         "content_filter",                       # OpenAI
         "SAFETY", "PROHIBITED_CONTENT", "RECITATION", "BLOCKLIST", "SPII",  # Gemini
         types.FinishReason.SAFETY,              # ADK's enum
+        # Gemini's prompt blocks: ADK's error_code, langchain's prompt_feedback.
+        types.BlockedReason.SAFETY, types.BlockedReason.PROHIBITED_CONTENT,
+        types.BlockedReason.JAILBREAK, types.BlockedReason.MODEL_ARMOR,
     ])
     def test_a_refusal(self, reason):
         assert outcome_of(reason) == REFUSED
@@ -45,6 +48,8 @@ class TestOutcomeOf:
     @pytest.mark.parametrize("reason", [
         None, "end_turn", "stop", "tool_use", "STOP", types.FinishReason.STOP,
         types.FinishReason.MALFORMED_FUNCTION_CALL, "",
+        # An unnamed stop says nothing of why: ADK's OpenAI adapters read on.
+        types.FinishReason.OTHER, types.BlockedReason.OTHER,
     ])
     def test_anything_else_is_none(self, reason):
         assert outcome_of(reason) is None

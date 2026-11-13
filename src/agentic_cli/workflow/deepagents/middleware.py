@@ -767,6 +767,11 @@ class ForeignReasoningMiddleware(AgentMiddleware):
 #: notice's ``kind`` is). No provider adapter sends it.
 _MARK = "agentic_cli"
 
+#: The raw content blocks that hold a model's reasoning, as the adapters
+#: write them: the standard ``reasoning`` (and the Responses API's), Claude's
+#: and Gemini's ``thinking``, Claude's ``redacted_thinking``.
+_REASONING_BLOCKS = frozenset({"reasoning", "thinking", "redacted_thinking"})
+
 
 class SubAgentOutcomeMiddleware(AgentMiddleware):
     """A sub-agent's refused or cut final answer, said so (``workflow/agents/outcome.py``).
@@ -775,16 +780,17 @@ class SubAgentOutcomeMiddleware(AgentMiddleware):
     refusal reached it as an empty result (before deepagents 0.7.34, which
     words its own notice), and an answer cut at the output limit as a
     complete one. Outermost on each sub-agent's model side (never the
-    root's: its refusal or cut ends the turn, as before), this rewrites a
-    final answer (one without tool calls) that a model refused (a refusal
-    block, Claude's ``refusal`` stop, OpenAI's ``content_filter``, a Gemini
-    block) into the refusal notice, and one cut at the output limit into its
-    text followed by the cut-off note, and marks it with its outcome
-    (``answer_outcome``), which the event processor ends the run by. The
-    rewritten answer holds no refusal block, so deepagents 0.7.34+ finds none
-    to word again: the result is the same whichever version is installed. A
-    model call that raises is not its business: the error goes on to
-    ``task`` untouched.
+    root's, whose answers reach the user as its model gave them), this
+    rewrites a final answer (one without tool calls) that a model refused (a
+    refusal block, Claude's ``refusal`` stop, OpenAI's ``content_filter``, a
+    Gemini block of the answer or of the prompt: ``marked_answer`` says what
+    it reads) into the refusal notice, and one cut at the output limit into
+    its text followed by the cut-off note, and marks it with its outcome
+    (``answer_outcome``), which the event processor ends the run by. Its
+    reasoning is kept, before the new text. The rewritten answer holds no
+    refusal block, so deepagents 0.7.34+ finds none to word again: the
+    result is the same whichever version is installed. A model call that
+    raises is not its business: the error goes on to ``task`` untouched.
     """
 
     async def awrap_model_call(
@@ -806,11 +812,14 @@ def answer_outcome(message: AnyMessage) -> str | None:
 def marked_answer(message: AIMessage) -> AIMessage:
     """``message`` as a sub-agent's final answer: refused or cut, said so and marked; else itself.
 
-    The stop reason is Claude's ``stop_reason``, OpenAI's ``finish_reason``
-    (the Responses API's ``incomplete_details.reason``) or Gemini's
-    ``finish_reason``; a refusal the message holds (``_refusal``) is a
-    refusal whatever the reason, its text the notice's explanation and its
-    category the notice's, as Deep Agents 0.7.34 words them.
+    The stop reason is read from ``response_metadata``: ChatAnthropic's
+    ``stop_reason``, ChatOpenAI's and ChatGoogleGenerativeAI's
+    ``finish_reason``, the Responses API's ``incomplete_details.reason``,
+    and a Gemini prompt block's ``prompt_feedback.block_reason``. A refusal
+    the message holds (``_refusal``) is a refusal whatever the reason, its
+    text the notice's explanation and its category the notice's, as Deep
+    Agents 0.7.34 words them. The new text follows the answer's reasoning
+    blocks, which are kept.
     """
     if message.tool_calls:
         return message
@@ -820,6 +829,13 @@ def marked_answer(message: AIMessage) -> AIMessage:
         metadata.get("stop_reason")
         or metadata.get("finish_reason")
         or (metadata.get("incomplete_details") or {}).get("reason")
+        # A blocked prompt has no answer, so no finish reason: streamed,
+        # langchain-google-genai gives an empty answer whose metadata holds
+        # only the prompt's feedback. Unstreamed (Deep Agents' model calls
+        # are not streamed) it gives a bare AIMessage("") with no metadata at
+        # all: nothing tells that from an empty answer, so it passes as it
+        # is, and the parent reads an empty result.
+        or (metadata.get("prompt_feedback") or {}).get("block_reason")
     )
     outcome = REFUSED if refusal is not None else outcome_of(reason)
     if outcome is None:
@@ -832,8 +848,12 @@ def marked_answer(message: AIMessage) -> AIMessage:
         )
     else:
         text = cut_off(message.text)
+    reasoning = [
+        block for block in (message.content if isinstance(message.content, list) else ())
+        if isinstance(block, dict) and block.get("type") in _REASONING_BLOCKS
+    ]
     return message.model_copy(update={
-        "content": text,
+        "content": [*reasoning, {"type": "text", "text": text}] if reasoning else text,
         "additional_kwargs": {
             key: value for key, value in message.additional_kwargs.items() if key != "refusal"
         },

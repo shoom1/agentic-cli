@@ -17,6 +17,7 @@ import pytest
 
 pytest.importorskip("deepagents")
 
+from google.genai import types  # noqa: E402
 from langchain.agents.middleware import ExtendedModelResponse, ModelResponse  # noqa: E402
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage  # noqa: E402
 
@@ -41,6 +42,11 @@ CUT_TEXT = "X is\n\n[cut off at the output limit]"
 
 def stopped(content="", **metadata) -> AIMessage:
     return AIMessage(content=content, response_metadata=metadata)
+
+
+def blocks(message: AIMessage) -> list[tuple[str, str | None]]:
+    """``message``'s standard blocks as (type, reasoning or text) pairs."""
+    return [(b["type"], b.get("reasoning") or b.get("text")) for b in message.content_blocks]
 
 
 def _refusal_in(message: object) -> dict | None:
@@ -82,6 +88,26 @@ class TestMarkedAnswer:
         assert [b["type"] for b in marked.content_blocks] == ["text"]
         assert "refusal" not in marked.additional_kwargs
 
+    def test_a_streamed_gemini_prompt_block_becomes_the_notice(self):
+        """Streamed, langchain-google-genai gives a blocked prompt an empty
+        answer whose metadata holds only the prompt's feedback."""
+        feedback = types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.PROHIBITED_CONTENT, block_reason_message="Blocked.",
+        )
+
+        marked = marked_answer(stopped(prompt_feedback=feedback.model_dump()))
+
+        assert marked.text == refusal_notice()
+        assert answer_outcome(marked) == REFUSED
+
+    def test_an_unstreamed_gemini_prompt_block_has_nothing_to_read(self):
+        """Unstreamed, langchain-google-genai gives a blocked prompt a bare
+        ``AIMessage("")``: nothing tells it from an empty answer, so it
+        passes as it is (Deep Agents' model calls are not streamed)."""
+        blocked = AIMessage("")
+
+        assert marked_answer(blocked) is blocked
+
     def test_a_standard_refusal_block_gives_its_category(self):
         refused = AIMessage(content=[{
             "type": "refusal", "refusal": "No.", "extras": {"category": "cyber"},
@@ -104,6 +130,37 @@ class TestMarkedAnswer:
         assert marked.text == CUT_TEXT
         assert answer_outcome(marked) == CUT
 
+    @pytest.mark.parametrize("reasoning, metadata", [
+        ({"type": "reasoning", "reasoning": "Thinking."}, {}),
+        ({"type": "thinking", "thinking": "Thinking.", "signature": "s"},
+         {"model_provider": "anthropic"}),
+    ])
+    def test_a_cut_keeps_its_text_and_its_reasoning(self, reasoning, metadata):
+        cut = AIMessage(
+            content=[reasoning, {"type": "text", "text": "X "}, {"type": "text", "text": "is"}],
+            response_metadata={**metadata, "stop_reason": "max_tokens"},
+        )
+
+        marked = marked_answer(cut)
+
+        assert marked.content[0] == reasoning
+        assert blocks(marked) == [
+            ("reasoning", "Thinking."), ("text", CUT_TEXT),
+        ]
+
+    def test_a_refusal_keeps_its_reasoning_and_leaves_no_refusal(self):
+        refused = AIMessage(content=[
+            {"type": "reasoning", "reasoning": "Thinking."},
+            {"type": "refusal", "refusal": "No."},
+        ])
+
+        marked = marked_answer(refused)
+
+        assert blocks(marked) == [
+            ("reasoning", "Thinking."), ("text", refusal_notice(explanation="No.")),
+        ]
+        assert _refusal_in(marked) is None
+
     def test_an_answer_that_calls_a_tool_is_not_final(self):
         calling = AIMessage(
             content="", tool_calls=[{"name": "lookup", "args": {}, "id": "r1"}],
@@ -112,7 +169,11 @@ class TestMarkedAnswer:
 
         assert marked_answer(calling) is calling
 
-    @pytest.mark.parametrize("metadata", [{"stop_reason": "end_turn"}, {"finish_reason": "stop"}, {}])
+    @pytest.mark.parametrize("metadata", [
+        {"stop_reason": "end_turn"}, {"finish_reason": "stop"}, {},
+        {"finish_reason": "STOP",
+         "prompt_feedback": {"block_reason": None, "safety_ratings": []}},
+    ])
     def test_any_other_answer_is_itself(self, metadata):
         answer = stopped("X is 42.", **metadata)
 

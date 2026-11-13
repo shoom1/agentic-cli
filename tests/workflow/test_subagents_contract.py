@@ -936,3 +936,21 @@ class TestRefusalAndCutOff:
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert ended.metadata["partial"] is False
         assert [e for e in events if e.type is EventType.ERROR] == []
+
+    async def test_the_roots_own_cut_answer_is_left_as_its_model_gave_it(self, make_crew):
+        """Only a sub-agent's answer is said so: the root's, after its
+        delegation returned, reaches the user as its model gave it."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("X is 42, and", stop="max_tokens")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        reply = [e.content for e in events if e.type is EventType.TEXT and e.run == COORDINATOR]
+        assert reply == ["X is 42, and"]
+        assert [e for e in events if e.type is EventType.ERROR] == []
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert (ended.run, ended.metadata["partial"]) == (RESEARCHER, False)

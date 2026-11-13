@@ -16,8 +16,8 @@ it with its outcome, and the event processors end the run by that mark:
   run ends ``completed`` with ``partial``, and one recoverable warning names
   it (``cut_off_warning``).
 
-The root's own answers are not touched: its refusal or cut is the turn's
-failure, as before.
+The root's own answers are not touched: they reach the user as their model
+gave them, as before.
 """
 
 from __future__ import annotations
@@ -44,7 +44,9 @@ CUT_OFF_NOTE = "[cut off at the output limit]"
 CUT_OFF_CODE = "MAX_TOKENS"
 
 #: Stop or finish reasons that mean the model refused, lowercased: Claude's
-#: ``refusal``; OpenAI's ``content_filter``; Gemini's blocks.
+#: ``refusal``; OpenAI's ``content_filter``; Gemini's blocks, of an answer
+#: (its finish reason) or of the prompt (its ``block_reason``, which adds
+#: ``jailbreak`` and ``model_armor``).
 REFUSAL_REASONS = frozenset({
     "refusal",
     "content_filter",
@@ -56,6 +58,8 @@ REFUSAL_REASONS = frozenset({
     "image_safety",
     "image_prohibited_content",
     "image_recitation",
+    "jailbreak",
+    "model_armor",
 })
 #: Stop or finish reasons that mean the answer was cut at the output limit,
 #: lowercased: Claude's ``max_tokens``, OpenAI's ``length`` (and the Responses

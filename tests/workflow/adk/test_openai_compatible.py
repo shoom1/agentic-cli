@@ -26,6 +26,8 @@ from google.genai import types  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 
 from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
+from agentic_cli.workflow.adk.subagent_outcome_plugin import mark_outcome  # noqa: E402
+from agentic_cli.workflow.agents.outcome import REFUSED, refusal_notice  # noqa: E402
 from tests.workflow.adk.fakes import user  # noqa: E402
 
 MODEL = "qwen/qwen3-235b-a22b"
@@ -224,6 +226,49 @@ async def test_a_reply_cut_off_before_any_answer_is_an_error_without_its_reasoni
 
     assert final.error_code == types.FinishReason.MAX_TOKENS
     assert final.content is None
+
+
+# --- a refusal, worded as ADK's OpenAI Responses adapter words one --------------------
+#
+# A Chat Completions server sends a model's refusal as ``refusal`` beside an
+# empty ``content`` (on streamed deltas too), which ADK's class drops. It
+# arrives as the text ADK's Responses adapter makes of one, which
+# SubAgentOutcomePlugin reads as a sub-agent's refusal.
+
+
+def said(response) -> list[tuple[str, Any]]:
+    return parts(response) if response.content is not None else []
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "content_filter"])
+async def test_a_streamed_refusal_arrives_as_the_responses_adapter_words_it(finish_reason):
+    server = Server(
+        deltas=[{"role": "assistant", "refusal": "I can't "}, {"refusal": "help with that."}],
+        finish_reason=finish_reason,
+    )
+
+    *partials, final = await responses(compatible(server), stream=True)
+
+    assert partials == []
+    assert said(final) == [("text", "OpenAI refusal: I can't help with that.")]
+    assert (final.error_code, final.partial) == (None, False)
+    assert mark_outcome(final) == REFUSED
+    assert said(final) == [("text", refusal_notice(explanation="I can't help with that."))]
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "content_filter"])
+async def test_an_unstreamed_refusal_arrives_as_the_responses_adapter_words_it(finish_reason):
+    server = Server(
+        message={"role": "assistant", "content": None, "refusal": "I can't help with that."},
+        finish_reason=finish_reason,
+    )
+
+    (response,) = await responses(compatible(server), stream=False)
+
+    assert said(response) == [("text", "OpenAI refusal: I can't help with that.")]
+    assert (response.error_code, response.error_message) == (None, None)
+    assert mark_outcome(response) == REFUSED
+    assert said(response) == [("text", refusal_notice(explanation="I can't help with that."))]
 
 
 # --- the request -------------------------------------------------------------------

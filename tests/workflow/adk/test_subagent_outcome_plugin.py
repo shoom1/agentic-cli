@@ -10,6 +10,8 @@ they are. The whole turn, on both backends, is in the contract suite.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("google.adk")
@@ -78,6 +80,33 @@ class TestMarkOutcome:
 
         assert mark_outcome(response) == REFUSED
         assert texts(response) == [refusal_notice(explanation="I can't help with that.")]
+
+    def test_the_responses_adapters_content_filter_is_a_refusal(self):
+        """ADK's OpenAI Responses adapter gives an incomplete answer's
+        ``content_filter`` as ``OTHER``, the reason in its error message."""
+        response = answer(types.Part(text="Par"), finish=FINISH.OTHER, error_code=FINISH.OTHER)
+        response.error_message = '{"reason": "content_filter"}'
+
+        assert mark_outcome(response) == REFUSED
+        assert texts(response) == [refusal_notice()]
+        assert (response.error_code, response.error_message) == (None, None)
+
+    @pytest.mark.parametrize("message", [
+        None, "Not JSON.", '{"reason": "unknown"}', '["content_filter"]',
+        '{"type": "response.failed"}',
+    ])
+    def test_an_other_stop_without_a_reason_it_names_is_left_as_it_is(self, message):
+        response = answer(finish=FINISH.OTHER, error_code=FINISH.OTHER)
+        response.error_message = message
+
+        assert mark_outcome(response) is None
+        assert (response.error_code, response.error_message) == (FINISH.OTHER, message)
+
+    def test_a_reason_in_an_error_message_counts_only_for_an_other_stop(self):
+        response = answer(types.Part(text="X is 42."), finish=FINISH.STOP)
+        response.error_message = '{"reason": "content_filter"}'
+
+        assert mark_outcome(response) is None
 
     def test_a_cut_keeps_its_text_and_its_thoughts(self):
         thought = types.Part(text="Thinking.", thought=True)
@@ -216,3 +245,14 @@ class TestTheADKItRestsOn:
         from google.adk.integrations.openai import _openai_responses_llm
 
         assert _openai_responses_llm._REFUSAL_PREFIX == OPENAI_REFUSAL_PREFIX
+
+    def test_the_responses_adapter_gives_a_content_filter_as_other_and_its_reason(self):
+        from google.adk.integrations.openai import _openai_responses_llm
+
+        response = _openai_responses_llm._response_to_llm_response({
+            "id": "resp_1", "status": "incomplete", "model": "gpt-5", "output": [],
+            "incomplete_details": {"reason": "content_filter"},
+        })
+
+        assert (response.finish_reason, response.error_code) == (FINISH.OTHER, FINISH.OTHER)
+        assert json.loads(response.error_message) == {"reason": "content_filter"}
