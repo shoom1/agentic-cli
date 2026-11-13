@@ -559,6 +559,26 @@ the start of the entry's title.
 
 ### Added
 
+- **Sub-agent runs have an identity, on both backends.** Every
+  `WorkflowEvent` an agent wrote names its run (`WorkflowEvent.run`, a frozen
+  `RunRef`: the agent, its instance `<agent>-<n>` and run `<instance>#<n>`
+  within the conversation, the parent's run and the depth; the root's own
+  work is `root_run(<root>)`, instance `root`, no run; the manager's own
+  events, a failed turn's `ERROR`, name none), so two parallel runs of one
+  sub-agent, and a run two levels down, are told apart. ADK's `TOOL_CALL`
+  and `TOOL_RESULT` carry `tool_call_id`, as Deep Agents' did. A sub-agent
+  run's start and end are an event of their own, `EventType.AGENT_RUN`
+  (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its title,
+  the first line of its request, then `completed`, `failed` or
+  `interrupted`, with the first 200 characters of its result), and each
+  manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
+  provisional: `records(ref)`, `record(ref, id)`); a run a stopped or failed
+  turn leaves open is recorded `interrupted`. `get_active_run()` (exported
+  from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
+  run whose call is in progress, None in the root's own: a sub-agent's
+  tools, permission checks and questions see it. A consumer that does not
+  know `AGENT_RUN` ignores it, as the CLI does until `/agents`.
+
 - **A backend's conversations, read without its manager:
   `agentic_cli.workflow.session_readers`.** `await
   open_session_reader(backend, settings, store=None)` opens a
