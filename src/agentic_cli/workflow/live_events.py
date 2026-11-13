@@ -28,6 +28,7 @@ from typing import Any, TypeVar
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.sessions import get_active_run
 
 logger = Loggers.workflow()
 
@@ -61,7 +62,14 @@ class LiveEvents:
         self._seen: set[str] = set()
 
     def emit(self, event: WorkflowEvent) -> None:
-        """Hand ``event`` to whoever merges this channel, from any thread."""
+        """Hand ``event`` to whoever merges this channel, from any thread.
+
+        An event that names no run is the run's in progress
+        (``get_active_run``): what a sub-agent's run reports from inside a
+        model call is that run's; the root's own reports name none.
+        """
+        if event.run is None:
+            event.run = get_active_run()
         self._put(_EVENT, event)
 
     def first(self, key: str) -> bool:

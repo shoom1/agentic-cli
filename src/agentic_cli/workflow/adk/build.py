@@ -162,6 +162,27 @@ def reply_agents(root: Any) -> frozenset[str]:
     return frozenset(names)
 
 
+def delegated_agents(root: Any) -> dict[str, frozenset[str]]:
+    """Each agent in ``root``'s tree that delegates, and the sub-agents it delegates to.
+
+    A delegation is a single-turn sub-agent: its parent calls it like a tool
+    named after it and reads its answer as the result (the event processor
+    names each such call's run). Only the agent's own count: a call another
+    agent makes of that name runs no sub-agent (ADK answers an unknown tool).
+    Empty for a tree that delegates nowhere.
+    """
+    delegating: dict[str, frozenset[str]] = {}
+    for agent in walk(root):
+        own = frozenset(
+            sub_agent.name
+            for sub_agent in getattr(agent, "sub_agents", None) or ()
+            if _mode(sub_agent) == _SINGLE_TURN
+        )
+        if own:
+            delegating[agent.name] = own
+    return delegating
+
+
 def own_after_tool_agents(root: Any) -> frozenset[str]:
     """The agents in ``root``'s tree with after-tool callbacks of their own."""
     return frozenset(

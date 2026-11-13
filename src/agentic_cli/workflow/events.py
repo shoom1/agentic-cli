@@ -25,9 +25,12 @@ Example:
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentic_cli.constants import truncate
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.sessions import RunRef
 
 
 class EventType(Enum):
@@ -42,6 +45,9 @@ class EventType(Enum):
     FILE_DATA = "file_data"
     ERROR = "error"
     TASK_PROGRESS = "task_progress"
+
+    # A sub-agent run's start and end (WorkflowEvent.agent_run)
+    AGENT_RUN = "agent_run"
 
     # Context management events
     CONTEXT_TRIMMED = "context_trimmed"
@@ -100,12 +106,16 @@ class WorkflowEvent:
         content: Primary content (text, code, etc.)
         metadata: Optional additional data specific to event type
         timestamp: When the event occurred
+        run: The agent run that wrote it: the root's own (``root_run``) or a
+            sub-agent's run; None for what the manager says itself (a failed
+            turn's error, a notice).
     """
 
     type: EventType
     content: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
+    run: "RunRef | None" = None
 
     @classmethod
     def text(cls, content: str, session_id: str | None = None) -> "WorkflowEvent":
@@ -172,6 +182,52 @@ class WorkflowEvent:
             type=EventType.TOOL_RESULT,
             content=content,
             metadata=metadata,
+        )
+
+    @classmethod
+    def agent_run(
+        cls,
+        ref: "RunRef",
+        status: str,
+        *,
+        title: str | None = None,
+        call_id: str | None = None,
+        result: str | None = None,
+        error: str | None = None,
+        partial: bool = False,
+    ) -> "WorkflowEvent":
+        """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
+
+        ``run`` is the sub-agent's run, and ``metadata["status"]`` says which:
+        ``started`` (with its ``title``), then one end status (``completed``,
+        ``failed``, ``refused``, ``cancelled``, ``interrupted``: the constants
+        of ``workflow/agents/runs.py``) with the first of its ``result``, its
+        ``error`` and whether the result is ``partial``. ``metadata["agent"]``
+        is the sub-agent, as on every event an agent wrote.
+
+        Args:
+            ref: The sub-agent's run.
+            status: ``started`` or an end status.
+            title: A start's title: the first line of the request.
+            call_id: The parent's call that started the run.
+            result: An end's result, its first characters.
+            error: Why a run that did not complete ended.
+            partial: Whether the result is cut short (a reply at its output limit).
+        """
+        metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
+        if title is not None:
+            metadata["title"] = title
+        if call_id is not None:
+            metadata["call_id"] = call_id
+        if result is not None:
+            metadata["result"] = result
+        if error is not None:
+            metadata["error"] = error
+        return cls(
+            type=EventType.AGENT_RUN,
+            content=f"{ref.instance} {status}",
+            metadata=metadata,
+            run=ref,
         )
 
     @staticmethod

@@ -273,6 +273,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             memory_index=self._memory_index_now if index_wanted else None,
             memory_index_cached=self._memory_index_cached if index_wanted else None,
             memory_index_forget=self._forget_memory_index if index_wanted else None,
+            runs=self.agent_runs,
         )
         self._root_summarization = summarizers.get(root)
 
@@ -621,6 +622,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             session_id=ref.session_id,
             budgets=self._budgets,
+            runs=self.agent_runs,
+            sub_agents={config.name: config.sub_agents for config in self.agent_configs},
         )
         live = LiveEvents()
         callback = RunCallback(
