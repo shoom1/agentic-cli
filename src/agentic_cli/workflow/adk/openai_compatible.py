@@ -1,6 +1,6 @@
 """OpenRouter and OpenAI-compatible servers (vLLM and the like) on ADK.
 
-``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with five
+``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with six
 additions:
 
 - Reasoning text. These servers send a model's reasoning beside its answer,
@@ -19,6 +19,12 @@ additions:
   session holds them; a later request to that model carries them on that
   turn's assistant message (``_put_back_details``), and never one to
   another model.
+- A refusal. A model's refusal comes as ``refusal`` beside an empty
+  ``content`` (on streamed deltas too), which ADK's class drops. This one
+  gives it as ADK's OpenAI Responses adapter does, a text part
+  ``OpenAI refusal: <text>`` after the answer (``OPENAI_REFUSAL_PREFIX``),
+  which ``SubAgentOutcomePlugin`` reads as a sub-agent's refusal; with it a
+  response has an answer, so it is no error, whatever the stop.
 - ``extra_body``, sent with every request: the provider's reasoning
   parameter (``workflow/adk/model_factory.py`` decides it).
 - ``max_tokens`` may be None, which leaves the limit to the server; ADK's
@@ -36,8 +42,8 @@ only a streamed one to ``_generate_content_streaming``. This class asks for
 every request to be handed there, and sends it streamed or not as its caller
 asked. The streaming loop (``_stream``) is a copy of ADK's
 (``OpenAILlm._generate_content_streaming``, google-adk 2.12) with the
-reasoning lines added; ``tests/workflow/adk/test_openai_compatible.py`` fails
-when ADK's loop changes.
+reasoning and refusal lines added; ``tests/workflow/adk/test_openai_compatible.py``
+fails when ADK's loop changes.
 """
 
 from __future__ import annotations
@@ -60,6 +66,7 @@ from google.genai import types
 from pydantic import Field, PrivateAttr
 
 from agentic_cli.logging import Loggers
+from agentic_cli.workflow.agents.outcome import OPENAI_REFUSAL_PREFIX
 
 logger = Loggers.workflow()
 
@@ -139,8 +146,9 @@ class OpenAICompatibleLlm(OpenAILlm):
             return
         response = await self._openai_client.chat.completions.create(**kwargs)
         message = response.choices[0].message if response.choices else None
+        refusal = getattr(message, "refusal", None)
         yield _with_reasoning(
-            _response_to_llm_response(response),
+            _with_refusal(_response_to_llm_response(response), refusal),
             _reasoning_of(message),
             _signature(self.model, _details_of(message)),
         )
@@ -148,7 +156,8 @@ class OpenAICompatibleLlm(OpenAILlm):
     async def _stream(self, kwargs: dict[str, Any]) -> AsyncGenerator[LlmResponse, None]:
         """ADK's ``OpenAILlm._generate_content_streaming``, reading reasoning too.
 
-        The lines marked ``# reasoning`` are this class's; the rest is ADK's.
+        The lines marked ``# reasoning`` and ``# refusal`` are this class's;
+        the rest is ADK's.
         """
         kwargs["stream"] = True
         # Ask for the trailing usage-only chunk. Backends that ignore this simply
@@ -157,6 +166,7 @@ class OpenAICompatibleLlm(OpenAILlm):
         raw_stream = await self._openai_client.chat.completions.create(**kwargs)
 
         reasoning_accumulated = ""  # reasoning
+        refusal_accumulated = ""  # refusal
         details_accumulated: list[dict[str, Any]] = []  # reasoning
         text_accumulated = ""
         tool_calls_accumulated: dict[int, dict[str, Any]] = {}
@@ -173,6 +183,7 @@ class OpenAICompatibleLlm(OpenAILlm):
                 finish_reason = choice.finish_reason
             delta = choice.delta
 
+            refusal_accumulated += getattr(delta, "refusal", None) or ""  # refusal
             details_accumulated += _details_of(delta) or []  # reasoning
             reasoning = _reasoning_of(delta)  # reasoning
             if reasoning:  # reasoning
@@ -237,6 +248,9 @@ class OpenAICompatibleLlm(OpenAILlm):
         parts = []
         if text_accumulated:
             parts.append(types.Part.from_text(text=text_accumulated))
+        if refusal_accumulated:  # refusal
+            refused = OPENAI_REFUSAL_PREFIX + refusal_accumulated  # refusal
+            parts.append(types.Part.from_text(text=refused))  # refusal
 
         for index in sorted(tool_calls_accumulated.keys()):
             acc = tool_calls_accumulated[index]
@@ -432,6 +446,26 @@ def _without_ephemeral_ids(details: list[dict[str, Any]]) -> list[dict[str, Any]
         {field: value for field, value in detail.items() if not ephemeral(field, value)}
         for detail in details
     ]
+
+
+def _with_refusal(response: LlmResponse, refusal: str | None) -> LlmResponse:
+    """``response`` with the ``refusal`` its message held, as a text part after
+    its answer, worded as ADK's OpenAI Responses adapter words one.
+
+    A response that was an error for having no answer (an abnormal stop, a
+    ``content_filter``, with no content) has one now, so it is no error, as
+    in ADK's class an answer with an abnormal stop is none.
+    """
+    if not refusal:
+        return response
+    refused = types.Part.from_text(text=OPENAI_REFUSAL_PREFIX + refusal)
+    if response.content is None:
+        response.content = types.Content(role="model", parts=[refused])
+        response.error_code = None
+        response.error_message = None
+    else:
+        response.content.parts = [*(response.content.parts or []), refused]
+    return response
 
 
 def _thought(text: str | None, signature: bytes | None = None) -> types.Part:

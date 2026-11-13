@@ -2693,6 +2693,33 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A sub-agent's refused or cut answer is said so, on both backends.** A
+  sub-agent whose model refused reached its parent as an empty result with
+  no warning (ADK; Deep Agents before 0.7.34), and an answer cut at the
+  output limit passed as complete. Now the parent reads Deep Agents
+  0.7.34's notice ("The subagent stopped because a model refused the
+  request. … rephrase it or continue without it.") whichever deepagents is
+  installed, and the run ends `refused`; a cut answer keeps its text (and
+  its reasoning), followed by `[cut off at the output limit]`, its run ends
+  `completed` and `partial`, and one recoverable warning names it
+  ("researcher-1's answer was cut off at the output limit"). Both backends
+  judge by `workflow/agents/outcome.py`. On ADK, `SubAgentOutcomePlugin` (in
+  the chain of a tree that delegates) reads the answer's `finish_reason`
+  (Claude's `refusal` and a Chat Completions `content_filter` arrive as
+  `SAFETY`, Gemini's blocks as themselves), the `error_code` ADK gives an
+  answer with no content (a Gemini prompt's block reason), the reason an
+  `OTHER` stop names in its error message (the OpenAI Responses API's
+  `content_filter`) and the text `OpenAI refusal: <text>` (the Responses
+  API's refusal). On Deep Agents, `SubAgentOutcomeMiddleware` (on every
+  sub-agent's model side) reads the answer's `stop_reason`, `finish_reason`,
+  `incomplete_details.reason` or a Gemini prompt block's
+  `prompt_feedback.block_reason`, and a refusal it holds (a refusal block,
+  `additional_kwargs["refusal"]`). `OpenAICompatibleLlm` (OpenRouter and
+  OpenAI-compatible servers on ADK) dropped a Chat Completions `refusal`; it
+  now gives it as the Responses adapter does, `OpenAI refusal: <text>`, so
+  a root on such a server replies with that text where it failed with no
+  answer. The root's own answers are otherwise left as their model gave
+  them.
 - **After Ctrl+C, a sub-agent's call never answers its parent's call of the
   same id, on both backends.** A provider that numbers its tool call ids per
   agent (`call_0`, ...) gives a sub-agent's first call the id of the

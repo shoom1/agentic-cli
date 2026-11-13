@@ -43,6 +43,7 @@ from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # no
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
     PermissionMiddleware,
+    SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState  # noqa: E402
@@ -395,10 +396,14 @@ class TestEveryStack:
             PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert [type(m) for m in created["coordinator"]["middleware"]] == delegating
-        assert [type(m) for m in created["lead"]["middleware"]] == delegating
+        # A sub-agent's model side has SubAgentOutcomeMiddleware; the root's not.
+        assert [type(m) for m in created["lead"]["middleware"]] == [
+            PatchToolCallsMiddleware, SubAgentMiddleware, SubAgentOutcomeMiddleware,
+            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
+        ]
         assert [type(m) for m in created["worker"]["middleware"]] == [
-            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
-            ActiveToolCallMiddleware,
+            PatchToolCallsMiddleware, SubAgentOutcomeMiddleware, PermissionMiddleware,
+            ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         for name, kwargs in created.items():
             (gate,) = [m for m in kwargs["middleware"] if isinstance(m, PermissionMiddleware)]
