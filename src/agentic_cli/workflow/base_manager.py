@@ -49,6 +49,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.interrupts import OpenCalls
 # The two limits are still importable from here.
 from agentic_cli.workflow.memory_index import (  # noqa: F401
@@ -499,6 +500,21 @@ class BaseWorkflowManager(ABC):
     def agent_configs(self) -> list[AgentConfig]:
         """Get the agent configurations."""
         return self._agent_configs
+
+    @property
+    def agent_runs(self) -> AgentRuns:
+        """This manager's sub-agent runs, kept by conversation (provisional).
+
+        Named by the backends' event processors and recorded from their
+        ``AGENT_RUN`` events (``workflow/agents/runs.py``): ``records(ref)``
+        lists a conversation's in the order they started; a turn ends the
+        runs it leaves open (``_turn``). In memory, for the process; made on
+        first use.
+        """
+        runs = self.__dict__.get("_agent_runs")
+        if runs is None:
+            runs = self.__dict__["_agent_runs"] = AgentRuns()
+        return runs
 
     @property
     def settings(self) -> "BaseSettings":
@@ -2012,6 +2028,8 @@ class BaseWorkflowManager(ABC):
         backend re-checked under it) and the workflow context
         (:meth:`_workflow_context`: the settings, the services and the
         active turn, reset as the block ends) are entered, in that order.
+        As the block ends, however it ends, the sub-agent runs it left open
+        are recorded interrupted (``agent_runs``).
 
         Yields:
             The turn's conversation.
@@ -2023,7 +2041,12 @@ class BaseWorkflowManager(ABC):
         bind_context(session_id=ref.session_id, user_id=ref.user_id)
         async with self._turn_admission():
             with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
-                yield ref
+                try:
+                    yield ref
+                finally:
+                    # A sub-agent run the turn leaves open (a cancel, a
+                    # failure) ends with it: no event can say so any more.
+                    self.agent_runs.interrupt_open(ref)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False
