@@ -27,9 +27,9 @@ conversation and, within it, by the run that made each call (the root's
 own, or a sub-agent's: ``workflow.sessions.get_active_run``), since a
 provider that numbers its call ids per agent gives a sub-agent's call the
 id of its parent's delegation: the backends answer from it (ADK as the
-cancelled turn stops, through its ``abort_signal``; Deep Agents before that
-conversation's next run's first model call, however many turns ran in
-others since).
+cancelled turn stops, through its ``abort_signal``; Deep Agents before the
+first model call of that conversation's next turn, however many turns ran
+in others since).
 """
 
 from __future__ import annotations
@@ -142,9 +142,9 @@ class OpenCalls:
     when the user stops its turn. Calls are kept by conversation, the active
     turn's (``workflow.sessions.get_active_turn``), which ``answer`` reads:
     Deep Agents answers a stopped turn's calls at that conversation's next
-    run, after turns in others. ``answer`` forgets nothing: that run may be
-    stopped too before its answers are saved, and the next one answers them
-    again. A turn that ends without a cancel has every call answered and
+    turn, after turns in others. ``answer`` forgets nothing: that turn may
+    be stopped too before its answers are saved, and the one after answers
+    them again. A turn that ends without a cancel has every call answered and
     saved, so ``clear`` forgets its conversation's calls; one that fails
     keeps those that finished (``failed``).
 
@@ -242,7 +242,7 @@ class OpenCalls:
         self._asking.pop(key, None)
 
     def failed(self, key: Any) -> None:
-        """The turn of conversation ``key`` failed: its next run answers its calls.
+        """The turn of conversation ``key`` failed: its next turn answers its calls.
 
         The finished ones keep their results; the others are answered
         ``INTERRUPTED``, one that waited at its prompt too, since the user

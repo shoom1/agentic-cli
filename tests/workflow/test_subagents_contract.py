@@ -43,7 +43,9 @@ from agentic_cli.workflow.sessions import (
     SessionRef,
     get_active_run,
     get_active_tool_call,
+    reset_active_turn,
     root_run,
+    set_active_turn,
 )
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 from tests.workflow.test_manager_models import route
@@ -214,6 +216,7 @@ class Crew:
     _results_read: Callable[[str, int], dict[str, str]]
     _requests: Callable[[str], int]
     _result_ids: Callable[[str, int], list[str]] | None = None
+    _answers: Callable[[str, str], Awaitable[list[str]]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -252,6 +255,28 @@ class Crew:
         assert self._result_ids is not None
         return self._result_ids(agent, call)
 
+    async def answers(self, agent: str, call_id: str) -> list[str]:
+        """The answers ``agent``'s call ``call_id`` has after a stopped turn,
+        one per answer, as text: a call answered twice is there twice.
+
+        ADK keeps every agent's conversation, so these are the answers its
+        session holds. Deep Agents keeps only the root's (a sub-agent is
+        compiled without a checkpointer), so a call's answer there is the
+        one its stack gives it from the record (``OpenCalls``, under the run
+        of ``agent``); read it before the next turn ends, which clears it.
+        """
+        assert self._answers is not None
+        return await self._answers(agent, call_id)
+
+    def recorded(self, call_id: str, run: str | None = None) -> bool:
+        """Whether the record holds ``call_id`` of ``run`` (None: the root's
+        own call) as finished: its result is kept for a stop to answer with."""
+        token = set_active_turn(self.conversation)
+        try:
+            return self.manager._open_calls.recorded(call_id, run=run) is not None
+        finally:
+            reset_active_turn(token)
+
 
 def _settings() -> BaseSettings:
     return BaseSettings(session_store="memory", default_model="claude-sonnet-4-6")
@@ -273,8 +298,20 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
     def result_ids(name: str, call: int) -> list[str]:
         return _claude_result_ids([body for sent, body in claude.sent if sent == name][call])
 
+    async def answers(name: str, call_id: str) -> list[str]:
+        session = await manager._session_service.get_session(
+            app_name=manager.session_ref(SESSION, USER).app_name,
+            user_id=USER, session_id=SESSION,
+        )
+        return [
+            json.dumps(response.response)
+            for event in session.events if event.author == name
+            for response in event.get_function_responses() if response.id == call_id
+        ]
+
     return Crew(
-        "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids
+        "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
+        answers,
     )
 
 
@@ -307,9 +344,22 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
             if isinstance(message, ToolMessage)
         ]
 
+    async def answers(name: str, call_id: str) -> list[str]:
+        conversation = manager.session_ref(SESSION, USER)
+        runs = [r.ref.run for r in manager.agent_runs.records(conversation) if r.ref.agent == name]
+        token = set_active_turn(conversation)
+        try:
+            answer = manager._open_calls.answer(
+                call_id, by_user=True, run=runs[-1] if runs else None
+            )
+        finally:
+            reset_active_turn(token)
+        message = getattr(answer, "message", None)  # a finished call's ToolMessage
+        return [message.text if message is not None else json.dumps(answer)]
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
-        result_ids,
+        result_ids, answers,
     )
 
 
@@ -705,6 +755,7 @@ class TestACallIsItsOwnRuns:
             await asyncio.wait_for(BLOCKING["started"].wait(), 10)
         finally:
             await crew.stop(turn)
+        middles = await crew.answers("middle", "c1")
         await crew.turn("Never mind.")
 
         assert [(r.ref.run, r.status) for r in crew.records()] == [
@@ -713,7 +764,71 @@ class TestACallIsItsOwnRuns:
         assert crew.result_ids("coordinator") == ["c1"]
         answered = crew.results_read("coordinator")["c1"]
         assert INTERRUPTED_BY_USER in answered and "42" not in answered
+        # The middle's delegation is answered once, as the user's, as the
+        # turn stops, and the next turn answers it no more.
+        (middle,) = middles
+        assert INTERRUPTED_BY_USER in middle and "42" not in middle
+        assert await crew.answers("middle", "c1") == middles
         for name in ("coordinator", "middle", "leaf"):
             for call in range(crew.requests(name)):
                 ids = crew.result_ids(name, call)
                 assert len(ids) == len(set(ids)), (name, call, ids)
+
+    async def test_after_ctrl_c_a_finished_sibling_of_a_delegation_keeps_its_result(
+        self, make_crew
+    ):
+        """The coordinator's own call ``c2`` finished beside its delegation
+        ``c1``, whose sub-agent then used both ids: each is answered once,
+        with its own answer."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               use("contract_whoami", "c2")),
+                         says("Starting over.")],
+            researcher=[calls(use("contract_lookup", "c1", q="X")),
+                        calls(use("contract_lookup", "c2", q="Y")),
+                        calls(use("contract_block", "c3"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+            await until(lambda: crew.recorded("c2"))
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Never mind.")
+
+        assert sorted(crew.result_ids("coordinator")) == ["c1", "c2"]
+        answered = crew.results_read("coordinator")
+        assert json.loads(answered["c2"]) == {"success": True}
+        assert INTERRUPTED_BY_USER in answered["c1"] and "42" not in answered["c1"]
+
+    async def test_after_ctrl_c_a_finished_delegation_keeps_its_result(self, make_crew):
+        """Two delegations run side by side, each sub-agent using the other's
+        call id: the one that finished keeps its sub-agent's answer, the
+        other is answered as the user's, each once."""
+        crew = make_crew(
+            [
+                agent("coordinator", sub_agents=("researcher", "waiter")),
+                agent("researcher", tools=(contract_lookup,)),
+                agent("waiter", tools=(contract_block,)),
+            ],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("waiter", "Wait.", "c2")),
+                         says("Starting over.")],
+            researcher=[calls(use("contract_lookup", "c2", q="X")), says("X is 42.")],
+            waiter=[calls(use("contract_block", "c1"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+            await until(lambda: crew.recorded("c1"))
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Never mind.")
+
+        assert sorted(crew.result_ids("coordinator")) == ["c1", "c2"]
+        answered = crew.results_read("coordinator")
+        assert answered["c1"] == "X is 42."
+        assert INTERRUPTED_BY_USER in answered["c2"]
