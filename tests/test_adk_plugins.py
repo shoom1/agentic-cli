@@ -1,11 +1,15 @@
 """Tests for ADK Plugins (LLMLoggingPlugin)."""
 
+import asyncio
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from agentic_cli.workflow.adk import plugins
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 from agentic_cli.workflow.events import EventType, WorkflowEvent
+from agentic_cli.workflow.sessions import RunRef, set_active_run
 
 
 # -------------------------------------------------------------------------
@@ -474,3 +478,126 @@ class TestLLMLoggingPlugin:
         assert len(result) == 1
         assert result[0]["role"] == "user"
         assert result[0]["parts"][0]["text"] == "Hello"
+
+
+# -------------------------------------------------------------------------
+# One model call at a time: its own clock, its agent and its run
+# -------------------------------------------------------------------------
+
+
+def _call_context(agent: str = "researcher", invocation_id: str = "inv-1") -> SimpleNamespace:
+    """A model call's callback context: ADK makes an ``EventActions`` for each
+    call and hands it to all three of the call's callbacks, while two parallel
+    calls of one sub-agent share their invocation and their agent's name."""
+    return SimpleNamespace(invocation_id=invocation_id, agent_name=agent, actions=object())
+
+
+def _usage() -> MagicMock:
+    return MagicMock(prompt_token_count=10, candidates_token_count=5, total_token_count=15,
+                     thoughts_token_count=None, cached_content_token_count=None)
+
+
+class TestEachModelCall:
+    @pytest.fixture
+    def plugin(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return LLMLoggingPlugin(model_name="test-model", app_name="test_app")
+
+    @pytest.fixture
+    def clock(self, monkeypatch):
+        """``time.perf_counter`` as the plugin reads it: the times given, in turn."""
+        times: list[float] = []
+        monkeypatch.setattr(plugins, "time", SimpleNamespace(perf_counter=lambda: times.pop(0)))
+        return times
+
+    async def test_parallel_calls_of_one_agent_each_time_their_own(self, plugin, clock):
+        # Two delegations to one sub-agent: their requests go out at 0 s and
+        # 10 s, their answers come back at 20 s and 30 s.
+        clock.extend([0.0, 10.0, 20.0, 30.0])
+        first, second = _call_context(), _call_context()
+
+        for call in (first, second):
+            await plugin.before_model_callback(
+                callback_context=call, llm_request=_make_mock_llm_request()
+            )
+        for call in (first, second):
+            await plugin.after_model_callback(
+                callback_context=call,
+                llm_response=_make_mock_llm_response(usage_metadata=_usage()),
+            )
+
+        latencies = [
+            r["metadata"].get("latency_ms") for r in _logged(plugin) if r["type"] == "llm_usage"
+        ]
+        assert latencies == [20_000.0, 20_000.0]
+
+    async def test_a_failed_call_lets_its_clock_go(self, plugin):
+        call = _call_context()
+        await plugin.before_model_callback(
+            callback_context=call, llm_request=_make_mock_llm_request()
+        )
+
+        await plugin.on_model_error_callback(
+            callback_context=call, llm_request=_make_mock_llm_request(), error=RuntimeError("529")
+        )
+
+        assert plugin._request_timestamps == {}
+
+    async def test_a_run_lets_go_of_what_another_left(self, plugin):
+        # Before google-adk 2.14 a call cancelled mid-request fires neither callback.
+        left = _call_context(invocation_id="inv-1")
+        await plugin.before_model_callback(
+            callback_context=left, llm_request=_make_mock_llm_request()
+        )
+
+        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
+
+        assert plugin._request_timestamps == {}
+
+    async def test_a_sub_agents_records_name_it_and_its_run(self, plugin):
+        researcher = RunRef(
+            agent="researcher", instance="researcher-1", run="researcher-1#1",
+            parent_run=None, depth=1,
+        )
+
+        async def call() -> None:
+            # ADK runs each agent in a task of its own, its run the active one.
+            set_active_run(researcher)
+            context = _call_context()
+            await plugin.before_model_callback(
+                callback_context=context, llm_request=_make_mock_llm_request()
+            )
+            await plugin.after_model_callback(
+                callback_context=context,
+                llm_response=_make_mock_llm_response(usage_metadata=_usage()),
+            )
+
+        await asyncio.create_task(call())
+
+        assert [(e.type, e.metadata["agent"], e.run) for e in plugin.drain_events()] == [
+            (EventType.LLM_REQUEST, "researcher", researcher),
+            (EventType.LLM_RESPONSE, "researcher", researcher),
+        ]
+        assert [(r["type"], r["metadata"]["agent"], r["run"]) for r in _logged(plugin)] == [
+            (kind, "researcher", {
+                "agent": "researcher", "instance": "researcher-1", "run": "researcher-1#1",
+                "parent_run": None, "depth": 1,
+            })
+            for kind in ("llm_request", "llm_response", "llm_usage")
+        ]
+
+    async def test_the_roots_records_name_no_run(self, plugin):
+        context = _call_context(agent="coordinator")
+        await plugin.before_model_callback(
+            callback_context=context, llm_request=_make_mock_llm_request()
+        )
+        await plugin.after_model_callback(
+            callback_context=context,
+            llm_response=_make_mock_llm_response(usage_metadata=_usage()),
+        )
+
+        assert [(e.metadata["agent"], e.run) for e in plugin.drain_events()] == [
+            ("coordinator", None), ("coordinator", None),
+        ]
+        assert all("run" not in r for r in _logged(plugin))

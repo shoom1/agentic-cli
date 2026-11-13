@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1116,7 +1117,7 @@ class TestASubAgentsFailure:
         ]
 
 
-# -- a delegation's result: shown alike on both backends ------------------------------------
+# -- a delegation's result shown alike, and the raw log per model call ---------------------
 
 
 class TestDelegationResult:
@@ -1159,3 +1160,39 @@ class TestDelegationResult:
             assert result.content == "Failed: Dynamic node researcher failed"
         else:
             assert "overloaded" in reason
+
+
+class TestRawLog:
+    async def test_each_record_names_its_agent_and_its_run(self, make_crew, monkeypatch):
+        settings = BaseSettings(
+            session_store="memory", default_model="claude-sonnet-4-6", raw_llm_logging=True
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda: settings)
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        coordinator = [("llm_request", "coordinator", None), ("llm_response", "coordinator", None)]
+        researcher = [
+            ("llm_request", "researcher", "researcher-1#1"),
+            ("llm_response", "researcher", "researcher-1#1"),
+        ]
+        expected = sorted(coordinator * 2 + researcher)
+        streamed = [e for e in events if e.type in (EventType.LLM_REQUEST, EventType.LLM_RESPONSE)]
+        assert sorted(
+            (e.type.value, e.metadata["agent"], e.run.run if e.run else None) for e in streamed
+        ) == expected
+        log = Path.home() / f".{settings.app_name}" / "logs" / "llm_events.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        logged = [r for r in records if r["type"] in ("llm_request", "llm_response")]
+        assert sorted(
+            (r["type"], r["metadata"]["agent"], (r.get("run") or {}).get("run")) for r in logged
+        ) == expected
+        assert {json.dumps(r["run"], sort_keys=True) for r in logged if "run" in r} == {
+            json.dumps({"agent": "researcher", "instance": "researcher-1",
+                        "run": "researcher-1#1", "parent_run": None, "depth": 1}, sort_keys=True)
+        }

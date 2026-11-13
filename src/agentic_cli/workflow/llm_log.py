@@ -5,14 +5,17 @@ Each backend turns its model calls into ``LLM_REQUEST``/``LLM_RESPONSE``/
 ``~/.{app_name}/logs/llm_events.jsonl``. The log holds whole conversations, so
 it lives under the user's home, never the (often git-tracked) project, with an
 owner-only directory (0700) and file (0600), and obvious keys and tokens are
-masked before a line is written. Logging is for debugging: a log that cannot
-be written is skipped, so it never fails the caller.
+masked before a line is written. A record of a sub-agent's model call names
+its run (``run``: the event's ``RunRef``, as a dict); the root's own name
+none. Logging is for debugging: a log that cannot be written is skipped, so
+it never fails the caller.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,6 +83,8 @@ class LLMLogWriter:
             "content": event.content,
             "metadata": event.metadata,
         }
+        if event.run is not None:
+            record["run"] = asdict(event.run)
 
         try:
             line = redact_secrets(json.dumps(record, default=str))

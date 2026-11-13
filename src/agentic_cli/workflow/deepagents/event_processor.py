@@ -525,8 +525,10 @@ class RunCallback(AsyncCallbackHandler):
       ``LLM_REQUEST`` and an ``LLM_RESPONSE``, also written to the log. Each
       names its ``agent`` (``lc_agent_name``: for a call a tool made, the
       agent whose tool it is) and its ``purpose``: ``"agent"``,
-      ``"summarization"`` or ``"tool"``. It records what LangChain sends, not
-      the HTTP body, and adds no ``LLM_USAGE``: the stream reports usage.
+      ``"summarization"`` or ``"tool"``; a sub-agent's call, its run too (the
+      active run ``LiveEvents.emit`` gives the event, which the log writes as
+      ``run``). It records what LangChain sends, not the HTTP body, and adds
+      no ``LLM_USAGE``: the stream reports usage.
 
     Args:
         root: The root agent, for a call no agent is named on.
