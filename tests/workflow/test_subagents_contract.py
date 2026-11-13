@@ -29,6 +29,7 @@ import pytest
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
+from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
@@ -258,6 +259,7 @@ class Crew:
     _requests: Callable[[str], int]
     _result_ids: Callable[[str, int], list[str]] | None = None
     _answers: Callable[[str, str], Awaitable[list[str]]] | None = None
+    _last_message: Callable[[str, int], str] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -289,6 +291,11 @@ class Crew:
     def requests(self, agent: str) -> int:
         """How many model requests ``agent`` made."""
         return self._requests(agent)
+
+    def last_message(self, agent: str, call: int = -1) -> str:
+        """The text of the last message ``agent``'s model request ``call`` held."""
+        assert self._last_message is not None
+        return self._last_message(agent, call)
 
     def result_ids(self, agent: str, call: int = -1) -> list[str]:
         """The call ids of the tool results ``agent``'s model request ``call``
@@ -350,9 +357,16 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
             for response in event.get_function_responses() if response.id == call_id
         ]
 
+    def last_message(name: str, call: int) -> str:
+        body = [body for sent, body in claude.sent if sent == name][call]
+        content = body["messages"][-1]["content"]
+        return content if isinstance(content, str) else "".join(
+            block.get("text", "") for block in content if block.get("type") == "text"
+        )
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
-        answers,
+        answers, last_message,
     )
 
 
@@ -398,9 +412,12 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
         message = getattr(answer, "message", None)  # a finished call's ToolMessage
         return [message.text if message is not None else json.dumps(answer)]
 
+    def last_message(name: str, call: int) -> str:
+        return models.chats[name].conversation(call)[-1].text
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
-        result_ids, answers,
+        result_ids, answers, last_message,
     )
 
 
@@ -498,6 +515,23 @@ async def contract_ask() -> dict:
         tool_name="contract_ask", prompt="Which one?",
     ))
     return {"success": True, "answer": answer}
+
+
+def _built() -> str:
+    return "built ok"
+
+
+@register_tool(
+    capabilities=EXEMPT, requires=JOB_MANAGER,
+    description="Start a background job (a contract-test tool).",
+)
+def contract_start_job() -> dict:
+    """Start a job that ends at once, the agent told when it has."""
+    record = get_service(JOB_MANAGER).submit(
+        tool="contract_start_job", backend="inprocess", spec={"target": _built},
+        resume_on_complete=True,
+    )
+    return {"success": True, "job_id": record.job_id, "state": record.state.value}
 
 
 # -- fixtures --------------------------------------------------------------------
@@ -1355,3 +1389,28 @@ class TestAfterItsTurn:
         assert asked == ["r1", "r2"]
         assert json.loads(crew.results_read("researcher")["r2"])["answer"] == "yes"
         assert [e.content for e in events if e.type is EventType.TEXT][-1] == "Done."
+
+
+class TestASubAgentsJob:
+    async def test_its_record_and_its_notice_name_it(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_start_job,))],
+            coordinator=[calls(delegate("researcher", "Start the build.", "c1")),
+                         says("The researcher started a build."),
+                         says("The build finished.")],
+            researcher=[calls(use("contract_start_job", "r1")), says("Started the job.")],
+        )
+
+        await crew.turn()
+        jobs = crew.manager.job_manager
+        (record,) = jobs.list()
+        await until(lambda: jobs.get(record.job_id).state in TERMINAL_STATES)
+        resumed = [event async for event in crew.manager.resume_with_job_result(record)]
+
+        assert (record.started_by, record.call_id) == ("researcher-1", "r1")
+        notice = crew.last_message("coordinator").splitlines()
+        assert notice[1] == (
+            "A background job researcher-1 started has finished. Tell the user what it means."
+        )
+        assert [e.content for e in resumed if e.type is EventType.TEXT] == ["The build finished."]

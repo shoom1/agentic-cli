@@ -37,8 +37,8 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.tools.jobs.backends import TERMINAL_STATES  # noqa: E402
 from agentic_cli.tools.jobs.resume import (  # noqa: E402
-    JOB_NOTICE_ASK,
     JOB_NOTICE_HEADER,
+    job_notice_ask,
     job_result_payload,
 )
 from agentic_cli.tools.registry import register_tool  # noqa: E402
@@ -220,7 +220,7 @@ def _record(**over) -> SimpleNamespace:
 
 def _notice_text(record, result) -> str:
     payload = json.dumps(job_result_payload(record, result), ensure_ascii=False)
-    return f"{JOB_NOTICE_HEADER}\n{JOB_NOTICE_ASK}\n{payload}"
+    return f"{JOB_NOTICE_HEADER}\n{job_notice_ask(record)}\n{payload}"
 
 
 async def _finished(manager, job_id: str):
@@ -754,12 +754,17 @@ class TestASubAgentsJob:
         events = await resume(manager, record)
 
         # The sub-agent's own call started the job, not the coordinator's task.
-        assert (record.call_id, record.call_name) == ("call-b", "jr_build")
+        assert (record.call_id, record.call_name, record.started_by) == (
+            "call-b", "jr_build", "builder-1",
+        )
         assert [e.content for e in of(events, EventType.TEXT)] == ["The docs are built."]
         assert {e.metadata["agent"] for e in events} == {"lead"}
         assert len(models.chats["builder"].requests) == 2
         assert models.chats["lead"].conversation(2)[-1].content == _notice_text(
             record, "built docs"
+        )
+        assert models.chats["lead"].conversation(2)[-1].content.splitlines()[1] == (
+            "A background job builder-1 started has finished. Tell the user what it means."
         )
 
 
