@@ -535,19 +535,19 @@ class TestTheApp:
         assert isinstance(runner.app.plugins[0], MainAgentPlugin)
 
 
-def team(context: str | None) -> list[AgentConfig]:
+def team(inherit_context: bool) -> list[AgentConfig]:
     return [
         AgentConfig(name="coordinator", prompt=PROMPTS["coordinator"],
                     sub_agents=["researcher"], description="Leads.", include_state_tools=False),
         AgentConfig(name="researcher", prompt=PROMPTS["researcher"], description="Finds facts.",
-                    context=context),
+                    inherit_context=inherit_context),
     ]
 
 
 class TestSubAgents:
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_a_sub_agent_past_the_trigger_never_compacts(
-        self, project, monkeypatch, context
+        self, project, monkeypatch, inherit_context
     ):
         consulted: list[str | None] = []
         real = AgentCliSummarizer.maybe_summarize_events
@@ -563,7 +563,7 @@ class TestSubAgents:
             # Both of the researcher's prompts pass its trigger.
             researcher=[calls("get_plan", "toolu_r1", OVER), says("X is 42.", OVER)],
         ))
-        manager = GoogleADKWorkflowManager(agent_configs=team(context), settings=settings())
+        manager = GoogleADKWorkflowManager(agent_configs=team(inherit_context), settings=settings())
         try:
             # Turn one would be worth summarizing, were the coordinator past its trigger.
             for text in TURNS[:2]:
@@ -585,8 +585,8 @@ class TestSubAgents:
                                  "user: result#toolu_r1"]
         assert texts(events)[-1] == "X is 42."
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
-    async def test_a_delegation_after_a_summary(self, project, monkeypatch, context):
+    @pytest.mark.parametrize("inherit_context", [False, True])
+    async def test_a_delegation_after_a_summary(self, project, monkeypatch, inherit_context):
         """A fresh sub-agent is sent its brief alone; an inheriting one the
         conversation as it now is, the summary first."""
         answers = serve(monkeypatch, Claude(
@@ -594,7 +594,7 @@ class TestSubAgents:
                          calls("researcher", "toolu_c1", request="Find X."), says("X is 42.")],
             researcher=[says("X is 42.")],
         ))
-        manager = GoogleADKWorkflowManager(agent_configs=team(context), settings=settings())
+        manager = GoogleADKWorkflowManager(agent_configs=team(inherit_context), settings=settings())
         try:
             for text in TURNS[:2]:
                 await turn(manager, text)
@@ -608,7 +608,7 @@ class TestSubAgents:
         assert len(summaries_in(session)) == 1
         (research,) = answers.bodies("researcher")
         sent = lines(research)
-        if context == "fresh":
+        if not inherit_context:
             assert sent == ["user: Find X."]
         else:
             assert sent[0] == f"user: {SUMMARY_PREFIX}\n\n{SUMMARY}"
@@ -633,7 +633,7 @@ class TestSubAgents:
                          says("X is 42.")],
             researcher=[says("X is 42.")],
         ))
-        manager = GoogleADKWorkflowManager(agent_configs=team("fresh"), settings=settings())
+        manager = GoogleADKWorkflowManager(agent_configs=team(False), settings=settings())
         try:
             for text in TURNS[:2]:
                 await turn(manager, text)

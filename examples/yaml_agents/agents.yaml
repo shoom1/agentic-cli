@@ -11,8 +11,8 @@ agents:
   - name: researcher
     # What it does: its parent chooses whom to delegate to by this.
     description: Analyzes text it is given (counts its words) and reports the figures.
-    # What it sees when delegated to: the request alone ("inherit" adds its parent's conversation).
-    context: fresh
+    # What it sees when delegated to: the request alone (true adds its parent's conversation).
+    inherit_context: false
     instruction_file: prompts/researcher.md
     # A tool is a registered name (tools.py registers word_count), or a dotted path to a registered function.
     tools: [word_count]

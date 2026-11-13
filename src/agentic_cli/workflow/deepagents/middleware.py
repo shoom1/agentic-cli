@@ -829,7 +829,7 @@ class ForeignReasoningMiddleware(AgentMiddleware):
     A model switch that keeps the session sends the new model AI messages
     another provider wrote, whose reasoning it would refuse (Claude rejects a
     thinking block it did not sign) or warn about. A forked sub-agent
-    (``context="inherit"``) is sent its coordinator's messages, whose
+    (``inherit_context=True``) is sent its coordinator's messages, whose
     reasoning another model may refuse too, and which ADK leaves out of a
     sub-agent's view as well. Each request goes out through
     ``without_foreign_reasoning``; the state, and so the checkpoint, keeps

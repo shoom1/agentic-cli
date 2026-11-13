@@ -196,7 +196,7 @@ def project(tmp_path, monkeypatch) -> Path:
     return tmp_path / "project"
 
 
-def team(context: str | None = None, *, researcher_tools=(), **coordinator) -> list[AgentConfig]:
+def team(inherit_context: bool = False, *, researcher_tools=(), **coordinator) -> list[AgentConfig]:
     return [
         AgentConfig(
             name="coordinator", prompt=PROMPTS["coordinator"], sub_agents=["researcher"],
@@ -204,7 +204,7 @@ def team(context: str | None = None, *, researcher_tools=(), **coordinator) -> l
         ),
         AgentConfig(
             name="researcher", prompt=PROMPTS["researcher"], description="Finds facts.",
-            tools=list(researcher_tools), include_state_tools=False, context=context,
+            tools=list(researcher_tools), include_state_tools=False, inherit_context=inherit_context,
         ),
     ]
 
@@ -302,21 +302,21 @@ class TestDelegation:
 
     async def test_a_fresh_sub_agent_sees_only_the_request(self, project, monkeypatch):
         answers = delegating()
-        await three_turns(monkeypatch, team("fresh"), answers)
+        await three_turns(monkeypatch, team(inherit_context=False), answers)
 
         (body,) = answers.bodies("researcher")
         assert lines(body) == [f"user: {BRIEF}"]
 
     async def test_the_default_is_fresh(self, project, monkeypatch):
         answers = delegating()
-        await three_turns(monkeypatch, team(None), answers)
+        await three_turns(monkeypatch, team(), answers)
 
         (body,) = answers.bodies("researcher")
         assert lines(body) == [f"user: {BRIEF}"]
 
     async def test_an_inheriting_sub_agent_sees_the_conversation(self, project, monkeypatch):
         answers = delegating()
-        await three_turns(monkeypatch, team("inherit"), answers)
+        await three_turns(monkeypatch, team(inherit_context=True), answers)
 
         (body,) = answers.bodies("researcher")
         sent = lines(body)
@@ -333,7 +333,7 @@ class TestDelegation:
         # note it may take them as its own instructions and answer as the
         # coordinator.
         answers = delegating()
-        await three_turns(monkeypatch, team("inherit"), answers)
+        await three_turns(monkeypatch, team(inherit_context=True), answers)
 
         (body,) = answers.bodies("researcher")
         assert system_text(body) == f"{PROMPTS['researcher']}\n\n{delegation.INHERITED_CONTEXT_NOTE}"
@@ -342,7 +342,7 @@ class TestDelegation:
 
     async def test_a_fresh_sub_agent_is_given_no_note(self, project, monkeypatch):
         answers = delegating()
-        await three_turns(monkeypatch, team("fresh"), answers)
+        await three_turns(monkeypatch, team(inherit_context=False), answers)
 
         (body,) = answers.bodies("researcher")
         assert system_text(body) == PROMPTS["researcher"]
@@ -459,7 +459,7 @@ class TestDelegation:
             ],
             researcher=[says("X is 42.")],
         )
-        await three_turns(monkeypatch, team("inherit"), answers)
+        await three_turns(monkeypatch, team(inherit_context=True), answers)
 
         # The coordinator is sent its own signed thinking back ...
         assert thought in json.dumps(answers.bodies("coordinator")[1])
@@ -661,11 +661,11 @@ class TestUsagePerAgent:
     the conversation's context, an inheriting sub-agent's included (its
     prompt holds the conversation, but it is not the main agent's context)."""
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_a_delegating_turns_usage_is_each_agents_own(
-        self, project, monkeypatch, context
+        self, project, monkeypatch, inherit_context
     ):
-        coordinator, researcher = team(context)
+        coordinator, researcher = team(inherit_context)
         configs = [coordinator, dataclasses.replace(researcher, model="claude-haiku-4-5")]
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(delegating()))
         manager = manager_for(configs)
@@ -693,9 +693,9 @@ class TestUsagePerAgent:
             ("coordinator", "anthropic:claude-sonnet-4-6", None, triggers["coordinator"], True),
         ]
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_the_status_bar_shows_only_the_main_agents_context(
-        self, project, monkeypatch, context
+        self, project, monkeypatch, inherit_context
     ):
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
             coordinator=[sized(calls("researcher", "toolu_c1", request=BRIEF), 4_000),
@@ -704,7 +704,7 @@ class TestUsagePerAgent:
             # sub-agent's may be: it is still not the main agent's context.
             researcher=[sized(says("X is 42."), 150_000)],
         )))
-        manager = manager_for(team(context))
+        manager = manager_for(team(inherit_context))
         try:
             events = await turn(manager, "Have the researcher find X.")
             trigger = manager.context_budget().trigger
@@ -723,9 +723,9 @@ class TestUsagePerAgent:
             f"ctx 4.2k{of} ({round(420_000 / trigger)}%)",
         ]
 
-    @pytest.mark.parametrize("context", ["fresh", "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_with_the_raw_llm_log_a_sub_agent_never_moves_ctx(
-        self, project, monkeypatch, context
+        self, project, monkeypatch, inherit_context
     ):
         """The raw LLM log keeps its usage records in its file: each call's
         usage is streamed once, the event processor's, credited to its agent.
@@ -737,7 +737,7 @@ class TestUsagePerAgent:
             researcher=[sized(says("X is 42."), 150_000)],
         )))
         manager = GoogleADKWorkflowManager(
-            agent_configs=team(context),
+            agent_configs=team(inherit_context),
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
                                   raw_llm_logging=True),
         )
@@ -850,13 +850,12 @@ class TestTheAgents:
         assert researcher.disallow_transfer_to_parent is True
         assert researcher.disallow_transfer_to_peers is True
 
-    @pytest.mark.parametrize("context", [None, "fresh"])
-    async def test_a_fresh_one_leaves_include_contents_to_adk(self, project, context):
-        (researcher,) = (await built(team(context))).sub_agents
+    async def test_a_fresh_one_leaves_include_contents_to_adk(self, project):
+        (researcher,) = (await built(team())).sub_agents
         assert "include_contents" not in researcher.model_fields_set
 
     async def test_an_inheriting_one_passes_it_explicitly(self, project):
-        (researcher,) = (await built(team("inherit"))).sub_agents
+        (researcher,) = (await built(team(inherit_context=True))).sub_agents
         assert "include_contents" in researcher.model_fields_set
         assert researcher.include_contents == "default"
 

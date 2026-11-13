@@ -22,16 +22,16 @@ The parent chooses a sub-agent by its tool's description, ADK's
 ``agent.description``: one without a description is offered as
 "The <name> agent.", with a warning, as on Deep Agents.
 
-What the sub-agent sees follows ``AgentConfig.context``: ``fresh`` (or None)
-only the request, ``inherit`` its parent's conversation too, other agents'
+What the sub-agent sees follows ``AgentConfig.inherit_context``: False (the
+default) only the request, True its parent's conversation too, other agents'
 turns quoted as context and without their thoughts. ADK gives a
 ``single_turn`` agent ``include_contents="none"`` unless the field was set
-explicitly, so ``inherit`` passes ``"default"`` explicitly and ``fresh``
-passes nothing. ADK sends an inheriting agent the user's turns as plain user
-messages, so its instruction ends with :data:`INHERITED_CONTEXT_NOTE`
-(:func:`subagent_instruction`), as Deep Agents frames a fork's task: without
-it the agent could take the user's request to its parent as its own and
-answer as the parent.
+explicitly, so an inheriting agent passes ``"default"`` explicitly and a
+fresh one passes nothing. ADK sends an inheriting agent the user's turns as
+plain user messages, so its instruction ends with
+:data:`INHERITED_CONTEXT_NOTE` (:func:`subagent_instruction`), as Deep Agents
+frames a fork's task: without it the agent could take the user's request to
+its parent as its own and answer as the parent.
 
 The tool ADK builds is its private ``_SingleTurnAgentTool``, which calls no
 ``func`` the permission plugin could verify. The framework built the parent
@@ -99,7 +99,7 @@ def subagent_fields(config: AgentConfig) -> dict[str, Any]:
         "disallow_transfer_to_parent": True,
         "disallow_transfer_to_peers": True,
     }
-    if config.context == "inherit":
+    if config.inherit_context:
         # Explicitly: ADK keeps include_contents only when it was set.
         fields["include_contents"] = "default"
     return fields
@@ -111,7 +111,7 @@ def subagent_instruction(config: AgentConfig, prompt: str) -> str:
     An inheriting one is told whose conversation it reads
     (:data:`INHERITED_CONTEXT_NOTE`); a fresh one sees only its task.
     """
-    if config.context != "inherit":
+    if not config.inherit_context:
         return prompt
     return f"{prompt}\n\n{INHERITED_CONTEXT_NOTE}" if prompt.strip() else INHERITED_CONTEXT_NOTE
 

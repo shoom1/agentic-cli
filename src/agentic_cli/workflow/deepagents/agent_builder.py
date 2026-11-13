@@ -7,19 +7,20 @@ one ``CompiledSubAgent`` per sub-agent, which gives it a ``task`` tool
 the configured sub-agents are offered: there is no automatic general-purpose
 sub-agent, and none of Deep Agents' file tools.
 
-What a sub-agent sees follows its ``context``. A ``fresh`` one (the default)
-is Deep Agents' isolated sub-agent: one ``HumanMessage`` holding the brief,
-not the conversation. An ``inherit`` one is a fork (``mode="fork"``): the
-coordinator's effective conversation (after any summary), without the
-message that called ``task``, then Deep Agents' preamble and the brief; its
-own summarization compacts an inherited history too large for its window,
-and its stack sends none of the coordinator's reasoning on. Either way it
-gets the coordinator's ``plan`` and ``tasks``, keeps its own prompt, tools,
-model and middleware, runs its own tool loop, and its last non-empty text
-comes back as the ``task`` call's result, with the ``plan``/``tasks`` it
-changed. Deep Agents marks forks beta with a ``LangChainBetaWarning``
-LangChain would print over the UI; that one warning is filtered, and a
-debug log (``deepagents_fork_beta``) says which agents fork.
+What a sub-agent sees follows its ``inherit_context``. A fresh one (False,
+the default) is Deep Agents' isolated sub-agent: one ``HumanMessage`` holding
+the brief, not the conversation. An inheriting one (True) is a fork
+(``mode="fork"``): the coordinator's effective conversation (after any
+summary), without the message that called ``task``, then Deep Agents'
+preamble and the brief; its own summarization compacts an inherited history
+too large for its window, and its stack sends none of the coordinator's
+reasoning on. Either way it gets the coordinator's ``plan`` and ``tasks``,
+keeps its own prompt, tools, model and middleware, runs its own tool loop,
+and its last non-empty text comes back as the ``task`` call's result, with
+the ``plan``/``tasks`` it changed. Deep Agents marks forks beta with a
+``LangChainBetaWarning`` LangChain would print over the UI; that one warning
+is filtered, and a debug log (``deepagents_fork_beta``) says which agents
+fork.
 
 Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a
 tool call a cancelled turn or a crash left without a result, before each
@@ -364,13 +365,14 @@ def _subagent(config: AgentConfig, runnable: "CompiledStateGraph") -> CompiledSu
 
     The coordinator chooses by the description, so an agent without one is
     still offered, under a placeholder, and the omission is logged. An
-    ``inherit`` agent is forked: it continues the coordinator's conversation.
+    inheriting agent (``inherit_context``) is forked: it continues the
+    coordinator's conversation.
     """
     description = config.description.strip()
     if not description:
         logger.warning("deepagents_subagent_without_description", agent=config.name)
         description = f"The {config.name} agent."
     spec = CompiledSubAgent(name=config.name, description=description, runnable=runnable)
-    if config.context == "inherit":
+    if config.inherit_context:
         spec["mode"] = "fork"
     return spec

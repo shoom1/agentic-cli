@@ -676,9 +676,9 @@ class TestOneFileTwoManagers:
 
 
 class TestSubAgentsStoreNoCheckpoints:
-    @pytest.mark.parametrize("context", [None, "inherit"])
+    @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_after_a_delegated_turn_only_the_root_namespace_is_stored(
-        self, ctx, monkeypatch, managers, context
+        self, ctx, monkeypatch, managers, inherit_context
     ):
         models = scripted(
             monkeypatch,
@@ -687,7 +687,7 @@ class TestSubAgentsStoreNoCheckpoints:
         )
         manager = managers(_manager(ctx.settings, [
             AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
-            AgentConfig(name="helper", prompt="Help.", description="Helps.", context=context),
+            AgentConfig(name="helper", prompt="Help.", description="Helps.", inherit_context=inherit_context),
         ]))
 
         events = await turn(manager, "Delegate this.")
@@ -702,7 +702,7 @@ class TestSubAgentsStoreNoCheckpoints:
         assert namespaces == {""}
         # A fork still reads its parent's conversation (from the parent's state).
         sent = [m.text for m in models.chats["helper"].conversation(0)]
-        assert ("Delegate this." in sent) is (context == "inherit")
+        assert ("Delegate this." in sent) is inherit_context
         (row,) = await listed(manager)
         assert row == await truth(manager)
         assert (row.title, row.turns) == ("Delegate this.", 1)

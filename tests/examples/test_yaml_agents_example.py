@@ -70,7 +70,7 @@ declared = {{
     "prompts": {{name: c.prompt for name, c in configs.items()}},
     "tools": {{name: list(c.tools) for name, c in configs.items()}},
     "sub_agents": {{name: list(c.sub_agents) for name, c in configs.items()}},
-    "context": {{name: c.context for name, c in configs.items()}},
+    "inherit_context": {{name: c.inherit_context for name, c in configs.items()}},
     "descriptions": {{name: c.description for name, c in configs.items()}},
 }}
 
@@ -158,7 +158,7 @@ def test_the_agents_come_from_the_yaml_and_the_prompts_from_their_files(child_re
     declared = json.loads(result.stdout.strip().splitlines()[-1])["declared"]
     assert declared["names"] == ["coordinator", "researcher"]
     assert declared["sub_agents"] == {"coordinator": ["researcher"], "researcher": []}
-    assert declared["context"] == {"coordinator": None, "researcher": "fresh"}
+    assert declared["inherit_context"] == {"coordinator": False, "researcher": False}
     assert declared["descriptions"]["researcher"]
     # Read from prompts/, not written into the YAML or the module.
     for name in ("coordinator", "researcher"):
