@@ -2730,7 +2730,10 @@ step; each entry says what to use instead.
   (`workflow/interrupts.py::job_for_call`), matched by conversation and call
   id; a provider that repeats call ids across agents made a sub-agent's job
   the answer to its coordinator's open call. The job's `started_by` must now
-  be the instance of the run whose call is answered (None for the root's).
+  be the instance of the run whose call is answered (None for the root's). A
+  sub-agent's call ADK left open (a crash's, answered at the next turn) gets
+  no job, since its run is no longer known, and never the root's job of
+  the same id.
 - **A delegation's result looks the same on both backends.** ADK showed a
   sub-agent's answer as "Result: 1 items" (its delegation tool hands back
   `{"result": text}`) and Deep Agents as up to 200 characters of the whole
