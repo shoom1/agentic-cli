@@ -295,21 +295,21 @@ class TestList:
     async def test_a_sub_agents_later_checkpoint_does_not_stand_for_the_session(
         self, saver, store
     ):
-        """A turn that failed inside the sub-agent left the thread's newest
-        checkpoint in the sub-agent's namespace, when sub-agents stored them."""
+        """A checkpoint in a sub-agent's namespace written after the root's
+        newest (as a turn that failed inside the sub-agent left one, when
+        sub-agents stored them) does not stand for the session."""
         root = _tree(
             saver,
             [COORDINATOR, WORKER],
-            coordinator=[ai(calls=[task("worker", "Do it.")])],
+            coordinator=[ai(calls=[task("worker", "Do it.")]), ai("The worker failed.")],
             worker=[RuntimeError("provider said 400")],
         )
-        with pytest.raises(RuntimeError):
-            await root.ainvoke({"messages": [HumanMessage("Delegate.")]}, run_config(ref()))
+        await root.ainvoke({"messages": [HumanMessage("Delegate.")]}, run_config(ref()))
         await older_sub_agent_checkpoint(saver, ref(), "Do it.", "And this.")
 
         listed = await CheckpointSessions(saver, store).list("app", "alice")
 
-        # The question and the task call; the worker's brief is not the session's.
+        # The question is the one turn; the worker's brief is not the session's.
         assert [(e.session_id, e.turns) for e in listed] == [("s1", 1)]
 
     async def test_a_thread_that_is_not_ours_is_left_out(self, saver, store):

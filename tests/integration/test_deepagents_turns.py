@@ -670,9 +670,11 @@ async def test_parallel_delegation(hermetic, monkeypatch):
 
 
 async def test_subagent_model_error_then_next_turn(hermetic, monkeypatch):
-    """Review Focus 5: a sub-agent's provider answers 400 mid-turn."""
+    """Review Focus 5: a sub-agent's provider answers 400 mid-turn. The
+    coordinator reads why and answers in the same turn, as on ADK."""
     claude = Claude(**{
-        "Lead.": [calls(delegate("worker", "Do it.", "t1")), say("Sorry, the worker failed.")],
+        "Lead.": [calls(delegate("worker", "Do it.", "t1")), say("Sorry, the worker failed."),
+                  say("Its request was refused.")],
         "Work.": [bad_request("The worker's request was refused.")],
     })
     route(monkeypatch, anthropic, "AsyncClient", claude.api)
@@ -687,20 +689,22 @@ async def test_subagent_model_error_then_next_turn(hermetic, monkeypatch):
         await manager.cleanup()
 
     (error,) = of(failed, EventType.ERROR)
-    assert error.metadata["agent"] == "worker"
+    assert (error.metadata["agent"], error.metadata["recoverable"]) == ("worker", True)
+    assert error.content.startswith("worker failed: ")
     assert "refused" in error.content
-    assert of(failed, EventType.TEXT) == []
-    # The checkpoint holds the question and the task call, nothing half-written.
-    assert [m.type for m in state["messages"]] == ["human", "ai"]
-    assert state["messages"][1].tool_calls[0]["id"] == "t1"
-
-    # The next turn is accepted: the dangling task call was answered first.
-    assert claude.refused == []
-    assert [e.content for e in of(answered, EventType.TEXT)] == ["Sorry, the worker failed."]
-    patched = claude.bodies("Lead.")[-1]["messages"]
-    results_sent = [b for m in patched if isinstance(m["content"], list)
+    # The coordinator read why, as an error result, and answered in the same turn.
+    assert [e.content for e in of(failed, EventType.TEXT)] == ["Sorry, the worker failed."]
+    read = claude.bodies("Lead.")[1]["messages"]
+    results_sent = [b for m in read if isinstance(m["content"], list)
                     for b in m["content"] if b.get("type") == "tool_result"]
     assert [(b["tool_use_id"], b.get("is_error")) for b in results_sent] == [("t1", True)]
+    assert "Error running sub-agent: " in json.dumps(results_sent[0]["content"])
+    # The checkpoint holds the whole turn.
+    assert [m.type for m in state["messages"]] == ["human", "ai", "tool", "ai"]
+
+    # The next turn is accepted.
+    assert claude.refused == []
+    assert [e.content for e in of(answered, EventType.TEXT)] == ["Its request was refused."]
     assert [m["content"] for m in recent] == [
-        "Delegate.", "What happened?", "Sorry, the worker failed."
+        "Delegate.", "Sorry, the worker failed.", "What happened?", "Its request was refused."
     ]

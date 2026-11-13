@@ -178,7 +178,9 @@ def build_agent_tree(
             the request that carries the summary is sent.
         runs: The manager's sub-agent runs: every agent's
             ``ActiveToolCallMiddleware`` makes a ``task`` call to one of the
-            agent's sub-agents the run of the sub-agent it starts.
+            agent's sub-agents the run of the sub-agent it starts, and its
+            ``ToolCallErrorMiddleware`` names that run in the warning a
+            failed one gives.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -286,7 +288,7 @@ def _tool_side(
             )
         )
     stack += [
-        ToolCallErrorMiddleware(),
+        ToolCallErrorMiddleware(runs, sub_agents=config.sub_agents),
         ActiveToolCallMiddleware(runs, sub_agents=config.sub_agents),
     ]
     return stack

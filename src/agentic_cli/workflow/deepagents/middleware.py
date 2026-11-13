@@ -8,7 +8,8 @@ gets these; sub-agents are gated as strictly as the root.
 - :class:`ToolResultCapMiddleware`, inside the gate, cuts a tool result too
   big for the context, as ADK's ``ToolResultCapPlugin`` does.
 - :class:`ToolCallErrorMiddleware`, inside the cap, gives a tool that raised
-  the error result ADK's ``ToolErrorPlugin`` gives, so the turn goes on.
+  the error result ADK's ``ToolErrorPlugin`` gives, and a failed delegation
+  the one ADK's delegation tool gives, so the turn goes on.
 - :class:`ActiveToolCallMiddleware`, innermost, runs each tool as the active
   tool call, which links a job the tool starts to its call.
 - :class:`ForeignReasoningMiddleware`, on the model side, sends no model
@@ -64,19 +65,22 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.context import is_context_overflow
+from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.agents.outcome import (
     REFUSED,
     cut_off,
     outcome_of,
     refusal_notice,
 )
-from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow import live_events
+from agentic_cli.workflow.agents.runs import SUBAGENT_ERROR_PREFIX, AgentRuns
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
@@ -91,7 +95,11 @@ from agentic_cli.workflow.sessions import (
     set_active_run,
     set_active_tool_call,
 )
-from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
+from agentic_cli.workflow.tool_errors import (
+    MAX_TOOL_ERROR,
+    tool_error_result,
+    unknown_tool_result,
+)
 from agentic_cli.workflow.tool_output import cap_tool_result, is_saved_output
 
 logger = Loggers.workflow()
@@ -465,9 +473,29 @@ class ToolCallErrorMiddleware(AgentMiddleware):
 
     A failed delegation is not a tool error. The sub-agent's own stack already
     turned its tools' exceptions into results, so what escapes ``task`` is the
-    sub-agent's model or run failing; it ends the turn, as a model failure at
-    the root does.
+    sub-agent's model or run failing (a summary it could not write among
+    them). The call is answered as ADK's delegation tool answers it,
+    ``Error running sub-agent: <reason>`` (``status="error"``), and the user
+    is told at once, as ADK's event processor tells a sub-agent's failed
+    model call: one recoverable ``ERROR``, ``<agent> failed: <reason>``,
+    through the turn's live events, the sub-agent's run's (given the
+    manager's runs). The coordinator reads why and carries on; the turn ends
+    only when the root's own model or run fails.
+
+    Args:
+        runs: The manager's sub-agent runs, which name the run a failed
+            delegation's ``ERROR`` belongs to; none without.
+        sub_agents: The agent's own sub-agents: only a ``task`` call to one
+            of them is a run, as ``ActiveToolCallMiddleware`` has it; None
+            takes every call's ``subagent_type`` as the agent's own.
     """
+
+    def __init__(
+        self, runs: AgentRuns | None = None, *, sub_agents: Collection[str] | None = None
+    ) -> None:
+        super().__init__()
+        self._runs = runs
+        self._sub_agents = None if sub_agents is None else frozenset(sub_agents)
 
     async def awrap_tool_call(
         self,
@@ -480,8 +508,45 @@ class ToolCallErrorMiddleware(AgentMiddleware):
             raise
         except Exception as error:
             if _is_delegation(request.tool):
-                raise
+                return self._failed_delegation(request.tool_call, error)
             return _error_message(request.tool_call, error)
+
+    def _failed_delegation(self, call: ToolCall, error: Exception) -> ToolMessage:
+        """The ``task`` call's answer for a sub-agent that failed with ``error``; warns the user.
+
+        The reason is the error's text, else its type's name. The ``ERROR``
+        is the report: the log is for diagnosis, at info, its traceback at
+        debug, so nothing is said twice over the CLI's prompt.
+        """
+        reason = str(error) or type(error).__name__
+        subagent = (call.get("args") or {}).get("subagent_type")
+        agent = subagent if isinstance(subagent, str) else call["name"]
+        logger.info(
+            "subagent_failed",
+            agent=agent,
+            error_type=type(error).__name__,
+            error=truncate(reason, MAX_TOOL_ERROR),
+        )
+        logger.debug("subagent_failed", exc_info=error)
+        warning = WorkflowEvent.error(
+            f"{agent} failed: {reason}", error_code=type(error).__name__, recoverable=True
+        )
+        warning.metadata["agent"] = agent
+        delegates = isinstance(subagent, str) and (
+            self._sub_agents is None or subagent in self._sub_agents
+        )
+        if self._runs is not None and delegates:
+            # The run the task call started (still open: its result is this).
+            warning.run = self._runs.run_for(
+                get_active_turn(), get_active_run(), call["id"], subagent
+            )
+        live_events.report(warning)
+        return ToolMessage(
+            content=f"{SUBAGENT_ERROR_PREFIX}{reason}",
+            tool_call_id=call["id"],
+            name=call["name"],
+            status="error",
+        )
 
 
 class InterruptedCallsMiddleware(AgentMiddleware):
