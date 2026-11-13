@@ -162,6 +162,15 @@ def reply_agents(root: Any) -> frozenset[str]:
     return frozenset(names)
 
 
+def delegated_agents(root: Any) -> frozenset[str]:
+    """The agents in ``root``'s tree that run as a tool of their parent's, named after them.
+
+    A single-turn agent: its parent calls it like a tool and reads its answer
+    as the result (the event processor names each such call's run).
+    """
+    return frozenset(agent.name for agent in walk(root) if _mode(agent) == _SINGLE_TURN)
+
+
 def own_after_tool_agents(root: Any) -> frozenset[str]:
     """The agents in ``root``'s tree with after-tool callbacks of their own."""
     return frozenset(

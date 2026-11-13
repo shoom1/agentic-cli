@@ -590,7 +590,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app's) run after every plugin, and only when none answered. So:
 
         - ``MainAgentPlugin`` first: it records the running agent, which the
-          summarizer reads.
+          summarizer reads, and makes its sub-agent run the active run.
         - ``_init_plugins``: the permission gate (a denial is the call's
           answer), the tool-error answer, the raw log as the model answers.
         - ``ForeignReasoningPlugin``: a model switch keeps the session, and no
@@ -624,7 +624,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         root = self._root_agent
         kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
-        plugins: list = [MainAgentPlugin(), *self._init_plugins()]
+        plugins: list = [MainAgentPlugin(self.agent_runs), *self._init_plugins()]
         plugins.append(ForeignReasoningPlugin({name: kind.value for name, kind in kinds.items()}))
         if cache is not None:
             from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
@@ -691,6 +691,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         (``NoAfterTurnCompactionRunner``), and an event processor that knows
         which agents reply.
         """
+        from agentic_cli.workflow.adk.build import delegated_agents
+
         logger.info("initializing_services", app_name=self.app_name)
 
         # Create the session service (durable DatabaseSessionService by
@@ -727,6 +729,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             models=build.models,
             budgets=self._budgets,
             reply_agents=build.reply_agents,
+            runs=self.agent_runs,
+            delegates=delegated_agents(build.root),
         )
 
         logger.info(

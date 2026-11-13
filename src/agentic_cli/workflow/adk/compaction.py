@@ -77,6 +77,7 @@ from google.genai import types
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.adk.branches import branch_run, parent_branch_run
 from agentic_cli.workflow.adk.model_factory import generate_text
 from agentic_cli.workflow.context import (
     ESTIMATE_MARGIN,
@@ -89,6 +90,7 @@ from agentic_cli.workflow.context import (
     usage_fields,
 )
 from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.sessions import get_active_turn, set_active_run
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX, summary_prompt
 
 if TYPE_CHECKING:
@@ -98,6 +100,7 @@ if TYPE_CHECKING:
 
     from agentic_cli.config import BaseSettings
     from agentic_cli.models import ProviderKind, ResolvedModel
+    from agentic_cli.workflow.agents.runs import AgentRuns
     from agentic_cli.workflow.context import ContextBudget
 
 logger = Loggers.workflow()
@@ -130,16 +133,55 @@ def running_agent() -> str | None:
 
 
 class MainAgentPlugin(BasePlugin):
-    """Records the running agent before ADK runs it, for ``running_agent()``."""
+    """Records the running agent before ADK runs it, for ``running_agent()``.
 
-    def __init__(self) -> None:
+    Given the manager's runs, it also makes the sub-agent run the agent is
+    the active run (``workflow.sessions.get_active_run``) as it starts: the
+    run its branch names (``workflow/adk/branches.py``), None for the root;
+    the agent's model calls, tool calls, permission checks and questions see
+    it. ADK runs a delegated sub-agent inside its parent's call
+    (``run_node``, in that call's own task), so as the sub-agent ends, or
+    fails, its parent's run is made the active one again: the call's
+    after-tool callbacks are the parent's. It is set by value, the parent's
+    run from the branch, so no token from the start's context is needed.
+
+    ``running_agent()`` keeps the sub-agent's name in that call's task until
+    the task ends; only the summarizer reads it, at an agent's model call,
+    which never runs in a tool call's task.
+    """
+
+    def __init__(self, runs: "AgentRuns | None" = None) -> None:
         super().__init__(name="main_agent")
+        self._runs = runs
 
     async def before_agent_callback(
         self, *, agent: "BaseAgent", callback_context: "CallbackContext"
     ) -> None:
         _running_agent.set(agent.name)
+        if self._runs is not None:
+            branch = getattr(callback_context, "branch", None)
+            set_active_run(branch_run(self._runs, get_active_turn(), branch))
         return None
+
+    async def after_agent_callback(
+        self, *, agent: "BaseAgent", callback_context: "CallbackContext"
+    ) -> None:
+        self._parents_again(callback_context)
+        return None
+
+    async def on_agent_error_callback(
+        self, *, agent: "BaseAgent", callback_context: "CallbackContext", error: Exception
+    ) -> None:
+        # ADK calls it for an exception that leaves the agent, before
+        # re-raising it (a delegation's tool answers "Error running
+        # sub-agent: ..."); after_agent_callback is not called then.
+        self._parents_again(callback_context)
+
+    def _parents_again(self, callback_context: "CallbackContext") -> None:
+        """Make the run that made this agent's delegation the active one again."""
+        if self._runs is not None:
+            branch = getattr(callback_context, "branch", None)
+            set_active_run(parent_branch_run(self._runs, get_active_turn(), branch))
 
 
 class NoAfterTurnCompactionRunner(Runner):
