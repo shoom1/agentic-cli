@@ -401,7 +401,8 @@ What it supports:
   12% of that word for word. A model whose window is unknown counts as
   128,000 tokens. A request the provider refuses as too long is summarized
   and retried once; a conversation that still does not fit ends the turn
-  with one error naming the model. The checkpoint keeps every message.
+  with one error naming the model (a sub-agent's fails only its `task`
+  call: its parent reads why). The checkpoint keeps every message.
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
@@ -420,8 +421,6 @@ How it differs from ADK:
   automatic and bills no storage.
 - **No code-execution events**: `CODE_EXECUTION`, `EXECUTABLE_CODE` and
   `FILE_DATA` come from Gemini's code execution on ADK.
-- **A sub-agent's failure ends the turn** with one error; on ADK the
-  coordinator carries on, and the user gets a warning.
 - **Its own sessions**: neither backend reads the other's, so a
   conversation stays on the backend it began on; `/resume`, `--continue`
   and `--resume` open it there, whichever backend runs. `orchestrator` is the
@@ -1345,11 +1344,12 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   what its fresh parent was kept from. A sub-agent on ADK cannot share its
   name with one of its parent's tools. Each raises `AgentGraphError` at
   startup.
-- **A sub-agent's failure.** On Deep Agents, a sub-agent whose model call
-  fails ends the turn with one error naming it. On ADK the turn goes on:
-  ADK hands the parent "Error running sub-agent: …", and the user sees a
-  warning, `<agent> failed: <the provider's reason>`, while the parent
-  answers.
+- **A sub-agent's failure.** A sub-agent whose model call fails does not
+  end the turn, on either backend: its parent is handed "Error running
+  sub-agent: …" as the call's error result, the user sees a warning,
+  `<agent> failed: <the provider's reason>`, and the parent answers. Only
+  the main agent's own failure ends the turn. (On ADK, ADK's delegation
+  tool words the parent's reason "Dynamic node <agent> failed".)
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of

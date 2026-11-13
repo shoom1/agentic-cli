@@ -917,7 +917,8 @@ the start of the entry's title.
     longer sent three times first); a
     conversation that still does not fit ends the turn with one `ERROR`,
     `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
-    <model>'s context window. Use /compact or /new.". The checkpoint
+    <model>'s context window. Use /compact or /new." (a sub-agent's fails
+    only its `task` call, whose parent reads why). The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals
@@ -1863,10 +1864,13 @@ the start of the entry's title.
   prompt is not taken as the conversation's context, and fact extraction
   (`recent_messages`) reads only the user's and the main agent's text, not
   a job notice. A
-  sub-agent whose model call fails does not end an ADK turn (ADK hands the
-  coordinator "Error running sub-agent: …"), so the user gets a recoverable
-  `ERROR`, `<agent> failed: <the provider's reason>`, with its error code;
-  on Deep Agents it ends the turn with one `ERROR`.
+  sub-agent whose model call or run fails does not end the turn, on either
+  backend: its coordinator is handed "Error running sub-agent: …" as the
+  call's error result (ADK's delegation tool's words; on ADK its reason is
+  ADK's own, "Dynamic node <agent> failed"), and the user gets
+  a recoverable `ERROR`, `<agent> failed: <the provider's reason>`, with its
+  error code, while the coordinator answers. Only the main agent's own
+  failure ends the turn; cancelling still stops it all.
 - **Models are named by reference or role, and resolved once, at startup.**
   `default_model`, `AgentConfig.model`, `Manager(model=...)` and
   `reinitialize(model=...)` take a `provider:model` reference or a bare model
