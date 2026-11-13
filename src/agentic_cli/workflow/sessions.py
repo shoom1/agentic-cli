@@ -173,12 +173,15 @@ def close_turn_scope(token: Token) -> None:
     """End the span ``token`` began, and restore the one before it.
 
     Every context copied from inside the span (a task the turn started that
-    outlives it) now sees it ended: :func:`turn_has_ended`.
+    outlives it) now sees it ended: :func:`turn_has_ended`. A token from
+    another context (a turn's block left there, as when the GC finalizes a
+    turn's generator while another turn runs) raises ``ValueError`` before
+    anything is ended, so this context's span stays open.
     """
     scope = _turn_scope.get()
+    _turn_scope.reset(token)
     if scope is not None:
         scope.ended = True
-    _turn_scope.reset(token)
 
 
 def turn_has_ended() -> bool:

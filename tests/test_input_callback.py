@@ -6,7 +6,7 @@ whether ``request_user_input`` reaches the callback — rather than the storage.
 """
 
 import asyncio
-from contextvars import ContextVar
+from contextvars import Context, ContextVar
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -114,3 +114,18 @@ class TestOnlyInsideItsTurn:
 
         assert await manager.request_user_input(_request()) == "answer"  # and between turns
         assert callback.await_count == 3
+
+    async def test_a_span_closed_from_another_context_ends_nothing_here(self):
+        """A turn left in another context (a ``process()`` generator the GC
+        finalizes while another turn runs) cannot end this turn's span."""
+        manager = _manager()
+        manager.set_input_callback(AsyncMock(return_value="answer"))
+        elsewhere = Context().run(open_turn_scope)
+
+        span = open_turn_scope()
+        try:
+            with pytest.raises(ValueError):
+                close_turn_scope(elsewhere)
+            assert await manager.request_user_input(_request()) == "answer"
+        finally:
+            close_turn_scope(span)
