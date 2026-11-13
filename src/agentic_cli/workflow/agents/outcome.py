@@ -17,7 +17,7 @@ it with its outcome, and the event processors end the run by that mark:
   it (``cut_off_warning``).
 
 The root's own answers are not touched: they reach the user as their model
-gave them, as before.
+gave them.
 """
 
 from __future__ import annotations
@@ -37,6 +37,12 @@ REFUSAL_ADVICE = (
 )
 #: A refused run's ``error``, one line.
 REFUSAL_ERROR = "a model refused the request"
+
+#: How ADK's OpenAI Responses adapter words a refusal: a text part starting
+#: with this (``google.adk.integrations.openai._openai_responses_llm._REFUSAL_PREFIX``,
+#: private ADK; a test pins it). ADK's ``OpenAICompatibleLlm`` words a Chat
+#: Completions refusal the same way, and ``SubAgentOutcomePlugin`` reads both.
+OPENAI_REFUSAL_PREFIX = "OpenAI refusal: "
 
 #: What follows the text of an answer cut at the output limit.
 CUT_OFF_NOTE = "[cut off at the output limit]"

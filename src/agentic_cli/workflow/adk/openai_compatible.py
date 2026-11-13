@@ -66,7 +66,7 @@ from google.genai import types
 from pydantic import Field, PrivateAttr
 
 from agentic_cli.logging import Loggers
-from agentic_cli.workflow.adk.subagent_outcome_plugin import OPENAI_REFUSAL_PREFIX
+from agentic_cli.workflow.agents.outcome import OPENAI_REFUSAL_PREFIX
 
 logger = Loggers.workflow()
 

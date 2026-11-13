@@ -829,12 +829,10 @@ def marked_answer(message: AIMessage) -> AIMessage:
         metadata.get("stop_reason")
         or metadata.get("finish_reason")
         or (metadata.get("incomplete_details") or {}).get("reason")
-        # A blocked prompt has no answer, so no finish reason: streamed,
+        # A blocked prompt has no answer, so no finish reason:
         # langchain-google-genai gives an empty answer whose metadata holds
-        # only the prompt's feedback. Unstreamed (Deep Agents' model calls
-        # are not streamed) it gives a bare AIMessage("") with no metadata at
-        # all: nothing tells that from an empty answer, so it passes as it
-        # is, and the parent reads an empty result.
+        # the prompt's feedback (unstreamed, langchain-core copies it there
+        # from the call's llm_output).
         or (metadata.get("prompt_feedback") or {}).get("block_reason")
     )
     outcome = REFUSED if refusal is not None else outcome_of(reason)

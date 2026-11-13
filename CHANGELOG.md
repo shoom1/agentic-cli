@@ -2712,11 +2712,9 @@ step; each entry says what to use instead.
   `content_filter`) and the text `OpenAI refusal: <text>` (the Responses
   API's refusal). On Deep Agents, `SubAgentOutcomeMiddleware` (on every
   sub-agent's model side) reads the answer's `stop_reason`, `finish_reason`,
-  `incomplete_details.reason` or a streamed Gemini prompt block's
+  `incomplete_details.reason` or a Gemini prompt block's
   `prompt_feedback.block_reason`, and a refusal it holds (a refusal block,
-  `additional_kwargs["refusal"]`); a Gemini prompt block unstreamed, as Deep
-  Agents' model calls are, is an empty answer with nothing to read, which
-  still reaches the parent empty. `OpenAICompatibleLlm` (OpenRouter and
+  `additional_kwargs["refusal"]`). `OpenAICompatibleLlm` (OpenRouter and
   OpenAI-compatible servers on ADK) dropped a Chat Completions `refusal`; it
   now gives it as the Responses adapter does, `OpenAI refusal: <text>`, so
   a root on such a server replies with that text where it failed with no

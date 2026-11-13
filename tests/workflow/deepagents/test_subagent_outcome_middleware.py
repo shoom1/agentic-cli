@@ -13,6 +13,8 @@ suite.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 pytest.importorskip("deepagents")
@@ -100,13 +102,30 @@ class TestMarkedAnswer:
         assert marked.text == refusal_notice()
         assert answer_outcome(marked) == REFUSED
 
-    def test_an_unstreamed_gemini_prompt_block_has_nothing_to_read(self):
-        """Unstreamed, langchain-google-genai gives a blocked prompt a bare
-        ``AIMessage("")``: nothing tells it from an empty answer, so it
-        passes as it is (Deep Agents' model calls are not streamed)."""
-        blocked = AIMessage("")
+    async def test_an_unstreamed_gemini_prompt_block_becomes_the_notice(self):
+        """Unstreamed, as Deep Agents calls its models, langchain-google-genai
+        gives a blocked prompt an empty answer and the prompt's feedback as
+        the call's ``llm_output``, which langchain-core puts in the answer's
+        metadata."""
+        genai = pytest.importorskip("langchain_google_genai")
+        blocked = types.GenerateContentResponse(
+            prompt_feedback=types.GenerateContentResponsePromptFeedback(
+                block_reason=types.BlockedReason.PROHIBITED_CONTENT,
+                block_reason_message="Blocked.",
+            ),
+        )
+        model = genai.ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key="a-test-key")
 
-        assert marked_answer(blocked) is blocked
+        async def generate_content(**request):
+            return blocked
+
+        with mock.patch.object(model.async_client.models, "generate_content", generate_content):
+            answer = await model.ainvoke("Find X.")
+
+        assert (answer.content, answer.tool_calls) == ("", [])
+        marked = marked_answer(answer)
+        assert marked.text == refusal_notice()
+        assert answer_outcome(marked) == REFUSED
 
     def test_a_standard_refusal_block_gives_its_category(self):
         refused = AIMessage(content=[{

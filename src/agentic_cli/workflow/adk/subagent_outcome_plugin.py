@@ -44,6 +44,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from agentic_cli.workflow.agents.outcome import (
+    OPENAI_REFUSAL_PREFIX,
     REFUSED,
     cut_off,
     outcome_of,
@@ -58,11 +59,6 @@ if TYPE_CHECKING:
 #: The key a rewritten answer carries its outcome under, in its
 #: ``custom_metadata`` (and so its event's), beside the provider key.
 OUTCOME_KEY = "agentic_cli_outcome"
-
-#: How ADK's OpenAI Responses adapter words a refusal: a text part starting
-#: with this (``google.adk.integrations.openai._openai_responses_llm._REFUSAL_PREFIX``,
-#: private ADK; a contract test pins it).
-OPENAI_REFUSAL_PREFIX = "OpenAI refusal: "
 
 
 class SubAgentOutcomePlugin(BasePlugin):

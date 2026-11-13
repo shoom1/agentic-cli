@@ -23,12 +23,16 @@ from google.genai import types  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.subagent_outcome_plugin import (  # noqa: E402
-    OPENAI_REFUSAL_PREFIX,
     OUTCOME_KEY,
     SubAgentOutcomePlugin,
     mark_outcome,
 )
-from agentic_cli.workflow.agents.outcome import CUT, REFUSED, refusal_notice  # noqa: E402
+from agentic_cli.workflow.agents.outcome import (  # noqa: E402
+    CUT,
+    OPENAI_REFUSAL_PREFIX,
+    REFUSED,
+    refusal_notice,
+)
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
