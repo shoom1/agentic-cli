@@ -67,6 +67,7 @@ from agentic_cli.paths import resolve_path
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.context import is_context_overflow
+from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
@@ -74,8 +75,11 @@ from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
+    get_active_run,
     get_active_turn,
+    reset_active_run,
     reset_active_tool_call,
+    set_active_run,
     set_active_tool_call,
 )
 from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
@@ -590,17 +594,35 @@ class ActiveToolCallMiddleware(AgentMiddleware):
     id from a ``tool_context`` that is None here. Each call runs in its own
     task, so parallel calls never see each other's; a sub-agent's call runs
     inside its coordinator's ``task`` call and restores it when done.
+
+    Given the manager's runs, a ``task`` call is also the run of the
+    sub-agent it starts (``workflow.sessions.set_active_run``, named by
+    ``AgentRuns.run_for`` under the run it is made in): the whole sub-agent
+    runs inside the call, so its model calls, tool calls, permission checks
+    and questions see it.
     """
+
+    def __init__(self, runs: AgentRuns | None = None) -> None:
+        super().__init__()
+        self._runs = runs
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
     ) -> _ToolResult:
-        token = set_active_tool_call(_call_ref(request.tool_call))
+        call = request.tool_call
+        token = set_active_tool_call(_call_ref(call))
+        run_token = None
+        subagent = (call.get("args") or {}).get("subagent_type")
+        if self._runs is not None and call["name"] == TASK_TOOL and isinstance(subagent, str):
+            run = self._runs.run_for(get_active_turn(), get_active_run(), call["id"], subagent)
+            run_token = set_active_run(run)
         try:
             return await handler(request)
         finally:
+            if run_token is not None:
+                reset_active_run(run_token)
             reset_active_tool_call(token)
 
 

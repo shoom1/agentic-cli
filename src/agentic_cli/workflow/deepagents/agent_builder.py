@@ -83,6 +83,7 @@ from agentic_cli.workflow.deepagents.middleware import (
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
 from agentic_cli.workflow.context import ContextBudget
+from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.outside_content import OutsideContentMarks
 from agentic_cli.workflow.deepagents.summarization import (
@@ -124,6 +125,7 @@ def build_agent_tree(
     memory_index: Callable[[], str] | None = None,
     memory_index_cached: Callable[[], str] | None = None,
     memory_index_forget: Callable[[], None] | None = None,
+    runs: AgentRuns | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, bottom-up, and return the root.
 
@@ -173,6 +175,9 @@ def build_agent_tree(
         memory_index_forget: Drops the conversation's index snapshot: the
             root's summarization calls it when it writes a summary, before
             the request that carries the summary is sent.
+        runs: The manager's sub-agent runs: every agent's
+            ``ActiveToolCallMiddleware`` makes a ``task`` call the run of the
+            sub-agent it starts.
 
     Raises:
         AgentGraphError: A coordinator's own tools include one named
@@ -212,7 +217,8 @@ def build_agent_tree(
                 ),
                 model_side=model_side,
                 tool_side=_tool_side(
-                    config, settings, bound=bound, open_calls=open_calls, marks=marks
+                    config, settings, bound=bound, open_calls=open_calls, marks=marks,
+                    runs=runs,
                 ),
             ),
             state_schema=AgentCliState,
@@ -260,6 +266,7 @@ def _tool_side(
     bound: Callable[[object], ToolDefinition | None],
     open_calls: OpenCalls | None = None,
     marks: OutsideContentMarks | None = None,
+    runs: AgentRuns | None = None,
 ) -> list["AgentMiddleware"]:
     """What runs each of the agent's tool calls, outermost first."""
     stack: list[AgentMiddleware] = [
@@ -273,7 +280,7 @@ def _tool_side(
                 settings.tool_result_max_chars, tool_output_dir(settings.app_name)
             )
         )
-    stack += [ToolCallErrorMiddleware(), ActiveToolCallMiddleware()]
+    stack += [ToolCallErrorMiddleware(), ActiveToolCallMiddleware(runs)]
     return stack
 
 

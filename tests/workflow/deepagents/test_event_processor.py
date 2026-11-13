@@ -296,11 +296,12 @@ class TestToolResult:
             AIMessage("", tool_calls=[_call("task", {"description": "d", "subagent_type": "researcher"}, "c1")])
         ))
 
-        (event,) = processor.process(
+        event, ended = processor.process(
             (), "updates", _tools_update(ToolMessage("Done.", tool_call_id="c1"))
         )
 
         assert event.metadata["tool_name"] == "task"
+        assert ended.type is EventType.AGENT_RUN
 
     def test_a_state_tools_command_is_its_tool_message(self):
         """``save_plan`` returns a ``Command``; the update carries its state
@@ -758,12 +759,14 @@ class TestARealStream:
             ("tool_result", "coordinator", "save_plan"),
             ("text", "coordinator", "Delegating."),
             ("tool_call", "coordinator", "task"),
+            ("agent_run", "researcher", "researcher-1 started"),
             ("thinking", "researcher", "Plan first."),
             ("tool_call", "researcher", "save_tasks"),
             ("tool_result", "researcher", "save_tasks"),
             ("task_progress", "researcher", progress["display"]),
             ("text", "researcher", "It is 42."),
             ("tool_result", "coordinator", "task"),
+            ("agent_run", "researcher", "researcher-1 completed"),
             ("text", "coordinator", "X is 42."),
         ]
         assert [(e.metadata["agent"], e.metadata.get("subagent")) for e in events
