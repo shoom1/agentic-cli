@@ -635,7 +635,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             tool_output_dir(self._settings.app_name),
             skip_agents=own_after_tool_agents(root),
         )
-        plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
+        plugins.append(InterruptedCallsPlugin(self._open_calls, cap, runs=self.agent_runs))
         plugins.append(cap)
         if self._memory_index_wanted(root.name):
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
@@ -1231,8 +1231,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # Every call of the turn is answered now, sealed or returned.
                 # One a failure left open is answered at the next turn
                 # (left_open) as interrupted: the state it changed, which
-                # ADK stores with its result, is gone.
-                self._open_calls.clear(self.session_ref(session_id, user_id))
+                # ADK stores with its result, is gone. One a stop left open
+                # (ADK took it for answered) is answered there as the user's.
+                ref = self.session_ref(session_id, user_id)
+                self._open_calls.clear(ref)
+                if aborted.is_set():
+                    self._open_calls.cancelled(ref)
 
         # Drain any remaining LLM events after processing completes
         if self._llm_logging_plugin:

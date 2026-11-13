@@ -35,6 +35,7 @@ from agentic_cli.workflow.agents import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, UserInputRequest, WorkflowEvent
+from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER, NOT_RUN
 from agentic_cli.workflow.permissions import EXEMPT
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE
 from agentic_cli.workflow.sessions import (
@@ -191,6 +192,15 @@ def _claude_results(body: dict[str, Any]) -> dict[str, str]:
     return results
 
 
+def _claude_result_ids(body: dict[str, Any]) -> list[str]:
+    """The call ids of the tool results a Claude request holds, one per result, in order."""
+    return [
+        block["tool_use_id"]
+        for message in body["messages"] if not isinstance(message["content"], str)
+        for block in message["content"] if block.get("type") == "tool_result"
+    ]
+
+
 # -- the crew: a team's manager on one backend -----------------------------------
 
 
@@ -203,6 +213,7 @@ class Crew:
     conversation: SessionRef
     _results_read: Callable[[str, int], dict[str, str]]
     _requests: Callable[[str], int]
+    _result_ids: Callable[[str, int], list[str]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -235,6 +246,12 @@ class Crew:
         """How many model requests ``agent`` made."""
         return self._requests(agent)
 
+    def result_ids(self, agent: str, call: int = -1) -> list[str]:
+        """The call ids of the tool results ``agent``'s model request ``call``
+        held, one per result, in order: a call answered twice is there twice."""
+        assert self._result_ids is not None
+        return self._result_ids(agent, call)
+
 
 def _settings() -> BaseSettings:
     return BaseSettings(session_store="memory", default_model="claude-sonnet-4-6")
@@ -253,7 +270,12 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
     def requests(name: str) -> int:
         return sum(1 for sent, _ in claude.sent if sent == name)
 
-    return Crew("adk", manager, manager.session_ref(SESSION, USER), results_read, requests)
+    def result_ids(name: str, call: int) -> list[str]:
+        return _claude_result_ids([body for sent, body in claude.sent if sent == name][call])
+
+    return Crew(
+        "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids
+    )
 
 
 def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch) -> Crew:
@@ -278,7 +300,17 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
     def requests(name: str) -> int:
         return len(models.chats[name].requests)
 
-    return Crew("deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests)
+    def result_ids(name: str, call: int) -> list[str]:
+        return [
+            message.tool_call_id
+            for message in models.chats[name].conversation(call)
+            if isinstance(message, ToolMessage)
+        ]
+
+    return Crew(
+        "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
+        result_ids,
+    )
 
 
 async def until(condition: Callable[[], bool], *, within: float = 10.0) -> None:
@@ -577,3 +609,111 @@ class TestRunIdentity:
         (record,) = crew.records()
         assert (record.ref, record.status) == (RESEARCHER, RUN_INTERRUPTED)
         assert record.ended is not None
+
+
+# -- each call is its own run's: a call of the same id never stands for another's ---------
+
+
+class TestACallIsItsOwnRuns:
+    """A provider that numbers its call ids per agent (``call_0``, ...) gives a
+    sub-agent's call the id of its parent's delegation: neither call ever
+    stands for the other, while the turn runs or after Ctrl+C."""
+
+    async def test_a_delegation_ends_at_its_own_result(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "c1", q="X")), says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        results = [e for e in events
+                   if e.type is EventType.TOOL_RESULT and e.metadata["tool_call_id"] == "c1"]
+        assert [e.run for e in results] == [RESEARCHER, COORDINATOR]
+        assert results[0].metadata["tool_name"] == "contract_lookup"
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert (ended.run, ended.metadata["result"]) == (RESEARCHER, "X is 42.")
+        assert events.index(ended) == events.index(results[1]) + 1
+        assert crew.results_read("coordinator")["c1"] == "X is 42."
+
+    async def test_after_ctrl_c_a_delegation_is_answered_as_interrupted(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Starting over.")],
+            researcher=[calls(use("contract_lookup", "c1", q="X")),
+                        calls(use("contract_block", "c2"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Never mind.")
+
+        answered = crew.results_read("coordinator")["c1"]
+        assert INTERRUPTED_BY_USER in answered
+        assert "42" not in answered
+        (record,) = crew.records()
+        assert (record.ref, record.status, record.result) == (RESEARCHER, RUN_INTERRUPTED, "")
+
+    async def test_after_ctrl_c_at_a_sub_agents_prompt_its_parents_call_was_not_asking(
+        self, make_crew
+    ):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Write a note.", "c1")),
+                         says("Starting over.")],
+            researcher=[calls(use("write_file", "c1", path="note.txt", content="hi"))],
+        )
+        asking = asyncio.Event()
+
+        async def never_answered(request: UserInputRequest) -> str:
+            asking.set()
+            await asyncio.Event().wait()
+            return DENY_CHOICE
+
+        crew.answer_with(never_answered)
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(asking.wait(), 10)
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Never mind.")
+
+        answered = crew.results_read("coordinator")["c1"]
+        assert INTERRUPTED_BY_USER in answered
+        assert NOT_RUN not in answered
+
+    async def test_after_ctrl_c_two_levels_down_every_open_run_is_interrupted_and_answered_once(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [
+                agent("coordinator", sub_agents=("middle",)),
+                agent("middle", sub_agents=("leaf",)),
+                agent("leaf", tools=(contract_lookup, contract_block)),
+            ],
+            coordinator=[calls(delegate("middle", "Plan X.", "c1")), says("Starting over.")],
+            middle=[calls(delegate("leaf", "Look X up.", "c1"))],
+            leaf=[calls(use("contract_lookup", "c1", q="X")), calls(use("contract_block", "c2"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Never mind.")
+
+        assert [(r.ref.run, r.status) for r in crew.records()] == [
+            ("middle-1#1", RUN_INTERRUPTED), ("leaf-1#1", RUN_INTERRUPTED),
+        ]
+        assert crew.result_ids("coordinator") == ["c1"]
+        answered = crew.results_read("coordinator")["c1"]
+        assert INTERRUPTED_BY_USER in answered and "42" not in answered
+        for name in ("coordinator", "middle", "leaf"):
+            for call in range(crew.requests(name)):
+                ids = crew.result_ids(name, call)
+                assert len(ids) == len(set(ids)), (name, call, ids)
