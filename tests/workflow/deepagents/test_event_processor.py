@@ -552,6 +552,65 @@ class TestError:
         assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
         assert event.metadata["agent"] == "coordinator"
 
+    def test_a_failure_its_task_call_answered_is_not_the_turns(self):
+        """A sub-agent whose model failed answers its ``task`` call with the
+        error, and its coordinator goes on: a later failure is the coordinator's."""
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        processor.process((SUB,), "tasks", {"id": "m1", "name": "model",
+                                            "error": RuntimeError("overloaded"),
+                                            "interrupts": [], "result": None})
+        processor.process((), "updates", _tools_update(ToolMessage(
+            "Error running sub-agent: overloaded", tool_call_id="c-" + SUB, name="task",
+            status="error",
+        )))
+
+        event = processor.turn_failed(TimeoutError())
+
+        assert event.metadata["agent"] == "coordinator"
+
+    def test_a_nested_failure_answered_leaves_its_parents_own(self):
+        """The leaf fails and its task call is answered; then its parent fails,
+        unanswered: the turn's failure is the parent's."""
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        _delegated(processor, (SUB,), NESTED, "leaf")
+        error = RuntimeError("overloaded")
+        processor.process((SUB, NESTED), "tasks", {"id": "m2", "name": "model", "error": error,
+                                                   "interrupts": [], "result": None})
+        processor.process((SUB,), "updates", _tools_update(ToolMessage(
+            "Error running sub-agent: overloaded", tool_call_id="c-" + NESTED, name="task",
+            status="error",
+        )))
+        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
+                                            "interrupts": [], "result": None})
+
+        event = processor.turn_failed(error)
+
+        assert event.metadata["agent"] == "researcher"
+
+    def test_a_sub_agents_own_call_of_the_same_id_answers_no_delegation(self):
+        """Call ids are only an agent's own (a provider that numbers them
+        gives a sub-agent's first call its parent's ``task`` call's): the
+        sub-agent's own result is not its delegation's, which still answers
+        the failure inside it when its own result comes."""
+        processor = _processor()
+        _delegated(processor, (), SUB, "researcher")
+        processor.process((SUB,), "updates", _tools_update(ToolMessage(
+            '{"success": true}', tool_call_id="c-" + SUB, name="contract_lookup",
+        )))
+        processor.process((SUB,), "tasks", {"id": "m1", "name": "model",
+                                            "error": RuntimeError("overloaded"),
+                                            "interrupts": [], "result": None})
+        processor.process((), "updates", _tools_update(ToolMessage(
+            "Error running sub-agent: overloaded", tool_call_id="c-" + SUB, name="task",
+            status="error",
+        )))
+
+        event = processor.turn_failed(TimeoutError())
+
+        assert event.metadata["agent"] == "coordinator"
+
 
 class TestAttribution:
     def test_a_sub_agents_events_are_its_own(self):

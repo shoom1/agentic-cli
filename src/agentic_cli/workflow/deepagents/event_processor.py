@@ -144,7 +144,12 @@ class DeepAgentsEventProcessor:
         # Command carried may have no name of its own.
         self._call_names: dict[tuple[str | None, str], str] = {}
         self._reported_tasks: list[dict] | None = None
-        self._failed_agent: str | None = None
+        # The namespaces whose tasks failed, in order; a delegation that
+        # answered its call takes its own (and those under it) away.
+        self._failures: list[Namespace] = []
+        # (the run that made it, call id) -> the namespace a delegation's
+        # sub-agent runs at, until its result.
+        self._spaces: dict[tuple[str | None, str], Namespace] = {}
         self._runs = runs if runs is not None else AgentRuns()
         # Namespace -> the run whose graph runs there; the root's at ().
         self._refs: dict[Namespace, RunRef] = {(): root_run(root)}
@@ -196,12 +201,14 @@ class DeepAgentsEventProcessor:
 
         ``WorkflowEvent.turn_failed``'s (the base ``process()``'s contract),
         attributed to the agent whose task failed first, the innermost: a
-        sub-agent's failure fails its coordinator's ``task`` call after it.
+        sub-agent's failure that escaped its coordinator's ``task`` call fails
+        that call after it. One the call answered (``Error running
+        sub-agent: …``, ``ToolCallErrorMiddleware``) is no longer the turn's.
         A context overflow (a provider's, or Deep Agents' own when a summary
         still does not fit) is told in one sentence naming that agent's
         model, with ``error_code`` ``CONTEXT_OVERFLOW``, as on ADK.
         """
-        agent = self._failed_agent or self._root
+        agent = self.agent(self._failures[0]) if self._failures else self._root
         if is_context_overflow(error):
             model = self._agent_models.get(agent) or self._agent_models.get(self._root)
             event = WorkflowEvent.turn_failed(
@@ -216,7 +223,7 @@ class DeepAgentsEventProcessor:
     # -- the tasks mode --------------------------------------------------------
 
     def _track(self, namespace: Namespace, payload: Any) -> None:
-        """Learn which agent runs where, and which task failed first."""
+        """Learn which agent runs where, and which tasks failed."""
         if not isinstance(payload, dict):
             return
         if "input" in payload:  # a task starts
@@ -226,11 +233,21 @@ class DeepAgentsEventProcessor:
                 where = (*namespace, f"tools:{payload['id']}")
                 self._agents[where] = subagent
                 if call.get("id"):
+                    caller = self.run(namespace)
                     self._refs[where] = self._runs.run_for(
-                        get_active_turn(), self.run(namespace), call["id"], subagent
+                        get_active_turn(), caller, call["id"], subagent
                     )
-        elif payload.get("error") is not None and self._failed_agent is None:
-            self._failed_agent = self.agent(namespace)
+                    self._spaces[(caller.run, call["id"])] = where
+        elif payload.get("error") is not None:
+            self._failures.append(namespace)
+
+    def _answered(self, message: ToolMessage, run: RunRef) -> None:
+        """``run``'s delegation answered its call: what failed inside it is not the turn's."""
+        where = self._spaces.pop((run.run, message.tool_call_id), None)
+        if where is not None:
+            self._failures = [
+                failed for failed in self._failures if failed[: len(where)] != where
+            ]
 
     # -- node outputs ----------------------------------------------------------
 
@@ -271,6 +288,7 @@ class DeepAgentsEventProcessor:
         events: list[WorkflowEvent] = []
         for message in values.get("messages") or ():
             if isinstance(message, ToolMessage):
+                self._answered(message, run)
                 events.append(self._tool_result(message, run))
                 ended = self._ended(message, run)
                 if ended is not None:
