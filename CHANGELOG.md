@@ -2693,6 +2693,21 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A sub-agent's refused or cut answer is said so, on both backends.** A
+  sub-agent whose model refused (Claude's `refusal`, OpenAI's
+  `content_filter` or refusal, a Gemini block) reached its parent as an
+  empty result with no warning (ADK; Deep Agents before 0.7.34), and an
+  answer cut at the output limit passed as complete. Now the parent reads
+  Deep Agents 0.7.34's notice ("The subagent stopped because a model refused
+  the request. … rephrase it or continue without it.") whichever deepagents
+  is installed, and the run ends `refused`; a cut answer keeps its text,
+  followed by `[cut off at the output limit]`, its run ends `completed` and
+  `partial`, and one recoverable warning names it ("researcher-1's answer
+  was cut off at the output limit"). ADK's `SubAgentOutcomePlugin` (in the
+  chain of a tree that delegates) and Deep Agents'
+  `SubAgentOutcomeMiddleware` (on every sub-agent's model side) do it, by
+  `workflow/agents/outcome.py`. The root's own refusal or cut is the turn's
+  failure, as before.
 - **After Ctrl+C, a sub-agent's call never answers its parent's call of the
   same id, on both backends.** A provider that numbers its tool call ids per
   agent (`call_0`, ...) gives a sub-agent's first call the id of the
