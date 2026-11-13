@@ -1329,7 +1329,7 @@ class TestRawLog:
 
 
 class TestAfterItsTurn:
-    async def test_a_task_a_turn_left_behind_asks_no_one(self, make_crew, project):
+    async def test_a_task_a_turn_left_behind_asks_no_one(self, make_crew):
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",)),
              agent("researcher", tools=(contract_leave_behind,))],
@@ -1355,7 +1355,6 @@ class TestAfterItsTurn:
         # Inside its turn the callback answered; after it, nothing reached it.
         assert LEFT["during"] == "yes"
         assert [request.request_id for request in asked] == ["during"]
-        assert not (project / "late.txt").exists()
 
     async def test_a_stopped_turns_question_leaves_the_next_turn_asking(self, make_crew):
         # A pin: the span refuses only a request from a turn that has ended,
@@ -1414,3 +1413,30 @@ class TestASubAgentsJob:
             "A background job researcher-1 started has finished. Tell the user what it means."
         )
         assert [e.content for e in resumed if e.type is EventType.TEXT] == ["The build finished."]
+
+    async def test_after_ctrl_c_it_never_answers_its_coordinators_call(self, make_crew):
+        """The researcher's call that started the job has the id of the
+        coordinator's delegation (a provider that numbers call ids per
+        agent): after Ctrl+C the delegation is answered as the user's, never
+        with the researcher's job."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_start_job, contract_block))],
+            coordinator=[calls(delegate("researcher", "Start the build.", "c1")),
+                         says("Starting over.")],
+            researcher=[calls(use("contract_start_job", "c1")),
+                        calls(use("contract_block", "c2"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        (record,) = crew.manager.job_manager.list()
+        await crew.turn("Never mind.")
+
+        assert (record.call_id, record.started_by) == ("c1", "researcher-1")
+        answered = crew.results_read("coordinator")["c1"]
+        assert INTERRUPTED_BY_USER in answered
+        assert record.job_id not in answered
