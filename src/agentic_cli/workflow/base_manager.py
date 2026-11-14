@@ -521,8 +521,8 @@ class BaseWorkflowManager(ABC):
         Named by the backends' event processors and recorded from their
         ``AGENT_RUN`` events (``workflow/agents/runs.py``): ``records(ref)``
         lists a conversation's in the order they started; a turn ends the
-        runs it leaves open (``_turn``). In memory, for the process; made on
-        first use.
+        runs it leaves open (``_turn``). In memory, for this manager's life
+        (a backend switch builds a new manager); made on first use.
         """
         runs = self.__dict__.get("_agent_runs")
         if runs is None:
