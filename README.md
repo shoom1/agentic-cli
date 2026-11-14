@@ -2142,6 +2142,7 @@ Built-in slash commands available in all apps:
 | `/models` | | The list the model pickers offer, each model's facts and why an entry is left out, and the providers in use (`/models <text>` searches the full listings, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
+| `/agents` | | This conversation's sub-agent runs, each under the run that started it: status, title, tokens in/out, time (`/agents <id>`: one instance or run, the first lines of its result, its error and its tokens by model) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep); on the memory store it says none are kept |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |

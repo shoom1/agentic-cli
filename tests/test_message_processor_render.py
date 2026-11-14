@@ -24,7 +24,7 @@ import pytest
 
 from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.workflow.events import WorkflowEvent
-from agentic_cli.workflow.sessions import RunRef
+from agentic_cli.workflow.sessions import RunRef, root_run
 from tests.event_replay import RecordingSession, ReplayController, ReplayWorkflow
 
 
@@ -448,8 +448,8 @@ class TestMemoryWriteLine:
 
 class TestAgentRunEvents:
     async def test_the_cli_renders_a_turn_with_them_as_without(self):
-        """The CLI renders nothing of ``AGENT_RUN``: a turn that holds it
-        renders as one that does not."""
+        """``AGENT_RUN`` feeds the manager's records, which ``/agents`` reads:
+        a turn renders nothing of it, and one that holds it as one that does not."""
         child = RunRef(
             agent="researcher", instance="researcher-1", run="researcher-1#1",
             parent_run=None, depth=1,
@@ -465,3 +465,110 @@ class TestAgentRunEvents:
         seen, _, _ = await _render(with_runs)
 
         assert seen.calls == plain.calls
+
+
+# --- the agent at work ------------------------------------------------------------
+
+
+RESEARCHER_1 = RunRef("researcher", "researcher-1", "researcher-1#1", None, 1)
+RESEARCHER_2 = RunRef("researcher", "researcher-2", "researcher-2#1", None, 1)
+
+
+def _by(run: RunRef | None, event: WorkflowEvent) -> WorkflowEvent:
+    """``event``, as the run ``run`` wrote it (``WorkflowEvent.run``)."""
+    event.run = run
+    return event
+
+
+class _Watched(RecordingSession):
+    """A recording session that keeps the events box's status callback."""
+
+    status = None
+
+    def start_thinking(self, content_callback=None, **kwargs):
+        if content_callback is not None and kwargs.get("title") is None:
+            self.status = content_callback
+        return super().start_thinking(content_callback, **kwargs)
+
+
+class _Watching(ReplayWorkflow):
+    """Replays events, reading the events box's line once each is handled
+    (the consumer handles an event before it asks for the next)."""
+
+    def __init__(self, events: list[WorkflowEvent], ui: _Watched) -> None:
+        super().__init__(events)
+        self._ui = ui
+        self.lines: list[str] = []
+
+    async def process(self, message: str, user_id: str, session_id: str | None = None):
+        for event in self._events:
+            yield event
+            self.lines.append(self._ui.status())
+
+
+async def _watch(events: list[WorkflowEvent]) -> tuple[_Watched, list[str]]:
+    """Render ``events``; the events box's line after each, and the session."""
+    ui = _Watched()
+    workflow = _Watching(events, ui)
+    await MessageProcessor().process(
+        message="hi", workflow_controller=ReplayController(workflow), ui=ui, settings=_settings(),
+    )
+    return ui, workflow.lines
+
+
+class TestTheAgentAtWork:
+    """During a turn each line of the events box names the sub-agent run at
+    work (``researcher-2 › Calling: web_fetch``), as its tool results in the
+    transcript do; the main agent's stay as they are."""
+
+    async def test_each_line_names_the_sub_agent_run_whose_work_it_is(self):
+        root = root_run("coordinator")
+        found = WorkflowEvent.text("X is 42.\nMore of it.")
+        found.metadata.update(agent="researcher", subagent=True)
+        events = [
+            _by(root, WorkflowEvent.tool_call("web_search", {"query": "x"})),
+            _by(RESEARCHER_1, WorkflowEvent.thinking("Where is X?")),
+            _by(RESEARCHER_1, WorkflowEvent.tool_call("lookup", {"q": "x"})),
+            _by(RESEARCHER_2, WorkflowEvent.tool_call("lookup", {"q": "y"})),
+            _by(RESEARCHER_1, WorkflowEvent.tool_result("lookup", "X is 42.")),
+            _by(RESEARCHER_1, found),
+            _by(RESEARCHER_2, WorkflowEvent.tool_result(
+                "lookup", {"success": False, "error": "no such page"}, success=False,
+                error="no such page",
+            )),
+            _by(root, WorkflowEvent.tool_result("web_search", "3 results")),
+            # A sub-agent's usage writes no line: the root's line stays its own.
+            _by(RESEARCHER_1, WorkflowEvent.llm_usage("m", prompt_tokens=5, completion_tokens=1)),
+            _by(root, WorkflowEvent.text("Done.")),
+        ]
+
+        ui, lines = await _watch(events)
+
+        assert lines == [
+            "Calling: web_search",
+            "researcher-1 › Thinking...",
+            "researcher-1 › Calling: lookup",
+            "researcher-2 › Calling: lookup",
+            "researcher-1 › + lookup: X is 42.",
+            "researcher-1 › X is 42.",
+            "researcher-2 › x lookup: Failed: no such page",
+            "+ web_search: 3 results",
+            "+ web_search: 3 results",
+            "+ web_search: 3 results",
+        ]
+        assert ui.rich() == [
+            "[green]+[/green] researcher-1 › lookup: X is 42.",
+            "[red]x[/red] researcher-2 › lookup: Failed: no such page",
+            "[green]+[/green] web_search: 3 results",
+        ]
+        assert ui.responses() == ["Done."]
+
+    async def test_a_sub_agents_text_without_a_run_keeps_its_agents_name(self):
+        """An event that names no run (an app's own event processor) is
+        shown as before: under its agent's name."""
+        found = WorkflowEvent.text("X is 42.")
+        found.metadata.update(agent="researcher", subagent=True)
+
+        _, lines = await _watch([found])
+
+        assert lines == ["researcher: X is 42."]

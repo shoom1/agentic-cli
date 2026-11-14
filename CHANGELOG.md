@@ -559,6 +559,17 @@ the start of the entry's title.
 
 ### Added
 
+- **`/agents`: the conversation's sub-agent runs.** A table of the open
+  conversation's sub-agent runs, each followed by the runs it started:
+  instance, type, status (`running`, `completed`, `completed (partial)` for
+  an answer cut at its output limit, `refused`, `failed`, `interrupted`),
+  run, title, tokens in/out (from the usage ledger, so a run still going
+  shows what it has used so far) and time. `/agents <id>` shows one instance
+  (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
+  then each run's status and time, the first lines of its result, its error
+  and its tokens by model. During a turn each line of the events box names
+  the sub-agent run at work (`researcher-2 › Calling: web_fetch`), as its
+  tool results in the transcript do; the main agent's lines are unchanged.
 - **Token usage by run and agent, on both backends.** Every model call the
   framework makes is one `LLM_USAGE`, side calls included (`generate_simple`:
   web_fetch's and the knowledge base's summaries, `purpose` `tool`; the memory

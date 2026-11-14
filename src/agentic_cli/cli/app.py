@@ -835,6 +835,7 @@ class BaseCLIApp:
             NewCommand,
             ModelsCommand,
         )
+        from agentic_cli.cli.agents_command import AgentsCommand
         from agentic_cli.cli.memory_command import MemoryCommand
         from agentic_cli.cli.settings_command import SettingsCommand
 
@@ -844,6 +845,7 @@ class BaseCLIApp:
         self.command_registry.register(StatusCommand())
         self.command_registry.register(SandboxCommand())
         self.command_registry.register(JobsCommand())
+        self.command_registry.register(AgentsCommand())
         self.command_registry.register(ResumeSessionCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
