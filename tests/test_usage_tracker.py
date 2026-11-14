@@ -2,7 +2,8 @@
 
 import pytest
 
-from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens
+from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens, format_usage
+from agentic_cli.workflow.usage import UsageTotals
 
 
 # === format_tokens tests ===
@@ -43,6 +44,16 @@ class TestFormatTokens:
     ])
     def test_rounded_to_a_whole_number_it_shows_no_decimal(self, count, shown):
         assert format_tokens(count) == shown
+
+
+class TestFormatUsage:
+    def test_tokens_in_and_out_and_the_calls(self):
+        assert format_usage(UsageTotals(input=12_500, output=3_200, calls=4)) == (
+            "12.5k in / 3.2k out · 4 calls"
+        )
+
+    def test_one_call(self):
+        assert format_usage(UsageTotals(input=30, output=3, calls=1)) == "30 in / 3 out · 1 call"
 
 
 # === UsageTracker tests ===
@@ -220,11 +231,15 @@ class TestContextWindowTracking:
 
         assert tracker.format_status_bar() == "ctx 45k | Tokens: 45k in / 100 out"
 
-    @pytest.mark.parametrize("purpose", ["subagent", "summarization"])
-    def test_a_sub_agent_or_summary_call_never_moves_it(self, purpose):
+    @pytest.mark.parametrize(
+        "purpose", ["subagent", "summarization", "tool", "memory_extraction", "side_call"]
+    )
+    def test_a_sub_agent_summary_or_side_call_never_moves_it(self, purpose):
         """A summary's prompt is the history it condenses; a sub-agent's is its
         brief, or the whole conversation when it inherits it, and still not
-        the main agent's context. Each adds to the totals only."""
+        the main agent's context; a side call's is what it was sent (a page
+        to summarize, the messages to propose memories from). Each adds to
+        the totals only."""
         tracker = UsageTracker()
         tracker.record(MAIN)
 

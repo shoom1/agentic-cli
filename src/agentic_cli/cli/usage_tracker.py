@@ -5,18 +5,30 @@ compact formatting for status bar display and /status breakdown.
 
 The status bar's ``ctx`` segment is the main agent's last prompt against the
 size at which its conversation is summarized (the ``context_trigger`` its
-calls' usage carries): ``ctx 45k/170k (26%)``. A sub-agent's call and a
-summary's add to the totals only, so they never move it.
+calls' usage carries): ``ctx 45k/170k (26%)``. A sub-agent's call, a
+summary's and any other side call's (every call with a ``purpose``) add to
+the totals only, so they never move it.
+
+The token segment is the conversation's total: the CLI sees every model call
+of a turn as an ``LLM_USAGE`` (side calls included, ``workflow/usage.py``),
+each counted alike on every backend, and the tracker starts over with each
+conversation. ``/status`` shows them by agent from the manager's ledger
+(``BaseWorkflowManager.usage``), ``format_usage``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-#: Calls whose prompt is not the main agent's context: a summary's prompt is
-#: the history it condenses, a sub-agent's its brief (or, inheriting, the
-#: conversation, which is still not the main agent's context).
-_NOT_THE_CONTEXT = ("summarization", "subagent")
+if TYPE_CHECKING:
+    from agentic_cli.workflow.usage import UsageTotals
+
+
+def format_usage(totals: "UsageTotals") -> str:
+    """Totals as ``/status`` shows them: ``12.5k in / 3.2k out · 4 calls``."""
+    calls = "1 call" if totals.calls == 1 else f"{totals.calls} calls"
+    return f"{format_tokens(totals.input)} in / {format_tokens(totals.output)} out · {calls}"
 
 
 def format_tokens(count: int) -> str:
@@ -74,16 +86,17 @@ class UsageTracker:
 
         Handles None values and missing keys gracefully.
 
-        A summarization call (``purpose="summarization"``) or a sub-agent's call
-        (``purpose="subagent"``) adds to the totals only: its prompt is the
-        history it condenses or the sub-agent's own, not the main agent's
-        context. Any other call sets the context: its prompt, and the
-        ``context_trigger`` and ``window_known`` its usage carries.
+        A call with a ``purpose`` (a sub-agent's, ``subagent``; a summary's,
+        ``summarization``; a side call's) adds to the totals only: its prompt
+        is the sub-agent's own, the history a summary condenses, or what a
+        side call was sent, not the main agent's context. The main agent's
+        own call sets the context: its prompt, and the ``context_trigger``
+        and ``window_known`` its usage carries.
 
         Args:
             metadata: Metadata dict from a WorkflowEvent (LLM_USAGE type).
         """
-        if metadata.get("purpose") not in _NOT_THE_CONTEXT:
+        if metadata.get("purpose") is None:
             self.last_prompt_tokens = metadata.get("prompt_tokens") or 0
             self.context_trigger = metadata.get("context_trigger")
             self.window_known = metadata.get("window_known")

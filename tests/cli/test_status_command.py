@@ -21,6 +21,8 @@ from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.sessions import reset_active_turn, set_active_turn
 from tests.cli.dialog_fakes import autospec_session
 
 SONNET = "anthropic:claude-sonnet-4-5"  # a 200,000-token window
@@ -241,3 +243,70 @@ async def test_a_running_workflow_has_no_error(monkeypatch):
     )
 
     assert app.workflow_error is None
+
+
+# --- tokens by agent ---------------------------------------------------------------
+
+
+def spent(prompt: int, completion: int, agent: str, purpose: str | None = None) -> WorkflowEvent:
+    """An ``LLM_USAGE`` of ``agent``'s, as a backend makes it."""
+    event = WorkflowEvent.llm_usage(model=SONNET, prompt_tokens=prompt, completion_tokens=completion)
+    event.metadata["agent"] = agent
+    if purpose is not None:
+        event.metadata["purpose"] = purpose
+    return event
+
+
+def by_agent(rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    labels = [label for label, _ in rows]
+    return rows[labels.index("Tokens by Agent"):] if "Tokens by Agent" in labels else []
+
+
+async def test_the_tokens_by_agent_with_each_sub_agents_runs_and_the_side_calls():
+    manager = GoogleADKWorkflowManager(
+        agent_configs=team(), settings=BaseSettings(session_store="memory", default_model=SONNET),
+    )
+    await manager.initialize_services()
+    try:
+        conversation = manager.session_ref()
+        token = set_active_turn(conversation)
+        try:
+            for call_id in ("c1", "c2"):
+                run = manager.agent_runs.run_for(conversation, None, call_id, "researcher")
+                manager.agent_runs.observe(WorkflowEvent.agent_run(run, "started", call_id=call_id))
+                manager.agent_runs.observe(WorkflowEvent.agent_run(run, "completed", call_id=call_id))
+        finally:
+            reset_active_turn(token)
+        for event in (
+            spent(100, 10, "coordinator"),
+            spent(50, 5, "researcher", "subagent"),
+            spent(30, 3, "researcher", "tool"),
+            spent(60, 6, "researcher", "subagent"),
+            spent(120, 12, "coordinator"),
+            spent(20_000, 1_000, "coordinator", "summarization"),
+        ):
+            manager.usage.record(event)
+        rows = await status_rows(manager)
+    finally:
+        await manager.cleanup()
+
+    assert by_agent(rows) == [
+        ("Tokens by Agent", ""),
+        ("  coordinator", "220 in / 22 out · 2 calls"),
+        ("  researcher (2 runs)", "110 in / 11 out · 2 calls"),
+        ("  tools' summaries", "30 in / 3 out · 1 call"),
+        ("  summaries", "20k in / 1k out · 1 call"),
+    ]
+
+
+async def test_no_tokens_by_agent_before_the_first_call():
+    manager = GoogleADKWorkflowManager(
+        agent_configs=team(), settings=BaseSettings(session_store="memory", default_model=SONNET),
+    )
+    await manager.initialize_services()
+    try:
+        rows = await status_rows(manager)
+    finally:
+        await manager.cleanup()
+
+    assert by_agent(rows) == []

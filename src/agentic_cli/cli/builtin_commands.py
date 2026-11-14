@@ -157,6 +157,46 @@ def _context_rows(workflow: Any, tracker: Any) -> list[tuple[str, str]]:
     ]
 
 
+#: How ``/status`` names the side calls of each purpose (``workflow/usage.py``).
+_SIDE_CALLS = {
+    "summarization": "summaries",
+    "tool": "tools' summaries",
+    "memory_extraction": "memory proposals",
+    "side_call": "other side calls",
+}
+
+
+def _usage_rows(workflow: Any) -> list[tuple[str, str]]:
+    """The open conversation's tokens by agent, as ``/status`` rows.
+
+    The main agent first, then each sub-agent, with how many runs it made
+    (``agent_runs``), then the side calls by purpose, from the manager's
+    ledger (``usage``); none before the first call, or from a manager
+    without one.
+    """
+    from agentic_cli.cli.usage_tracker import format_usage
+
+    ledger = getattr(workflow, "usage", None)
+    if ledger is None:
+        return []
+    by_agent, by_purpose = ledger.by_agent(), ledger.by_purpose()
+    if not by_agent and not by_purpose:
+        return []
+    runs: dict[str, int] = {}
+    for record in workflow.agent_runs.records(workflow.session_ref()):
+        runs[record.ref.agent] = runs.get(record.ref.agent, 0) + 1
+    root = workflow.root_agent_name
+    rows: list[tuple[str, str]] = [("", ""), ("Tokens by Agent", "")]
+    # The main agent first; the others as they first ran (sorted is stable).
+    for name in sorted(by_agent, key=lambda name: name != root):
+        count = runs.get(name, 0)
+        label = f"  {name}" if not count else f"  {name} ({count} run{'s' if count != 1 else ''})"
+        rows.append((label, format_usage(by_agent[name])))
+    for purpose, totals in by_purpose.items():
+        rows.append((f"  {_SIDE_CALLS.get(purpose, purpose)}", format_usage(totals)))
+    return rows
+
+
 class StatusCommand(Command):
     """Show current session status."""
 
@@ -211,6 +251,14 @@ class StatusCommand(Command):
         if tracker is not None:
             for label, value in tracker.format_detail_rows():
                 table.add_row(label, value)
+
+        # By agent: the root, each sub-agent and the side calls
+        try:
+            by_agent = _usage_rows(app.workflow)
+        except (RuntimeError, AttributeError):
+            by_agent = []  # no workflow: its rows above say why
+        for label, value in by_agent:
+            table.add_row(label, value)
 
         panel = Panel(table, title="[bold]Session Status[/bold]", border_style="cyan")
         app.session.add_rich(panel)
