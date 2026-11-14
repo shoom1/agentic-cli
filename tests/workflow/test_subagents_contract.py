@@ -1014,7 +1014,8 @@ class TestACallIsItsOwnRuns:
     async def test_after_ctrl_c_a_finished_delegation_keeps_its_result(self, make_crew):
         """Two delegations run side by side, each sub-agent using the other's
         call id: the one that finished keeps its sub-agent's answer, the
-        other is answered as the user's, each once."""
+        other is answered as the user's, each once. The finished one's run
+        ends completed with its result, the other's interrupted."""
         crew = make_crew(
             [
                 agent("coordinator", sub_agents=("researcher", "waiter")),
@@ -1034,8 +1035,12 @@ class TestACallIsItsOwnRuns:
             await until(lambda: crew.recorded("c1"))
         finally:
             await crew.stop(turn)
+        ended = [(r.ref.run, r.status, r.result) for r in crew.records()]
         await crew.turn("Never mind.")
 
+        assert ended == [
+            ("researcher-1#1", RUN_COMPLETED, "X is 42."), ("waiter-1#1", RUN_INTERRUPTED, ""),
+        ]
         assert sorted(crew.result_ids("coordinator")) == ["c1", "c2"]
         answered = crew.results_read("coordinator")
         assert answered["c1"] == "X is 42."

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, SessionRef, get_active_turn
 from agentic_cli.workflow.tool_summaries import delegation_summary
@@ -70,6 +71,56 @@ def run_label(ref: RunRef | None) -> str | None:
     if ref is None or ref.is_root:
         return None
     return f"{ref.instance} ({ref.agent}, run {ref.run.rpartition('#')[2]})"
+
+
+def run_ended(
+    ref: RunRef,
+    call_id: str | None,
+    answer: str,
+    *,
+    failed: bool = False,
+    error: str | None = None,
+    outcome: str | None = None,
+    usage: dict[str, dict[str, int]] | None = None,
+    sealed: bool = False,
+) -> WorkflowEvent:
+    """The ``AGENT_RUN`` that ends ``ref``'s run, decided as on every backend.
+
+    ``answer`` is the delegation's result as its parent read it; ``failed``
+    says it is the framework's own error result (``error``: its error), and
+    ``outcome`` is the mark the backend's hook put on the run's last answer
+    (``agents/outcome.py``). The run ends:
+
+    - ``interrupted`` for the seal of a call a stopped turn left open
+      (``sealed``), with its result;
+    - ``failed`` for ``Error running sub-agent: <reason>`` (its error the
+      reason), or for the framework's error result (its error, else the
+      answer);
+    - ``refused`` when the outcome is ``REFUSED``;
+    - else ``completed``, ``partial`` when the outcome is ``CUT``.
+    """
+    if sealed:
+        return WorkflowEvent.agent_run(
+            ref, RUN_INTERRUPTED, call_id=call_id, result=result_head(answer), usage=usage,
+        )
+    if answer.startswith(SUBAGENT_ERROR_PREFIX):
+        return WorkflowEvent.agent_run(
+            ref, RUN_FAILED, call_id=call_id, result="",
+            error=answer.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
+        )
+    if failed:
+        return WorkflowEvent.agent_run(
+            ref, RUN_FAILED, call_id=call_id, result="", error=error or answer, usage=usage,
+        )
+    if outcome == REFUSED:
+        return WorkflowEvent.agent_run(
+            ref, RUN_REFUSED, call_id=call_id, result=result_head(answer),
+            error=REFUSAL_ERROR, usage=usage,
+        )
+    return WorkflowEvent.agent_run(
+        ref, RUN_COMPLETED, call_id=call_id, result=result_head(answer),
+        partial=outcome == CUT, usage=usage,
+    )
 
 
 def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:

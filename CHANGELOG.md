@@ -631,7 +631,12 @@ the start of the entry's title.
   `interrupted`, with the first 200 characters of its result), and each
   manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
   provisional: `records(ref)`, `record(ref, id)`); a run a stopped or failed
-  turn leaves open is recorded `interrupted`. `get_active_run()` (exported
+  turn leaves open is recorded `interrupted`. On ADK a delegation that
+  finished beside a slower one in the same model step ends with the slower
+  one's (ADK hands a step's parallel function responses back in one event,
+  after the last), where Deep Agents ends each at its own result; a turn
+  stopped or failed before then ends it from the record, with its result,
+  not `interrupted`. `get_active_run()` (exported
   from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
   run whose call is in progress, None in the root's own: a sub-agent's
   tools, permission checks and questions see it. A consumer that does not

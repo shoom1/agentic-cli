@@ -51,6 +51,7 @@ from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.interrupted_calls_plugin import (
     InterruptedCallsPlugin,
     left_open,
+    returned,
     unsealed,
 )
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
@@ -63,6 +64,7 @@ from agentic_cli.workflow.adk.sessions import (
     turn_state,
 )
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
+from agentic_cli.workflow.agents.runs import RUN_STARTED
 from agentic_cli.workflow.outside_content import (
     BEFORE_0_7_0,
     JOB_RESULT,
@@ -1134,9 +1136,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         call by id alone, so a call whose id a sub-agent's result used is
         left open (``interrupted_calls_plugin.unsealed``): answered here, a
         finished one keeps its result and one at its prompt was not run.
-        Run shielded, so a second Ctrl+C neither loses the answers nor
-        clears the record before they are read. Answers that cannot be
-        written are given at the next turn (``left_open``), from no record.
+        Then each open run whose delegation returned ends with its result
+        (``_end_returned_runs``), before the record is cleared. Run
+        shielded, so a second Ctrl+C neither loses the answers nor clears
+        the record before they are read. Answers that cannot be written are
+        given at the next turn (``left_open``), from no record.
         """
         try:
             session = await self._session_service.get_session(
@@ -1157,7 +1161,27 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 "unsealed_calls_not_answered", error_type=type(error).__name__, exc_info=error,
             )
         finally:
+            self._end_returned_runs(ref)
             self._open_calls.clear(ref)
+
+    def _end_returned_runs(self, ref: SessionRef) -> None:
+        """End, from the record, each open run whose delegation returned; before the record is cleared.
+
+        ADK hands a model step's parallel function responses back in one
+        event, after the last one returns, so a delegation that finished
+        beside a slower one has no result event when the turn is stopped or
+        fails first. Its result is in the record, under its parent's run:
+        its run ends as that result says (``end_returned_run``: refused or
+        partial from its outcome mark), and not ``interrupted`` with the
+        runs the turn leaves open (the base's ``_turn``). Called after
+        ``unsealed``, which names each branch's run while it is open.
+        """
+        for record in self.agent_runs.records(ref):
+            if record.status != RUN_STARTED or not record.call_id:
+                continue
+            response = returned(self._open_calls, record.call_id, record.ref.parent_run)
+            if response is not None:
+                self._event_processor.end_returned_run(record.ref, record.call_id, response)
 
     def _seed_outside_content(self, ref: SessionRef, session: Session) -> dict[str, Any]:
         """Seed the marks from the session's state; the state delta a turn writes.
@@ -1313,7 +1337,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # id alone): it is answered here, from the record, before the
                 # record is cleared. One a failure left open is answered at
                 # the next turn (left_open) as interrupted: the state it
-                # changed, which ADK stores with its result, is gone.
+                # changed, which ADK stores with its result, is gone. Either
+                # way a delegation that returned ends its run with its result.
                 ref = self.session_ref(session_id, user_id)
                 if aborted.is_set():
                     # Should those answers not be written, left_open gives
@@ -1321,6 +1346,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     self._open_calls.cancelled(ref)
                     await asyncio.shield(self._answer_unsealed(ref))
                 else:
+                    self._end_returned_runs(ref)
                     self._open_calls.clear(ref)
 
         # Drain any remaining LLM events after processing completes

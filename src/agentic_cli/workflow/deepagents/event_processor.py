@@ -59,15 +59,11 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
-from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
+from agentic_cli.workflow.agents.outcome import cut_off_warning
 from agentic_cli.workflow.agents.runs import (
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_REFUSED,
     RUN_STARTED,
-    SUBAGENT_ERROR_PREFIX,
     AgentRuns,
-    result_head,
+    run_ended,
     run_title,
     show_as_delegation,
 )
@@ -359,39 +355,23 @@ class DeepAgentsEventProcessor:
     def _ended(self, message: ToolMessage, run: RunRef) -> WorkflowEvent | None:
         """The ``AGENT_RUN`` the result of a ``task`` call ``run`` made ends, recorded; else None.
 
-        ``failed`` for ``Error running sub-agent: <reason>`` (its ``error``
-        the reason) or another error result (an error message, or one that
-        says ``success`` false: its error), ``refused`` when
-        ``SubAgentOutcomeMiddleware`` marked the run's last answer refused,
-        else ``completed`` (``partial`` when it marked the answer cut).
+        ``agents/runs.py::run_ended``'s decision, as on ADK: ``failed`` for
+        ``Error running sub-agent: <reason>`` (its ``error`` the reason) or
+        another error result (an error message, or one that says ``success``
+        false: its error), ``refused`` when ``SubAgentOutcomeMiddleware``
+        marked the run's last answer refused, else ``completed`` (``partial``
+        when it marked the answer cut).
         """
         child = self._delegated.pop((run.run, message.tool_call_id), None)
         if child is None:
             return None
-        outcome = self._outcomes.pop(child.run or "", None)
-        text = message.text
-        usage = self._ledgers.ledger(get_active_turn()).run_usage(child.run or "")
         _, succeeded, error = _result_of(message)
-        if text.startswith(SUBAGENT_ERROR_PREFIX):
-            event = WorkflowEvent.agent_run(
-                child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
-            )
-        elif not succeeded:
-            event = WorkflowEvent.agent_run(
-                child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=error or text, usage=usage,
-            )
-        elif outcome == REFUSED:
-            event = WorkflowEvent.agent_run(
-                child, RUN_REFUSED, call_id=message.tool_call_id, result=result_head(text),
-                error=REFUSAL_ERROR, usage=usage,
-            )
-        else:
-            event = WorkflowEvent.agent_run(
-                child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text),
-                partial=outcome == CUT, usage=usage,
-            )
+        event = run_ended(
+            child, message.tool_call_id, message.text,
+            failed=not succeeded, error=error,
+            outcome=self._outcomes.pop(child.run or "", None),
+            usage=self._ledgers.ledger(get_active_turn()).run_usage(child.run or ""),
+        )
         self._runs.observe(event)
         return event
 

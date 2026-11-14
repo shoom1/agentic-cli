@@ -17,21 +17,11 @@ from agentic_cli.workflow.adk.branches import branch_run
 from agentic_cli.workflow.adk.call_clock import call_latency
 from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
 from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY
-from agentic_cli.workflow.agents.outcome import (
-    CUT,
-    REFUSAL_ERROR,
-    REFUSED,
-    cut_off_warning,
-)
+from agentic_cli.workflow.agents.outcome import cut_off_warning
 from agentic_cli.workflow.agents.runs import (
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_INTERRUPTED,
-    RUN_REFUSED,
     RUN_STARTED,
-    SUBAGENT_ERROR_PREFIX,
     AgentRuns,
-    result_head,
+    run_ended,
     run_title,
     show_as_delegation,
 )
@@ -132,18 +122,28 @@ class ADKEventProcessor:
     delegates to one of the calling agent's own single-turn sub-agents
     (``delegates``, by the caller, the event's author: ADK names the tool
     after the sub-agent) is followed by the ``AGENT_RUN`` that starts the
-    sub-agent's run, and its result by the one that ends it: ``failed`` for
-    ADK's answer for a sub-agent that failed (``Error running sub-agent:
-    …``) or an error result (``success`` false: the tool raised), with its
-    error, ``interrupted`` for the seal of a stopped turn, ``refused`` when
-    ``SubAgentOutcomePlugin`` marked the run's last answer refused, else
-    ``completed`` (``partial``, and followed by one warning,
-    ``cut_off_warning``, when it marked the answer cut); the result itself is
-    shown as on Deep Agents (``agents/runs.py::show_as_delegation``: the
-    answer's first line, a failed one as a failed result). Any other call is
-    an ordinary tool call, with no run: a name the caller has no such
-    sub-agent for runs none (ADK answers an unknown tool). Each ``AGENT_RUN``
-    is recorded in ``runs`` as it is made, before ``on_event``.
+    sub-agent's run, and its result by the one that ends it, as on Deep
+    Agents (``agents/runs.py::run_ended``): ``failed`` for ADK's answer for
+    a sub-agent that failed (``Error running sub-agent: …``) or the
+    framework's error result (a dict that says ``success`` false: the tool
+    raised, the gate denied it), with its error, ``interrupted`` for the
+    seal of a stopped turn, ``refused`` when ``SubAgentOutcomePlugin``
+    marked the run's last answer refused, else ``completed`` (``partial``,
+    and followed by one warning, ``cut_off_warning``, when it marked the
+    answer cut). The sub-agent's answer, which ADK keeps under ``result``,
+    is never read for success. The result itself is shown as on Deep Agents
+    (``agents/runs.py::show_as_delegation``: the answer's first line, a
+    failed one as a failed result). Any other call is an ordinary tool call,
+    with no run: a name the caller has no such sub-agent for runs none (ADK
+    answers an unknown tool). Each ``AGENT_RUN`` is recorded in ``runs`` as
+    it is made, before ``on_event``.
+
+    A delegation that finished beside a slower one in the same model step
+    ends later than on Deep Agents, which ends each run at its own result:
+    ADK hands a step's parallel function responses back in one event, after
+    the last one returns, so the finished run ends with the slower one's. A
+    turn stopped or failed before then ends it from the record
+    (``end_returned_run``), with its result, as that event would have.
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -415,39 +415,47 @@ class ADKEventProcessor:
             )
         elif response is not None and response.name in own and response.id:
             child = self.runs.run_for(get_active_turn(), parent, response.id, response.name)
-            text = _result_text(response.response)
-            usage = self._run_usage(child)
-            outcome = self._outcomes.pop(child.run or "", None)
-            succeeded, error = _outcome(response.response)
-            if sealed:
-                event = WorkflowEvent.agent_run(
-                    child, RUN_INTERRUPTED, call_id=response.id, result=result_head(text),
-                    usage=usage,
-                )
-            elif text.startswith(SUBAGENT_ERROR_PREFIX):
-                event = WorkflowEvent.agent_run(
-                    child, RUN_FAILED, call_id=response.id, result="",
-                    error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
-                )
-            elif not succeeded:
-                event = WorkflowEvent.agent_run(
-                    child, RUN_FAILED, call_id=response.id, result="", error=error or text,
-                    usage=usage,
-                )
-            elif outcome == REFUSED:
-                event = WorkflowEvent.agent_run(
-                    child, RUN_REFUSED, call_id=response.id, result=result_head(text),
-                    error=REFUSAL_ERROR, usage=usage,
-                )
-            else:
-                event = WorkflowEvent.agent_run(
-                    child, RUN_COMPLETED, call_id=response.id, result=result_head(text),
-                    partial=outcome == CUT, usage=usage,
-                )
+            event = self._ended(child, response.id, response.response, sealed=sealed)
         else:
             return None
         self.runs.observe(event)
         return event
+
+    def end_returned_run(self, ref: RunRef, call_id: str, response: Any) -> WorkflowEvent:
+        """End ``ref``'s run with what its delegation returned, which no event brought; recorded.
+
+        ADK hands a model step's parallel function responses back in one
+        event, after the last one returns, so a delegation that finished
+        beside a slower one has no result event until then. A turn stopped
+        or failed before it ends that run from the record with this
+        (``GoogleADKWorkflowManager``): as its result would have ended it,
+        refused or partial from its outcome mark.
+
+        Args:
+            ref: The run.
+            call_id: Its parent's call that started it.
+            response: What the call returned, as ADK stores it (text under
+                ``result``).
+        """
+        event = self._ended(ref, call_id, response, sealed=False)
+        self.runs.observe(event)
+        return event
+
+    def _ended(self, child: RunRef, call_id: str, response: Any, *, sealed: bool) -> WorkflowEvent:
+        """The ``AGENT_RUN`` that ``response``, a delegation's result, ends ``child``'s run with.
+
+        ``agents/runs.py::run_ended``'s decision: the framework's error
+        result (a dict that says it failed: the tool raised, the gate denied
+        it) fails it, never the sub-agent's answer, which ADK keeps under
+        ``result``.
+        """
+        succeeded, error = _outcome(response)
+        return run_ended(
+            child, call_id, _result_text(response),
+            failed=not succeeded, error=error,
+            outcome=self._outcomes.pop(child.run or "", None),
+            usage=self._run_usage(child), sealed=sealed,
+        )
 
     def process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.
