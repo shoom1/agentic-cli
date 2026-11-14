@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
@@ -740,7 +741,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         model allows it and ``max_tokens`` as its limit (``_simple_model``).
         Called by a tool during a turn, it runs in that turn's run, so the raw
         LLM log records it under the agent whose tool called it. Its usage is
-        reported as a side call's (``_report_side_call``).
+        reported as a side call's (``_report_side_call``), timed around its
+        request.
 
         Returns:
             The answer's text, without its thinking.
@@ -748,9 +750,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         await self._ensure_initialized()
         resolved = self._simple_model(max_tokens)
         model = build_chat_model(resolved, settings=self._settings, app_name=self.app_name)
+        started = time.perf_counter()
         response = await model.ainvoke([HumanMessage(content=prompt)])
         if response.usage_metadata:
-            self._report_side_call(usage_event(resolved, response.usage_metadata))
+            self._report_side_call(usage_event(
+                resolved, response.usage_metadata,
+                latency_ms=(time.perf_counter() - started) * 1000,
+            ))
         return str(response.text)
 
     # -------------------------------------------------------------------------

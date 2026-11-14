@@ -1594,6 +1594,33 @@ class TestUsage:
             RUN_INTERRUPTED, {model: {"input": 50, "output": 5}}
         )
 
+    async def test_every_call_is_timed(self, make_crew):
+        # The agents' steps, the side call a tool makes in a run, a summary:
+        # each row says how long its call took.
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Two."), says("Three.")],
+            researcher=[calls(use("contract_summarize", "r1", text="A page.")),
+                        says("X is 42.")],
+            side_calls=[says("A summary of the page.")],
+            summaries=[says("A summary.")],
+        )
+        await crew.turn()
+        for n in (2, 3):
+            await crew.turn(f"Turn {n}: {LONG_TURN}")
+        await compact_now(crew.manager, session_id=SESSION, user_id=USER)
+
+        rows = crew.ledger().rows
+        assert [(row.agent, row.purpose) for row in rows] == [
+            ("coordinator", None), ("researcher", "subagent"), ("researcher", PURPOSE_TOOL),
+            ("researcher", "subagent"), ("coordinator", None), ("coordinator", None),
+            ("coordinator", None), ("coordinator", PURPOSE_SUMMARIZATION),
+        ]
+        assert all(isinstance(row.latency_ms, float) and row.latency_ms >= 0 for row in rows), [
+            row.latency_ms for row in rows
+        ]
+
     @pytest.mark.parametrize("summary", ["A summary.", ""], ids=["written", "empty"])
     async def test_a_summarys_usage_is_recorded_whether_it_is_written_or_not(
         self, make_crew, summary
