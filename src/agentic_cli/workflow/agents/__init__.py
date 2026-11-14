@@ -19,6 +19,7 @@ from agentic_cli.workflow.agents.runs import (
     AgentRuns,
     RunRecord,
     result_head,
+    run_label,
     run_title,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "SUBAGENT_ERROR_PREFIX",
     "TITLE_MAX",
     "result_head",
+    "run_label",
     "run_title",
 ]

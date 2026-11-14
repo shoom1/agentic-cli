@@ -60,6 +60,18 @@ def result_head(result: str) -> str:
     return result[:RESULT_MAX]
 
 
+def run_label(ref: RunRef | None) -> str | None:
+    """How a dialog names a sub-agent run: ``researcher-2 (researcher, run 1)``.
+
+    Its instance, its agent, and its number within the instance (what follows
+    ``#`` in ``ref.run``). None for the root's own work (and for none): the
+    root's dialogs name no agent.
+    """
+    if ref is None or ref.is_root:
+        return None
+    return f"{ref.instance} ({ref.agent}, run {ref.run.rpartition('#')[2]})"
+
+
 def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
     """Show a delegation's ``TOOL_RESULT`` as every backend shows it.
 
