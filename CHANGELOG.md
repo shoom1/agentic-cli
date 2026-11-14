@@ -559,6 +559,23 @@ the start of the entry's title.
 
 ### Added
 
+- **A sub-agent's questions and permission prompts name it, on both
+  backends.** `UserInputRequest.run` is the sub-agent run that asks (a
+  `RunRef`; None for the root's own), filled by `request_user_input` from
+  `get_active_run()` when the caller left it None, so both permission gates
+  and `ask_clarification` are covered. A sub-agent's permission prompt opens
+  ``researcher-2 (researcher, run 1) wants to use `write_file`:``
+  (`build_request(run=)`, which the engine passes; the root's still opens
+  ``Tool `write_file` wants:``), and the CLI titles its dialog
+  `researcher-2 · Permission`, and a question's `researcher-2 asks`, its
+  text opening `researcher-2 (researcher, run 1) asks:`; the root's dialogs
+  are as they were. `run_label(ref)` (`agentic_cli.workflow.agents`) is that
+  name, and `is_permission_request(request)`
+  (`agentic_cli.workflow.permissions.prompt`) tells a permission prompt from
+  a question. Grants stay shared by every agent, and only a rule or the
+  user's answer in the dialog approves: a brief, a tool result or a message
+  saying the user approved changes nothing, and a sub-agent's question goes
+  to the user, never to its parent (contract-tested on both backends).
 - **`/agents`: the conversation's sub-agent runs.** A table of the open
   conversation's sub-agent runs, each followed by the runs it started:
   instance, type, status (`running`, `completed`, `completed (partial)` for
