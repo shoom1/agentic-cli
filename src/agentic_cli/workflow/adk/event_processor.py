@@ -37,6 +37,7 @@ from agentic_cli.workflow.agents.runs import (
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
+from agentic_cli.workflow.usage import UsageLedgers, adk_tokens, llm_usage_event
 from agentic_cli.logging import Loggers
 
 logger = Loggers.workflow()
@@ -83,7 +84,12 @@ class ADKEventProcessor:
     author: ``metadata["agent"]``, that agent's own model (``models``; the
     default model for an agent the framework did not build) and its context
     numbers (``context_trigger``, ``window_known``, from ``budgets``), which
-    the CLI shows the main agent's prompt against.
+    the CLI shows the main agent's prompt against. Its counts are normalized
+    by that model's provider kind (``kinds``; ``workflow/usage.py``'s
+    ``adk_tokens``: the thinking counts in the output, a Claude cache write
+    in ``cache_creation_tokens``), and it is recorded in the conversation's
+    ledger (``ledgers``) as it is made, before ``on_event``. A sub-agent
+    run's end carries what the run used, by model (``metadata["usage"]``).
 
     A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
@@ -150,6 +156,10 @@ class ADKEventProcessor:
             to through a tool named after each, by the agent's name
             (``build.delegated_agents``); a collection of names alone is the
             root's.
+        kinds: Each agent's model's provider kind (``ProviderKind``'s value), by name.
+        default_kind: The default model's, for an agent ``kinds`` does not hold.
+        ledgers: The manager's usage ledgers, which this processor records
+            each call's usage in; its own when not given.
 
     The manager builds one at each initialization, from the app it built.
     """
@@ -164,6 +174,9 @@ class ADKEventProcessor:
         reply_agents: Collection[str] | None = None,
         runs: AgentRuns | None = None,
         delegates: Mapping[str, Collection[str]] | Collection[str] = (),
+        kinds: Mapping[str, str] | None = None,
+        default_kind: str | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         self._model = model
         self._on_event = on_event
@@ -184,6 +197,9 @@ class ADKEventProcessor:
         # A sub-agent run's last answer's outcome (SubAgentOutcomePlugin's
         # mark), by run id, until its delegation's result ends the run.
         self._outcomes: dict[str, str] = {}
+        self.kinds: Mapping[str, str] = kinds or {}
+        self.default_kind = default_kind
+        self.ledgers = ledgers if ledgers is not None else UsageLedgers()
 
     @property
     def model(self) -> str:
@@ -267,13 +283,10 @@ class ADKEventProcessor:
             invocation_id = getattr(adk_event, "invocation_id", None)
             agent = self._agent(adk_event)
 
-            usage_event = WorkflowEvent.llm_usage(
-                model=self.models.get(agent, self._model),
-                prompt_tokens=getattr(usage, "prompt_token_count", None),
-                completion_tokens=getattr(usage, "candidates_token_count", None),
+            usage_event = llm_usage_event(
+                self.models.get(agent, self._model),
+                adk_tokens(usage, self.kinds.get(agent, self.default_kind)),
                 total_tokens=getattr(usage, "total_token_count", None),
-                thinking_tokens=getattr(usage, "thoughts_token_count", None),
-                cached_tokens=getattr(usage, "cached_content_token_count", None),
                 invocation_id=invocation_id,
             )
             if agent is not None:
@@ -282,6 +295,8 @@ class ADKEventProcessor:
             if subagent is not None:
                 usage_event.metadata["purpose"] = "subagent"
             usage_event.run = run
+            # Recorded before the hook: an app's on_event cannot drop a row.
+            self.ledgers.record(usage_event)
             usage_event = self._apply_hook(usage_event)
             if usage_event:
                 yield usage_event
@@ -367,6 +382,10 @@ class ADKEventProcessor:
             return root_run(agent)
         return RunRef(agent=agent, instance=agent, run=None, parent_run=None, depth=0)
 
+    def _run_usage(self, run: RunRef) -> dict[str, dict[str, int]]:
+        """What ``run`` used, by model, from its conversation's ledger."""
+        return self.ledgers.ledger(get_active_turn()).run_usage(run.run or "")
+
     def _delegation_run(
         self, part: Any, parent: RunRef | None, *, sealed: bool
     ) -> WorkflowEvent | None:
@@ -394,30 +413,33 @@ class ADKEventProcessor:
         elif response is not None and response.name in own and response.id:
             child = self.runs.run_for(get_active_turn(), parent, response.id, response.name)
             text = _result_text(response.response)
+            usage = self._run_usage(child)
             outcome = self._outcomes.pop(child.run or "", None)
             succeeded, error = _outcome(response.response)
             if sealed:
                 event = WorkflowEvent.agent_run(
-                    child, RUN_INTERRUPTED, call_id=response.id, result=result_head(text)
+                    child, RUN_INTERRUPTED, call_id=response.id, result=result_head(text),
+                    usage=usage,
                 )
             elif text.startswith(SUBAGENT_ERROR_PREFIX):
                 event = WorkflowEvent.agent_run(
                     child, RUN_FAILED, call_id=response.id, result="",
-                    error=text.removeprefix(SUBAGENT_ERROR_PREFIX),
+                    error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
                 )
             elif not succeeded:
                 event = WorkflowEvent.agent_run(
-                    child, RUN_FAILED, call_id=response.id, result="", error=error or text
+                    child, RUN_FAILED, call_id=response.id, result="", error=error or text,
+                    usage=usage,
                 )
             elif outcome == REFUSED:
                 event = WorkflowEvent.agent_run(
                     child, RUN_REFUSED, call_id=response.id, result=result_head(text),
-                    error=REFUSAL_ERROR,
+                    error=REFUSAL_ERROR, usage=usage,
                 )
             else:
                 event = WorkflowEvent.agent_run(
                     child, RUN_COMPLETED, call_id=response.id, result=result_head(text),
-                    partial=outcome == CUT,
+                    partial=outcome == CUT, usage=usage,
                 )
         else:
             return None

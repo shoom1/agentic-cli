@@ -92,6 +92,12 @@ from agentic_cli.workflow.context import (
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import get_active_turn, set_active_run
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX, summary_prompt
+from agentic_cli.workflow.usage import (
+    PURPOSE_SUMMARIZATION,
+    UsageLedgers,
+    adk_tokens,
+    llm_usage_event,
+)
 
 if TYPE_CHECKING:
     from google.adk.agents.base_agent import BaseAgent
@@ -242,6 +248,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             prompt prefix changes with it): the manager drops the
             conversation's memory index snapshot, so the next request takes
             a new one.
+        ledgers: The manager's usage ledgers: a summary's usage is recorded
+            in its conversation's as it is reported.
 
     Attributes:
         last_result: What the last summary written did; None until one is.
@@ -269,6 +277,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         focus: str | None = None,
         source: str | None = None,
         on_written: Callable[[], None] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         self.root = root
         self.model = model
@@ -277,6 +286,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         self.focus = focus
         self.source = source or ("compact" if manual else "summarization")
         self._on_written = on_written
+        self._ledgers = ledgers
         self.last_result: CompactResult | None = None
         self.last_kept_turns = 0
         self.last_error: Exception | None = None
@@ -360,7 +370,10 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             tokens_before=estimate_event_tokens(events, kind),
             tokens_after=estimate_event_tokens([event, *kept], kind),
         )
-        live_events.report(self._usage(usage))
+        spent = self._usage(usage)
+        if self._ledgers is not None:
+            self._ledgers.record(spent)
+        live_events.report(spent)
         trimmed = WorkflowEvent.context_trimmed(
             len(events), len(kept) + 1, self.source,
             self.root, messages_summarized=result.messages_summarized,
@@ -432,16 +445,13 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         It carries that agent's context numbers (an overflow's summary too),
         as its own calls' usage does.
         """
-        event = WorkflowEvent.llm_usage(
-            model=str(self.model.ref),
-            prompt_tokens=getattr(usage, "prompt_token_count", None),
-            completion_tokens=getattr(usage, "candidates_token_count", None),
+        event = llm_usage_event(
+            str(self.model.ref),
+            adk_tokens(usage, self.model.record.kind),
             total_tokens=getattr(usage, "total_token_count", None),
-            thinking_tokens=getattr(usage, "thoughts_token_count", None),
-            cached_tokens=getattr(usage, "cached_content_token_count", None),
         )
         event.metadata.update(
-            purpose="summarization", agent=self.root, **usage_fields(self.budget)
+            purpose=PURPOSE_SUMMARIZATION, agent=self.root, **usage_fields(self.budget)
         )
         return event
 

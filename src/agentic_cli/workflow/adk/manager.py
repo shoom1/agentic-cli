@@ -743,6 +743,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             reply_agents=build.reply_agents,
             runs=self.agent_runs,
             delegates=delegated_agents(build.root),
+            kinds={name: m.record.kind.value for name, m in self._resolved_models.items()},
+            default_kind=self._default_model.record.kind.value if self._default_model else None,
+            ledgers=self._usage_ledgers,
         )
 
         logger.info(
@@ -806,6 +809,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             settings=self._settings,
             app_name=self.app_name,
             on_written=self._forget_memory_index,
+            ledgers=self._usage_ledgers,
             **options,
         )
 

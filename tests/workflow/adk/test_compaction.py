@@ -63,6 +63,7 @@ from agentic_cli.workflow.context import CompactResult, ContextBudget  # noqa: E
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, reporting  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
+from agentic_cli.workflow.usage import UsageLedgers  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -425,6 +426,17 @@ class TestTheSummary:
 
         prompt = api.bodies[0]["messages"][0]["content"][0]["text"]
         assert "<focus>\nFocus the summary on: the API decisions\n</focus>\n\n<messages>" in prompt
+
+    async def test_its_usage_is_recorded_as_it_is_reported(self, manager, api):
+        api.script = [written()]
+        ledgers = UsageLedgers()
+        made = summarizer(manager, ledgers=ledgers)
+
+        await as_agent("solo", lambda: made.maybe_summarize_events(events=conversation()),
+                       Recorded())
+
+        (row,) = ledgers.ledger(None).rows
+        assert (row.purpose, row.agent, row.input, row.output) == ("summarization", "solo", 7_300, 40)
 
     async def test_it_reports_as_it_goes(self, manager, api):
         api.script = [written()]

@@ -32,6 +32,7 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow.usage import UsageTotals  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
     FakeAPI,
     anthropic_message,
@@ -132,3 +133,74 @@ async def test_chat_completions_pass_their_whole_prompt_count_on(monkeypatch):
 
     assert (usage["prompt_tokens"], usage["cached_tokens"]) == (1_550, 1_200)
     assert tracker.last_prompt_tokens == 1_550
+
+
+# --- every call's output counts its thinking, as on Deep Agents ---------------------
+#
+# ADK's Gemini and Claude adapters keep the thinking out of the candidates;
+# OpenAI's count it inside. LLM_USAGE's completion_tokens is every output
+# token on every backend (workflow/usage.py), and each call is recorded in the
+# conversation's ledger.
+
+
+async def test_gemini_s_thinking_counts_in_the_output(monkeypatch):
+    def answer(request) -> dict:
+        return {
+            "candidates": [{"content": {"role": "model", "parts": [{"text": "Hi."}]},
+                            "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 5,
+                              "totalTokenCount": 930, "thoughtsTokenCount": 25},
+        }
+
+    route_gemini(monkeypatch, FakeAPI(answer))
+
+    usage, tracker = await usage_of_a_turn("google:gemini-2.5-flash")
+
+    assert (usage["completion_tokens"], usage["thinking_tokens"]) == (30, 25)
+    assert tracker.completion_tokens == 30
+
+
+async def test_claude_s_cache_writes_are_reported(monkeypatch):
+    reply = {**anthropic_message({"type": "text", "text": "Hi."}),
+             "usage": {"input_tokens": 50, "output_tokens": 7,
+                       "cache_read_input_tokens": 1_200, "cache_creation_input_tokens": 300}}
+    route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(reply))
+
+    usage, _ = await usage_of_a_turn("anthropic:claude-sonnet-4-6")
+
+    assert (usage["prompt_tokens"], usage["completion_tokens"]) == (1_550, 7)
+    assert (usage["cached_tokens"], usage["cache_creation_tokens"]) == (1_200, 300)
+
+
+async def test_openai_s_reasoning_stays_inside_the_output(monkeypatch):
+    reply = openai_response("Hi.")
+    reply["usage"] = {"input_tokens": 100, "output_tokens": 70, "total_tokens": 170,
+                      "input_tokens_details": {"cached_tokens": 0},
+                      "output_tokens_details": {"reasoning_tokens": 64}}
+    route(monkeypatch, openai, "AsyncOpenAI", FakeAPI(reply))
+
+    usage, _ = await usage_of_a_turn("openai:gpt-5")
+
+    assert (usage["completion_tokens"], usage["thinking_tokens"]) == (70, 64)
+
+
+async def test_each_call_is_recorded_in_its_conversation_s_ledger(monkeypatch):
+    reply = {**anthropic_message({"type": "text", "text": "Hi."}),
+             "usage": {"input_tokens": 50, "output_tokens": 7,
+                       "cache_read_input_tokens": 1_200, "cache_creation_input_tokens": 300}}
+    route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(reply))
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[AgentConfig(name="solo", prompt="Answer.", include_state_tools=False)],
+        settings=BaseSettings(session_store="memory", default_model="anthropic:claude-sonnet-4-6",
+                              prompt_caching_enabled=False),
+    )
+    try:
+        [e async for e in manager.process("Hello.", "u", session_id="s")]
+        ledger = manager.usage_of(manager.session_ref("s", "u"))
+    finally:
+        await manager.cleanup()
+
+    assert ledger.totals() == UsageTotals(input=1_550, output=7, cached=1_200, cache_write=300,
+                                          calls=1)
+    (row,) = ledger.rows
+    assert (row.agent, row.purpose, row.run, row.turn) == ("solo", None, None, 1)

@@ -149,8 +149,9 @@ def adk_tokens(usage: Any, kind: Any) -> UsageTotals:
     prompt = _count(getattr(usage, "prompt_token_count", None))
     tool_prompt = _count(getattr(usage, "tool_use_prompt_token_count", None))
     kind = getattr(kind, "value", kind)
+    unreported = prompt is None and tool_prompt is None
     return normalized_tokens(
-        input=None if prompt is None and tool_prompt is None else (prompt or 0) + (tool_prompt or 0),
+        input=None if unreported else (prompt or 0) + (tool_prompt or 0),
         output=_count(getattr(usage, "candidates_token_count", None)),
         cached=_count(getattr(usage, "cached_content_token_count", None)),
         cache_write=_count(getattr(usage, "cache_creation_input_tokens", None)),
@@ -388,7 +389,9 @@ class UsageLedger:
 
     def by_agent(self) -> dict[str, UsageTotals]:
         """The agents' own steps, by agent name, in the order each first ran."""
-        return self._grouped(lambda row: row.agent, lambda row: row.purpose in AGENT_STEP_PURPOSES)
+        return self._grouped(
+            lambda row: row.agent, lambda row: row.purpose in AGENT_STEP_PURPOSES
+        )
 
     def by_purpose(self) -> dict[str, UsageTotals]:
         """The side calls, by purpose, in the order each was first made."""
@@ -396,7 +399,9 @@ class UsageLedger:
             lambda row: row.purpose, lambda row: row.purpose not in AGENT_STEP_PURPOSES
         )
 
-    def by_model(self, *, run: str | None = ...) -> dict[str, UsageTotals]:  # type: ignore[assignment]
+    def by_model(
+        self, *, run: str | None = ...  # type: ignore[assignment]
+    ) -> dict[str, UsageTotals]:
         """The calls by model; one run's when ``run`` is given (None: the root's own)."""
         return self._grouped(lambda row: row.model, lambda row: run is ... or row.run == run)
 
@@ -440,5 +445,6 @@ class UsageLedgers:
         return ledger
 
     def record(self, event: WorkflowEvent) -> UsageRow | None:
-        """Record an ``LLM_USAGE`` in the ledger of the turn it is made in (``get_active_turn``)."""
+        """Record an ``LLM_USAGE`` in the ledger of the turn it is made in
+        (``get_active_turn``)."""
         return self.ledger(get_active_turn()).record(event)
