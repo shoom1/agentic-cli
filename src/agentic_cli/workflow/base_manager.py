@@ -50,6 +50,15 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow.usage import (
+    PURPOSE_MEMORY_EXTRACTION,
+    PURPOSE_SIDE_CALL,
+    PURPOSE_TOOL,
+    UsageLedger,
+    UsageLedgers,
+    current_side_call,
+    side_call,
+)
 from agentic_cli.workflow.interrupts import OpenCalls
 # The two limits are still importable from here.
 from agentic_cli.workflow.memory_index import (  # noqa: F401
@@ -63,6 +72,7 @@ from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
     close_turn_scope,
+    get_active_run,
     get_active_tool_call,
     get_active_turn,
     open_turn_scope,
@@ -511,13 +521,38 @@ class BaseWorkflowManager(ABC):
         Named by the backends' event processors and recorded from their
         ``AGENT_RUN`` events (``workflow/agents/runs.py``): ``records(ref)``
         lists a conversation's in the order they started; a turn ends the
-        runs it leaves open (``_turn``). In memory, for the process; made on
-        first use.
+        runs it leaves open (``_turn``). In memory, for this manager's life
+        (a backend switch builds a new manager); made on first use.
         """
         runs = self.__dict__.get("_agent_runs")
         if runs is None:
             runs = self.__dict__["_agent_runs"] = AgentRuns()
         return runs
+
+    @property
+    def usage(self) -> UsageLedger:
+        """The open conversation's token usage: every model call made in it (provisional).
+
+        A row per call, the root's and its sub-agents' steps and the side
+        calls (summaries, ``generate_simple``), each counted alike on every
+        backend (``workflow/usage.py``): totals by run, agent, model, purpose
+        and turn. In memory, for this manager's life (a backend switch builds
+        a new manager, and the rows before it do not follow, as with
+        ``agent_runs``). ``usage_of`` reads another conversation's.
+        """
+        return self.usage_of(self.session_ref())
+
+    def usage_of(self, conversation: SessionRef) -> UsageLedger:
+        """``conversation``'s token usage, as ``usage`` is the open one's (provisional)."""
+        return self._usage_ledgers.ledger(conversation)
+
+    @property
+    def _usage_ledgers(self) -> UsageLedgers:
+        """Every conversation's ledger, made on first use (as ``agent_runs``)."""
+        ledgers = self.__dict__.get("_usage_ledgers")
+        if ledgers is None:
+            ledgers = self.__dict__["_usage_ledgers"] = UsageLedgers()
+        return ledgers
 
     @property
     def settings(self) -> "BaseSettings":
@@ -911,9 +946,10 @@ class BaseWorkflowManager(ABC):
         Returns:
             Summarized text response.
         """
-        return await self.generate_simple(
-            self._fit_prompt(prompt, 12000), max_tokens=12000
-        )
+        with side_call(PURPOSE_TOOL):
+            return await self.generate_simple(
+                self._fit_prompt(prompt, 12000), max_tokens=12000
+            )
 
     def _fit_prompt(self, prompt: str, max_tokens: int) -> str:
         """``prompt`` as a side call on the default model may send it.
@@ -998,7 +1034,10 @@ class BaseWorkflowManager(ABC):
             index = await asyncio.to_thread(store.index, tools=ALL_MEMORY_TOOLS)
             discarded = await asyncio.to_thread(store.discarded)
             prompt = extraction_prompt(messages[-20:], index, discarded)
-            answer = await self.generate_simple(self._fit_prompt(prompt, 2000), max_tokens=2000)
+            with side_call(PURPOSE_MEMORY_EXTRACTION, ref):
+                answer = await self.generate_simple(
+                    self._fit_prompt(prompt, 2000), max_tokens=2000
+                )
         except Exception:
             logger.debug("session_fact_extraction_failed", exc_info=True)
             return []
@@ -2037,7 +2076,8 @@ class BaseWorkflowManager(ABC):
         (:meth:`_workflow_context`: the settings, the services and the
         active turn, reset as the block ends) are entered, in that order.
         As the block ends, however it ends, the sub-agent runs it left open
-        are recorded interrupted (``agent_runs``).
+        are recorded interrupted (``agent_runs``), with what they used; each
+        turn is counted in its conversation's usage ledger (``usage_of``).
 
         Yields:
             The turn's conversation.
@@ -2049,12 +2089,14 @@ class BaseWorkflowManager(ABC):
         bind_context(session_id=ref.session_id, user_id=ref.user_id)
         async with self._turn_admission():
             with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
+                ledger = self.usage_of(ref)
+                ledger.begin_turn()
                 try:
                     yield ref
                 finally:
                     # A sub-agent run the turn leaves open (a cancel, a
                     # failure) ends with it: no event can say so any more.
-                    self.agent_runs.interrupt_open(ref)
+                    self.agent_runs.interrupt_open(ref, usage=ledger.run_usage)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False
@@ -2434,6 +2476,40 @@ class BaseWorkflowManager(ABC):
 
     # Optional methods with default implementations
 
+    def _report_side_call(self, event: WorkflowEvent) -> None:
+        """Account for a side call (``generate_simple``), and report it in a turn.
+
+        ``event`` is the call's ``LLM_USAGE``, its counts normalized
+        (``workflow/usage.py``). Its purpose is the one its caller named
+        (``usage.side_call``: ``tool`` for ``summarize``,
+        ``memory_extraction`` for ``on_session_end``), else ``side_call``; it
+        is the run in progress (``get_active_run``: a sub-agent's tool's call
+        is that run's), and names that run's agent, else the main agent. It is
+        recorded in the conversation its caller named, else the turn's, else
+        the open one, and, in a turn, reported through the turn's live
+        events, so the stream carries it as it carries the agents' own. A
+        task that outlived its turn (``turn_has_ended``) records its call in
+        that turn's conversation, with no turn, and reports it to no one:
+        the turn's stream has ended.
+        """
+        side = current_side_call()
+        run = get_active_run()
+        event.run = run
+        event.metadata["purpose"] = side.purpose if side is not None else PURPOSE_SIDE_CALL
+        agent = run.agent if run is not None else self.root_agent_name
+        if agent:
+            event.metadata["agent"] = agent
+        turn = get_active_turn()
+        if side is not None and side.conversation is not None:
+            conversation = side.conversation
+        else:
+            conversation = turn or self.session_ref()
+        self.usage_of(conversation).record(event)
+        if turn is not None and not turn_has_ended():
+            from agentic_cli.workflow import live_events
+
+            live_events.report(event)
+
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
 
@@ -2449,7 +2525,8 @@ class BaseWorkflowManager(ABC):
 
         Note:
             Default implementation raises NotImplementedError.
-            Subclasses should override if they support simple generation.
+            Subclasses should override if they support simple generation,
+            and report the call's usage with ``_report_side_call``.
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement generate_simple"

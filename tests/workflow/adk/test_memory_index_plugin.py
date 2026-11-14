@@ -221,7 +221,8 @@ async def test_the_plugin_comes_before_the_overflow_handler_and_the_fit_guard(pr
     finally:
         await manager.cleanup()
     assert names.index("memory_index") < names.index("context_overflow") < names.index("fit_guard")
-    assert names[-2:] == ["context_overflow", "fit_guard"]  # test_adk_overflow's order still holds
+    # test_adk_overflow's order still holds
+    assert names[-3:] == ["context_overflow", "fit_guard", "call_sent"]
 
 
 class TestAfterAnOverflow:

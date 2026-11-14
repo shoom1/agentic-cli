@@ -275,8 +275,9 @@ class TestEveryCall:
                     for e in of(events, EventType.LLM_USAGE)]
 
         assert usage(on) == usage(off)
-        # The agents' six calls and the summary; a tool's own call has none.
-        assert len(usage(off)) == 7
+        # The agents' six calls, the summary and the tool's own call (a side call).
+        assert len(usage(off)) == 8
+        assert ("worker", "side_call") in [(agent, purpose) for agent, purpose, _ in usage(off)]
         assert of(off, *LOGGED) == []
         assert not log.exists()
         assert [e.type for e in on if e.type not in LOGGED] == [e.type for e in off]

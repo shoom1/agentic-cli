@@ -1,6 +1,6 @@
 """OpenRouter and OpenAI-compatible servers (vLLM and the like) on ADK.
 
-``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with six
+``OpenAICompatibleLlm`` is ADK's Chat Completions ``OpenAILlm`` with seven
 additions:
 
 - Reasoning text. These servers send a model's reasoning beside its answer,
@@ -33,6 +33,11 @@ additions:
   ``response_format`` to None when a request has none, and the SDK writes
   None as null, which a server that validates the request (Synthetic)
   refuses.
+- Cache writes. OpenRouter reports a call's cache writes
+  (``prompt_tokens_details.cache_write_tokens``), which ADK's usage mapping
+  drops; they are kept where ADK's Claude adapter keeps Claude's, the usage's
+  ``cache_creation_input_tokens`` (``_with_cache_writes``), which
+  ``workflow/usage.py``'s ``adk_tokens`` reads.
 
 The factory gives each instance its client, with the base URL, the key, the
 timeout and retries and, for OpenRouter, the attribution headers.
@@ -42,7 +47,7 @@ only a streamed one to ``_generate_content_streaming``. This class asks for
 every request to be handed there, and sends it streamed or not as its caller
 asked. The streaming loop (``_stream``) is a copy of ADK's
 (``OpenAILlm._generate_content_streaming``, google-adk 2.12) with the
-reasoning and refusal lines added; ``tests/workflow/adk/test_openai_compatible.py``
+reasoning, refusal and cache-write lines added; ``tests/workflow/adk/test_openai_compatible.py``
 fails when ADK's loop changes.
 """
 
@@ -147,8 +152,10 @@ class OpenAICompatibleLlm(OpenAILlm):
         response = await self._openai_client.chat.completions.create(**kwargs)
         message = response.choices[0].message if response.choices else None
         refusal = getattr(message, "refusal", None)
+        answer = _response_to_llm_response(response)
+        _with_cache_writes(answer.usage_metadata, getattr(response, "usage", None))
         yield _with_reasoning(
-            _with_refusal(_response_to_llm_response(response), refusal),
+            _with_refusal(answer, refusal),
             _reasoning_of(message),
             _signature(self.model, _details_of(message)),
         )
@@ -156,8 +163,8 @@ class OpenAICompatibleLlm(OpenAILlm):
     async def _stream(self, kwargs: dict[str, Any]) -> AsyncGenerator[LlmResponse, None]:
         """ADK's ``OpenAILlm._generate_content_streaming``, reading reasoning too.
 
-        The lines marked ``# reasoning`` and ``# refusal`` are this class's;
-        the rest is ADK's.
+        The lines marked ``# reasoning``, ``# refusal`` and ``# cache writes``
+        are this class's; the rest is ADK's.
         """
         kwargs["stream"] = True
         # Ask for the trailing usage-only chunk. Backends that ignore this simply
@@ -281,7 +288,7 @@ class OpenAICompatibleLlm(OpenAILlm):
                     f" {finish_reason!r} and no content."
                 ),
                 finish_reason=mapped_finish_reason,
-                usage_metadata=_usage_metadata(usage),
+                usage_metadata=_with_cache_writes(_usage_metadata(usage), usage),  # cache writes
             )
             return
 
@@ -295,7 +302,7 @@ class OpenAICompatibleLlm(OpenAILlm):
         yield LlmResponse(
             content=types.Content(role="model", parts=parts),
             partial=False,
-            usage_metadata=_usage_metadata(usage),
+            usage_metadata=_with_cache_writes(_usage_metadata(usage), usage),  # cache writes
             finish_reason=mapped_finish_reason,
         )
 
@@ -466,6 +473,24 @@ def _with_refusal(response: LlmResponse, refusal: str | None) -> LlmResponse:
     else:
         response.content.parts = [*(response.content.parts or []), refused]
     return response
+
+
+def _with_cache_writes(
+    metadata: types.GenerateContentResponseUsageMetadata | None, usage: Any
+) -> types.GenerateContentResponseUsageMetadata | None:
+    """``metadata`` with the cache writes ``usage`` reports, as ADK's Claude adapter keeps them.
+
+    ADK's ``_usage_metadata`` maps Chat Completions usage without OpenRouter's
+    ``prompt_tokens_details.cache_write_tokens``; they go on the attribute
+    ADK's Claude adapter sets, ``cache_creation_input_tokens`` (the GenAI
+    shape has no field for them), which ``workflow/usage.py``'s ``adk_tokens``
+    reads.
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    writes = getattr(details, "cache_write_tokens", None)
+    if metadata is not None and isinstance(writes, int) and writes > 0:
+        object.__setattr__(metadata, "cache_creation_input_tokens", writes)
+    return metadata
 
 
 def _thought(text: str | None, signature: bytes | None = None) -> types.Part:

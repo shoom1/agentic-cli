@@ -9,6 +9,8 @@ and these tests pin it whole, so a move anywhere fails one of them:
 
 - ``main_agent`` first: it records the running agent, which the summarizer
   reads;
+- ``call_latency`` before any plugin that could replace an answer: it marks
+  each call's answer with how long the call took;
 - ``permission`` before every other tool callback: a denial is the call's
   answer;
 - ``tool_error`` answers a call that raised (and one to an unknown tool);
@@ -24,9 +26,10 @@ and these tests pin it whole, so a move anywhere fails one of them:
   callbacks;
 - ``memory_index`` before ``context_overflow`` and ``fit_guard``, which keep
   it;
-- ``fit_guard`` last but the raw log: it measures the request every other
-  plugin edited;
-- ``llm_logging_sent`` last: it logs the request as sent.
+- ``fit_guard`` last but the raw log and the clock: it measures the request
+  every other plugin edited;
+- ``llm_logging_sent``: it logs the request as sent;
+- ``call_sent`` last: each call's clock starts as its request goes out.
 
 A native ADK YAML app gets the same chain: only the building of its agents
 differs (``workflow/adk/build.py``).
@@ -83,6 +86,7 @@ async def test_a_config_built_app_with_every_option(project):
 
     assert await _chain(manager) == [
         "main_agent",
+        "call_latency",
         "permission",
         "tool_error",
         "llm_logging",
@@ -94,6 +98,7 @@ async def test_a_config_built_app_with_every_option(project):
         "context_overflow",
         "fit_guard",
         "llm_logging_sent",
+        "call_sent",
     ]
 
 
@@ -105,6 +110,7 @@ async def test_a_plain_config_built_app(project):
 
     assert await _chain(manager) == [
         "main_agent",
+        "call_latency",
         "permission",
         "tool_error",
         "foreign_reasoning",
@@ -112,6 +118,7 @@ async def test_a_plain_config_built_app(project):
         "tool_result_cap",
         "context_overflow",
         "fit_guard",
+        "call_sent",
     ]
 
 
@@ -127,6 +134,7 @@ async def test_a_delegating_app(project):
 
     assert await _chain(manager) == [
         "main_agent",
+        "call_latency",
         "permission",
         "tool_error",
         "llm_logging",
@@ -138,6 +146,7 @@ async def test_a_delegating_app(project):
         "context_overflow",
         "fit_guard",
         "llm_logging_sent",
+        "call_sent",
     ]
 
 
@@ -149,6 +158,7 @@ async def test_a_native_adk_yaml_app_gets_the_same_chain(project):
 
     assert await _chain(manager) == [
         "main_agent",
+        "call_latency",
         "permission",
         "tool_error",
         "foreign_reasoning",
@@ -156,6 +166,7 @@ async def test_a_native_adk_yaml_app_gets_the_same_chain(project):
         "tool_result_cap",
         "context_overflow",
         "fit_guard",
+        "call_sent",
     ]
 
 
@@ -170,6 +181,7 @@ async def test_a_native_adk_yaml_app_with_every_option(project):
 
     assert await _chain(manager) == [
         "main_agent",
+        "call_latency",
         "permission",
         "tool_error",
         "llm_logging",
@@ -181,4 +193,5 @@ async def test_a_native_adk_yaml_app_with_every_option(project):
         "context_overflow",
         "fit_guard",
         "llm_logging_sent",
+        "call_sent",
     ]

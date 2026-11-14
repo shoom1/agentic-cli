@@ -78,10 +78,15 @@ from agentic_cli.workflow.context import (
     overflow_message,
     usage_fields,
 )
-from agentic_cli.workflow.deepagents.middleware import answer_outcome
+from agentic_cli.workflow.deepagents.middleware import (
+    answer_latency,
+    answer_outcome,
+    mark_latency,
+)
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
+from agentic_cli.workflow.usage import UsageLedgers, langchain_tokens, llm_usage_event
 
 if TYPE_CHECKING:
     from langchain_core.outputs import LLMResult
@@ -124,6 +129,10 @@ class DeepAgentsEventProcessor:
         sub_agents: Each agent's sub-agents, by name: a ``task`` call starts
             a run only for one of the caller's own. None takes every
             ``task`` call's ``subagent_type`` as the caller's.
+        ledgers: The manager's usage ledgers: each call's usage is recorded
+            in its conversation's as it is made, before ``on_event``, and a
+            sub-agent run's end carries what the run used, by model
+            (``metadata["usage"]``); its own when not given.
     """
 
     def __init__(
@@ -135,6 +144,7 @@ class DeepAgentsEventProcessor:
         budgets: Mapping[str, ContextBudget] | None = None,
         runs: AgentRuns | None = None,
         sub_agents: Mapping[str, Collection[str]] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         self._root = root
         self._agent_models = agent_models
@@ -166,6 +176,7 @@ class DeepAgentsEventProcessor:
         # A sub-agent run's last answer's outcome (SubAgentOutcomeMiddleware's
         # mark), by run id, until its task call's result ends the run.
         self._outcomes: dict[str, str] = {}
+        self._ledgers = ledgers if ledgers is not None else UsageLedgers()
 
     def agent(self, namespace: Iterable[str]) -> str:
         """The agent whose graph runs at ``namespace``."""
@@ -196,6 +207,9 @@ class DeepAgentsEventProcessor:
                     events += self._model_output(agent, run, values)
                 elif node == "tools":
                     events += self._tools_output(agent, run, values)
+        for event in events:
+            # Recorded as it is made: an app's on_event cannot drop a row.
+            self._ledgers.record(event)
         return events
 
     def turn_failed(self, error: BaseException) -> WorkflowEvent:
@@ -283,7 +297,9 @@ class DeepAgentsEventProcessor:
                 if started is not None:
                     events.append(started)
             if message.usage_metadata:
-                events.append(self._usage(agent, message.usage_metadata))
+                events.append(
+                    self._usage(agent, message.usage_metadata, answer_latency(message))
+                )
         return self._all_attributed(events, agent, run)
 
     def _tools_output(self, agent: str, run: RunRef, values: dict) -> list[WorkflowEvent]:
@@ -354,26 +370,27 @@ class DeepAgentsEventProcessor:
             return None
         outcome = self._outcomes.pop(child.run or "", None)
         text = message.text
+        usage = self._ledgers.ledger(get_active_turn()).run_usage(child.run or "")
         _, succeeded, error = _result_of(message)
         if text.startswith(SUBAGENT_ERROR_PREFIX):
             event = WorkflowEvent.agent_run(
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=text.removeprefix(SUBAGENT_ERROR_PREFIX),
+                error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
             )
         elif not succeeded:
             event = WorkflowEvent.agent_run(
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=error or text,
+                error=error or text, usage=usage,
             )
         elif outcome == REFUSED:
             event = WorkflowEvent.agent_run(
                 child, RUN_REFUSED, call_id=message.tool_call_id, result=result_head(text),
-                error=REFUSAL_ERROR,
+                error=REFUSAL_ERROR, usage=usage,
             )
         else:
             event = WorkflowEvent.agent_run(
                 child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text),
-                partial=outcome == CUT,
+                partial=outcome == CUT, usage=usage,
             )
         self._runs.observe(event)
         return event
@@ -408,9 +425,11 @@ class DeepAgentsEventProcessor:
             )
         ]
 
-    def _usage(self, agent: str, usage: Mapping[str, Any]) -> WorkflowEvent:
+    def _usage(
+        self, agent: str, usage: Mapping[str, Any], latency_ms: float | None
+    ) -> WorkflowEvent:
         model = self._agent_models.get(agent) or self._agent_models.get(self._root)
-        event = usage_event(model, usage)
+        event = usage_event(model, usage, latency_ms=latency_ms)
         event.metadata.update(usage_fields(self._budgets.get(agent)))
         if agent != self._root:
             # A sub-agent's prompt is its brief, not the conversation's context.
@@ -427,28 +446,25 @@ class DeepAgentsEventProcessor:
         return event
 
 
-def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> WorkflowEvent:
+def usage_event(
+    model: "ResolvedModel | None",
+    usage: Mapping[str, Any],
+    *,
+    latency_ms: float | None = None,
+) -> WorkflowEvent:
     """``LLM_USAGE`` for a call on ``model`` that reported ``usage``.
 
-    ``usage`` is LangChain's ``usage_metadata``: cache reads and writes are its
-    ``input_token_details``, thinking its ``output_token_details.reasoning``.
+    ``usage`` is LangChain's ``usage_metadata``, read as every partner
+    package writes it (``workflow/usage.py``'s ``langchain_tokens``): cache
+    reads and writes are its ``input_token_details``, thinking its
+    ``output_token_details.reasoning``. ``latency_ms`` is how long the call
+    took, when it was measured.
     """
-    inputs = usage.get("input_token_details") or {}
-    outputs = usage.get("output_token_details") or {}
-    # When Anthropic breaks cache writes down by TTL, langchain-anthropic
-    # reports them under these keys and sets "cache_creation" to 0.
-    by_ttl = sum(
-        inputs.get(key) or 0
-        for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
-    )
-    return WorkflowEvent.llm_usage(
-        model=str(model.ref) if model is not None else "unknown",
-        prompt_tokens=usage.get("input_tokens"),
-        completion_tokens=usage.get("output_tokens"),
+    return llm_usage_event(
+        str(model.ref) if model is not None else "unknown",
+        langchain_tokens(usage),
         total_tokens=usage.get("total_tokens"),
-        thinking_tokens=outputs.get("reasoning"),
-        cached_tokens=inputs.get("cache_read"),
-        cache_creation_tokens=by_ttl or inputs.get("cache_creation"),
+        latency_ms=latency_ms,
     )
 
 
@@ -514,10 +530,15 @@ class RunCallback(AsyncCallbackHandler):
     ``live`` as it happens (the manager merges it into the turn's stream), so
     it shows while the node it happened in still runs.
 
+    - Every model call is timed, from its start to its end, and its answer
+      marked with the milliseconds (``middleware.mark_latency``:
+      ``response_metadata["agentic_cli"]["latency_ms"]``, beside any other
+      mark), before any middleware sees it: the event processor gives the
+      step's ``LLM_USAGE`` its ``latency_ms`` from it. No adapter sends it.
     - A summary call (run metadata ``lc_source="summarization"``) reports
       ``CONTEXT_SUMMARIZING`` as it starts, then its ``LLM_USAGE``, with
       ``purpose="summarization"``, on the model of the agent it summarized
-      for, with that agent's context numbers.
+      for, with that agent's context numbers and the call's latency.
     - A summary applied (``CONTEXT_SUMMARIZED``) is ``CONTEXT_TRIMMED``, with
       ``source="summarization"``, the messages it stands for and the
       conversation's tokens before and after.
@@ -537,6 +558,8 @@ class RunCallback(AsyncCallbackHandler):
         live: The turn's live events, which every event goes out through.
         budgets: Each agent's context numbers, by name, which a summary's
             ``LLM_USAGE`` carries; none without.
+        ledgers: The manager's usage ledgers: a summary's usage is recorded
+            in its conversation's before it goes out.
     """
 
     def __init__(
@@ -547,15 +570,17 @@ class RunCallback(AsyncCallbackHandler):
         llm_log: "LLMLogWriter | None" = None,
         live: "LiveEvents",
         budgets: Mapping[str, ContextBudget] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         super().__init__()
+        self._ledgers = ledgers
         self._root = root
         self._agent_models = agent_models
         self._budgets: Mapping[str, ContextBudget] = budgets or {}
         self._llm_log = llm_log
         self._live = live
-        # The calls in flight that are reported when they end, by run id:
-        # summary calls, and every call when logging.
+        # Every call in flight, by run id: each is timed, and a summary's,
+        # and every call when logging, reported as it ends.
         self._calls: dict[UUID, _ModelCall] = {}
         # The notices given once a turn (this callback is the turn's).
         self._notified: set[str] = set()
@@ -571,8 +596,6 @@ class RunCallback(AsyncCallbackHandler):
     ) -> None:
         metadata = metadata or {}
         purpose = _purpose(metadata)
-        if self._llm_log is None and purpose != PURPOSE_SUMMARY:
-            return
         # create_agent names its runs after the agent, and a tool's runs
         # inherit the name of the agent whose tool it is.
         agent = metadata.get("lc_agent_name") or self._root
@@ -594,14 +617,23 @@ class RunCallback(AsyncCallbackHandler):
         call = self._calls.pop(run_id, None)
         if call is None:
             return
+        latency = call.latency_ms()
+        for generation in (g for generations in response.generations for g in generations):
+            message = getattr(generation, "message", None)
+            if isinstance(message, AIMessage):
+                mark_latency(message, latency)
         if self._llm_log is not None:
-            self._log(_response_event(call, response), run_id)
+            self._log(_response_event(call, response, latency), run_id)
         if call.purpose == PURPOSE_SUMMARY:
-            event = usage_event(self._agent_models.get(call.agent), _usage_of(response))
+            event = usage_event(
+                self._agent_models.get(call.agent), _usage_of(response), latency_ms=latency
+            )
             event.metadata.update(
                 purpose=PURPOSE_SUMMARY, agent=call.agent,
                 **usage_fields(self._budgets.get(call.agent)),
             )
+            if self._ledgers is not None:
+                self._ledgers.record(event)
             self._emit(event)
 
     async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
@@ -704,8 +736,10 @@ def _request_event(
     return _attributed_call(event, call)
 
 
-def _response_event(call: _ModelCall, response: "LLMResult") -> WorkflowEvent:
-    """``LLM_RESPONSE`` for a call that answered ``response``."""
+def _response_event(
+    call: _ModelCall, response: "LLMResult", latency_ms: float
+) -> WorkflowEvent:
+    """``LLM_RESPONSE`` for a call that answered ``response`` after ``latency_ms``."""
     generation = next((g for gens in response.generations for g in gens), None)
     message = getattr(generation, "message", None)
     info = {**(getattr(generation, "generation_info", None) or {})}
@@ -721,7 +755,7 @@ def _response_event(call: _ModelCall, response: "LLMResult") -> WorkflowEvent:
         author=call.agent,
         raw_parts=list(message.content_blocks) if answered else None,
     )
-    event.metadata["latency_ms"] = call.latency_ms()
+    event.metadata["latency_ms"] = latency_ms
     if answered and message.usage_metadata:
         event.metadata["usage"] = dict(message.usage_metadata)
     return _attributed_call(event, call)

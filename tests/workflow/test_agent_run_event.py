@@ -43,6 +43,13 @@ class TestAgentRun:
             "call_id": "c1", "result": "", "error": "overloaded",
         }
 
+    def test_an_end_carries_what_the_run_used(self):
+        used = {"anthropic:claude-sonnet-4-6": {"input": 140, "output": 14}}
+
+        event = WorkflowEvent.agent_run(RESEARCHER, "completed", result="X is 42.", usage=used)
+
+        assert event.metadata["usage"] == used
+
     def test_a_partial_end_says_so(self):
         event = WorkflowEvent.agent_run(RESEARCHER, "completed", result="X is", partial=True)
 

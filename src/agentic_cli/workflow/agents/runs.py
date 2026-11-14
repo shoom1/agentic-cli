@@ -20,6 +20,7 @@ is in memory, for the process.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -174,8 +175,9 @@ class AgentRuns:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.
 
         A start makes the run's record; an end gives it its status, time,
-        result, error and whether it is partial (an end whose start was not
-        seen makes the record too). Any other event changes nothing.
+        result, error, whether it is partial and what it used (an end whose
+        start was not seen makes the record too). Any other event changes
+        nothing.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
@@ -208,6 +210,7 @@ class AgentRuns:
         record.result = metadata.get("result") or ""
         record.error = metadata.get("error")
         record.partial = bool(metadata.get("partial"))
+        record.usage = dict(metadata.get("usage") or {})
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""
@@ -221,11 +224,18 @@ class AgentRuns:
         found = [r for r in records.values() if r.ref.instance == run_or_instance]
         return found[-1] if found else None
 
-    def interrupt_open(self, conversation: SessionRef | None) -> list[RunRef]:
+    def interrupt_open(
+        self,
+        conversation: SessionRef | None,
+        *,
+        usage: Callable[[str], dict[str, dict[str, int]]] | None = None,
+    ) -> list[RunRef]:
         """End ``conversation``'s runs still open as interrupted; the runs ended.
 
         For a turn that ends with runs open (a cancel, a failure): no event
-        can tell its consumer any more.
+        can tell its consumer any more. ``usage`` gives each run's tokens by
+        model, as an end event carries them (the conversation's ledger's
+        ``run_usage``).
         """
         now = datetime.now()
         ended: list[RunRef] = []
@@ -233,6 +243,8 @@ class AgentRuns:
             if record.status not in RUN_END_STATUSES:
                 record.status = RUN_INTERRUPTED
                 record.ended = now
+                if usage is not None and record.ref.run is not None:
+                    record.usage = usage(record.ref.run)
                 ended.append(record.ref)
         return ended
 

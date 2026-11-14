@@ -25,9 +25,11 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   it is built from the request the error callback received.
   It runs on the agent's own model
   (``get_invocation_context().agent.canonical_model``), and its answer is the
-  call's. Plugins' ``before_model_callback``\\ s do not run for it: the request
-  was already built and checked. The turns it leaves out are reported as the
-  fit guard reports its own, once a turn.
+  call's, marked with how long the retry took (``call_clock.mark_latency``),
+  as Deep Agents times each model call: its usage counts the retry. Plugins'
+  ``before_model_callback``\\ s do not run for it: the request was already
+  built and checked. The turns it leaves out are reported as the fit guard
+  reports its own, once a turn.
 
 When the retry is refused as too long too, or nothing could be left out (the
 newest turn alone is too long), an agent that replies to the user (the main
@@ -52,6 +54,7 @@ response: it gets the same answer, without a retry.
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import TYPE_CHECKING
 
@@ -61,6 +64,7 @@ from google.genai import types
 
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.adk.call_clock import mark_latency
 from agentic_cli.workflow.adk.fit_guard_plugin import (
     drop_turns,
     fold_summary,
@@ -174,6 +178,7 @@ class OverflowPlugin(BasePlugin):
         contents = fold_summary(contents)
         retry = request.model_copy(update={"contents": contents})
         model = callback_context.get_invocation_context().agent.canonical_model
+        started = time.perf_counter()
         try:
             async with contextlib.aclosing(
                 model.generate_content_async(retry, stream=False)
@@ -181,6 +186,7 @@ class OverflowPlugin(BasePlugin):
                 async for response in responses:
                     logger.info("adk_context_overflow_retried", agent=agent,
                                 turns_dropped=dropped, summarized=summary is not None)
+                    mark_latency(response, (time.perf_counter() - started) * 1000)
                     return response
         except Exception as again:
             if not is_context_overflow(again):

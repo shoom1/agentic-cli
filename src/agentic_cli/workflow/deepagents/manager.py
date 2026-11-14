@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
@@ -63,6 +64,7 @@ from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
     RunCallback,
+    usage_event,
 )
 from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clashes
 from agentic_cli.workflow.deepagents.sessions import (
@@ -556,6 +558,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # report to: what it reports is queued where nothing reads.
             live=live_events.current() or LiveEvents(),
             budgets=self._budgets,
+            ledgers=self._usage_ledgers,
         )
         summary = await write_summary(
             middleware, sent[:cut], focus=focus, callbacks=[callback]
@@ -624,6 +627,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             budgets=self._budgets,
             runs=self.agent_runs,
             sub_agents={config.name: config.sub_agents for config in self.agent_configs},
+            ledgers=self._usage_ledgers,
         )
         live = LiveEvents()
         callback = RunCallback(
@@ -632,6 +636,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             llm_log=self._raw_llm_log(),
             live=live,
             budgets=self._budgets,
+            ledgers=self._usage_ledgers,
         )
         stream = self._root.astream(
             graph_input,
@@ -735,16 +740,23 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         the call through the LangChain adapter, with thinking off where the
         model allows it and ``max_tokens`` as its limit (``_simple_model``).
         Called by a tool during a turn, it runs in that turn's run, so the raw
-        LLM log records it under the agent whose tool called it.
+        LLM log records it under the agent whose tool called it. Its usage is
+        reported as a side call's (``_report_side_call``), timed around its
+        request.
 
         Returns:
             The answer's text, without its thinking.
         """
         await self._ensure_initialized()
-        model = build_chat_model(
-            self._simple_model(max_tokens), settings=self._settings, app_name=self.app_name
-        )
+        resolved = self._simple_model(max_tokens)
+        model = build_chat_model(resolved, settings=self._settings, app_name=self.app_name)
+        started = time.perf_counter()
         response = await model.ainvoke([HumanMessage(content=prompt)])
+        if response.usage_metadata:
+            self._report_side_call(usage_event(
+                resolved, response.usage_metadata,
+                latency_ms=(time.perf_counter() - started) * 1000,
+            ))
         return str(response.text)
 
     # -------------------------------------------------------------------------

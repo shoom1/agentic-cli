@@ -860,9 +860,11 @@ class ForeignReasoningMiddleware(AgentMiddleware):
         return await handler(self._own(request))
 
 
-#: Where a rewritten answer's ``response_metadata`` carries its outcome:
-#: ``{"agentic_cli": {"outcome": ...}}`` (the framework's key, as a job
-#: notice's ``kind`` is). No provider adapter sends it.
+#: Where an answer's ``response_metadata`` carries the framework's marks:
+#: ``{"agentic_cli": {"outcome": ..., "latency_ms": ...}}`` (the framework's
+#: key, as a job notice's ``kind`` is): a rewritten answer's outcome, and how
+#: long the call that wrote it took. Each mark is added beside the others,
+#: never in their place. No provider adapter sends it.
 _MARK = "agentic_cli"
 
 #: The raw content blocks that hold a model's reasoning, as the adapters
@@ -905,6 +907,31 @@ def answer_outcome(message: AnyMessage) -> str | None:
         return None
     mark = message.response_metadata.get(_MARK)
     return mark.get("outcome") if isinstance(mark, dict) else None
+
+
+def mark_latency(message: AIMessage, latency_ms: float) -> None:
+    """Mark ``message``, in place, with how long the model call that wrote it took.
+
+    The run callback marks every answer as its call ends, before any
+    middleware sees it; the mark joins the framework's others
+    (``response_metadata["agentic_cli"]``), which ``answer_latency`` reads.
+    """
+    marks = message.response_metadata.get(_MARK)
+    message.response_metadata[_MARK] = {
+        **(marks if isinstance(marks, dict) else {}), "latency_ms": latency_ms,
+    }
+
+
+def answer_latency(message: AnyMessage) -> float | None:
+    """How long the model call that wrote ``message`` took, in milliseconds, as
+    the run callback marked it (``mark_latency``); None without a mark."""
+    if not isinstance(message, AIMessage):
+        return None
+    mark = message.response_metadata.get(_MARK)
+    latency = mark.get("latency_ms") if isinstance(mark, dict) else None
+    if isinstance(latency, bool) or not isinstance(latency, (int, float)):
+        return None
+    return float(latency)
 
 
 def marked_answer(message: AIMessage) -> AIMessage:
@@ -953,8 +980,15 @@ def marked_answer(message: AIMessage) -> AIMessage:
         "additional_kwargs": {
             key: value for key, value in message.additional_kwargs.items() if key != "refusal"
         },
-        "response_metadata": {**metadata, _MARK: {"outcome": outcome}},
+        # Beside the other marks: the run callback's latency stays.
+        "response_metadata": {**metadata, _MARK: {**_marks(metadata), "outcome": outcome}},
     })
+
+
+def _marks(metadata: dict) -> dict:
+    """The framework's marks ``metadata`` holds already (``_MARK``)."""
+    marks = metadata.get(_MARK)
+    return marks if isinstance(marks, dict) else {}
 
 
 def _refusal(message: AIMessage) -> dict | None:

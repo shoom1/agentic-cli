@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -92,6 +93,7 @@ from agentic_cli.workflow.context import (
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import get_active_turn, set_active_run
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX, summary_prompt
+from agentic_cli.workflow.usage import PURPOSE_SUMMARIZATION, UsageLedgers, adk_usage_event
 
 if TYPE_CHECKING:
     from google.adk.agents.base_agent import BaseAgent
@@ -242,6 +244,8 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             prompt prefix changes with it): the manager drops the
             conversation's memory index snapshot, so the next request takes
             a new one.
+        ledgers: The manager's usage ledgers: a summary's usage is recorded
+            in its conversation's as it is reported.
 
     Attributes:
         last_result: What the last summary written did; None until one is.
@@ -269,6 +273,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         focus: str | None = None,
         source: str | None = None,
         on_written: Callable[[], None] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         self.root = root
         self.model = model
@@ -277,6 +282,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         self.focus = focus
         self.source = source or ("compact" if manual else "summarization")
         self._on_written = on_written
+        self._ledgers = ledgers
         self.last_result: CompactResult | None = None
         self.last_kept_turns = 0
         self.last_error: Exception | None = None
@@ -320,6 +326,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
 
         self._paying_for = (start, size)
         live_events.report(WorkflowEvent.context_summarizing(self.root))
+        started = time.perf_counter()
         try:
             summary, usage = await generate_text(
                 self.model, summary_prompt(self._rendered(summarized), self.focus),
@@ -333,6 +340,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             if not _is_overflow(error):
                 raise
             self._sized_to = _summary_window(str(error), self.budget.window)
+            started = time.perf_counter()  # the call that answers is timed
             try:
                 summary, usage = await generate_text(
                     self.model, summary_prompt(self._rendered(summarized), self.focus),
@@ -340,6 +348,11 @@ class AgentCliSummarizer(BaseEventsSummarizer):
                 )
             finally:
                 self._sized_to = None
+        # Paid for whatever it wrote: an empty summary's call too.
+        spent = self._usage(usage, latency_ms=(time.perf_counter() - started) * 1000)
+        if self._ledgers is not None:
+            self._ledgers.record(spent)
+        live_events.report(spent)
         if not summary.strip():
             raise ValueError(f"{self.model.ref} wrote an empty summary")
 
@@ -360,7 +373,6 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             tokens_before=estimate_event_tokens(events, kind),
             tokens_after=estimate_event_tokens([event, *kept], kind),
         )
-        live_events.report(self._usage(usage))
         trimmed = WorkflowEvent.context_trimmed(
             len(events), len(kept) + 1, self.source,
             self.root, messages_summarized=result.messages_summarized,
@@ -426,22 +438,22 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             return f"{head}\n{_cut_middle(rest, left)}"
         return _cut_middle(whole, room)
 
-    def _usage(self, usage: types.GenerateContentResponseUsageMetadata | None) -> WorkflowEvent:
+    def _usage(
+        self,
+        usage: types.GenerateContentResponseUsageMetadata | None,
+        *,
+        latency_ms: float | None = None,
+    ) -> WorkflowEvent:
         """The summary call's usage, credited to the agent it summarized.
 
         It carries that agent's context numbers (an overflow's summary too),
-        as its own calls' usage does.
+        as its own calls' usage does, and how long the call took.
         """
-        event = WorkflowEvent.llm_usage(
-            model=str(self.model.ref),
-            prompt_tokens=getattr(usage, "prompt_token_count", None),
-            completion_tokens=getattr(usage, "candidates_token_count", None),
-            total_tokens=getattr(usage, "total_token_count", None),
-            thinking_tokens=getattr(usage, "thoughts_token_count", None),
-            cached_tokens=getattr(usage, "cached_content_token_count", None),
+        event = adk_usage_event(
+            str(self.model.ref), usage, self.model.record.kind, latency_ms=latency_ms
         )
         event.metadata.update(
-            purpose="summarization", agent=self.root, **usage_fields(self.budget)
+            purpose=PURPOSE_SUMMARIZATION, agent=self.root, **usage_fields(self.budget)
         )
         return event
 

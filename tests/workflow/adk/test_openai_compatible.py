@@ -26,6 +26,7 @@ from google.genai import types  # noqa: E402
 from openai import AsyncOpenAI  # noqa: E402
 
 from agentic_cli.workflow.adk.openai_compatible import OpenAICompatibleLlm  # noqa: E402
+from agentic_cli.workflow.usage import UsageTotals, adk_tokens  # noqa: E402
 from agentic_cli.workflow.adk.subagent_outcome_plugin import mark_outcome  # noqa: E402
 from agentic_cli.workflow.agents.outcome import REFUSED, refusal_notice  # noqa: E402
 from tests.workflow.adk.fakes import user  # noqa: E402
@@ -46,11 +47,13 @@ class Server:
         deltas: list[dict[str, Any]] = (),
         message: dict[str, Any] | None = None,
         finish_reason: str = "stop",
+        usage: dict[str, Any] | None = None,
     ) -> None:
         self.deltas = list(deltas)
         self.message = message or {"role": "assistant", "content": "ok"}
         self.finish_reason = finish_reason
         self.requests: list[httpx.Request] = []
+        self.usage = usage or {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
 
     @property
     def bodies(self) -> list[dict[str, Any]]:
@@ -73,7 +76,7 @@ class Server:
             "choices": [
                 {"index": 0, "message": self.message, "finish_reason": self.finish_reason}
             ],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            "usage": self.usage,
         })
 
     def _stream(self) -> httpx.Response:
@@ -87,9 +90,7 @@ class Server:
             chunk([{"index": 0, "delta": delta, "finish_reason": None}]) for delta in self.deltas
         ]
         chunks.append(chunk([{"index": 0, "delta": {}, "finish_reason": self.finish_reason}]))
-        chunks.append(
-            chunk([], usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
-        )
+        chunks.append(chunk([], usage=self.usage))
         body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=body.encode()
@@ -738,3 +739,42 @@ async def test_a_request_adk_built_otherwise_goes_without_the_details(monkeypatc
     assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
         "reasoning_details_not_sent"
     ]
+
+
+# --- OpenRouter's cache writes are kept --------------------------------------------
+#
+# OpenRouter reports a call's cache writes under prompt_tokens_details, which
+# ADK's usage mapping drops; the adapter keeps them where ADK's Claude adapter
+# keeps Claude's, so the ledger counts them as Deep Agents does.
+
+#: OpenRouter's usage for a call that read and wrote its cache.
+CACHING_USAGE = {"prompt_tokens": 1_550, "completion_tokens": 7, "total_tokens": 1_557,
+                 "prompt_tokens_details": {"cached_tokens": 1_200, "cache_write_tokens": 300}}
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_openrouter_s_cache_writes_are_kept(stream):
+    server = Server(usage=CACHING_USAGE)
+
+    final = (await responses(compatible(server), stream=stream))[-1]
+
+    assert adk_tokens(final.usage_metadata, "openrouter") == UsageTotals(
+        input=1_550, output=7, cached=1_200, cache_write=300, calls=1
+    )
+
+
+async def test_a_reply_cut_off_before_any_answer_keeps_its_cache_writes():
+    server = Server(deltas=[{"role": "assistant", "reasoning": "Long thoughts"}],
+                    finish_reason="length", usage=CACHING_USAGE)
+
+    cut = (await responses(compatible(server), stream=True))[-1]
+
+    assert cut.error_code is not None
+    assert adk_tokens(cut.usage_metadata, "openrouter").cache_write == 300
+
+
+@pytest.mark.parametrize("stream", [True, False])
+async def test_no_cache_writes_is_none(stream):
+    final = (await responses(compatible(Server()), stream=stream))[-1]
+
+    assert adk_tokens(final.usage_metadata, "openrouter").cache_write == 0

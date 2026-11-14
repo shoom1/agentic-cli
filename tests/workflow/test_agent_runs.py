@@ -158,6 +158,17 @@ class TestObserve:
             RUN_FAILED, end.timestamp, "", "overloaded", False,
         )
 
+    def test_an_end_keeps_what_the_run_used(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        used = {"m": {"input": 140, "output": 14}}
+
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(ref, RUN_COMPLETED, call_id="c1", result="ok", usage=used)
+        ))
+
+        assert runs.records(ONE)[0].usage == used
+
     def test_a_partial_end_says_so(self):
         runs = AgentRuns()
         ref = started(runs, ONE, "c1", "researcher")
@@ -230,6 +241,24 @@ class TestInterruptOpen:
     def test_none_open_is_none(self):
         assert AgentRuns().interrupt_open(ONE) == []
 
+    def test_an_interrupted_run_keeps_what_it_used(self):
+        runs = AgentRuns()
+        open_one = started(runs, ONE, "c1", "researcher")
+        done = started(runs, ONE, "c2", "researcher")
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(done, RUN_COMPLETED, call_id="c2", result="ok")
+        ))
+        asked: list[str] = []
+
+        def usage(run: str) -> dict[str, dict[str, int]]:
+            asked.append(run)
+            return {"m": {"input": 50, "output": 5}}
+
+        runs.interrupt_open(ONE, usage=usage)
+
+        assert asked == [open_one.run]
+        assert [r.usage for r in runs.records(ONE)] == [{"m": {"input": 50, "output": 5}}, {}]
+
 
 class TestForget:
     def test_a_forgotten_conversation_starts_again(self):
@@ -292,6 +321,13 @@ class TestTheTurnEndsItsOpenRuns:
 
         (record,) = manager.agent_runs.records(manager.session_ref("s", "u"))
         assert record.status == RUN_INTERRUPTED
+
+    async def test_each_turn_is_counted_in_its_conversations_ledger(self, manager):
+        for _ in range(2):
+            [event async for event in manager.process("Find X.", "u", "s")]
+
+        assert manager.usage_of(manager.session_ref("s", "u")).turns == 2
+        assert manager.usage_of(manager.session_ref("t", "u")).turns == 0
 
     async def test_a_turn_that_ends_its_runs_leaves_them_as_they_ended(self, manager):
         [event async for event in manager.process("Find X.", "u", "s")]

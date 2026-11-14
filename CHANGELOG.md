@@ -559,6 +559,28 @@ the start of the entry's title.
 
 ### Added
 
+- **Token usage by run and agent, on both backends.** Every model call the
+  framework makes is one `LLM_USAGE`, side calls included (`generate_simple`:
+  web_fetch's and the knowledge base's summaries, `purpose` `tool`; the memory
+  proposals as a conversation ends, `memory_extraction`; an app's own,
+  `side_call`, or what its caller names with `workflow.usage.side_call`), of
+  the run it is made in (`WorkflowEvent.run`). Each is recorded in its
+  conversation's ledger (`workflow/usage.py`'s `UsageLedger`;
+  `BaseWorkflowManager.usage`, the open conversation's, and `usage_of`, both
+  provisional; in memory for the manager's life: a backend switch builds a
+  new manager, and the rows before it do not follow, as with `agent_runs`):
+  a row per call (run, agent, purpose, model, input, output, cached,
+  cache-write and thinking tokens, latency, the turn as the manager counts
+  them, a `cost` None until prices are known), and totals by run, agent,
+  model, purpose and turn. Every call is timed, on both backends (ADK: from
+  its request to its answer, `workflow/adk/call_clock.py`; Deep Agents: the
+  turn's run callback; a side call around its own request), its
+  `LLM_USAGE`'s `latency_ms`. A sub-agent run's `AGENT_RUN` end carries
+  what it used, by model (`metadata["usage"]`), as its record does
+  (`RunRecord.usage`), a run a stopped turn leaves open too. `/status` shows
+  the tokens by agent: the main agent, each sub-agent with its runs, the side
+  calls by purpose. The status bar's `ctx` is the main agent's: no side call
+  moves it.
 - **A job records the sub-agent that started it.** `JobRecord.started_by`
   is the instance id of the sub-agent run whose call submitted the job
   (`researcher-2`; `get_active_run()` at submit), None for the root's and
@@ -1425,6 +1447,16 @@ the start of the entry's title.
 
 ### Changed
 
+- **Every `LLM_USAGE` counts the same way on both backends.** `prompt_tokens`
+  is every input token, cache reads and writes included, and
+  `completion_tokens` every output token, thinking included
+  (`workflow/usage.py`'s `normalized_tokens`). On ADK, a Gemini or Claude
+  reply's `completion_tokens` now includes its thinking (ADK's adapters
+  report it apart, `thoughts_token_count`), as Deep Agents' did, and a
+  Claude or OpenRouter cache write is reported (`cache_creation_tokens`).
+  The raw LLM log's usage records count the same way, and langchain-openai's
+  priority and flex tiers' cache and reasoning parts count as the standard
+  tier's.
 - **A native ADK YAML app runs as an app built from configs; only the building
   of its agents differs.** In 0.6 a native app (`adk_config_path`) and one
   built from `AgentConfig`s ran the same plugins. What 0.7.0 adds to an app
@@ -2714,6 +2746,11 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A model call a tool makes reports its usage.** `generate_simple`
+  (web_fetch's and the knowledge base's summaries, the memory proposals)
+  reported no `LLM_USAGE` on ADK or Deep Agents, so the status bar's totals
+  left them out. Nor did an ADK summary that came back empty, though its call
+  was paid for.
 - **A task that outlives its turn asks no one.** The input callback is
   context-local, and a task a turn started (`asyncio.create_task` copies the
   context) still held it after the turn ended: asked then, it opened a dialog
