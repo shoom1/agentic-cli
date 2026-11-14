@@ -64,12 +64,22 @@ from agentic_cli.workflow.service_registry import (
     WORKFLOW,
     get_service,
 )
+from agentic_cli.workflow.usage import (
+    PURPOSE_MEMORY_EXTRACTION,
+    PURPOSE_TOOL,
+    UsageLedger,
+    UsageTotals,
+    side_call,
+)
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 from tests.workflow.test_manager_models import route
 
 BACKENDS = ("adk", "deepagents")
 USER = "u"
 SESSION = "s"
+#: The script that answers side calls (``generate_simple``): a model request
+#: that is no agent's (ADK: no agent's prompt; Deep Agents: the default model's).
+SIDE_CALLS = "side_calls"
 
 
 # -- backend-neutral model answers ---------------------------------------------
@@ -101,9 +111,10 @@ class Step:
     """One model answer: its text, its calls, and why it stopped.
 
     ``stop`` is a text answer's stop reason (Claude's ``end_turn``); an answer
-    with calls stops for them. A scenario that needs another kind of answer
-    adds a keyword here, with a default, and handles it in both
-    ``_claude_answer`` and ``_scripted_answer``.
+    with calls stops for them. ``usage`` is what the call reports,
+    ``(input, output)`` tokens; each fake's own when None (they differ). A
+    scenario that needs another kind of answer adds a keyword here, with a
+    default, and handles it in both ``_claude_answer`` and ``_scripted_answer``.
     """
 
     text: str = ""
@@ -111,11 +122,12 @@ class Step:
     stop: str = "end_turn"
     #: The provider refuses the request (a 400) with this message.
     fails: str | None = None
+    usage: tuple[int, int] | None = None
 
 
-def says(text: str, *, stop: str = "end_turn") -> Step:
+def says(text: str, *, stop: str = "end_turn", usage: tuple[int, int] | None = None) -> Step:
     """An answer of ``text`` alone."""
-    return Step(text=text, stop=stop)
+    return Step(text=text, stop=stop, usage=usage)
 
 
 def fails(message: str) -> Step:
@@ -123,9 +135,9 @@ def fails(message: str) -> Step:
     return Step(fails=message)
 
 
-def calls(*made: Call, text: str = "") -> Step:
+def calls(*made: Call, text: str = "", usage: tuple[int, int] | None = None) -> Step:
     """An answer that makes ``made`` (in one response: they run in parallel)."""
-    return Step(text=text, calls=made)
+    return Step(text=text, calls=made, usage=usage)
 
 
 def prompt_of(name: str) -> str:
@@ -174,6 +186,8 @@ def _claude_answer(step: Step) -> dict[str, Any] | httpx.Response:
     answer = anthropic_message()
     answer["content"] = blocks
     answer["stop_reason"] = "tool_use" if step.calls else step.stop
+    if step.usage is not None:
+        answer["usage"] = {"input_tokens": step.usage[0], "output_tokens": step.usage[1]}
     return answer
 
 
@@ -195,14 +209,20 @@ def _scripted_answer(step: Step) -> Any:
         else (call.tool, dict(call.args), call.call_id)
         for call in step.calls
     ]
-    answer = ai(step.text, calls=made)
+    usage = None
+    if step.usage is not None:
+        tokens_in, tokens_out = step.usage
+        usage = {"input_tokens": tokens_in, "output_tokens": tokens_out,
+                 "total_tokens": tokens_in + tokens_out}
+    answer = ai(step.text, calls=made, usage=usage)
     stop = "tool_use" if step.calls else step.stop
     return answer.model_copy(update={"response_metadata": {"stop_reason": stop}})
 
 
 class _ClaudeTeam:
     """Claude for a team, behind ``FakeAPI``: each agent answers from its own
-    script, told apart by its prompt; every request is kept under its agent."""
+    script, told apart by its prompt, and a request that is no agent's (a
+    side call) from ``SIDE_CALLS``'s; every request is kept under its agent."""
 
     def __init__(self, scripts: dict[str, list[Step]]) -> None:
         self.scripts = {name: list(steps) for name, steps in scripts.items()}
@@ -213,7 +233,9 @@ class _ClaudeTeam:
         system = body.get("system") or ""
         if isinstance(system, list):
             system = "\n".join(block.get("text", "") for block in system)
-        name = next(name for name in self.scripts if system.startswith(prompt_of(name)))
+        name = next(
+            (name for name in self.scripts if system.startswith(prompt_of(name))), SIDE_CALLS
+        )
         self.sent.append((name, body))
         script = self.scripts[name]
         return _claude_answer(script.pop(0) if script else says(f"[{name} has no scripted answer]"))
@@ -291,6 +313,10 @@ class Crew:
     def requests(self, agent: str) -> int:
         """How many model requests ``agent`` made."""
         return self._requests(agent)
+
+    def ledger(self) -> UsageLedger:
+        """The conversation's token usage (``manager.usage_of``)."""
+        return self.manager.usage_of(self.conversation)
 
     def last_message(self, agent: str, call: int = -1) -> str:
         """The text of the last message ``agent``'s model request ``call`` held."""
@@ -379,6 +405,8 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
     models = ScriptedModels(**{
         name: [_scripted_answer(step) for step in steps] for name, steps in scripts.items()
     })
+    # A side call runs on the default model, which serves no agent.
+    models.chats[None] = models.chats.pop(SIDE_CALLS)
     monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
     manager = deepagents_manager.DeepAgentsWorkflowManager(agent_configs=team, settings=_settings())
 
@@ -460,6 +488,13 @@ async def contract_whoami() -> dict:
     call = get_active_tool_call()
     SEEN.append((get_active_run(), call.call_id if call is not None else None))
     return {"success": True}
+
+
+@register_tool(capabilities=EXEMPT, description="Summarize a text (a contract-test tool).")
+async def contract_summarize(text: str = "") -> dict:
+    """Summarize ``text`` with the workflow's model: a side call inside the run."""
+    summary = await get_service(WORKFLOW).summarize(text, f"Summarize this: {text}")
+    return {"success": True, "summary": summary}
 
 
 @register_tool(capabilities=EXEMPT, description="Wait until stopped (a contract-test tool).")
@@ -568,6 +603,7 @@ async def make_crew(backend, project, monkeypatch):
 
     def make(team: list[AgentConfig], **scripts: list[Step]) -> Crew:
         complete = {config.name: list(scripts.get(config.name, ())) for config in team}
+        complete[SIDE_CALLS] = list(scripts.get(SIDE_CALLS, ()))
         build = _adk_crew if backend == "adk" else _deepagents_crew
         crew = build(team, complete, monkeypatch)
         made.append(crew)
@@ -590,7 +626,8 @@ def team() -> list[AgentConfig]:
     """A coordinator, and the researcher it delegates to."""
     return [
         agent("coordinator", sub_agents=("researcher",), tools=(contract_whoami,)),
-        agent("researcher", tools=(contract_lookup, contract_whoami, contract_block, "write_file")),
+        agent("researcher", tools=(contract_lookup, contract_whoami, contract_block,
+                                   contract_summarize, "write_file")),
     ]
 
 
@@ -1440,3 +1477,71 @@ class TestASubAgentsJob:
         answered = crew.results_read("coordinator")["c1"]
         assert INTERRUPTED_BY_USER in answered
         assert record.job_id not in answered
+
+
+# -- token usage: each model call in its conversation's ledger, by run and agent ------------
+
+
+class TestUsage:
+    async def test_the_ledger_adds_up_to_what_the_providers_reported(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"), usage=(100, 10)),
+                         says("Done.", usage=(120, 12))],
+            researcher=[calls(use("contract_summarize", "r1", text="A long page."), usage=(50, 5)),
+                        says("X is 42.", usage=(60, 6))],
+            side_calls=[says("A summary.", usage=(30, 3))],
+        )
+
+        events = await crew.turn()
+
+        ledger = crew.ledger()
+        model = str(crew.manager.agent_models["researcher"].ref)
+        reported = [e for e in events if e.type is EventType.LLM_USAGE]
+        # Every call's usage reached the stream too, the side call's among them.
+        assert sum(e.metadata["prompt_tokens"] for e in reported) == 360
+        (side,) = [e for e in reported if e.metadata.get("purpose") == PURPOSE_TOOL]
+        assert (side.run, side.metadata["agent"]) == (RESEARCHER, "researcher")
+        assert ledger.totals() == UsageTotals(input=360, output=36, calls=5)
+        assert ledger.by_agent() == {
+            "coordinator": UsageTotals(input=220, output=22, calls=2),
+            "researcher": UsageTotals(input=110, output=11, calls=2),
+        }
+        assert ledger.by_purpose() == {PURPOSE_TOOL: UsageTotals(input=30, output=3, calls=1)}
+        # The run's own: its steps and its tool's side call.
+        assert ledger.totals(run="researcher-1#1") == UsageTotals(input=140, output=14, calls=3)
+        assert ledger.totals(run=None) == UsageTotals(input=220, output=22, calls=2)
+        assert {row.turn for row in ledger.rows} == {1}
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert ended.metadata["usage"] == {model: {"input": 140, "output": 14}}
+        (record,) = crew.records()
+        assert record.usage == {model: {"input": 140, "output": 14}}
+
+    async def test_a_side_call_outside_a_turn_is_its_conversations(self, make_crew):
+        crew = make_crew(team(), side_calls=[says("[]", usage=(40, 4))])
+
+        with side_call(PURPOSE_MEMORY_EXTRACTION, crew.conversation):
+            await crew.manager.generate_simple("Propose memories.", max_tokens=200)
+
+        (row,) = crew.ledger().rows
+        assert (row.purpose, row.run, row.turn) == (PURPOSE_MEMORY_EXTRACTION, None, None)
+        assert (row.input, row.output, row.agent) == (40, 4, "coordinator")
+
+    async def test_a_stopped_runs_record_keeps_what_it_used(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Wait.", "c1"), usage=(100, 10))],
+            researcher=[calls(use("contract_block", "r1"), usage=(50, 5))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+
+        model = str(crew.manager.agent_models["researcher"].ref)
+        (record,) = crew.records()
+        assert (record.status, record.usage) == (
+            RUN_INTERRUPTED, {model: {"input": 50, "output": 5}}
+        )

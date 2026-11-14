@@ -67,6 +67,7 @@ from agentic_cli.workflow.outside_content import (
     OUTSIDE_CONTENT_KEY,
 )
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
+from agentic_cli.workflow.usage import adk_tokens, llm_usage_event
 from agentic_cli.workflow.tool_output import tool_output_dir
 
 from agentic_cli.config import (
@@ -283,14 +284,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             prompt: The prompt to send.
             max_tokens: The output limit.
 
+        The call's usage is reported as a side call's (``_report_side_call``).
+
         Returns:
             The answer's text, without the model's thoughts.
         """
         await self._ensure_initialized()
-        text, _ = await generate_text(
-            self._simple_model(max_tokens), prompt, settings=self._settings,
-            app_name=self.app_name,
+        resolved = self._simple_model(max_tokens)
+        text, usage = await generate_text(
+            resolved, prompt, settings=self._settings, app_name=self.app_name,
         )
+        if usage is not None:
+            self._report_side_call(llm_usage_event(
+                str(resolved.ref),
+                adk_tokens(usage, resolved.record.kind),
+                total_tokens=getattr(usage, "total_token_count", None),
+            ))
         return text
 
     def _detach_backend(self) -> list[Closer]:

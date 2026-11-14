@@ -50,7 +50,15 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.agents.runs import AgentRuns
-from agentic_cli.workflow.usage import UsageLedger, UsageLedgers
+from agentic_cli.workflow.usage import (
+    PURPOSE_MEMORY_EXTRACTION,
+    PURPOSE_SIDE_CALL,
+    PURPOSE_TOOL,
+    UsageLedger,
+    UsageLedgers,
+    current_side_call,
+    side_call,
+)
 from agentic_cli.workflow.interrupts import OpenCalls
 # The two limits are still importable from here.
 from agentic_cli.workflow.memory_index import (  # noqa: F401
@@ -64,6 +72,7 @@ from agentic_cli.workflow.sessions import (
     SessionInfo,
     SessionRef,
     close_turn_scope,
+    get_active_run,
     get_active_tool_call,
     get_active_turn,
     open_turn_scope,
@@ -936,9 +945,10 @@ class BaseWorkflowManager(ABC):
         Returns:
             Summarized text response.
         """
-        return await self.generate_simple(
-            self._fit_prompt(prompt, 12000), max_tokens=12000
-        )
+        with side_call(PURPOSE_TOOL):
+            return await self.generate_simple(
+                self._fit_prompt(prompt, 12000), max_tokens=12000
+            )
 
     def _fit_prompt(self, prompt: str, max_tokens: int) -> str:
         """``prompt`` as a side call on the default model may send it.
@@ -1023,7 +1033,10 @@ class BaseWorkflowManager(ABC):
             index = await asyncio.to_thread(store.index, tools=ALL_MEMORY_TOOLS)
             discarded = await asyncio.to_thread(store.discarded)
             prompt = extraction_prompt(messages[-20:], index, discarded)
-            answer = await self.generate_simple(self._fit_prompt(prompt, 2000), max_tokens=2000)
+            with side_call(PURPOSE_MEMORY_EXTRACTION, ref):
+                answer = await self.generate_simple(
+                    self._fit_prompt(prompt, 2000), max_tokens=2000
+                )
         except Exception:
             logger.debug("session_fact_extraction_failed", exc_info=True)
             return []
@@ -2462,6 +2475,37 @@ class BaseWorkflowManager(ABC):
 
     # Optional methods with default implementations
 
+    def _report_side_call(self, event: WorkflowEvent) -> None:
+        """Account for a side call (``generate_simple``), and report it in a turn.
+
+        ``event`` is the call's ``LLM_USAGE``, its counts normalized
+        (``workflow/usage.py``). Its purpose is the one its caller named
+        (``usage.side_call``: ``tool`` for ``summarize``,
+        ``memory_extraction`` for ``on_session_end``), else ``side_call``; it
+        is the run in progress (``get_active_run``: a sub-agent's tool's call
+        is that run's), and names that run's agent, else the main agent. It is
+        recorded in the conversation its caller named, else the turn's, else
+        the open one, and, in a turn, reported through the turn's live
+        events, so the stream carries it as it carries the agents' own.
+        """
+        side = current_side_call()
+        run = get_active_run()
+        event.run = run
+        event.metadata["purpose"] = side.purpose if side is not None else PURPOSE_SIDE_CALL
+        agent = run.agent if run is not None else self.root_agent_name
+        if agent:
+            event.metadata["agent"] = agent
+        turn = get_active_turn()
+        if side is not None and side.conversation is not None:
+            conversation = side.conversation
+        else:
+            conversation = turn or self.session_ref()
+        self.usage_of(conversation).record(event)
+        if turn is not None:
+            from agentic_cli.workflow import live_events
+
+            live_events.report(event)
+
     async def generate_simple(self, prompt: str, max_tokens: int = 500) -> str:
         """Generate a simple text response using the current model.
 
@@ -2477,7 +2521,8 @@ class BaseWorkflowManager(ABC):
 
         Note:
             Default implementation raises NotImplementedError.
-            Subclasses should override if they support simple generation.
+            Subclasses should override if they support simple generation,
+            and report the call's usage with ``_report_side_call``.
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement generate_simple"

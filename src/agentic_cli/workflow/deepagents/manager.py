@@ -739,16 +739,18 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         the call through the LangChain adapter, with thinking off where the
         model allows it and ``max_tokens`` as its limit (``_simple_model``).
         Called by a tool during a turn, it runs in that turn's run, so the raw
-        LLM log records it under the agent whose tool called it.
+        LLM log records it under the agent whose tool called it. Its usage is
+        reported as a side call's (``_report_side_call``).
 
         Returns:
             The answer's text, without its thinking.
         """
         await self._ensure_initialized()
-        model = build_chat_model(
-            self._simple_model(max_tokens), settings=self._settings, app_name=self.app_name
-        )
+        resolved = self._simple_model(max_tokens)
+        model = build_chat_model(resolved, settings=self._settings, app_name=self.app_name)
         response = await model.ainvoke([HumanMessage(content=prompt)])
+        if response.usage_metadata:
+            self._report_side_call(usage_event(resolved, response.usage_metadata))
         return str(response.text)
 
     # -------------------------------------------------------------------------
