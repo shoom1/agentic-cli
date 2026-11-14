@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -325,6 +326,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
 
         self._paying_for = (start, size)
         live_events.report(WorkflowEvent.context_summarizing(self.root))
+        started = time.perf_counter()
         try:
             summary, usage = await generate_text(
                 self.model, summary_prompt(self._rendered(summarized), self.focus),
@@ -338,6 +340,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             if not _is_overflow(error):
                 raise
             self._sized_to = _summary_window(str(error), self.budget.window)
+            started = time.perf_counter()  # the call that answers is timed
             try:
                 summary, usage = await generate_text(
                     self.model, summary_prompt(self._rendered(summarized), self.focus),
@@ -346,7 +349,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             finally:
                 self._sized_to = None
         # Paid for whatever it wrote: an empty summary's call too.
-        spent = self._usage(usage)
+        spent = self._usage(usage, latency_ms=(time.perf_counter() - started) * 1000)
         if self._ledgers is not None:
             self._ledgers.record(spent)
         live_events.report(spent)
@@ -435,13 +438,20 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             return f"{head}\n{_cut_middle(rest, left)}"
         return _cut_middle(whole, room)
 
-    def _usage(self, usage: types.GenerateContentResponseUsageMetadata | None) -> WorkflowEvent:
+    def _usage(
+        self,
+        usage: types.GenerateContentResponseUsageMetadata | None,
+        *,
+        latency_ms: float | None = None,
+    ) -> WorkflowEvent:
         """The summary call's usage, credited to the agent it summarized.
 
         It carries that agent's context numbers (an overflow's summary too),
-        as its own calls' usage does.
+        as its own calls' usage does, and how long the call took.
         """
-        event = adk_usage_event(str(self.model.ref), usage, self.model.record.kind)
+        event = adk_usage_event(
+            str(self.model.ref), usage, self.model.record.kind, latency_ms=latency_ms
+        )
         event.metadata.update(
             purpose=PURPOSE_SUMMARIZATION, agent=self.root, **usage_fields(self.budget)
         )

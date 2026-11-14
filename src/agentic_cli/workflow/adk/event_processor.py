@@ -14,6 +14,7 @@ from google.genai import types
 
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.adk.branches import branch_run
+from agentic_cli.workflow.adk.call_clock import call_latency
 from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
 from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY
 from agentic_cli.workflow.agents.outcome import (
@@ -90,8 +91,10 @@ class ADKEventProcessor:
     in ``cache_creation_tokens``; an agent ``kinds`` does not hold runs on a
     model the manager did not resolve, a native ADK YAML app's own, and is
     read as an unknown kind's), and it is recorded in the conversation's
-    ledger (``ledgers``) as it is made, before ``on_event``. A sub-agent
-    run's end carries what the run used, by model (``metadata["usage"]``).
+    ledger (``ledgers``) as it is made, before ``on_event``, with how long
+    the call took (``latency_ms``: the mark ``CallLatencyPlugin`` puts on
+    the answer, ``workflow/adk/call_clock.py``). A sub-agent run's end
+    carries what the run used, by model (``metadata["usage"]``).
 
     A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
@@ -287,6 +290,7 @@ class ADKEventProcessor:
                 usage,
                 self.kinds.get(agent),
                 invocation_id=invocation_id,
+                latency_ms=call_latency(adk_event),
             )
             if agent is not None:
                 usage_event.metadata["agent"] = agent

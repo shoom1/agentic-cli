@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import time
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -36,6 +37,7 @@ from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
 from agentic_cli.workflow.adk import delegation
+from agentic_cli.workflow.adk.call_clock import CallClock, CallLatencyPlugin, CallSentPlugin
 from agentic_cli.workflow.adk.compaction import (
     SUMMARY_MAX_TOKENS,
     AgentCliSummarizer,
@@ -279,7 +281,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         built through the model factory, as an agent's is, with thinking off
         where the model allows it and ``max_tokens`` as its limit, so every
         provider can write them. The call's usage is reported as a side
-        call's (``_report_side_call``).
+        call's (``_report_side_call``), timed around its request.
 
         Args:
             prompt: The prompt to send.
@@ -290,13 +292,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         await self._ensure_initialized()
         resolved = self._simple_model(max_tokens)
+        started = time.perf_counter()
         text, usage = await generate_text(
             resolved, prompt, settings=self._settings, app_name=self.app_name,
         )
         if usage is not None:
-            self._report_side_call(
-                adk_usage_event(str(resolved.ref), usage, resolved.record.kind)
-            )
+            self._report_side_call(adk_usage_event(
+                str(resolved.ref), usage, resolved.record.kind,
+                latency_ms=(time.perf_counter() - started) * 1000,
+            ))
         return text
 
     def _detach_backend(self) -> list[Closer]:
@@ -603,6 +607,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         - ``MainAgentPlugin`` first: it records the running agent, which the
           summarizer reads, and makes its sub-agent run the active run.
+        - ``CallLatencyPlugin``: each model call's answer marked with how
+          long the call took (``workflow/adk/call_clock.py``), before any
+          plugin could replace the answer; it returns nothing.
         - ``_init_plugins``: the permission gate (a denial is the call's
           answer), the tool-error answer, the raw log as the model answers.
         - ``SubAgentOutcomePlugin``, when the tree delegates: a sub-agent's
@@ -625,11 +632,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         - ``OverflowPlugin``: a call refused as too long is summarized (the
           main agent) or trimmed, retried once from the request the fit guard
           saw, then one clear answer; for an agent that replies, the turn's.
-        - ``FitGuardPlugin`` last but the raw log: it measures the request
-          every other plugin edited, and drops the oldest turns of one over
-          its budget.
+        - ``FitGuardPlugin`` last but the raw log and the clock: it measures
+          the request every other plugin edited, and drops the oldest turns
+          of one over its budget.
         - ``SentRequestLoggingPlugin``, with ``raw_llm_logging``: the request
           as sent.
+        - ``CallSentPlugin`` last: each call's clock starts as its request
+          goes out, after every plugin that edits it.
 
         Args:
             replies: The agents that reply to the user (``build.reply_agents``).
@@ -640,7 +649,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         root = self._root_agent
         kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
-        plugins: list = [MainAgentPlugin(self.agent_runs), *self._init_plugins()]
+        clock = CallClock()
+        plugins: list = [
+            MainAgentPlugin(self.agent_runs), CallLatencyPlugin(clock), *self._init_plugins()
+        ]
         if delegated_agents(root):
             from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
 
@@ -674,6 +686,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         plugins.append(fit_guard)
         if self._llm_logging_plugin is not None:
             plugins.append(SentRequestLoggingPlugin(self._llm_logging_plugin))
+        plugins.append(CallSentPlugin(clock))
         return plugins
 
     def _agent_model_refs(self) -> dict[str, str]:

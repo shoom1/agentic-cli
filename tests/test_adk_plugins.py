@@ -6,7 +6,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agentic_cli.workflow.adk import plugins
+from agentic_cli.workflow.adk import call_clock
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, set_active_run
@@ -336,12 +336,12 @@ class TestLLMLoggingPlugin:
     def test_clear_resets_state(self, plugin):
         """clear() should reset events and timestamps."""
         plugin._events = [MagicMock()]
-        plugin._request_timestamps = {"inv-1": 12345.0}
+        plugin.clock.start(_call_context())
 
         plugin.clear()
 
         assert plugin._events == []
-        assert plugin._request_timestamps == {}
+        assert len(plugin.clock) == 0
 
     async def test_max_events_enforced(self, tmp_path, monkeypatch):
         """Buffer should not exceed max_events."""
@@ -559,7 +559,7 @@ class TestEachModelCall:
     def clock(self, monkeypatch):
         """``time.perf_counter`` as the plugin reads it: the times given, in turn."""
         times: list[float] = []
-        monkeypatch.setattr(plugins, "time", SimpleNamespace(perf_counter=lambda: times.pop(0)))
+        monkeypatch.setattr(call_clock, "time", SimpleNamespace(perf_counter=lambda: times.pop(0)))
         return times
 
     async def test_parallel_calls_of_one_agent_each_time_their_own(self, plugin, clock):
@@ -606,7 +606,7 @@ class TestEachModelCall:
             r["metadata"].get("latency_ms") for r in _logged(plugin) if r["type"] == "llm_usage"
         ]
         assert latencies == [5_000.0]
-        assert plugin._request_timestamps == {}
+        assert len(plugin.clock) == 0
 
     async def test_an_unanswered_errors_clock_goes_at_the_next_run(self, plugin):
         # Nothing answers the error, so no response comes: the clock waits
@@ -618,11 +618,11 @@ class TestEachModelCall:
         await plugin.on_model_error_callback(
             callback_context=call, llm_request=_make_mock_llm_request(), error=RuntimeError("529")
         )
-        assert len(plugin._request_timestamps) == 1
+        assert len(plugin.clock) == 1
 
         await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
 
-        assert plugin._request_timestamps == {}
+        assert len(plugin.clock) == 0
 
     async def test_a_run_lets_go_of_what_another_left(self, plugin):
         # Before google-adk 2.14 a call cancelled mid-request fires neither callback.
@@ -633,7 +633,7 @@ class TestEachModelCall:
 
         await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
 
-        assert plugin._request_timestamps == {}
+        assert len(plugin.clock) == 0
 
     async def test_a_sub_agents_records_name_it_and_its_run(self, plugin):
         researcher = RunRef(

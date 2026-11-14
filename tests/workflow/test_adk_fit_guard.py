@@ -395,14 +395,16 @@ async def test_the_raw_log_records_the_request_as_sent(project, monkeypatch):
     (logged,) = [e for e in events[3] if e.type is EventType.LLM_REQUEST]
     sent = json.dumps(logged.metadata["messages"])
     assert FIT_NOTE in sent and "One:" not in sent and "Four:" in sent
-    # Recorded after the guard; the response still ahead of any plugin
-    # that could replace it.
-    assert names[-2:] == ["fit_guard", "llm_logging_sent"]
+    # Recorded after the guard (only the clock that starts as the request
+    # goes out is later); the response still ahead of any plugin that could
+    # replace it.
+    assert names[-3:] == ["fit_guard", "llm_logging_sent", "call_sent"]
     assert names.index("llm_logging") < names.index("fit_guard")
 
 
 async def test_the_guard_is_the_last_plugin(project):
-    """After every plugin that edits the request: it measures what is sent."""
+    """After every plugin that edits the request: it measures what is sent.
+    Only the clock that starts as the request goes out comes after it."""
     manager = solo()
     try:
         await manager.initialize_services()
@@ -410,5 +412,6 @@ async def test_the_guard_is_the_last_plugin(project):
     finally:
         await manager.cleanup()
 
-    assert isinstance(plugins[-1], FitGuardPlugin)
-    assert plugins[-1]._budgets == budgets
+    assert isinstance(plugins[-2], FitGuardPlugin)
+    assert plugins[-2]._budgets == budgets
+    assert plugins[-1].name == "call_sent"

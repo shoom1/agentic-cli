@@ -223,6 +223,33 @@ class TestEachProvidersOverflow:
         assert (last.error_code, last.content) == (OVERFLOW_ERROR_CODE, None)
 
 
+class TestTheRetrysUsage:
+    async def test_it_is_timed_around_its_own_request(self, project, monkeypatch):
+        # The refused request's clock is held until the answer; the answer is
+        # the retry's, timed around its own request, as Deep Agents times
+        # each model call, so its row says how long the call it counts took.
+        from types import SimpleNamespace
+
+        from agentic_cli.workflow.adk import overflow_plugin
+
+        provider, status, body = SHAPES["claude-400"]
+        api, manager = on(monkeypatch, provider, answer(provider, "A1."),
+                          httpx.Response(status, json=body), answer(provider, "A2."))
+        try:
+            await turn(manager, "One.")
+            ticks = iter([100.0, 100.25])
+            monkeypatch.setattr(overflow_plugin, "time", SimpleNamespace(
+                perf_counter=lambda: next(ticks)
+            ))
+            second = await turn(manager, "Two?")
+        finally:
+            await manager.cleanup()
+
+        assert texts(second) == ["A2."]
+        (usage,) = [e for e in second if e.type is EventType.LLM_USAGE]
+        assert usage.metadata["latency_ms"] == 250.0
+
+
 class TestOtherErrors:
     async def test_a_400_that_is_no_overflow_is_the_turns_error(self, project, monkeypatch):
         refused = httpx.Response(400, json={"type": "error", "error": {
@@ -791,8 +818,9 @@ async def test_the_handler_comes_before_the_fit_guard(project, monkeypatch):
     finally:
         await manager.cleanup()
 
-    # Last but the fit guard: a retry is the request the guard already fitted.
-    assert names[-2:] == ["context_overflow", "fit_guard"]
+    # Last but the fit guard (and the clock that starts as the request goes
+    # out): a retry is the request the guard already fitted.
+    assert names[-3:] == ["context_overflow", "fit_guard", "call_sent"]
 
 
 # --- nothing prints over the UI ----------------------------------------------------------------

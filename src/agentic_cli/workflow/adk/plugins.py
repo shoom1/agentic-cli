@@ -8,14 +8,14 @@ Provides framework-level cross-cutting concerns as ADK Plugins:
 
 from __future__ import annotations
 
-import time
 from collections import deque
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from google.adk.plugins.base_plugin import BasePlugin
 
+from agentic_cli.workflow.adk.call_clock import CallClock
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.llm_log import LLMLogWriter
 from agentic_cli.workflow.sessions import get_active_run
@@ -28,16 +28,6 @@ if TYPE_CHECKING:
     from google.adk.models import LlmRequest, LlmResponse
 
 logger = Loggers.workflow()
-
-
-class _Clock(NamedTuple):
-    """When one model call's request went out, under the id of the call's
-    ``EventActions``: holding the object keeps that id from going to another
-    call while this one is out."""
-
-    actions: Any
-    invocation: str | None
-    started: float
 
 
 class LLMLoggingPlugin(BasePlugin):
@@ -62,16 +52,14 @@ class LLMLoggingPlugin(BasePlugin):
     ``cache_creation_tokens``).
 
     A call's latency runs from its request to its response, timed per model
-    call: under the identity of the call's ``EventActions``, which ADK makes
-    for each call and hands to all three of its callbacks, as the fit guard
-    keeps its copy of a request. Parallel delegations to one sub-agent share
-    their invocation and their agent's name, so a clock kept by invocation
-    timed one call from another's request. A failed call keeps its clock
+    call by a clock of its own (``workflow/adk/call_clock.py``'s
+    ``CallClock``, the one every app's calls are timed by for their usage):
+    under the identity of the call's ``EventActions``, which ADK hands to
+    all three of its callbacks. A failed call keeps its clock
     (``on_model_error_callback``): a plugin after this one may answer the
     error (the overflow handler), and that answer reaches
     ``after_model_callback`` like any response, timed. Each run lets go of
-    what another invocation left: an error nobody answered, and a call
-    cancelled mid-request, which before google-adk 2.14 fires no callback.
+    what another invocation left.
 
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
@@ -108,8 +96,8 @@ class LLMLoggingPlugin(BasePlugin):
         self.log_requests = log_requests
 
         self._events: deque[WorkflowEvent] = deque(maxlen=max_events)
-        # id(a model call's EventActions) -> when its request went out.
-        self._request_timestamps: dict[int, _Clock] = {}
+        #: Each model call's clock, from its request to its response.
+        self.clock = CallClock()
 
         # The log lives under the user's home — NOT the (often git-tracked)
         # project dir — since it holds full conversations.
@@ -141,11 +129,7 @@ class LLMLoggingPlugin(BasePlugin):
         invocation_id = getattr(callback_context, "invocation_id", None)
         agent = getattr(callback_context, "agent_name", None)
 
-        actions = getattr(callback_context, "actions", None)
-        if actions is not None:
-            self._request_timestamps[id(actions)] = _Clock(
-                actions, invocation_id, time.perf_counter()
-            )
+        self.clock.start(callback_context)
 
         # The calling agent's model, else the one the request names
         model = self.models.get(agent) or llm_request.model or self.model_name
@@ -198,7 +182,7 @@ class LLMLoggingPlugin(BasePlugin):
         Returns None to allow the response to proceed unchanged.
         """
         invocation_id = getattr(callback_context, "invocation_id", None)
-        latency_ms = self._latency(
+        latency_ms = self.clock.elapsed(
             callback_context, done=getattr(llm_response, "partial", None) is not True
         )
 
@@ -277,22 +261,8 @@ class LLMLoggingPlugin(BasePlugin):
         # What another invocation left (turns run one at a time): a call
         # whose error nobody answered, and one cancelled mid-request, which
         # before google-adk 2.14 fired no callback.
-        invocation = invocation_context.invocation_id
-        self._request_timestamps = {
-            key: clock for key, clock in self._request_timestamps.items()
-            if clock.invocation == invocation
-        }
+        self.clock.keep_only(invocation_context.invocation_id)
         return None
-
-    def _latency(self, callback_context: "CallbackContext", *, done: bool) -> float | None:
-        """Milliseconds since this call's request went out, None if it was not
-        timed; its clock is let go once the call is ``done``."""
-        actions = getattr(callback_context, "actions", None)
-        if actions is None:
-            return None
-        clocks = self._request_timestamps
-        clock = clocks.pop(id(actions), None) if done else clocks.get(id(actions))
-        return None if clock is None else (time.perf_counter() - clock.started) * 1000
 
     # ------------------------------------------------------------------
     # Event buffer management
@@ -307,7 +277,7 @@ class LLMLoggingPlugin(BasePlugin):
     def clear(self) -> None:
         """Clear all captured events and pending timestamps."""
         self._events.clear()
-        self._request_timestamps.clear()
+        self.clock.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
