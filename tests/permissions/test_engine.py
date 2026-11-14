@@ -1279,3 +1279,46 @@ class TestCodeThatMayRunOnTheHostIsApprovedPerCall:
             is_storable_grant(stateful, home=layout.home, uncontained={"python.exec.stateful"})
             is False
         )
+
+
+class TestTheAskNamesTheRun:
+    """The engine asks with the run whose call it gates (``get_active_run()``,
+    which both gates run inside): the prompt opens with it and the request
+    carries it."""
+
+    async def test_a_sub_agents_check_asks_as_its_run(self, ctx):
+        from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run
+
+        researcher = RunRef("researcher", "researcher-2", "researcher-2#1", None, 1)
+        w = _stub_workflow()
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        token = set_active_run(researcher)
+        try:
+            result = await engine.check(
+                "web_fetch",
+                [Capability("http.read", target_arg="url")],
+                {"url": "https://example.com/"},
+            )
+        finally:
+            reset_active_run(token)
+
+        assert result.allowed is False
+        (request,), _ = w.request_user_input.await_args
+        assert request.run == researcher
+        assert request.prompt.startswith(
+            "researcher-2 (researcher, run 1) wants to use `web_fetch`:"
+        )
+
+    async def test_the_roots_check_asks_as_before(self, ctx):
+        w = _stub_workflow()
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        await engine.check(
+            "web_fetch", [Capability("http.read", target_arg="url")],
+            {"url": "https://example.com/"},
+        )
+
+        (request,), _ = w.request_user_input.await_args
+        assert request.run is None
+        assert request.prompt.startswith("Tool `web_fetch` wants:")

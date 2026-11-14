@@ -588,12 +588,15 @@ class PermissionEngine:
     ) -> CheckResult:
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
+        from agentic_cli.workflow.sessions import get_active_run
 
         unmatched = [cap for cap, r in outcomes if r is None]
         async with self._ask_lock:
+            # The run whose call is gated: both gates run inside it, so its
+            # prompt says which sub-agent asks.
             request = build_request(
                 tool_name, resolved, args, home=self._ctx.home,
-                uncontained=uncontained, per_call=per_call,
+                uncontained=uncontained, per_call=per_call, run=get_active_run(),
             )
             # Fail closed: a prompt nobody can answer is a denial the model can
             # read, not an exception that aborts the turn. Cancellation is not
