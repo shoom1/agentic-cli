@@ -17,7 +17,7 @@ from thinking_prompt import ButtonConfig, Dialog, TextField
 
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
-from agentic_cli.workflow.sessions import ConversationChangedError
+from agentic_cli.workflow.sessions import ConversationChangedError, instance_of
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -313,10 +313,39 @@ class _EventProcessingState:
     # First non-recoverable ERROR event seen. The stream may keep going (the
     # backend decides), but the turn's outcome is FAILED, never delivered.
     fatal_error: str | None = None
+    # The sub-agent run whose event is being handled (its instance,
+    # ``researcher-2``; None for the main agent's own and the manager's), and
+    # the one whose event last wrote the status line, which the events box
+    # names (``get_status``).
+    at_work: str | None = None
+    line_by: str | None = None
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Whichever handler writes the status line, it writes the work of
+        # the run whose event is being handled.
+        if name == "status_line":
+            object.__setattr__(self, "line_by", self.__dict__.get("at_work"))
+        object.__setattr__(self, name, value)
 
     def get_status(self) -> str:
-        """Return the current status line for the events thinking box."""
-        return self.status_line
+        """Return the current status line for the events thinking box.
+
+        A sub-agent run's line is under its name: ``researcher-2 ›
+        Calling: web_fetch``. The main agent's is as it is.
+        """
+        if self.line_by is None:
+            return self.status_line
+        return f"{self.line_by} › {self.status_line}"
+
+
+def _at_work(event: "WorkflowEvent") -> str | None:
+    """The sub-agent run ``event`` is the work of (its instance), or None.
+
+    None for the main agent's own (``root_run``), a depth-0 agent's (a native
+    ADK YAML app's transfer target) and the manager's (no run): those lines
+    name nobody, as before.
+    """
+    return instance_of(getattr(event, "run", None))
 
 
 # === Message Processor ===
@@ -760,6 +789,7 @@ class MessageProcessor:
                             async for event in events:
                                 handler = dispatch.get(event.type)
                                 if handler is not None:
+                                    state.at_work = _at_work(event)
                                     await handler(
                                         self, event, state, ui, settings, workflow
                                     )
@@ -961,7 +991,8 @@ class MessageProcessor:
         Only the main agent replies to the user. A sub-agent's text (marked
         ``metadata["subagent"]`` by the backend) is its work, which its parent
         reads as a tool result: it becomes the events box's status line,
-        under the sub-agent's name, and is no part of the reply.
+        under its run's name (``researcher-2 › …``, ``get_status``), or its
+        agent's when the event names no run, and is no part of the reply.
         """
         # Text is already on screen, or in the durable session: replaying the
         # turn would emit it twice.
@@ -970,8 +1001,11 @@ class MessageProcessor:
             line = next(
                 (line.strip() for line in event.content.splitlines() if line.strip()), ""
             )
-            agent = event.metadata.get("agent") or "sub-agent"
-            state.status_line = truncate(f"{agent}: {line}", _SUBAGENT_LINE)
+            if state.at_work is not None:
+                state.status_line = truncate(line, _SUBAGENT_LINE)
+            else:
+                agent = event.metadata.get("agent") or "sub-agent"
+                state.status_line = truncate(f"{agent}: {line}", _SUBAGENT_LINE)
             return
         ui.add_response(event.content, markdown=True)
         state.response_content.append(event.content)
@@ -1073,7 +1107,11 @@ class MessageProcessor:
         settings: "BaseSettings",
         workflow: object,
     ) -> None:
-        """Handle TOOL_RESULT events — display result summary."""
+        """Handle TOOL_RESULT events — display result summary.
+
+        A sub-agent run's result is under its name, as its status line is:
+        ``+ researcher-2 › web_fetch: …``.
+        """
         state.side_effects_seen = True
         tool_name = event.metadata.get("tool_name", "unknown")
         success = event.metadata.get("success", True)
@@ -1097,8 +1135,9 @@ class MessageProcessor:
         # the turn after the tool already ran) and "[bold]" text restyles it.
         from rich.markup import escape
 
+        by = f"{escape(state.at_work)} › " if state.at_work else ""
         display = (
-            f"[{style}]{icon}[/{style}] {escape(tool_name)}: {escape(first_line)}"
+            f"[{style}]{icon}[/{style}] {by}{escape(tool_name)}: {escape(first_line)}"
         )
         if len(lines) > 1:
             display += "\n" + escape("\n".join(lines[1:]))
