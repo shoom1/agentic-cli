@@ -598,7 +598,7 @@ def _active_run(ref):
 
 
 class TestTheRunThatStartedIt:
-    """``started_by``: the sub-agent instance whose call submitted the job (spec 9)."""
+    """``started_by``: the sub-agent instance whose call submitted the job; None for the root's."""
 
     def test_a_sub_agents_job_records_its_instance(self, jm: JobManager):
         from agentic_cli.workflow.sessions import RunRef

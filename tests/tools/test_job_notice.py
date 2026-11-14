@@ -1,7 +1,7 @@
 """What a finished job's notice asks of the root agent: who started the job.
 
 A job a sub-agent started is told to the root (that run has ended), so the
-notice names the sub-agent instead of "you" (spec 9).
+notice names the sub-agent instead of "you": the root did not start it.
 """
 
 from __future__ import annotations
