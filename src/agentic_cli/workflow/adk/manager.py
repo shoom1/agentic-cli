@@ -67,8 +67,8 @@ from agentic_cli.workflow.outside_content import (
     OUTSIDE_CONTENT_KEY,
 )
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
-from agentic_cli.workflow.usage import adk_tokens, llm_usage_event
 from agentic_cli.workflow.tool_output import tool_output_dir
+from agentic_cli.workflow.usage import adk_tokens, llm_usage_event
 
 from agentic_cli.config import (
     BaseSettings,
@@ -278,13 +278,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Used for internal operations such as summaries. The default model is
         built through the model factory, as an agent's is, with thinking off
         where the model allows it and ``max_tokens`` as its limit, so every
-        provider can write them.
+        provider can write them. The call's usage is reported as a side
+        call's (``_report_side_call``).
 
         Args:
             prompt: The prompt to send.
             max_tokens: The output limit.
-
-        The call's usage is reported as a side call's (``_report_side_call``).
 
         Returns:
             The answer's text, without the model's thoughts.
