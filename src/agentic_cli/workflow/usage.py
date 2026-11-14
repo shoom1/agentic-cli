@@ -19,8 +19,11 @@ step, ``subagent`` for a sub-agent's, and a side call's purpose otherwise
 (``PURPOSE_*``). The caller of a side call names it (``side_call``).
 
 Each manager keeps a ledger per conversation (``UsageLedgers``), in memory
-for the process: a row per call, recorded where the event is made, before an
-app's ``on_event`` hook could drop it, under the turn it is made in. The
+for as long as that manager lives: a backend switch builds a new manager,
+and the rows recorded before it do not follow (as with its ``agent_runs``).
+A row per call, recorded where the event is made, before an app's
+``on_event`` hook could drop it, under the turn it is made in, with how long
+the call took (``latency_ms``: every call is timed, on both backends). The
 ledger answers totals by run, agent, model, purpose and turn
 (``UsageLedger.totals``); ``BaseWorkflowManager.usage`` is the open
 conversation's. Its rows carry a ``cost`` that is None while no price is
@@ -316,7 +319,11 @@ class UsageRow:
         cache_write: The input tokens written to a cache.
         thinking: The output tokens spent thinking.
         latency_ms: How long the call took, when it was measured.
-        turn: The conversation's turn it was made in (from 1); None outside a turn.
+        turn: The turn of the conversation it was made in, as this manager
+            counts them (``begin_turn``, from 1: ``/compact`` and a job's
+            notice each run as a turn, and a conversation resumed in another
+            manager starts again at 1), not ``SessionInfo.turns``, the
+            user's own; None outside one of the conversation's turns.
         cost: What it cost; None while no price is known.
     """
 
@@ -347,7 +354,7 @@ class UsageRow:
 
 
 class UsageLedger:
-    """One conversation's model calls, a row each, in memory for the process.
+    """One conversation's model calls, a row each, in memory for its manager's life.
 
     ``record`` makes a row from an ``LLM_USAGE`` event; the totals are read
     by run, agent, model, purpose and turn (``totals``), or grouped
