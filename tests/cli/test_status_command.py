@@ -310,3 +310,35 @@ async def test_no_tokens_by_agent_before_the_first_call():
         await manager.cleanup()
 
     assert by_agent(rows) == []
+
+
+async def test_langgraph_shows_no_tokens_by_agent(tmp_path, monkeypatch):
+    """Deprecated LangGraph makes its own LLM_USAGE and runs no turn through
+    the base: it records no ledger, so /status has no table by agent, even
+    after a turn that reported its usage."""
+    pytest.importorskip("langgraph")
+    import anthropic
+
+    from agentic_cli.workflow.events import EventType
+    from tests.workflow.adk.fakes import FakeAPI
+    from tests.workflow.langchain_fakes import anthropic_reply, route
+    from tests.workflow.test_manager_models import _langgraph, lg_turn
+
+    (tmp_path / "home").mkdir(exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+    route(monkeypatch, anthropic, "AsyncClient",
+          FakeAPI(anthropic_reply({"type": "text", "text": "Hi."})))
+    manager = _langgraph(
+        [AgentConfig(name="solo", prompt="Answer.")],
+        BaseSettings(session_store="memory", default_model=SONNET),
+    )
+    try:
+        events = await lg_turn(manager, "Hello.")
+        rows = await status_rows(manager)
+    finally:
+        await manager.cleanup()
+
+    assert [e for e in events if e.type is EventType.LLM_USAGE]  # it reported usage
+    assert by_agent(rows) == []
