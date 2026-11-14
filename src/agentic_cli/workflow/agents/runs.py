@@ -98,6 +98,10 @@ def run_ended(
       answer);
     - ``refused`` when the outcome is ``REFUSED``;
     - else ``completed``, ``partial`` when the outcome is ``CUT``.
+
+    The sub-agent's answer is never read for success: each backend tells
+    ``failed`` from its own error result alone, so an answer that looks
+    like a failed result completed.
     """
     if sealed:
         return WorkflowEvent.agent_run(

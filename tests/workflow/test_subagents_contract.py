@@ -1379,6 +1379,31 @@ class TestDelegationResult:
         else:
             assert "overloaded" in reason
 
+    async def test_an_answer_that_looks_like_a_failed_result_is_an_answer(self, make_crew):
+        """A sub-agent's answer is text, never read for success: JSON that
+        says it failed completes the run, and is shown as its answer."""
+        answer = json.dumps({"success": False, "error": "no X here"})
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says(answer)],
+        )
+
+        events = await crew.turn()
+
+        (result,) = [
+            e for e in events
+            if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
+        ]
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert crew.results_read("coordinator")["c1"] == answer
+        assert (ended.run, ended.metadata["result"]) == (RESEARCHER, answer)
+        assert "error" not in ended.metadata
+        assert (result.content, result.metadata["success"]) == (answer, True)
+        assert "error" not in result.metadata
+        (record,) = crew.records()
+        assert (record.status, record.result, record.error) == (RUN_COMPLETED, answer, None)
+
 
 class TestRawLog:
     async def test_each_record_names_its_agent_and_its_run(self, make_crew, monkeypatch):

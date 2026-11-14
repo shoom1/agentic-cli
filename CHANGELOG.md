@@ -628,7 +628,11 @@ the start of the entry's title.
   run's start and end are an event of their own, `EventType.AGENT_RUN`
   (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its title,
   the first line of its request, then `completed`, `failed` or
-  `interrupted`, with the first 200 characters of its result), and each
+  `interrupted`, with the first 200 characters of its result; a run fails
+  on `Error running sub-agent: …` or the framework's own error result, an
+  error `ToolMessage` on Deep Agents, the error dict of a raised or denied
+  call on ADK, and the sub-agent's answer is never read for success, so an
+  answer that is JSON saying it failed completes), and each
   manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
   provisional: `records(ref)`, `record(ref, id)`); a run a stopped or failed
   turn leaves open is recorded `interrupted`. On ADK a delegation that
