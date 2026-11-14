@@ -54,7 +54,7 @@ class TestTheProcessor:
 
     async def test_an_openai_models_reasoning_is_counted_once(self):
         ledgers = UsageLedgers()
-        processor = _processor(ledgers=ledgers, default_kind="openai")
+        processor = _processor(ledgers=ledgers, kinds={"coordinator": "openai"})
 
         await _process(processor, _answer("coordinator", 100, 70, 64))
 
@@ -78,3 +78,33 @@ class TestTheProcessor:
         ))
 
         assert ended.metadata["usage"] == {"m": {"input": 50, "output": 5}}
+
+
+class TestTheManagersProcessor:
+    async def test_an_agent_whose_model_is_unknown_counts_its_thinking_apart(
+        self, tmp_path, monkeypatch
+    ):
+        # The default model is OpenAI's, whose adapters count the reasoning in
+        # the completion. An agent the manager resolved no model for (a native
+        # ADK YAML app's that ADK runs on its own model) may run on any: its
+        # usage is read as an unknown kind's, the thinking apart.
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.config import AgentConfig
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("OPENAI_API_KEY", "o-test-key")
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt="Answer.", include_state_tools=False)],
+            settings=BaseSettings(session_store="memory", default_model="openai:gpt-5"),
+        )
+        await manager.initialize_services()
+        try:
+            (usage, _) = await _process(
+                manager._event_processor, _answer("stranger", 900, 5, 25)
+            )
+        finally:
+            await manager.cleanup()
+
+        assert (usage.metadata["completion_tokens"], usage.metadata["thinking_tokens"]) == (30, 25)

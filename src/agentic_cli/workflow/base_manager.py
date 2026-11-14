@@ -2486,7 +2486,10 @@ class BaseWorkflowManager(ABC):
         is that run's), and names that run's agent, else the main agent. It is
         recorded in the conversation its caller named, else the turn's, else
         the open one, and, in a turn, reported through the turn's live
-        events, so the stream carries it as it carries the agents' own.
+        events, so the stream carries it as it carries the agents' own. A
+        task that outlived its turn (``turn_has_ended``) records its call in
+        that turn's conversation, with no turn, and reports it to no one:
+        the turn's stream has ended.
         """
         side = current_side_call()
         run = get_active_run()
@@ -2501,7 +2504,7 @@ class BaseWorkflowManager(ABC):
         else:
             conversation = turn or self.session_ref()
         self.usage_of(conversation).record(event)
-        if turn is not None:
+        if turn is not None and not turn_has_ended():
             from agentic_cli.workflow import live_events
 
             live_events.report(event)

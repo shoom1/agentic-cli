@@ -37,7 +37,7 @@ from agentic_cli.workflow.agents.runs import (
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
 from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
-from agentic_cli.workflow.usage import UsageLedgers, adk_tokens, llm_usage_event
+from agentic_cli.workflow.usage import UsageLedgers, adk_usage_event
 from agentic_cli.logging import Loggers
 
 logger = Loggers.workflow()
@@ -87,7 +87,9 @@ class ADKEventProcessor:
     the CLI shows the main agent's prompt against. Its counts are normalized
     by that model's provider kind (``kinds``; ``workflow/usage.py``'s
     ``adk_tokens``: the thinking counts in the output, a Claude cache write
-    in ``cache_creation_tokens``), and it is recorded in the conversation's
+    in ``cache_creation_tokens``; an agent ``kinds`` does not hold runs on a
+    model the manager did not resolve, a native ADK YAML app's own, and is
+    read as an unknown kind's), and it is recorded in the conversation's
     ledger (``ledgers``) as it is made, before ``on_event``. A sub-agent
     run's end carries what the run used, by model (``metadata["usage"]``).
 
@@ -157,7 +159,6 @@ class ADKEventProcessor:
             (``build.delegated_agents``); a collection of names alone is the
             root's.
         kinds: Each agent's model's provider kind (``ProviderKind``'s value), by name.
-        default_kind: The default model's, for an agent ``kinds`` does not hold.
         ledgers: The manager's usage ledgers, which this processor records
             each call's usage in; its own when not given.
 
@@ -175,7 +176,6 @@ class ADKEventProcessor:
         runs: AgentRuns | None = None,
         delegates: Mapping[str, Collection[str]] | Collection[str] = (),
         kinds: Mapping[str, str] | None = None,
-        default_kind: str | None = None,
         ledgers: UsageLedgers | None = None,
     ) -> None:
         self._model = model
@@ -198,7 +198,6 @@ class ADKEventProcessor:
         # mark), by run id, until its delegation's result ends the run.
         self._outcomes: dict[str, str] = {}
         self.kinds: Mapping[str, str] = kinds or {}
-        self.default_kind = default_kind
         self.ledgers = ledgers if ledgers is not None else UsageLedgers()
 
     @property
@@ -283,10 +282,10 @@ class ADKEventProcessor:
             invocation_id = getattr(adk_event, "invocation_id", None)
             agent = self._agent(adk_event)
 
-            usage_event = llm_usage_event(
+            usage_event = adk_usage_event(
                 self.models.get(agent, self._model),
-                adk_tokens(usage, self.kinds.get(agent, self.default_kind)),
-                total_tokens=getattr(usage, "total_token_count", None),
+                usage,
+                self.kinds.get(agent),
                 invocation_id=invocation_id,
             )
             if agent is not None:

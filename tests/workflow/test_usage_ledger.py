@@ -7,11 +7,15 @@ call's caller says what it is for (``side_call``).
 
 from __future__ import annotations
 
+import contextvars
+
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
+    close_turn_scope,
     get_active_run,
+    open_turn_scope,
     reset_active_run,
     reset_active_turn,
     root_run,
@@ -135,7 +139,7 @@ class TestTheLedger:
         assert ledger.run_usage("nobody-1#1") == {}
 
     def test_a_call_in_a_turn_carries_its_number(self):
-        ledger = UsageLedger()
+        ledger = UsageLedger(CONVERSATION)
         ledger.record(usage(1, 1))  # before any turn
         token = set_active_turn(CONVERSATION)
         try:
@@ -150,6 +154,32 @@ class TestTheLedger:
         assert [row.turn for row in ledger.rows] == [None, 1, 2, None]
         assert ledger.totals(turn=2) == UsageTotals(input=20, output=2, calls=1)
         assert ledger.turns == 2
+
+    def test_a_call_in_another_conversations_turn_carries_none(self):
+        # The memory proposals of a conversation left, made while another's turn runs.
+        ledger = UsageLedger(CONVERSATION)
+        ledger.begin_turn()
+        token = set_active_turn(SessionRef(app_name="app", user_id="u", session_id="t"))
+        try:
+            ledger.record(usage(10, 1))
+        finally:
+            reset_active_turn(token)
+
+        assert ledger.rows[0].turn is None
+
+    def test_a_call_after_its_turn_has_ended_carries_none(self):
+        # A task the turn started that outlived it: its context is the turn's, ended.
+        ledger = UsageLedger(CONVERSATION)
+        turn = set_active_turn(CONVERSATION)
+        scope = open_turn_scope()
+        ledger.begin_turn()
+        outlived = contextvars.copy_context()
+        close_turn_scope(scope)
+        reset_active_turn(turn)
+
+        outlived.run(ledger.record, usage(10, 1))
+
+        assert ledger.rows[0].turn is None
 
 
 class TestTheLedgers:

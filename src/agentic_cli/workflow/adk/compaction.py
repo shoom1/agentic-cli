@@ -92,12 +92,7 @@ from agentic_cli.workflow.context import (
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import get_active_turn, set_active_run
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX, summary_prompt
-from agentic_cli.workflow.usage import (
-    PURPOSE_SUMMARIZATION,
-    UsageLedgers,
-    adk_tokens,
-    llm_usage_event,
-)
+from agentic_cli.workflow.usage import PURPOSE_SUMMARIZATION, UsageLedgers, adk_usage_event
 
 if TYPE_CHECKING:
     from google.adk.agents.base_agent import BaseAgent
@@ -445,11 +440,7 @@ class AgentCliSummarizer(BaseEventsSummarizer):
         It carries that agent's context numbers (an overflow's summary too),
         as its own calls' usage does.
         """
-        event = llm_usage_event(
-            str(self.model.ref),
-            adk_tokens(usage, self.model.record.kind),
-            total_tokens=getattr(usage, "total_token_count", None),
-        )
+        event = adk_usage_event(str(self.model.ref), usage, self.model.record.kind)
         event.metadata.update(
             purpose=PURPOSE_SUMMARIZATION, agent=self.root, **usage_fields(self.budget)
         )

@@ -36,7 +36,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentic_cli.workflow.events import EventType, WorkflowEvent
-from agentic_cli.workflow.sessions import SessionRef, get_active_run, get_active_turn
+from agentic_cli.workflow.sessions import (
+    SessionRef,
+    get_active_run,
+    get_active_turn,
+    turn_has_ended,
+)
 
 #: Why a model call was made (``LLM_USAGE``'s ``metadata["purpose"]``). The
 #: root's own step has none.
@@ -58,6 +63,10 @@ _THOUGHTS_APART = frozenset({"google", "anthropic"})
 #: Anthropic's cache writes by time to live, which langchain-anthropic
 #: reports instead of ``cache_creation`` when the API breaks them down.
 _WRITES_BY_TTL = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+#: The service tiers langchain-openai names a part after when a call ran on
+#: one (``priority_cache_read``, ``flex_reasoning``, ...).
+_SERVICE_TIERS = ("", "priority_", "flex_")
 
 
 def _count(value: Any) -> int | None:
@@ -170,7 +179,9 @@ def langchain_tokens(usage: Mapping[str, Any] | None) -> UsageTotals:
     Gemini's thoughts), their parts in ``input_token_details`` (``cache_read``,
     ``cache_creation``, or the writes by time to live, when Anthropic breaks
     them down and the package zeroes ``cache_creation``) and
-    ``output_token_details.reasoning``.
+    ``output_token_details.reasoning``. langchain-openai names each part
+    after the service tier a call ran on, priority or flex
+    (``priority_cache_read``, ``flex_reasoning``): those count too.
     """
     usage = usage or {}
     inputs = usage.get("input_token_details") or {}
@@ -179,10 +190,17 @@ def langchain_tokens(usage: Mapping[str, Any] | None) -> UsageTotals:
     return normalized_tokens(
         input=_count(usage.get("input_tokens")),
         output=_count(usage.get("output_tokens")),
-        cached=_count(inputs.get("cache_read")),
-        cache_write=by_ttl or _count(inputs.get("cache_creation")),
-        thinking=_count(outputs.get("reasoning")),
+        cached=_part(inputs, "cache_read"),
+        cache_write=by_ttl or _part(inputs, "cache_creation"),
+        thinking=_part(outputs, "reasoning"),
     )
+
+
+def _part(details: Mapping[str, Any], name: str) -> int | None:
+    """A part of LangChain's usage details, on any service tier; None when none is reported."""
+    counts = [_count(details.get(f"{tier}{name}")) for tier in _SERVICE_TIERS]
+    reported = [count for count in counts if count is not None]
+    return sum(reported) if reported else None
 
 
 def llm_usage_event(
@@ -212,6 +230,36 @@ def llm_usage_event(
         latency_ms=latency_ms,
     )
 
+
+
+def adk_usage_event(
+    model: str,
+    usage: Any,
+    kind: Any,
+    *,
+    invocation_id: str | None = None,
+    latency_ms: float | None = None,
+) -> WorkflowEvent:
+    """``LLM_USAGE`` for one ADK call on ``model`` that reported ``usage``.
+
+    Every place ADK's usage becomes an event makes it here: the event
+    processor, the summarizer, ``generate_simple`` and the raw log.
+
+    Args:
+        model: The model's reference, as the event names it.
+        usage: The response's usage metadata (``LlmResponse.usage_metadata``).
+        kind: The provider kind of the model that answered; None when
+            unknown (``adk_tokens``).
+        invocation_id: ADK's invocation, for correlation.
+        latency_ms: How long the call took, when it was measured.
+    """
+    return llm_usage_event(
+        model,
+        adk_tokens(usage, kind),
+        total_tokens=getattr(usage, "total_token_count", None),
+        invocation_id=invocation_id,
+        latency_ms=latency_ms,
+    )
 
 # -- what a side call is for ----------------------------------------------------
 
@@ -304,9 +352,15 @@ class UsageLedger:
     ``record`` makes a row from an ``LLM_USAGE`` event; the totals are read
     by run, agent, model, purpose and turn (``totals``), or grouped
     (``by_agent``, ``by_purpose``, ``by_model``).
+
+    Args:
+        conversation: The conversation it keeps (``UsageLedgers`` names
+            it): a call carries a turn's number only while a turn of this
+            conversation runs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, conversation: SessionRef | None = None) -> None:
+        self.conversation = conversation
         self._rows: list[UsageRow] = []
         self._total = UsageTotals()
         #: The turns begun in the conversation (``begin_turn``).
@@ -328,7 +382,8 @@ class UsageLedger:
         The call is the run's the event names, else the one in progress
         (``get_active_run``), which the event is then given, so the stream
         and the ledger agree; its agent is the event's (``metadata["agent"]``),
-        else that run's.
+        else that run's; its turn the number of the turn of this conversation
+        running, None outside one (``_in_a_turn``).
         """
         if event.type is not EventType.LLM_USAGE:
             return None
@@ -348,11 +403,26 @@ class UsageLedger:
             cache_write=_count(metadata.get("cache_creation_tokens")) or 0,
             thinking=_count(metadata.get("thinking_tokens")) or 0,
             latency_ms=float(latency) if isinstance(latency, (int, float)) else None,
-            turn=self.turns if self.turns and get_active_turn() is not None else None,
+            turn=self.turns if self._in_a_turn() else None,
         )
         self._rows.append(row)
         self._total = self._total + row.tokens
         return row
+
+    def _in_a_turn(self) -> bool:
+        """Whether a turn of this conversation runs in this context.
+
+        Not another conversation's (a conversation left proposes its
+        memories outside its own turns), and not a turn that has ended (a
+        task it started that outlived it: ``turn_has_ended``).
+        """
+        turn = get_active_turn()
+        return (
+            bool(self.turns)
+            and turn is not None
+            and turn == self.conversation
+            and not turn_has_ended()
+        )
 
     def totals(
         self,
@@ -441,7 +511,7 @@ class UsageLedgers:
         """``conversation``'s ledger, made on first use."""
         ledger = self._ledgers.get(conversation)
         if ledger is None:
-            ledger = self._ledgers[conversation] = UsageLedger()
+            ledger = self._ledgers[conversation] = UsageLedger(conversation)
         return ledger
 
     def record(self, event: WorkflowEvent) -> UsageRow | None:

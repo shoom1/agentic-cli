@@ -68,7 +68,7 @@ from agentic_cli.workflow.outside_content import (
 )
 from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
 from agentic_cli.workflow.tool_output import tool_output_dir
-from agentic_cli.workflow.usage import adk_tokens, llm_usage_event
+from agentic_cli.workflow.usage import adk_usage_event
 
 from agentic_cli.config import (
     BaseSettings,
@@ -294,11 +294,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             resolved, prompt, settings=self._settings, app_name=self.app_name,
         )
         if usage is not None:
-            self._report_side_call(llm_usage_event(
-                str(resolved.ref),
-                adk_tokens(usage, resolved.record.kind),
-                total_tokens=getattr(usage, "total_token_count", None),
-            ))
+            self._report_side_call(
+                adk_usage_event(str(resolved.ref), usage, resolved.record.kind)
+            )
         return text
 
     def _detach_backend(self) -> list[Closer]:
@@ -752,7 +750,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             runs=self.agent_runs,
             delegates=delegated_agents(build.root),
             kinds={name: m.record.kind.value for name, m in self._resolved_models.items()},
-            default_kind=self._default_model.record.kind.value if self._default_model else None,
             ledgers=self._usage_ledgers,
         )
 

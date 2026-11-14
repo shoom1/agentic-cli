@@ -19,6 +19,7 @@ from agentic_cli.workflow.events import EventType
 from agentic_cli.workflow.usage import (
     UsageTotals,
     adk_tokens,
+    adk_usage_event,
     langchain_tokens,
     llm_usage_event,
     normalized_tokens,
@@ -147,6 +148,19 @@ class TestLangChainShapes:
             input=1_550, output=70, cached=1_200, cache_write=100, thinking=64, calls=1
         )
 
+    @pytest.mark.parametrize("tier", ["priority", "flex"])
+    def test_openai_s_package_on_a_service_tier(self, tier):
+        # langchain-openai prefixes the parts with the tier, and counts the
+        # tier's own tokens beside them (the input or output less the parts).
+        usage = {"input_tokens": 1_550, "output_tokens": 70, "total_tokens": 1_620,
+                 "input_token_details": {f"{tier}_cache_read": 1_200,
+                                         f"{tier}_cache_creation": 100, tier: 350},
+                 "output_token_details": {f"{tier}_reasoning": 64, tier: 6}}
+
+        assert langchain_tokens(usage) == UsageTotals(
+            input=1_550, output=70, cached=1_200, cache_write=100, thinking=64, calls=1
+        )
+
     def test_none_is_nothing(self):
         assert langchain_tokens(None) == UsageTotals(calls=1)
 
@@ -170,3 +184,19 @@ class TestTheEvent:
         event = llm_usage_event("m", UsageTotals(input=10, output=5, calls=1))
 
         assert event.metadata == {"model": "m", "prompt_tokens": 10, "completion_tokens": 5}
+
+
+class TestTheADKEvent:
+    def test_it_reads_adk_s_usage_by_kind(self):
+        usage = adk_usage(prompt_token_count=900, candidates_token_count=5,
+                          total_token_count=930, cached_content_token_count=800,
+                          thoughts_token_count=25)
+
+        event = adk_usage_event("google:gemini-2.5-flash", usage, "google",
+                                invocation_id="i1", latency_ms=12.5)
+
+        assert event.metadata == {
+            "model": "google:gemini-2.5-flash", "prompt_tokens": 900,
+            "completion_tokens": 30, "total_tokens": 930, "thinking_tokens": 25,
+            "cached_tokens": 800, "invocation_id": "i1", "latency_ms": 12.5,
+        }

@@ -10,6 +10,8 @@ reported through its live events, as the run's in progress.
 
 from __future__ import annotations
 
+import asyncio
+
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run
@@ -104,6 +106,31 @@ class TestReportingASideCall:
         )
         assert event.run == RESEARCHER
         assert await reported(live) == [event]
+
+
+    async def test_from_a_task_its_turn_outlived_it_is_recorded_but_not_reported(
+        self, tmp_path
+    ):
+        # A tool's task that outlives its turn: the turn's stream has ended,
+        # so the call is recorded in the conversation, with no turn, and
+        # handed to no one.
+        mgr, _ = _manager(tmp_path)
+        live = live_events.LiveEvents()
+        go = asyncio.Event()
+
+        async def later() -> None:
+            await go.wait()
+            mgr._report_side_call(spent())
+
+        with mgr._workflow_context(session_id="conv-1", user_id="u"), live_events.reporting(live):
+            mgr.usage_of(mgr.session_ref("conv-1", "u")).begin_turn()
+            task = asyncio.create_task(later())
+        go.set()
+        await task
+
+        (row,) = mgr.usage_of(mgr.session_ref("conv-1", "u")).rows
+        assert (row.purpose, row.turn) == (PURPOSE_SIDE_CALL, None)
+        assert await reported(live) == []
 
 
 async def reported(live: live_events.LiveEvents) -> list:
