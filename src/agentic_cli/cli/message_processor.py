@@ -924,6 +924,12 @@ class MessageProcessor:
         other request is free text, in a dialog with one text field and OK
         and Cancel.
 
+        A sub-agent run's request (``request.run``) names it: a permission
+        prompt is titled ``researcher-2 · Permission`` (its text already
+        opens with who wants the tool), a question ``researcher-2 asks``, its
+        text opening ``researcher-2 (researcher, run 1) asks:``. The root's
+        are titled after the tool, as they always were.
+
         Args:
             request: The user input request from the tool.
             ui: UI session for prompting.
@@ -933,14 +939,29 @@ class MessageProcessor:
         Returns:
             User's response string ("" for a cancelled free-text question).
         """
+        from agentic_cli.workflow.agents.runs import run_label
         from agentic_cli.workflow.events import InputType
+        from agentic_cli.workflow.permissions.prompt import is_permission_request
 
         tool_name = request.tool_name or "Tool"
+        title = f"{tool_name} - Input Required"
+        confirm_title = f"{tool_name} - Confirmation"
+        text = request.prompt
+        # A consumer may be handed a request built without the field (a
+        # workflow of its own, a duck-typed one): it is the root's.
+        run = getattr(request, "run", None)
+        asking = run_label(run)
+        if asking is not None:
+            if is_permission_request(request):
+                title = confirm_title = f"{run.instance} · Permission"
+            else:
+                title = confirm_title = f"{run.instance} asks"
+                text = f"{asking} asks:\n\n{request.prompt}"
 
         if request.input_type == InputType.CHOICE and request.choices:
             result = await ui.dropdown_dialog(
-                title=f"{tool_name} - Input Required",
-                text=request.prompt,
+                title=title,
+                text=text,
                 options=request.choices,
                 default=request.default,
                 placement=placement,
@@ -949,16 +970,16 @@ class MessageProcessor:
 
         elif request.input_type == InputType.CONFIRM:
             result = await ui.yes_no_dialog(
-                title=f"{tool_name} - Confirmation",
-                text=request.prompt,
+                title=confirm_title,
+                text=text,
                 placement=placement,
             )
             return "yes" if result else "no"
 
         else:
             dialog = Dialog(
-                title=f"{tool_name} - Input Required",
-                body=request.prompt,
+                title=title,
+                body=text,
                 buttons=[ButtonConfig("OK", result=True), ButtonConfig("Cancel")],
                 fields=[
                     TextField(

@@ -88,6 +88,9 @@ class UserInputRequest:
         input_type: Type of input expected (TEXT, CHOICE, CONFIRM)
         choices: Available choices for CHOICE input type
         default: Default value if user provides no input
+        run: The sub-agent run that asks (a ``RunRef``); None for the root's
+            own. ``request_user_input`` fills it from ``get_active_run()``
+            when the caller left it None, so a UI can name the agent asking.
     """
 
     request_id: str
@@ -96,6 +99,7 @@ class UserInputRequest:
     input_type: InputType = InputType.TEXT
     choices: list[str] | None = None
     default: str | None = None
+    run: "RunRef | None" = None
 
 
 @dataclass

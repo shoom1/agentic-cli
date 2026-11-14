@@ -2424,6 +2424,10 @@ class BaseWorkflowManager(ABC):
         question has no answer and a permission prompt is denied (the
         engine's no-approver rule).
 
+        A request that names no run is given the sub-agent run asking
+        (``get_active_run()``; None in the root's own calls), so the consumer
+        can say which agent asks, whoever built the request.
+
         Args:
             request: The user input request.
 
@@ -2434,6 +2438,8 @@ class BaseWorkflowManager(ABC):
             UserInputUnavailable: If no callback is registered, or the turn
                 this context comes from has ended (a RuntimeError).
         """
+        if request.run is None:
+            request.run = get_active_run()
         logger.debug(
             "user_input_requested",
             request_id=request.request_id,

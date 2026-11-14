@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from agentic_cli.workflow.agents.runs import run_label
 from agentic_cli.workflow.events import InputType, UserInputRequest
 from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
 from agentic_cli.workflow.permissions.engine import (
@@ -14,6 +16,9 @@ from agentic_cli.workflow.permissions.engine import (
     unstorable_reason,
 )
 from agentic_cli.workflow.permissions.rules import AskScope
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.sessions import RunRef
 
 # Args that carry executable payloads, shown in the prompt for *.exec grants.
 _CODE_ARGS = ("code", "command", "script")
@@ -35,6 +40,10 @@ _ONCE_ONLY_NOTES = {
         "(This target contains wildcard characters, so approval applies to this call only.)"
     ),
 }
+
+#: How a permission prompt's ``request_id`` starts: what a UI tells one from
+#: a question by (``is_permission_request``).
+PERMISSION_REQUEST_PREFIX = "perm-"
 
 # Strings kept module-level so the UI and parser stay in sync.
 ALLOW_ONCE_CHOICE = "Allow once"
@@ -68,8 +77,14 @@ def build_request(
     home: Path | None = None,
     uncontained: Collection[str] = (),
     per_call: Mapping[str, str] | None = None,
+    run: "RunRef | None" = None,
 ) -> UserInputRequest:
     """Construct a ``UserInputRequest`` (CHOICE) describing the pending grant.
+
+    A sub-agent run's prompt (``run``, the run whose call is gated) opens
+    with who wants the tool, ``researcher-2 (researcher, run 1) wants to use
+    `write_file`:``, and carries the run (``UserInputRequest.run``); the
+    root's opens ``Tool `write_file` wants:``, as it always has.
 
     Each capability line names the **exact target** the call acts on, the
     file or URL "Allow once" approves. When a session or "always" grant would
@@ -94,7 +109,9 @@ def build_request(
     target is ``*`` (allow-any-code), so the payload — not the target — is
     what the user is actually approving.
     """
-    lines = [f"Tool `{tool_name}` wants:"]
+    asking = run_label(run)
+    opening = f"{asking} wants to use `{tool_name}`:" if asking else f"Tool `{tool_name}` wants:"
+    lines = [opening]
     per_call = per_call or {}
     reasons = {
         unstorable_reason(cap, home=home, uncontained=uncontained, per_call=per_call)
@@ -133,7 +150,7 @@ def build_request(
     prompt = "\n".join(lines)
 
     return UserInputRequest(
-        request_id=f"perm-{uuid.uuid4().hex[:8]}",
+        request_id=f"{PERMISSION_REQUEST_PREFIX}{uuid.uuid4().hex[:8]}",
         tool_name=tool_name,
         prompt=prompt,
         input_type=InputType.CHOICE,
@@ -143,7 +160,13 @@ def build_request(
             else [ALLOW_ONCE_CHOICE, DENY_CHOICE]
         ),
         default=DENY_CHOICE,
+        run=run,
     )
+
+
+def is_permission_request(request: UserInputRequest) -> bool:
+    """Whether ``request`` is a permission prompt (``build_request``'s), not a question."""
+    return request.request_id.startswith(PERMISSION_REQUEST_PREFIX)
 
 
 def _code_to_approve(

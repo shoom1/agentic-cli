@@ -9,9 +9,12 @@ from agentic_cli.workflow.permissions.prompt import (
     ALLOW_ONCE_CHOICE,
     ALLOW_SESSION_CHOICE,
     DENY_CHOICE,
+    PERMISSION_REQUEST_PREFIX,
     build_request,
+    is_permission_request,
     parse_response,
 )
+from agentic_cli.workflow.sessions import RunRef
 
 #: The wording this choice used to display. Spelled out here rather than
 #: imported: it is an internal parser-compatibility detail, and a test that
@@ -190,6 +193,57 @@ class TestBuildRequest:
     def test_backward_compatible_without_args(self):
         req = build_request("write_file", [ResolvedCapability("filesystem.write", "/foo")])
         assert "write_file" in req.prompt
+
+
+class TestASubAgentsPrompt:
+    """A sub-agent's permission prompt opens with who wants what; the root's
+    stays as it was. The request carries the run (``UserInputRequest.run``)
+    and an id a UI tells a permission prompt by (``is_permission_request``)."""
+
+    RESEARCHER = RunRef(
+        agent="researcher", instance="researcher-2", run="researcher-2#1",
+        parent_run=None, depth=1,
+    )
+
+    def test_it_opens_with_the_run_that_wants_the_tool(self):
+        request = build_request(
+            "write_file", [ResolvedCapability("filesystem.write", "/p/note.txt")],
+            run=self.RESEARCHER,
+        )
+
+        assert request.prompt.startswith(
+            "researcher-2 (researcher, run 1) wants to use `write_file`:\n"
+            "  • filesystem.write → /p/note.txt\n"
+        )
+        assert request.run == self.RESEARCHER
+
+    def test_the_rest_of_it_is_the_roots(self):
+        """Only the first line differs: the targets, the scope a grant would
+        cover, the notes and the choices are the same."""
+        caps = [ResolvedCapability("filesystem.write", "/p/note.txt")]
+        roots = build_request("write_file", caps)
+        sub_agents = build_request("write_file", caps, run=self.RESEARCHER)
+
+        assert sub_agents.prompt.split("\n", 1)[1] == roots.prompt.split("\n", 1)[1]
+        assert sub_agents.choices == roots.choices
+        assert sub_agents.default == roots.default
+
+    @pytest.mark.parametrize("run", [None, RunRef("coordinator", "root", None, None, 0)])
+    def test_the_roots_prompt_is_unchanged(self, run):
+        request = build_request(
+            "write_file", [ResolvedCapability("filesystem.write", "/p/note.txt")], run=run
+        )
+
+        assert request.prompt.startswith("Tool `write_file` wants:\n")
+        assert request.run == run
+
+    def test_a_permission_prompt_is_told_by_its_id(self):
+        prompt = build_request("write_file", [ResolvedCapability("filesystem.write", "/p/n")])
+        question = UserInputRequest(request_id="q-1", tool_name="ask_clarification", prompt="?")
+
+        assert prompt.request_id.startswith(PERMISSION_REQUEST_PREFIX)
+        assert is_permission_request(prompt)
+        assert not is_permission_request(question)
 
 
 class TestParseResponse:
