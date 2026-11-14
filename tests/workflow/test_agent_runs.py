@@ -26,6 +26,7 @@ from agentic_cli.workflow.agents import (
     result_head,
     run_title,
 )
+from agentic_cli.workflow.agents.runs import run_instance
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent
@@ -123,6 +124,14 @@ class TestRunFor:
         runs = AgentRuns()
 
         assert runs.run_for(None, None, "c1", "researcher").run == "researcher-1#1"
+
+    def test_a_run_id_names_its_instance(self):
+        """What a job's ``started_by`` is matched by, for a run named by its id."""
+        runs = AgentRuns()
+        middle = runs.run_for(ONE, None, "c1", "middle")
+        leaf = runs.run_for(ONE, middle, "m1", "leaf")
+
+        assert [run_instance(ref.run) for ref in (middle, leaf)] == ["middle-1", "leaf-1"]
 
 
 class TestObserve:

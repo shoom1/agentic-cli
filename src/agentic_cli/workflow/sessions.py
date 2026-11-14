@@ -11,7 +11,9 @@ A stored conversation is listed as a ``SessionInfo`` row, its title made by
 
 Three context-local markers say what is running now: the turn (its
 ``SessionRef``), inside it the sub-agent run (``RunRef``; none in the root's
-own calls), and the tool call (``ToolCallRef``).
+own calls), and the tool call (``ToolCallRef``). A fourth, the turn's span,
+outlives the turn in a task it started, and tells that task its turn has
+ended.
 """
 
 from __future__ import annotations
@@ -139,6 +141,60 @@ def get_active_turn() -> "SessionRef | None":
     return _active_turn.get()
 
 
+class _TurnScope:
+    """One turn's span: open while the turn runs, ended as it ends.
+
+    A task a turn starts copies the turn's context, this object with it; the
+    active turn alone (the same ``SessionRef`` before and after) cannot tell
+    such a task that the turn it came from is over, this can.
+    """
+
+    __slots__ = ("ended",)
+
+    def __init__(self) -> None:
+        self.ended = False
+
+
+_turn_scope: ContextVar["_TurnScope | None"] = ContextVar(
+    "agentic_cli_turn_scope", default=None
+)
+
+
+def open_turn_scope() -> Token:
+    """Begin a turn's span in this context (``BaseWorkflowManager._workflow_context``).
+
+    Returns:
+        Token for :func:`close_turn_scope`.
+    """
+    return _turn_scope.set(_TurnScope())
+
+
+def close_turn_scope(token: Token) -> None:
+    """End the span ``token`` began, and restore the one before it.
+
+    Every context copied from inside the span (a task the turn started that
+    outlives it) now sees it ended: :func:`turn_has_ended`. A token from
+    another context (a turn's block left there, as when the GC finalizes a
+    turn's generator while another turn runs) raises ``ValueError`` before
+    anything is ended, so this context's span stays open.
+    """
+    scope = _turn_scope.get()
+    _turn_scope.reset(token)
+    if scope is not None:
+        scope.ended = True
+
+
+def turn_has_ended() -> bool:
+    """Whether this context belongs to a turn that has ended.
+
+    True only in a context copied from inside a turn after that turn ended:
+    an asyncio task the turn started that outlived it. False inside a turn,
+    and outside any.
+    """
+    scope = _turn_scope.get()
+    return scope is not None and scope.ended
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCallRef:
     """One tool call of a turn, as the model made it.
@@ -245,3 +301,14 @@ def reset_active_run(token: Token) -> None:
 def get_active_run() -> "RunRef | None":
     """The sub-agent run in progress in this context, or None (the root's own calls)."""
     return _active_run.get()
+
+
+def instance_of(run: "RunRef | None") -> str | None:
+    """The instance whose call ``run`` names: a sub-agent run's instance id,
+    None for the root's own (no run, or ``root_run``).
+
+    What a job a call of ``run`` starts records as its ``started_by``
+    (``tools/jobs/manager.py``), and what a call's job is matched by
+    (``workflow/interrupts.py::job_for_call``).
+    """
+    return None if run is None or run.is_root else run.instance

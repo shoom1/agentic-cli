@@ -46,7 +46,7 @@ from google.adk.events import Event, EventActions
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from agentic_cli.workflow.adk.branches import branch_run
+from agentic_cli.workflow.adk.branches import branch_run, delegations
 from agentic_cli.workflow.adk.tool_error_plugin import is_unknown_tool
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.interrupts import (
@@ -54,6 +54,7 @@ from agentic_cli.workflow.interrupts import (
     INTERRUPTED_BY_USER,
     MARKER,
     OpenCalls,
+    interrupted,
     unrecorded,
 )
 from agentic_cli.workflow.sessions import (
@@ -328,7 +329,11 @@ def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
     else ``INTERRUPTED_BY_USER`` when the user stopped the conversation's
     last turn, ``OpenCalls.take_cancel``, which this asks once, else
     ``INTERRUPTED``): every turn clears its conversation's record as it ends
-    (``OpenCalls.clear``), and a new process has none. A stopped turn
+    (``OpenCalls.clear``), and a new process has none. Only the root's own
+    calls (and those of an agent it transferred to) are matched to a job: a
+    sub-agent's run, on a delegation's branch, is numbered no more (one a
+    stop ended, or a crash's in a new process), so its call is answered
+    interrupted, never with another run's job of the same id. A stopped turn
     answers what ADK's seals missed itself (``unsealed``), so a stop leaves
     a call here only when those answers could not be written. The answer is
     in the author, branch, scope and invocation of the event that made the
@@ -340,9 +345,21 @@ def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
         _answer_event(place, [
             types.FunctionResponse(
                 id=call.id, name=call.name,
-                response=_as_response(unrecorded(call.id, by_user=by_user)),
+                response=_as_response(_left_open_answer(call.id, place[2], by_user)),
             )
             for call in calls
         ], INTERRUPTED)
         for place, calls in _unanswered(events).items()
     ]
+
+
+def _left_open_answer(call_id: str | None, branch: str | None, by_user: bool) -> Any:
+    """What ``left_open`` answers the call ``call_id`` made on ``branch`` with.
+
+    The root's own call (no delegation on its branch) gets its job's state
+    when it submitted one (``unrecorded``, the root's: ``started_by`` None);
+    a sub-agent's run cannot be named any more, so its call gets no job.
+    """
+    if delegations(branch):
+        return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
+    return unrecorded(call_id, by_user=by_user)

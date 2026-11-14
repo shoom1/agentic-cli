@@ -29,6 +29,7 @@ import pytest
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
+from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
@@ -39,9 +40,14 @@ from agentic_cli.workflow.agents import (
     RunRecord,
 )
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.events import EventType, UserInputRequest, WorkflowEvent
+from agentic_cli.workflow.events import (
+    EventType,
+    UserInputRequest,
+    UserInputUnavailable,
+    WorkflowEvent,
+)
 from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER, NOT_RUN
-from agentic_cli.workflow.permissions import EXEMPT
+from agentic_cli.workflow.permissions import EXEMPT, Capability
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE
 from agentic_cli.workflow.sessions import (
     RunRef,
@@ -51,6 +57,12 @@ from agentic_cli.workflow.sessions import (
     reset_active_turn,
     root_run,
     set_active_turn,
+)
+from agentic_cli.workflow.service_registry import (
+    JOB_MANAGER,
+    PERMISSION_ENGINE,
+    WORKFLOW,
+    get_service,
 )
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 from tests.workflow.test_manager_models import route
@@ -247,6 +259,7 @@ class Crew:
     _requests: Callable[[str], int]
     _result_ids: Callable[[str, int], list[str]] | None = None
     _answers: Callable[[str, str], Awaitable[list[str]]] | None = None
+    _last_message: Callable[[str, int], str] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -278,6 +291,11 @@ class Crew:
     def requests(self, agent: str) -> int:
         """How many model requests ``agent`` made."""
         return self._requests(agent)
+
+    def last_message(self, agent: str, call: int = -1) -> str:
+        """The text of the last message ``agent``'s model request ``call`` held."""
+        assert self._last_message is not None
+        return self._last_message(agent, call)
 
     def result_ids(self, agent: str, call: int = -1) -> list[str]:
         """The call ids of the tool results ``agent``'s model request ``call``
@@ -339,9 +357,16 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
             for response in event.get_function_responses() if response.id == call_id
         ]
 
+    def last_message(name: str, call: int) -> str:
+        body = [body for sent, body in claude.sent if sent == name][call]
+        content = body["messages"][-1]["content"]
+        return content if isinstance(content, str) else "".join(
+            block.get("text", "") for block in content if block.get("type") == "text"
+        )
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
-        answers,
+        answers, last_message,
     )
 
 
@@ -387,9 +412,12 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
         message = getattr(answer, "message", None)  # a finished call's ToolMessage
         return [message.text if message is not None else json.dumps(answer)]
 
+    def last_message(name: str, call: int) -> str:
+        return models.chats[name].conversation(call)[-1].text
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
-        result_ids, answers,
+        result_ids, answers, last_message,
     )
 
 
@@ -440,6 +468,70 @@ async def contract_block() -> dict:
     BLOCKING["started"].set()
     await asyncio.Event().wait()
     return {"success": True}
+
+
+#: What ``contract_leave_behind`` did: ``LEFT["during"]`` is the answer to the
+#: question it asked in its turn, ``LEFT["go"]`` lets its task go on,
+#: ``LEFT["task"]`` is the task.
+LEFT: dict[str, Any] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Leave a task behind (a contract-test tool).")
+async def contract_leave_behind() -> dict:
+    """Ask the user once, then start a task that outlives the turn; once let go,
+    that task asks the user and the gate."""
+    workflow = get_service(WORKFLOW)
+    engine = get_service(PERMISSION_ENGINE)
+    LEFT["during"] = await workflow.request_user_input(UserInputRequest(
+        request_id="during", tool_name="contract_leave_behind", prompt="Here?",
+    ))
+    go = LEFT["go"] = asyncio.Event()
+
+    async def later() -> dict[str, Any]:
+        await go.wait()
+        try:
+            await workflow.request_user_input(UserInputRequest(
+                request_id="late", tool_name="contract_leave_behind", prompt="Still there?",
+            ))
+            question = "answered"
+        except UserInputUnavailable:
+            question = "unavailable"
+        checked = await engine.check(
+            "write_file", [Capability("filesystem.write", target_arg="path")],
+            {"path": "late.txt"},
+        )
+        return {"question": question, "permission": (checked.allowed, checked.reason)}
+
+    LEFT["task"] = asyncio.create_task(later())
+    return {"success": True}
+
+
+@register_tool(capabilities=EXEMPT, description="Ask the user (a contract-test tool).")
+async def contract_ask() -> dict:
+    """Ask the user a question, its request named after this call; return the answer."""
+    call = get_active_tool_call()
+    answer = await get_service(WORKFLOW).request_user_input(UserInputRequest(
+        request_id=call.call_id if call is not None else "ask",
+        tool_name="contract_ask", prompt="Which one?",
+    ))
+    return {"success": True, "answer": answer}
+
+
+def _built() -> str:
+    return "built ok"
+
+
+@register_tool(
+    capabilities=EXEMPT, requires=JOB_MANAGER,
+    description="Start a background job (a contract-test tool).",
+)
+def contract_start_job() -> dict:
+    """Start a job that ends at once, the agent told when it has."""
+    record = get_service(JOB_MANAGER).submit(
+        tool="contract_start_job", backend="inprocess", spec={"target": _built},
+        resume_on_complete=True,
+    )
+    return {"success": True, "job_id": record.job_id, "state": record.state.value}
 
 
 # -- fixtures --------------------------------------------------------------------
@@ -1231,3 +1323,120 @@ class TestRawLog:
             json.dumps({"agent": "researcher", "instance": "researcher-1",
                         "run": "researcher-1#1", "parent_run": None, "depth": 1}, sort_keys=True)
         }
+
+
+# -- the input callback after its turn, and a sub-agent's jobs ----------------------------
+
+
+class TestAfterItsTurn:
+    async def test_a_task_a_turn_left_behind_asks_no_one(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_leave_behind,))],
+            coordinator=[calls(delegate("researcher", "Leave a task behind.", "c1")),
+                         says("Done.")],
+            researcher=[calls(use("contract_leave_behind", "r1")), says("Left one.")],
+        )
+        asked: list[UserInputRequest] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            asked.append(request)
+            return "yes"
+
+        crew.answer_with(answer)  # installed outside any turn, as a script does
+        await crew.turn()
+        LEFT["go"].set()
+        late = await asyncio.wait_for(LEFT["task"], 10)
+
+        assert late == {
+            "question": "unavailable",
+            "permission": (False, "no rule + no interactive approver to ask"),
+        }
+        # Inside its turn the callback answered; after it, nothing reached it.
+        assert LEFT["during"] == "yes"
+        assert [request.request_id for request in asked] == ["during"]
+
+    async def test_a_stopped_turns_question_leaves_the_next_turn_asking(self, make_crew):
+        # A pin: the span refuses only a request from a turn that has ended,
+        # never the next turn's, even after a cancel at a dialog.
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_ask,))],
+            coordinator=[calls(delegate("researcher", "Ask.", "c1")),
+                         calls(delegate("researcher", "Ask again.", "c2")),
+                         says("Done.")],
+            researcher=[calls(use("contract_ask", "r1")),
+                        calls(use("contract_ask", "r2")), says("Got yes.")],
+        )
+        asked: list[str] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            asked.append(request.request_id)
+            if len(asked) == 1:
+                BLOCKING["started"].set()
+                await asyncio.Event().wait()  # at its dialog until the turn is stopped
+            return "yes"
+
+        crew.answer_with(answer)
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        events = await crew.turn("Again.")
+
+        assert asked == ["r1", "r2"]
+        assert json.loads(crew.results_read("researcher")["r2"])["answer"] == "yes"
+        assert [e.content for e in events if e.type is EventType.TEXT][-1] == "Done."
+
+
+class TestASubAgentsJob:
+    async def test_its_record_and_its_notice_name_it(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_start_job,))],
+            coordinator=[calls(delegate("researcher", "Start the build.", "c1")),
+                         says("The researcher started a build."),
+                         says("The build finished.")],
+            researcher=[calls(use("contract_start_job", "r1")), says("Started the job.")],
+        )
+
+        await crew.turn()
+        jobs = crew.manager.job_manager
+        (record,) = jobs.list()
+        await until(lambda: jobs.get(record.job_id).state in TERMINAL_STATES)
+        resumed = [event async for event in crew.manager.resume_with_job_result(record)]
+
+        assert (record.started_by, record.call_id) == ("researcher-1", "r1")
+        notice = crew.last_message("coordinator").splitlines()
+        assert notice[1] == (
+            "A background job researcher-1 started has finished. Tell the user what it means."
+        )
+        assert [e.content for e in resumed if e.type is EventType.TEXT] == ["The build finished."]
+
+    async def test_after_ctrl_c_it_never_answers_its_coordinators_call(self, make_crew):
+        """The researcher's call that started the job has the id of the
+        coordinator's delegation (a provider that numbers call ids per
+        agent): after Ctrl+C the delegation is answered as the user's, never
+        with the researcher's job."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_start_job, contract_block))],
+            coordinator=[calls(delegate("researcher", "Start the build.", "c1")),
+                         says("Starting over.")],
+            researcher=[calls(use("contract_start_job", "c1")),
+                        calls(use("contract_block", "c2"))],
+        )
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        finally:
+            await crew.stop(turn)
+        (record,) = crew.manager.job_manager.list()
+        await crew.turn("Never mind.")
+
+        assert (record.call_id, record.started_by) == ("c1", "researcher-1")
+        answered = crew.results_read("coordinator")["c1"]
+        assert INTERRUPTED_BY_USER in answered
+        assert record.job_id not in answered

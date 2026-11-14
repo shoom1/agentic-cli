@@ -137,8 +137,9 @@ def job_notification(
 ) -> HumanMessage:
     """The message that tells the root agent ``record``'s job finished.
 
-    Its text is ``job_notice``: ``JOB_NOTICE_HEADER``, ``JOB_NOTICE_ASK``,
-    then the payload (``job_result_payload``) as JSON, as on ADK.
+    Its text is ``job_notice``: ``JOB_NOTICE_HEADER``, the ask
+    (``job_notice_ask``: a sub-agent's job names the sub-agent), then the
+    payload (``job_result_payload``) as JSON, as on ADK.
 
     Args:
         record: The finished ``JobRecord``.

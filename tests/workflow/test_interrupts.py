@@ -119,10 +119,13 @@ class TestOpenCalls:
         assert calls._finished == {} and calls._asking == {}
 
 
-def job(job_id: str, call_id: str, session_id: str, user_id: str = "u") -> SimpleNamespace:
+def job(
+    job_id: str, call_id: str, session_id: str, user_id: str = "u",
+    started_by: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         job_id=job_id, call_id=call_id, session_id=session_id, user_id=user_id,
-        state=JobState.RUNNING,
+        state=JobState.RUNNING, started_by=started_by,
     )
 
 
@@ -257,3 +260,48 @@ class TestUnrecorded:
         jobs = Jobs(job("j1", "call_0", "a"))
         with turn_of(ref("a"), jobs):
             assert unrecorded("call_0", by_user=True) == job_started(jobs.records[0])
+
+
+class TestAJobAnswersOnlyItsOwnRunsCall:
+    """A provider that numbers its call ids repeats them across agents: a
+    sub-agent's job never answers its parent's call with the same id."""
+
+    def test_a_sub_agents_job_does_not_answer_its_parents_call(self):
+        jobs = Jobs(job("j-sub", "call_0", "a", started_by="researcher-1"))
+        calls = OpenCalls()
+
+        with turn_of(ref("a"), jobs):
+            assert calls.answer("call_0", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            assert job_for_call("call_0") is None
+            assert job_for_call("call_0", started_by="researcher-1") is jobs.records[0]
+
+    def test_each_run_gets_the_job_its_own_call_started(self):
+        jobs = Jobs(
+            job("j-root", "call_0", "a"),
+            job("j-sub", "call_0", "a", started_by="researcher-1"),
+        )
+        calls = OpenCalls()
+
+        with turn_of(ref("a"), jobs):
+            assert calls.answer("call_0", by_user=True) == job_started(jobs.records[0])
+            with run_as(RESEARCHER):
+                assert calls.answer("call_0", by_user=True) == job_started(jobs.records[1])
+
+    def test_a_run_named_outright_gets_the_job_its_call_started(self):
+        """ADK answers a stopped turn's calls outside the run that made each,
+        naming the run its branch is: the job is that run's, not the run in
+        progress."""
+        jobs = Jobs(
+            job("j-root", "call_0", "a"),
+            job("j-sub", "call_0", "a", started_by="researcher-1"),
+        )
+        calls = OpenCalls()
+
+        with turn_of(ref("a"), jobs):
+            assert calls.answer("call_0", by_user=True, run="researcher-1#1") == job_started(
+                jobs.records[1]
+            )
+            with run_as(RESEARCHER):
+                assert calls.answer("call_0", by_user=True, run=None) == job_started(
+                    jobs.records[0]
+                )

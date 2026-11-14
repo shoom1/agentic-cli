@@ -1363,8 +1363,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
   its own that opens with `[Automatic job notification — not written by the
-  user]`, on both backends, which fact extraction leaves out. The main
-  agent's own job is told the same way, a native ADK YAML app's too.
+  user]`, on both backends, which fact extraction leaves out, and which names
+  the sub-agent that started it ("A background job researcher-2 started has
+  finished…"; `JobRecord.started_by`). The main agent's own job is told the
+  same way, a native ADK YAML app's too.
 - **A native ADK YAML app** (`adk_config_path`) is built by ADK
   (`from_config`), and only the building differs: once its agents are
   built, it runs as an app built from configs (the same plugins, summary,
@@ -1549,7 +1551,9 @@ or running, with how to stop it: "Still running in the background: build
 
 The HITL input callback is **context-local**: `set_input_callback()` binds it
 for the calling context (and any task started from it), so two consumers of one
-manager cannot capture each other's prompts.
+manager cannot capture each other's prompts. It answers only inside its turn: a
+task a turn started that asks after the turn ended gets `UserInputUnavailable`,
+so its question goes unanswered and its permission prompt is denied.
 
 `WorkflowController` exposes a derived `WorkflowState`
 (`uninitialized`/`initializing`/`ready`/`failed`/`closed`) that never reports

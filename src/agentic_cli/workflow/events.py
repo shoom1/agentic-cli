@@ -71,7 +71,8 @@ class UserInputUnavailable(RuntimeError):
     """No consumer is attached to answer a :class:`UserInputRequest`.
 
     Raised by ``request_user_input`` when no input callback is installed (a
-    headless run, or a script driving the manager directly). A RuntimeError so
+    headless run, or a script driving the manager directly), or when the
+    request comes from a task that outlived its turn. A RuntimeError so
     existing handlers keep catching it.
     """
 

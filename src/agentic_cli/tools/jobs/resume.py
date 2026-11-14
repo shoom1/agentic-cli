@@ -10,7 +10,8 @@ that is answered cannot be answered again (Anthropic and OpenAI accept one
 result per call; ADK, given a second, sent the call, that result and nothing
 between). So a finished job is told to the root agent in a message of its
 own, ``job_notice``, which opens with ``JOB_NOTICE_HEADER``, on both backends,
-a native ADK YAML app's too.
+a native ADK YAML app's too. A job a sub-agent started is told to the root
+all the same (that sub-agent's run has ended), naming the sub-agent.
 """
 
 from __future__ import annotations
@@ -24,6 +25,11 @@ JOB_NOTICE_HEADER = "[Automatic job notification — not written by the user]"
 #: What the notice asks of the agent: without it a model may take the notice
 #: in and say nothing (Gemini, live, about one resume in five).
 JOB_NOTICE_ASK = "A background job you started has finished. Tell the user what it means."
+#: The ask for a job a sub-agent started (``JobRecord.started_by``, its
+#: instance): the root did not start it, and is told who did.
+JOB_NOTICE_ASK_FOR = (
+    "A background job {started_by} started has finished. Tell the user what it means."
+)
 
 #: Longest result text the payload carries.
 _RESULT_SUMMARY_LIMIT = 1000
@@ -64,15 +70,30 @@ def job_result_payload(record: Any, result: Any) -> dict:
 def job_notice(record: Any, result: Any) -> str:
     """The text that tells the root agent ``record``'s job finished.
 
-    ``JOB_NOTICE_HEADER``, ``JOB_NOTICE_ASK``, then ``job_result_payload``
-    as JSON, a line each: what both backends send when a job finishes.
+    ``JOB_NOTICE_HEADER``, the ask (``job_notice_ask``), then
+    ``job_result_payload`` as JSON, a line each: what both backends send when
+    a job finishes.
 
     Args:
         record: The finished ``JobRecord``.
         result: The job's result, or None.
     """
     payload = job_result_payload(record, result)
-    return f"{JOB_NOTICE_HEADER}\n{JOB_NOTICE_ASK}\n{json.dumps(payload, ensure_ascii=False)}"
+    ask = job_notice_ask(record)
+    return f"{JOB_NOTICE_HEADER}\n{ask}\n{json.dumps(payload, ensure_ascii=False)}"
+
+
+def job_notice_ask(record: Any) -> str:
+    """What the notice of ``record``'s job asks of the root agent.
+
+    ``JOB_NOTICE_ASK`` for the root's own job; for a sub-agent's
+    (``started_by``, read leniently: a record from before it has none), the
+    same ask naming the instance that started it.
+    """
+    started_by = getattr(record, "started_by", None)
+    if not started_by:
+        return JOB_NOTICE_ASK
+    return JOB_NOTICE_ASK_FOR.format(started_by=started_by)
 
 
 def _summarize_result(result: Any) -> str | None:

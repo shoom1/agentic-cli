@@ -21,6 +21,8 @@ knows what happened rather than running a side effect again blindly:
 Background jobs a long-running tool started are not part of the turn: they
 go on, and their results arrive later. A call whose job was submitted is
 answered with the job's state (``job_started``), so the model knows it runs.
+A job answers only a call of the run that submitted it
+(``JobRecord.started_by``).
 
 ``OpenCalls`` is a manager's record of what became of its calls, kept by
 conversation and, within it, by the run that made each call (the root's
@@ -39,8 +41,9 @@ import enum
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+from agentic_cli.workflow.agents.runs import run_instance
 from agentic_cli.workflow.service_registry import JOB_MANAGER, get_service
-from agentic_cli.workflow.sessions import get_active_run, get_active_turn
+from agentic_cli.workflow.sessions import get_active_run, get_active_turn, instance_of
 
 #: A call that was running when the user pressed Ctrl+C.
 INTERRUPTED_BY_USER = (
@@ -73,13 +76,18 @@ def job_started(record: Any) -> dict[str, Any]:
     }
 
 
-def job_for_call(call_id: str | None) -> Any | None:
+def job_for_call(call_id: str | None, *, started_by: str | None = None) -> Any | None:
     """The background job the call ``call_id`` submitted, if there is one.
 
     Only a job of the active turn's conversation (its session and user), and
     none outside a turn: the job store holds all the user's jobs, from every
     run, and a provider that numbers its call ids (``call_0``, ...) repeats
-    them in every conversation.
+    them in every conversation. And only a job ``started_by`` started: the
+    caller names the run whose call it is by its instance (None for the
+    root's own call), as ``JobRecord.started_by`` records it, since such a
+    provider repeats them across agents too, and a sub-agent's job must not
+    answer its parent's call. A caller that cannot name the run (ADK's
+    ``left_open``, for a sub-agent's call) asks for no job.
 
     Looked up among the jobs the manager holds (``JobManager.snapshot``), with
     no lock: it is asked on the event loop (ADK answers a stopped turn's
@@ -96,17 +104,24 @@ def job_for_call(call_id: str | None) -> Any | None:
         if record.call_id == call_id
         and record.session_id == turn.session_id
         and record.user_id == turn.user_id
+        # A record a test or an app built may not have the field: the root's.
+        and getattr(record, "started_by", None) == started_by
     ), None)
 
 
-def unrecorded(call_id: str | None, *, by_user: bool) -> dict[str, Any]:
+def unrecorded(
+    call_id: str | None, *, by_user: bool, started_by: str | None = None
+) -> dict[str, Any]:
     """The answer for an open call no record holds: its job's state, else why it has none.
 
-    ``OpenCalls.answer`` gives it for a call it holds nothing for; ADK's
-    ``left_open`` for every call it answers, since each turn clears its
-    conversation's record as it ends, and a new process has none.
+    ``OpenCalls.answer`` gives it for a call it holds nothing for, matching
+    the job by the instance of the call's run (``started_by``). ADK's
+    ``left_open`` gives it for the root's own calls it answers (``started_by``
+    None), since each turn clears its conversation's record as it ends, and
+    a new process has none; a sub-agent's call there gets no job, its run
+    being numbered no more.
     """
-    record = job_for_call(call_id)
+    record = job_for_call(call_id, started_by=started_by)
     if record is not None:
         return job_started(record)
     return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
@@ -132,6 +147,17 @@ def _run_id(run: str | None | _Active) -> str | None:
         active = get_active_run()
         return active.run if active is not None else None
     return run
+
+
+def _instance(run: str | None | _Active) -> str | None:
+    """The instance whose call ``run`` names, as a job's ``started_by`` records it.
+
+    The run in progress by default (``instance_of``); a run named by its id
+    is its instance's (``agents.runs.run_instance``); None is the root's own.
+    """
+    if run is ACTIVE_RUN:
+        return instance_of(get_active_run())
+    return run_instance(run) if run else None
 
 
 class OpenCalls:
@@ -213,6 +239,8 @@ class OpenCalls:
             by_user: Whether the user stopped its turn (else a crash did, or
                 a cancel this process did not see).
             run: The run that made the call: by default the run in progress.
+                A job answers the call only when that run's instance
+                submitted it (``job_for_call``).
         """
         if call_id:
             key = get_active_turn()
@@ -222,7 +250,8 @@ class OpenCalls:
                 return finished[mark]
             if mark in self._asking.get(key, ()):
                 return interrupted(NOT_RUN)
-        return unrecorded(call_id, by_user=by_user)
+        # Its job, if it submitted one: the job of the run it was given.
+        return unrecorded(call_id, by_user=by_user, started_by=_instance(run))
 
     def cancelled(self, key: Any) -> None:
         """The user stopped the turn of conversation ``key``."""
