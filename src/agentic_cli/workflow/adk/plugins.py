@@ -19,6 +19,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.llm_log import LLMLogWriter
 from agentic_cli.workflow.sessions import get_active_run
+from agentic_cli.workflow.usage import adk_usage_event
 from agentic_cli.logging import Loggers
 
 if TYPE_CHECKING:
@@ -54,7 +55,11 @@ class LLMLoggingPlugin(BasePlugin):
     else the request's own model or ``model_name``; that agent
     (``metadata["agent"]``); and, for a sub-agent's call, its run
     (``WorkflowEvent.run``, the active run its ``MainAgentPlugin`` set,
-    which the log writes as ``run``), as Deep Agents' records do.
+    which the log writes as ``run``), as Deep Agents' records do. A usage
+    record counts as the stream's ``LLM_USAGE`` does
+    (``workflow/usage.py``'s ``adk_usage_event``, by the agent's model's
+    provider kind, ``kinds``: the thinking in the output, a cache write in
+    ``cache_creation_tokens``).
 
     A call's latency runs from its request to its response, timed per model
     call: under the identity of the call's ``EventActions``, which ADK makes
@@ -71,6 +76,8 @@ class LLMLoggingPlugin(BasePlugin):
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
         models: Each agent's model reference, by agent name
+        kinds: Each agent's model's provider kind, by agent name; an agent
+            it does not hold is an unknown kind's
         app_name: Application name for log directory (~/.{app_name}/logs/)
         max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
@@ -88,10 +95,12 @@ class LLMLoggingPlugin(BasePlugin):
         include_raw_parts: bool = True,
         log_requests: bool = True,
         models: Mapping[str, str] | None = None,
+        kinds: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(name="llm_logging")
         self.model_name = model_name
         self.models: Mapping[str, str] = models or {}
+        self.kinds: Mapping[str, str] = kinds or {}
         self.app_name = app_name
         self.max_events = max_events
         self.include_messages = include_messages
@@ -236,14 +245,10 @@ class LLMLoggingPlugin(BasePlugin):
         # The usage record, for the log only: the stream's usage is the event
         # processor's, credited to the agent that made the call.
         if llm_response.usage_metadata:
-            usage = llm_response.usage_metadata
-            usage_event = WorkflowEvent.llm_usage(
-                model=model,
-                prompt_tokens=getattr(usage, "prompt_token_count", None),
-                completion_tokens=getattr(usage, "candidates_token_count", None),
-                total_tokens=getattr(usage, "total_token_count", None),
-                thinking_tokens=getattr(usage, "thoughts_token_count", None),
-                cached_tokens=getattr(usage, "cached_content_token_count", None),
+            usage_event = adk_usage_event(
+                model,
+                llm_response.usage_metadata,
+                self.kinds.get(author),
                 invocation_id=invocation_id,
                 latency_ms=latency_ms,
             )

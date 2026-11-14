@@ -108,3 +108,26 @@ class TestTheManagersProcessor:
             await manager.cleanup()
 
         assert (usage.metadata["completion_tokens"], usage.metadata["thinking_tokens"]) == (30, 25)
+
+    async def test_the_raw_log_reads_each_agents_kind_as_the_processor_does(
+        self, tmp_path, monkeypatch
+    ):
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.config import AgentConfig
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("OPENAI_API_KEY", "o-test-key")
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt="Answer.", include_state_tools=False)],
+            settings=BaseSettings(session_store="memory", default_model="openai:gpt-5",
+                                  raw_llm_logging=True),
+        )
+        await manager.initialize_services()
+        try:
+            kinds = (manager._llm_logging_plugin.kinds, manager._event_processor.kinds)
+        finally:
+            await manager.cleanup()
+
+        assert kinds == ({"solo": "openai"}, {"solo": "openai"})

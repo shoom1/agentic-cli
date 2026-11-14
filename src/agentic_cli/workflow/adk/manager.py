@@ -580,8 +580,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # A request is recorded as sent, after the fit guard
                 # (SentRequestLoggingPlugin, last).
                 log_requests=False,
-                # Each call's records name its agent's own model.
+                # Each call's records name its agent's own model, and read
+                # its usage by that model's provider kind.
                 models=self._agent_model_refs(),
+                kinds=self._agent_kinds(),
             )
             plugins.append(self._llm_logging_plugin)
             logger.info("llm_logging_plugin_enabled")
@@ -683,6 +685,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         return {name: str(model.ref) for name, model in self._resolved_models.items()}
 
+    def _agent_kinds(self) -> dict[str, str]:
+        """Each agent's model's provider kind (``ProviderKind``'s value), by name.
+
+        The agents ``_agent_model_refs`` names; any other is an unknown
+        kind's, whose usage ``workflow/usage.py``'s ``adk_tokens`` reads with
+        the thinking apart.
+        """
+        return {name: model.record.kind.value for name, model in self._resolved_models.items()}
+
     def _make_session_service(self) -> BaseSessionService:
         """Build the ADK session service of its ``session_store``
         (``adk/sessions.py::make_session_service``, which its reader opens
@@ -749,7 +760,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             reply_agents=build.reply_agents,
             runs=self.agent_runs,
             delegates=delegated_agents(build.root),
-            kinds={name: m.record.kind.value for name, m in self._resolved_models.items()},
+            kinds=self._agent_kinds(),
             ledgers=self._usage_ledgers,
         )
 

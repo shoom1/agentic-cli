@@ -266,6 +266,57 @@ class TestLLMLoggingPlugin:
             ("llm_usage", "anthropic:the-default"),
         ]
 
+    async def test_its_usage_record_counts_as_the_streams(self, tmp_path, monkeypatch):
+        """The log's usage record reads ADK's usage as the stream's does
+        (``workflow/usage.py``): the thinking in the output, the cache's
+        reads and writes in the input, a cache write as
+        ``cache_creation_tokens`` (ADK's Claude adapter's shape)."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        plugin = LLMLoggingPlugin(model_name="anthropic:claude-sonnet-4-6", app_name="test_app")
+        usage = SimpleNamespace(
+            prompt_token_count=1_550, candidates_token_count=4, total_token_count=1_557,
+            cached_content_token_count=1_200, thoughts_token_count=3,
+            tool_use_prompt_token_count=None, cache_creation_input_tokens=300,
+        )
+        ctx = _make_mock_callback_context(agent_name="researcher")
+
+        await plugin.after_model_callback(
+            callback_context=ctx, llm_response=_make_mock_llm_response(usage_metadata=usage)
+        )
+
+        metadata = _logged(plugin)[-1]["metadata"]
+        assert {key: metadata.get(key) for key in (
+            "prompt_tokens", "completion_tokens", "thinking_tokens", "cached_tokens",
+            "cache_creation_tokens",
+        )} == {
+            "prompt_tokens": 1_550, "completion_tokens": 7, "thinking_tokens": 3,
+            "cached_tokens": 1_200, "cache_creation_tokens": 300,
+        }
+
+    async def test_an_openai_agents_reasoning_stays_inside_its_output(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        plugin = LLMLoggingPlugin(
+            model_name="anthropic:claude-sonnet-4-6", app_name="test_app",
+            models={"writer": "openai:gpt-5"}, kinds={"writer": "openai"},
+        )
+        usage = SimpleNamespace(
+            prompt_token_count=100, candidates_token_count=70, total_token_count=170,
+            cached_content_token_count=None, thoughts_token_count=64,
+            tool_use_prompt_token_count=None,
+        )
+        ctx = _make_mock_callback_context(agent_name="writer")
+
+        await plugin.after_model_callback(
+            callback_context=ctx, llm_response=_make_mock_llm_response(usage_metadata=usage)
+        )
+
+        metadata = _logged(plugin)[-1]["metadata"]
+        assert (metadata["completion_tokens"], metadata["thinking_tokens"]) == (70, 64)
+
     async def test_drain_events_clears_buffer(self, plugin):
         """drain_events() should return events and clear the buffer."""
         ctx = _make_mock_callback_context()
