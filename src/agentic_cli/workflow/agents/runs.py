@@ -70,7 +70,7 @@ def run_label(ref: RunRef | None) -> str | None:
     """
     if ref is None or ref.is_root:
         return None
-    return f"{ref.instance} ({ref.agent}, run {ref.run.rpartition('#')[2]})"
+    return f"{ref.instance} ({ref.agent}, run {run_number(ref.run)})"
 
 
 def run_ended(
@@ -197,6 +197,15 @@ def run_instance(run: str) -> str:
     (``workflow/interrupts.py``).
     """
     return run.rpartition("#")[0]
+
+
+def run_number(run: str) -> str:
+    """A run's number within its instance, as its id writes it (``researcher-2#1``: ``1``).
+
+    The other half of the id ``AgentRuns.run_for`` gives: how a dialog
+    (``run_label``) and ``/agents`` number a run.
+    """
+    return run.rpartition("#")[2]
 
 
 class AgentRuns:
