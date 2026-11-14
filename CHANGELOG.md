@@ -584,9 +584,12 @@ the start of the entry's title.
   shows what it has used so far) and time. `/agents <id>` shows one instance
   (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
   then each run's status and time, the first lines of its result, its error
-  and its tokens by model. During a turn each line of the events box names
-  the sub-agent run at work (`researcher-2 › Calling: web_fetch`), as its
-  tool results in the transcript do; the main agent's lines are unchanged.
+  and its tokens by model. The runs are the manager's records, kept in
+  memory with it: a conversation resumed from an earlier run of the app, or
+  after a backend switch, lists none. During a turn each line of the events
+  box names the sub-agent run at work (`researcher-2 › Calling: web_fetch`),
+  as its tool results in the transcript do; the main agent's lines are
+  unchanged.
 - **Token usage by run and agent, on both backends.** Every model call the
   framework makes is one `LLM_USAGE`, side calls included (`generate_simple`:
   web_fetch's and the knowledge base's summaries, `purpose` `tool`; the memory
@@ -627,11 +630,21 @@ the start of the entry's title.
   and `TOOL_RESULT` carry `tool_call_id`, as Deep Agents' did. A sub-agent
   run's start and end are an event of their own, `EventType.AGENT_RUN`
   (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its title,
-  the first line of its request, then `completed`, `failed` or
-  `interrupted`, with the first 200 characters of its result), and each
+  the first line of its request, then `completed` (`partial` for an answer
+  cut at its output limit), `refused`, `failed` or `interrupted`, with the
+  first 200 characters of its result; a run fails
+  on `Error running sub-agent: …` or the framework's own error result, an
+  error `ToolMessage` on Deep Agents, the error dict of a raised or denied
+  call on ADK, and the sub-agent's answer is never read for success, so an
+  answer that is JSON saying it failed completes), and each
   manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
   provisional: `records(ref)`, `record(ref, id)`); a run a stopped or failed
-  turn leaves open is recorded `interrupted`. `get_active_run()` (exported
+  turn leaves open is recorded `interrupted`. On ADK a delegation that
+  finished beside a slower one in the same model step ends with the slower
+  one's (ADK hands a step's parallel function responses back in one event,
+  after the last), where Deep Agents ends each at its own result; a turn
+  stopped or failed before then ends it from the record, with its result,
+  not `interrupted`. `get_active_run()` (exported
   from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
   run whose call is in progress, None in the root's own: a sub-agent's
   tools, permission checks and questions see it. A consumer that does not
@@ -1216,9 +1229,11 @@ the start of the entry's title.
   model, and `ForeignReasoningMiddleware` leaves out the reasoning of AI
   messages another agent wrote, so a fork is never sent its coordinator's.
   `validate_agent_graph` raises `AgentGraphError` for `inherit_context=True`
-  on the root or on an agent with sub-agents of its own (in 0.7.0: Deep
+  on the root, on an agent with sub-agents of its own (in 0.7.0: Deep
   Agents tells a fork that delegating "will be refused", which a
-  coordinator would believe), and for a value that is not True or False.
+  coordinator would believe) or on an agent below another sub-agent (it is
+  for the main agent's own sub-agents), and for a value that is not True or
+  False.
 - **`BaseWorkflowManager.context_budget(agent_name=None)` and
   `root_agent_name`**: an agent's context numbers as its backend summarizes
   and trims by them, the root agent's by default. A frozen `ContextBudget`
@@ -2816,9 +2831,10 @@ step; each entry says what to use instead.
   the stream (`WorkflowEvent.run`) and in `llm_events.jsonl` (`run`: agent,
   instance, run, parent run, depth), on both backends.
 - **A sub-agent's refused or cut answer is said so, on both backends.** A
-  sub-agent whose model refused reached its parent as an empty result with
-  no warning (ADK; Deep Agents before 0.7.34), and an answer cut at the
-  output limit passed as complete. Now the parent reads Deep Agents
+  sub-agent whose model refused reached its parent with no warning: as an
+  empty result on ADK, and on Deep Agents before 0.7.34 as the sub-agent's
+  last non-empty text (empty when it had written none); and an answer cut at
+  the output limit passed as complete. Now the parent reads Deep Agents
   0.7.34's notice ("The subagent stopped because a model refused the
   request. … rephrase it or continue without it.") whichever deepagents is
   installed, and the run ends `refused`; a cut answer keeps its text (and

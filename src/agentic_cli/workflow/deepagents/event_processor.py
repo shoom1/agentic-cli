@@ -31,7 +31,8 @@ call runs at, named by the manager's runs (``AgentRuns.run_for``) from the
 call the ``tasks`` stream announced; a turn's own ``ERROR`` names none. A
 ``task`` call to one of the calling agent's own sub-agents is followed by the
 ``AGENT_RUN`` that starts its run, and its result by the one that ends it
-(``failed`` for an error result, with its error), the result shown as on ADK
+(``failed`` for the framework's error result, with its error: the
+sub-agent's answer is never read for success), the result shown as on ADK
 (``agents/runs.py::show_as_delegation``), each recorded as it is made, before
 ``on_event``. A ``task`` call to any other type runs no sub-agent (Deep
 Agents answers that it does not exist): it is an ordinary tool call, with no
@@ -59,15 +60,11 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
-from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
+from agentic_cli.workflow.agents.outcome import cut_off_warning
 from agentic_cli.workflow.agents.runs import (
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_REFUSED,
     RUN_STARTED,
-    SUBAGENT_ERROR_PREFIX,
     AgentRuns,
-    result_head,
+    run_ended,
     run_title,
     show_as_delegation,
 )
@@ -307,9 +304,9 @@ class DeepAgentsEventProcessor:
         for message in values.get("messages") or ():
             if isinstance(message, ToolMessage):
                 self._answered(message, run)
-                result = self._tool_result(message, run)
-                events.append(result)
                 ended = self._ended(message, run)
+                result = self._tool_result(message, run, delegation=ended is not None)
+                events.append(result)
                 if ended is not None:
                     show_as_delegation(result, message.text, ended)
                     events.append(ended)
@@ -359,47 +356,35 @@ class DeepAgentsEventProcessor:
     def _ended(self, message: ToolMessage, run: RunRef) -> WorkflowEvent | None:
         """The ``AGENT_RUN`` the result of a ``task`` call ``run`` made ends, recorded; else None.
 
-        ``failed`` for ``Error running sub-agent: <reason>`` (its ``error``
-        the reason) or another error result (an error message, or one that
-        says ``success`` false: its error), ``refused`` when
-        ``SubAgentOutcomeMiddleware`` marked the run's last answer refused,
-        else ``completed`` (``partial`` when it marked the answer cut).
+        ``agents/runs.py::run_ended``'s decision, as on ADK: ``failed`` for
+        ``Error running sub-agent: <reason>`` (its ``error`` the reason) or
+        the framework's other error results (an error message: its error),
+        ``refused`` when ``SubAgentOutcomeMiddleware`` marked the run's last
+        answer refused, else ``completed`` (``partial`` when it marked the
+        answer cut). The sub-agent's answer is never read for success
+        (``_delegation_result``).
         """
         child = self._delegated.pop((run.run, message.tool_call_id), None)
         if child is None:
             return None
-        outcome = self._outcomes.pop(child.run or "", None)
-        text = message.text
-        usage = self._ledgers.ledger(get_active_turn()).run_usage(child.run or "")
-        _, succeeded, error = _result_of(message)
-        if text.startswith(SUBAGENT_ERROR_PREFIX):
-            event = WorkflowEvent.agent_run(
-                child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
-            )
-        elif not succeeded:
-            event = WorkflowEvent.agent_run(
-                child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=error or text, usage=usage,
-            )
-        elif outcome == REFUSED:
-            event = WorkflowEvent.agent_run(
-                child, RUN_REFUSED, call_id=message.tool_call_id, result=result_head(text),
-                error=REFUSAL_ERROR, usage=usage,
-            )
-        else:
-            event = WorkflowEvent.agent_run(
-                child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text),
-                partial=outcome == CUT, usage=usage,
-            )
+        _, succeeded, error = _delegation_result(message)
+        event = run_ended(
+            child, message.tool_call_id, message.text,
+            failed=not succeeded, error=error,
+            outcome=self._outcomes.pop(child.run or "", None),
+            usage=self._ledgers.ledger(get_active_turn()).run_usage(child.run or ""),
+        )
         self._runs.observe(event)
         return event
 
-    def _tool_result(self, message: ToolMessage, run: RunRef) -> WorkflowEvent:
+    def _tool_result(
+        self, message: ToolMessage, run: RunRef, *, delegation: bool = False
+    ) -> WorkflowEvent:
+        """``TOOL_RESULT`` for ``message``; a ``delegation``'s read as ``_delegation_result``."""
         name = (
             message.name or self._call_names.get((run.run, message.tool_call_id)) or "unknown"
         )
-        result, success, error = _result_of(message)
+        result, success, error = (_delegation_result if delegation else _result_of)(message)
         event = WorkflowEvent.tool_result(name, result, success=success, error=error)
         event.metadata["tool_call_id"] = message.tool_call_id
         return event
@@ -491,6 +476,20 @@ def _result_of(message: ToolMessage) -> tuple[Any, bool, str | None]:
     elif not success:
         error = message.text
     return result, success, error
+
+
+def _delegation_result(message: ToolMessage) -> tuple[Any, bool, str | None]:
+    """A delegation's result, whether it succeeded, and its error, as on ADK.
+
+    Only the framework's own error result fails: an error message (the
+    gate's denial, ``ToolCallErrorMiddleware``'s ``Error running sub-agent:
+    …``), read as ``_result_of`` reads one. Anything else is the sub-agent's
+    answer, text never read for success (ADK keeps it under ``result``): an
+    answer that is JSON saying it failed completed.
+    """
+    if message.status == "error":
+        return _result_of(message)
+    return message.content, True, None
 
 
 def _delegation_call(payload: dict) -> dict | None:

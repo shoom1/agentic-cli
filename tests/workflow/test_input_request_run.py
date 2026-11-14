@@ -9,11 +9,17 @@ app's own tool). ``run_label`` is how a dialog names that run.
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from agentic_cli.workflow.agents import run_label
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
-from agentic_cli.workflow.events import UserInputRequest
+from agentic_cli.workflow.events import UserInputRequest, UserInputUnavailable
 from agentic_cli.workflow.sessions import (
     RunRef,
+    close_turn_scope,
+    open_turn_scope,
     reset_active_run,
     root_run,
     set_active_run,
@@ -103,6 +109,36 @@ class TestTheRequestNamesItsRun:
         (asked,) = manager.asked
         assert asked.run == LEAF
 
+    @pytest.mark.parametrize("refused_by", ["no callback", "its turn has ended"])
+    async def test_a_refused_request_is_given_its_run_first(self, refused_by):
+        """The run is filled before the request can be refused, so whoever
+        catches the refusal can still say which run asked."""
+        manager = _Asking()
+        request = _request()
+        token = set_active_run(RESEARCHER)
+        try:
+            if refused_by == "no callback":
+                manager.clear_input_callback()
+                asking = manager.request_user_input(request)
+            else:
+                go = asyncio.Event()
+
+                async def later() -> str:
+                    await go.wait()
+                    return await manager.request_user_input(request)
+
+                span = open_turn_scope()
+                asking = asyncio.create_task(later())  # copies the turn's context
+                close_turn_scope(span)
+                go.set()
+            with pytest.raises(UserInputUnavailable):
+                await asking
+        finally:
+            reset_active_run(token)
+
+        assert manager.asked == []
+        assert request.run == RESEARCHER
+
 
 class TestRunLabel:
     def test_a_sub_agent_run_is_its_instance_its_agent_and_its_number(self):
@@ -115,5 +151,5 @@ class TestRunLabel:
 
     def test_a_depth_0_agent_has_none(self):
         """An agent the root transfers to (a native ADK YAML app's) replies
-        as the root does: no run, so no label (the header's R1)."""
+        as the root does: it is no sub-agent run (``run`` None), so no label."""
         assert run_label(RunRef("helper", "helper", None, None, 0)) is None

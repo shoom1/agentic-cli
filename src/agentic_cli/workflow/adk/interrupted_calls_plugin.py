@@ -89,6 +89,12 @@ class _Finished:
     artifact_delta: dict[str, Any]
     cut: Any = None
 
+    @property
+    def read(self) -> Any:
+        """What the model reads of the result: the cap's cut, else the result
+        (never cut again, which would save its full output a second time)."""
+        return self.result if self.cut is None else self.cut
+
 
 class InterruptedCallsPlugin(BasePlugin):
     """Answer the calls a cancelled turn leaves open (``workflow/interrupts.py``).
@@ -222,18 +228,27 @@ def _branch(tool_context: Any) -> str | None:
 def _from_record(open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any) -> Any:
     """A stopped turn's call answered from the record, as ``run``'s.
 
-    A finished call keeps what the model would have read: the cap's cut, or
-    the result as it was (never cut again, which would save its full output
-    a second time); the state it changed goes into ``actions``, stored with
-    the answer as with its result. Any other is answered as
-    ``OpenCalls.answer`` says.
+    A finished call keeps what the model would have read (``_Finished.read``);
+    the state it changed goes into ``actions``, stored with the answer as
+    with its result. Any other is answered as ``OpenCalls.answer`` says.
     """
     answer = open_calls.answer(call_id, by_user=True, run=run)
     if not isinstance(answer, _Finished):
         return answer
     actions.state_delta.update(answer.state_delta)
     actions.artifact_delta.update(answer.artifact_delta)
-    return answer.result if answer.cut is None else answer.cut
+    return answer.read
+
+
+def returned(open_calls: OpenCalls, call_id: str | None, run: str | None) -> dict[str, Any] | None:
+    """What the call ``call_id`` of ``run`` returned, from the record; None if it did not finish.
+
+    As ADK stores the result (text under ``result``), and as the model reads
+    it (the cap's cut): what the manager ends a delegation's run with when
+    no event brought its result (``ADKEventProcessor.end_returned_run``).
+    """
+    finished = open_calls.recorded(call_id, run=run)
+    return _as_response(finished.read) if isinstance(finished, _Finished) else None
 
 
 def _as_response(result: Any) -> dict[str, Any]:
@@ -297,9 +312,13 @@ def unsealed(events: list[Event], open_calls: OpenCalls, runs: AgentRuns) -> lis
     other ``INTERRUPTED_BY_USER``. The manager writes them before the turn
     clears its record.
 
-    Only once ADK has sealed the stopped invocation (its seals are the
-    session's last events): seals written after these answers would answer
-    a call twice. ``left_open`` answers, at the next turn, what is left.
+    Only once ADK has sealed the stopped invocation: seals written after
+    these answers would answer a call twice. The check is that the
+    session's last event is a seal, which is also so between two of ADK's
+    seal appends; a read made there is caught by the durable store's stale
+    check (an append to a session changed since it was read fails, and
+    ``left_open`` answers the call at the next turn), not by this check.
+    ``left_open`` answers, at the next turn, what is left.
     """
     if not events or events[-1].error_code != ABORTED:
         return []

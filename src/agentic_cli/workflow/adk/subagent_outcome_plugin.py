@@ -31,8 +31,10 @@ It changes the response in place and returns None, as
 after the raw log, which records the answer as the model gave it. An answer
 that calls tools is not final and is left alone, as is every answer of the
 root and of an agent the root transfers to (no active run): they reach the
-user as their model gave them (a refusal with no answer is the turn's failure,
-as before).
+user as their model gave them (a Claude or Gemini refusal with no answer is the
+turn's failure, "<model> returned no answer"; a root on OpenRouter or an
+OpenAI-compatible server replies "OpenAI refusal: <text>", as
+``OpenAICompatibleLlm`` words a Chat Completions refusal).
 """
 
 from __future__ import annotations

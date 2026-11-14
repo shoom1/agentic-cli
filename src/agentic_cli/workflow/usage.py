@@ -234,7 +234,6 @@ def llm_usage_event(
     )
 
 
-
 def adk_usage_event(
     model: str,
     usage: Any,
@@ -263,6 +262,7 @@ def adk_usage_event(
         invocation_id=invocation_id,
         latency_ms=latency_ms,
     )
+
 
 # -- what a side call is for ----------------------------------------------------
 

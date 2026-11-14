@@ -144,19 +144,34 @@ class TestDelegationRuns:
         assert ended.metadata["status"] == RUN_FAILED
         assert (ended.metadata["error"], ended.metadata["result"]) == ("overloaded", "")
 
-    def test_a_result_that_says_it_failed_ends_it_failed(self):
+    def test_the_frameworks_error_result_ends_it_failed_with_its_error(self):
+        """The gate's or the error middleware's result: an error message
+        whose JSON holds the error."""
         processor = _processor()
         processor.process((), "updates", _delegating())
 
         _, ended = processor.process((), "updates", _tools_update(ToolMessage(
             json.dumps({"success": False, "error": "researcher failed: boom"}),
-            tool_call_id="c1", name="task",
+            tool_call_id="c1", name="task", status="error",
         )))
 
         assert ended.metadata["status"] == RUN_FAILED
         assert (ended.metadata["error"], ended.metadata["result"]) == (
             "researcher failed: boom", "",
         )
+
+    def test_an_answer_that_says_it_failed_completes_it(self):
+        """The sub-agent's answer is text, never read for success."""
+        answer = json.dumps({"success": False, "error": "no X here"})
+        processor = _processor()
+        processor.process((), "updates", _delegating())
+
+        result, ended = processor.process((), "updates", _tools_update(ToolMessage(
+            answer, tool_call_id="c1", name="task",
+        )))
+
+        assert (ended.metadata["status"], ended.metadata["result"]) == (RUN_COMPLETED, answer)
+        assert (result.metadata["result"], result.metadata["success"]) == (answer, True)
 
     def test_a_long_result_is_cut(self):
         processor = _processor()

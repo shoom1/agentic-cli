@@ -19,7 +19,7 @@ import pytest
 from rich.console import Console
 
 from agentic_cli.cli import agents_command
-from agentic_cli.cli.agents_command import AgentsCommand
+from agentic_cli.cli.agents_command import NO_RUNS, AgentsCommand
 from agentic_cli.cli.commands import CommandCategory, CommandRegistry
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
@@ -155,9 +155,7 @@ class TestTheList:
     async def test_a_conversation_without_runs_says_so(self, manager):
         session = await agents(manager)
 
-        session.add_message.assert_called_once_with(
-            "system", "No sub-agent runs in this conversation yet."
-        )
+        session.add_message.assert_called_once_with("system", NO_RUNS)
         session.add_rich.assert_not_called()
 
     async def test_another_conversations_runs_are_not_listed(self, manager):
@@ -165,9 +163,7 @@ class TestTheList:
 
         session = await agents(manager, session_id="s2")
 
-        session.add_message.assert_called_once_with(
-            "system", "No sub-agent runs in this conversation yet."
-        )
+        session.add_message.assert_called_once_with("system", NO_RUNS)
 
     async def test_a_title_is_shown_as_written(self, manager):
         """Titles are the model's words: markup in one is text, never style."""

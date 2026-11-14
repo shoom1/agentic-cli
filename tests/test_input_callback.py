@@ -65,7 +65,8 @@ class TestInputCallbackAPI:
 
 class TestOnlyInsideItsTurn:
     """A task a turn started copies the turn's context, the callback with it;
-    once the turn has ended, the callback does not answer it (spec 9)."""
+    once the turn has ended, the callback does not answer it: no dialog
+    opens outside a turn."""
 
     async def test_a_task_that_outlives_its_turn_cannot_ask(self):
         manager = _manager()

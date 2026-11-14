@@ -277,7 +277,7 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
     Raises:
         AgentGraphError: Naming the agent(s) and what to change.
     """
-    # Not coerced: "fresh", a value of the field's unreleased predecessor, is
+    # Not coerced: "fresh", a value of this field's earlier string form, is
     # truthy, and would show a sub-agent the whole conversation.
     unknown = [
         f"{name!r} ({config.inherit_context!r})"

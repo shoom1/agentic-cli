@@ -15,7 +15,9 @@ make them, under the turn they are reported in. The one other writer is
 ``interrupt_open``, for the runs a turn leaves open when it is stopped or
 fails, when no event can reach its consumer any more. A conversation is a
 ``SessionRef``, or None for a processor driven outside a manager. All of it
-is in memory, for the process.
+is in memory, for as long as its manager lives: a backend switch builds a
+new manager, and the runs recorded before it do not follow (as with its
+usage ledgers).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, SessionRef, get_active_turn
 from agentic_cli.workflow.tool_summaries import delegation_summary
@@ -69,7 +72,61 @@ def run_label(ref: RunRef | None) -> str | None:
     """
     if ref is None or ref.is_root:
         return None
-    return f"{ref.instance} ({ref.agent}, run {ref.run.rpartition('#')[2]})"
+    return f"{ref.instance} ({ref.agent}, run {run_number(ref.run)})"
+
+
+def run_ended(
+    ref: RunRef,
+    call_id: str | None,
+    answer: str,
+    *,
+    failed: bool = False,
+    error: str | None = None,
+    outcome: str | None = None,
+    usage: dict[str, dict[str, int]] | None = None,
+    sealed: bool = False,
+) -> WorkflowEvent:
+    """The ``AGENT_RUN`` that ends ``ref``'s run, decided as on every backend.
+
+    ``answer`` is the delegation's result as its parent read it; ``failed``
+    says it is the framework's own error result (``error``: its error), and
+    ``outcome`` is the mark the backend's hook put on the run's last answer
+    (``agents/outcome.py``). The run ends:
+
+    - ``interrupted`` for the seal of a call a stopped turn left open
+      (``sealed``), with its result;
+    - ``failed`` for ``Error running sub-agent: <reason>`` (its error the
+      reason), or for the framework's error result (its error, else the
+      answer);
+    - ``refused`` when the outcome is ``REFUSED``;
+    - else ``completed``, ``partial`` when the outcome is ``CUT``.
+
+    The sub-agent's answer is never read for success: each backend tells
+    ``failed`` from its own error result alone, so an answer that looks
+    like a failed result completed.
+    """
+    if sealed:
+        return WorkflowEvent.agent_run(
+            ref, RUN_INTERRUPTED, call_id=call_id, result=result_head(answer), usage=usage,
+        )
+    if answer.startswith(SUBAGENT_ERROR_PREFIX):
+        return WorkflowEvent.agent_run(
+            ref, RUN_FAILED, call_id=call_id, result="",
+            error=answer.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
+        )
+    if failed:
+        return WorkflowEvent.agent_run(
+            ref, RUN_FAILED, call_id=call_id, result="", error=error or answer, usage=usage,
+        )
+    if outcome == REFUSED:
+        return WorkflowEvent.agent_run(
+            ref, RUN_REFUSED, call_id=call_id, result=result_head(answer),
+            error=REFUSAL_ERROR, usage=usage,
+        )
+    return WorkflowEvent.agent_run(
+        ref, RUN_COMPLETED, call_id=call_id, result=result_head(answer),
+        partial=outcome == CUT, usage=usage,
+    )
 
 
 def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
@@ -144,8 +201,17 @@ def run_instance(run: str) -> str:
     return run.rpartition("#")[0]
 
 
+def run_number(run: str) -> str:
+    """A run's number within its instance, as its id writes it (``researcher-2#1``: ``1``).
+
+    The other half of the id ``AgentRuns.run_for`` gives: how a dialog
+    (``run_label``) and ``/agents`` number a run.
+    """
+    return run.rpartition("#")[2]
+
+
 class AgentRuns:
-    """A manager's sub-agent runs, kept by conversation, in memory for the process."""
+    """A manager's sub-agent runs, kept by conversation, in memory for the manager's life."""
 
     def __init__(self) -> None:
         # (conversation, parent run, call id) -> the run that call started.

@@ -11,8 +11,10 @@ and its tokens by model.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``) and the tokens its usage ledger's
-(``usage_of``), so a run still going shows what it has used so far. They
-are this process's runs, one run per instance.
+(``usage_of``), so a run still going shows what it has used so far. Both
+live in memory with the manager: a conversation resumed from an earlier run
+of the app, or after a backend switch (a new manager), lists none. Each
+instance runs once.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from rich.text import Text
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
 from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_STARTED
+from agentic_cli.workflow.agents.runs import run_number
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.agents import RunRecord
@@ -35,6 +38,12 @@ if TYPE_CHECKING:
 
 #: How many lines of a run's result ``/agents <id>`` shows.
 RESULT_LINES = 3
+#: What ``/agents`` says for a conversation with no run recorded.
+NO_RUNS = (
+    "No sub-agent runs in this conversation yet. Runs are kept while the app "
+    "runs, by its backend: a conversation resumed from an earlier run of the "
+    "app, or after a backend switch, lists none."
+)
 
 
 def _now() -> datetime:
@@ -60,21 +69,26 @@ class AgentsCommand(Command):
         if workflow is None:
             return
         conversation = workflow.session_ref(getattr(app, "session_id", None))
-        records = workflow.agent_runs.records(conversation)
+        runs = workflow.agent_runs
+        records = runs.records(conversation)
         ledger = workflow.usage_of(conversation)
         parts = self.parse_args(args).positional.split()
         if parts:
             wanted = parts[0]
-            mine = [r for r in records if wanted in (r.ref.instance, r.ref.run)]
-            if not mine:
+            found = runs.record(conversation, wanted)
+            if found is None:
                 app.session.add_warning(
                     f"No sub-agent {wanted} in this conversation. Type /agents for the list."
                 )
                 return
+            # A run's id shows that run; an instance's, each of its runs.
+            mine = [found] if found.ref.run == wanted else [
+                r for r in records if r.ref.instance == found.ref.instance
+            ]
             app.session.add_rich(_one(mine, ledger))
             return
         if not records:
-            app.session.add_message("system", "No sub-agent runs in this conversation yet.")
+            app.session.add_message("system", NO_RUNS)
             return
         app.session.add_rich(_table(records, ledger))
 
@@ -173,7 +187,7 @@ def _status(record: "RunRecord") -> str:
 
 def _run_number(record: "RunRecord") -> str:
     """The run's number within its instance: ``#1`` of ``researcher-2#1``."""
-    return "#" + (record.ref.run or "").rpartition("#")[2]
+    return "#" + run_number(record.ref.run or "")
 
 
 def _tokens(totals: "UsageTotals") -> str:
