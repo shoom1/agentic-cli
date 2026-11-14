@@ -82,6 +82,7 @@ from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
+from agentic_cli.workflow.usage import UsageLedgers, langchain_tokens, llm_usage_event
 
 if TYPE_CHECKING:
     from langchain_core.outputs import LLMResult
@@ -124,6 +125,10 @@ class DeepAgentsEventProcessor:
         sub_agents: Each agent's sub-agents, by name: a ``task`` call starts
             a run only for one of the caller's own. None takes every
             ``task`` call's ``subagent_type`` as the caller's.
+        ledgers: The manager's usage ledgers: each call's usage is recorded
+            in its conversation's as it is made, before ``on_event``, and a
+            sub-agent run's end carries what the run used, by model
+            (``metadata["usage"]``); its own when not given.
     """
 
     def __init__(
@@ -135,6 +140,7 @@ class DeepAgentsEventProcessor:
         budgets: Mapping[str, ContextBudget] | None = None,
         runs: AgentRuns | None = None,
         sub_agents: Mapping[str, Collection[str]] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         self._root = root
         self._agent_models = agent_models
@@ -166,6 +172,7 @@ class DeepAgentsEventProcessor:
         # A sub-agent run's last answer's outcome (SubAgentOutcomeMiddleware's
         # mark), by run id, until its task call's result ends the run.
         self._outcomes: dict[str, str] = {}
+        self._ledgers = ledgers if ledgers is not None else UsageLedgers()
 
     def agent(self, namespace: Iterable[str]) -> str:
         """The agent whose graph runs at ``namespace``."""
@@ -196,6 +203,9 @@ class DeepAgentsEventProcessor:
                     events += self._model_output(agent, run, values)
                 elif node == "tools":
                     events += self._tools_output(agent, run, values)
+        for event in events:
+            # Recorded as it is made: an app's on_event cannot drop a row.
+            self._ledgers.record(event)
         return events
 
     def turn_failed(self, error: BaseException) -> WorkflowEvent:
@@ -354,26 +364,27 @@ class DeepAgentsEventProcessor:
             return None
         outcome = self._outcomes.pop(child.run or "", None)
         text = message.text
+        usage = self._ledgers.ledger(get_active_turn()).run_usage(child.run or "")
         _, succeeded, error = _result_of(message)
         if text.startswith(SUBAGENT_ERROR_PREFIX):
             event = WorkflowEvent.agent_run(
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=text.removeprefix(SUBAGENT_ERROR_PREFIX),
+                error=text.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
             )
         elif not succeeded:
             event = WorkflowEvent.agent_run(
                 child, RUN_FAILED, call_id=message.tool_call_id, result="",
-                error=error or text,
+                error=error or text, usage=usage,
             )
         elif outcome == REFUSED:
             event = WorkflowEvent.agent_run(
                 child, RUN_REFUSED, call_id=message.tool_call_id, result=result_head(text),
-                error=REFUSAL_ERROR,
+                error=REFUSAL_ERROR, usage=usage,
             )
         else:
             event = WorkflowEvent.agent_run(
                 child, RUN_COMPLETED, call_id=message.tool_call_id, result=result_head(text),
-                partial=outcome == CUT,
+                partial=outcome == CUT, usage=usage,
             )
         self._runs.observe(event)
         return event
@@ -430,25 +441,15 @@ class DeepAgentsEventProcessor:
 def usage_event(model: "ResolvedModel | None", usage: Mapping[str, Any]) -> WorkflowEvent:
     """``LLM_USAGE`` for a call on ``model`` that reported ``usage``.
 
-    ``usage`` is LangChain's ``usage_metadata``: cache reads and writes are its
-    ``input_token_details``, thinking its ``output_token_details.reasoning``.
+    ``usage`` is LangChain's ``usage_metadata``, read as every partner
+    package writes it (``workflow/usage.py``'s ``langchain_tokens``): cache
+    reads and writes are its ``input_token_details``, thinking its
+    ``output_token_details.reasoning``.
     """
-    inputs = usage.get("input_token_details") or {}
-    outputs = usage.get("output_token_details") or {}
-    # When Anthropic breaks cache writes down by TTL, langchain-anthropic
-    # reports them under these keys and sets "cache_creation" to 0.
-    by_ttl = sum(
-        inputs.get(key) or 0
-        for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
-    )
-    return WorkflowEvent.llm_usage(
-        model=str(model.ref) if model is not None else "unknown",
-        prompt_tokens=usage.get("input_tokens"),
-        completion_tokens=usage.get("output_tokens"),
+    return llm_usage_event(
+        str(model.ref) if model is not None else "unknown",
+        langchain_tokens(usage),
         total_tokens=usage.get("total_tokens"),
-        thinking_tokens=outputs.get("reasoning"),
-        cached_tokens=inputs.get("cache_read"),
-        cache_creation_tokens=by_ttl or inputs.get("cache_creation"),
     )
 
 
@@ -537,6 +538,8 @@ class RunCallback(AsyncCallbackHandler):
         live: The turn's live events, which every event goes out through.
         budgets: Each agent's context numbers, by name, which a summary's
             ``LLM_USAGE`` carries; none without.
+        ledgers: The manager's usage ledgers: a summary's usage is recorded
+            in its conversation's before it goes out.
     """
 
     def __init__(
@@ -547,8 +550,10 @@ class RunCallback(AsyncCallbackHandler):
         llm_log: "LLMLogWriter | None" = None,
         live: "LiveEvents",
         budgets: Mapping[str, ContextBudget] | None = None,
+        ledgers: UsageLedgers | None = None,
     ) -> None:
         super().__init__()
+        self._ledgers = ledgers
         self._root = root
         self._agent_models = agent_models
         self._budgets: Mapping[str, ContextBudget] = budgets or {}
@@ -602,6 +607,8 @@ class RunCallback(AsyncCallbackHandler):
                 purpose=PURPOSE_SUMMARY, agent=call.agent,
                 **usage_fields(self._budgets.get(call.agent)),
             )
+            if self._ledgers is not None:
+                self._ledgers.record(event)
             self._emit(event)
 
     async def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:

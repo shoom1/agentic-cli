@@ -63,6 +63,7 @@ from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
     RunCallback,
+    usage_event,
 )
 from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clashes
 from agentic_cli.workflow.deepagents.sessions import (
@@ -556,6 +557,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # report to: what it reports is queued where nothing reads.
             live=live_events.current() or LiveEvents(),
             budgets=self._budgets,
+            ledgers=self._usage_ledgers,
         )
         summary = await write_summary(
             middleware, sent[:cut], focus=focus, callbacks=[callback]
@@ -624,6 +626,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             budgets=self._budgets,
             runs=self.agent_runs,
             sub_agents={config.name: config.sub_agents for config in self.agent_configs},
+            ledgers=self._usage_ledgers,
         )
         live = LiveEvents()
         callback = RunCallback(
@@ -632,6 +635,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             llm_log=self._raw_llm_log(),
             live=live,
             budgets=self._budgets,
+            ledgers=self._usage_ledgers,
         )
         stream = self._root.astream(
             graph_input,
