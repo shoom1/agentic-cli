@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,6 +31,9 @@ from thinking_prompt import ButtonConfig, TextField, ThinkingPromptSession
 from agentic_cli.cli import message_processor
 from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
+from agentic_cli.workflow.permissions.capabilities import ResolvedCapability
+from agentic_cli.workflow.permissions.prompt import ALLOW_ONCE_CHOICE, DENY_CHOICE, build_request
+from agentic_cli.workflow.sessions import RunRef, root_run
 from tests.cli.dialog_fakes import autospec_session, edited_dialog, opening_boxes
 
 
@@ -176,6 +180,138 @@ async def test_a_confirmation_is_a_yes_no_dialog(ui, monkeypatch, pressed, answe
     ui.yes_no_dialog.assert_awaited_once_with(
         title="approve - Confirmation", text="Go?", placement="box"
     )
+
+
+# --- a sub-agent's questions and permission prompts -------------------------------------
+#
+# A request a sub-agent's run makes names it (``UserInputRequest.run``): a
+# permission prompt is titled "<instance> · Permission", its body already
+# opening with who wants the tool (``build_request``); a question is titled
+# "<instance> asks", its body opening with the run. The root's stay as they were.
+
+RESEARCHER = RunRef(
+    agent="researcher", instance="researcher-2", run="researcher-2#1", parent_run=None, depth=1
+)
+
+
+def _permission(run: RunRef | None) -> UserInputRequest:
+    """A permission prompt, as the engine builds it."""
+    return build_request(
+        "write_file", [ResolvedCapability("filesystem.write", "/p/note.txt")], run=run
+    )
+
+
+async def test_a_sub_agents_permission_prompt_is_titled_with_its_instance(ui, monkeypatch):
+    request = _permission(RESEARCHER)
+    ui.dropdown_dialog.return_value = DENY_CHOICE
+
+    answer, _ = await _ask(ui, request, monkeypatch)
+
+    assert answer == DENY_CHOICE
+    ui.dropdown_dialog.assert_awaited_once_with(
+        title="researcher-2 · Permission",
+        text=request.prompt,
+        options=request.choices,
+        default=DENY_CHOICE,
+        placement="box",
+    )
+    assert request.prompt.startswith(
+        "researcher-2 (researcher, run 1) wants to use `write_file`:\n"
+    )
+
+
+async def test_the_roots_permission_prompt_is_titled_as_before(ui, monkeypatch):
+    request = _permission(None)
+    ui.dropdown_dialog.return_value = DENY_CHOICE
+
+    await _ask(ui, request, monkeypatch)
+
+    assert ui.dropdown_dialog.await_args.kwargs["title"] == "write_file - Input Required"
+    assert ui.dropdown_dialog.await_args.kwargs["text"] == request.prompt
+    assert request.prompt.startswith("Tool `write_file` wants:\n")
+
+
+async def test_a_sub_agents_question_says_who_asks(ui, monkeypatch):
+    _, (dialog,) = await _ask(ui, replace(_text(), run=RESEARCHER), monkeypatch)
+
+    assert dialog.title == "researcher-2 asks"
+    assert dialog.body == "researcher-2 (researcher, run 1) asks:\n\nWhich dataset should I use?"
+
+
+async def test_a_sub_agents_choice_and_confirmation_say_who_asks(ui, monkeypatch):
+    ui.dropdown_dialog.return_value = "b"
+    ui.yes_no_dialog.return_value = True
+
+    await _ask(ui, replace(_choice(), run=RESEARCHER), monkeypatch)
+    await _ask(ui, replace(_confirmation(), run=RESEARCHER), monkeypatch)
+
+    ui.dropdown_dialog.assert_awaited_once_with(
+        title="researcher-2 asks",
+        text="researcher-2 (researcher, run 1) asks:\n\nWhich?",
+        options=["a", "b"],
+        default="a",
+        placement="box",
+    )
+    ui.yes_no_dialog.assert_awaited_once_with(
+        title="researcher-2 asks",
+        text="researcher-2 (researcher, run 1) asks:\n\nGo?",
+        placement="box",
+    )
+
+
+class _TwoRunsAsk:
+    """Two runs of one sub-agent, started in one response, ask permission at
+    once (parallel delegations), each through the turn's input callback."""
+
+    def __init__(self, *requests: UserInputRequest) -> None:
+        self.requests = requests
+        self.callback = None
+        self.answered: dict[str, str] = {}
+
+    def set_input_callback(self, callback) -> None:
+        self.callback = callback
+
+    def clear_input_callback(self) -> None:
+        self.callback = None
+
+    def source(self, _workflow):
+        async def ask(request: UserInputRequest) -> None:
+            self.answered[request.run.run] = await self.callback(request)
+
+        async def _turn():
+            await asyncio.gather(*(ask(request) for request in self.requests))
+            yield WorkflowEvent.text("done")
+
+        return _turn()
+
+
+async def test_two_runs_asking_at_once_get_a_dialog_each_with_its_own_answer():
+    other = RunRef(
+        agent="researcher", instance="researcher-1", run="researcher-1#1",
+        parent_run=None, depth=1,
+    )
+    workflow = _TwoRunsAsk(_permission(other), _permission(RESEARCHER))
+    ui = opening_boxes(autospec_session())
+    ui.dropdown_dialog.side_effect = lambda *, title, **_: (
+        ALLOW_ONCE_CHOICE if title.startswith("researcher-1 ") else DENY_CHOICE
+    )
+    controller = SimpleNamespace(workflow=workflow, update_status_bar=lambda ui: None)
+    settings = SimpleNamespace(verbose_thinking=False, default_user="u", dialog_placement="box")
+
+    await MessageProcessor()._run_turn(workflow.source, controller, ui, settings)
+
+    assert [c.kwargs["title"] for c in ui.dropdown_dialog.await_args_list] == [
+        "researcher-1 · Permission", "researcher-2 · Permission",
+    ]
+    assert workflow.answered == {"researcher-1#1": ALLOW_ONCE_CHOICE, "researcher-2#1": DENY_CHOICE}
+
+
+async def test_the_roots_own_work_is_asked_as_before(ui, monkeypatch):
+    """A request naming the root's own work (``root_run``) is the root's."""
+    _, (dialog,) = await _ask(ui, replace(_text(), run=root_run("coordinator")), monkeypatch)
+
+    assert dialog.title == "ask_clarification - Input Required"
+    assert dialog.body == "Which dataset should I use?"
 
 
 # --- where they are drawn ----------------------------------------------------------------
