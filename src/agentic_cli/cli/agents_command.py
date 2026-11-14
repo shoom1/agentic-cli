@@ -11,8 +11,10 @@ and its tokens by model.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``) and the tokens its usage ledger's
-(``usage_of``), so a run still going shows what it has used so far. They
-are this process's runs, one run per instance.
+(``usage_of``), so a run still going shows what it has used so far. Both
+live in memory with the manager: a conversation resumed from an earlier run
+of the app, or after a backend switch (a new manager), lists none. Each
+instance runs once.
 """
 
 from __future__ import annotations
@@ -36,6 +38,12 @@ if TYPE_CHECKING:
 
 #: How many lines of a run's result ``/agents <id>`` shows.
 RESULT_LINES = 3
+#: What ``/agents`` says for a conversation with no run recorded.
+NO_RUNS = (
+    "No sub-agent runs in this conversation yet. Runs are kept while the app "
+    "runs, by its backend: a conversation resumed from an earlier run of the "
+    "app, or after a backend switch, lists none."
+)
 
 
 def _now() -> datetime:
@@ -80,7 +88,7 @@ class AgentsCommand(Command):
             app.session.add_rich(_one(mine, ledger))
             return
         if not records:
-            app.session.add_message("system", "No sub-agent runs in this conversation yet.")
+            app.session.add_message("system", NO_RUNS)
             return
         app.session.add_rich(_table(records, ledger))
 

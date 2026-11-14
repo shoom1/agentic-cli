@@ -1279,8 +1279,9 @@ references, self-references, delegation cycles, a sub-agent shared by two
 parents, and **more than one root** raise `AgentGraphError` naming the
 offending agents. Exactly one agent may be unreferenced: the runner starts from
 a single root, so agents under any other root would never run.
-`inherit_context=True` on the root or on an agent with sub-agents of its own,
-and an `inherit_context` that is not True or False, raise it too, and on ADK,
+`inherit_context=True` on the root, on an agent with sub-agents of its own or
+on an agent below another sub-agent, and an `inherit_context` that is not True
+or False, raise it too, and on ADK,
 when the agents are built, so does a sub-agent named like one of its parent's
 tools. Agents are built in dependency order, so declaration order does not
 matter. Then every agent's model is resolved, with the default model, before

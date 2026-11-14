@@ -15,7 +15,9 @@ make them, under the turn they are reported in. The one other writer is
 ``interrupt_open``, for the runs a turn leaves open when it is stopped or
 fails, when no event can reach its consumer any more. A conversation is a
 ``SessionRef``, or None for a processor driven outside a manager. All of it
-is in memory, for the process.
+is in memory, for as long as its manager lives: a backend switch builds a
+new manager, and the runs recorded before it do not follow (as with its
+usage ledgers).
 """
 
 from __future__ import annotations
@@ -209,7 +211,7 @@ def run_number(run: str) -> str:
 
 
 class AgentRuns:
-    """A manager's sub-agent runs, kept by conversation, in memory for the process."""
+    """A manager's sub-agent runs, kept by conversation, in memory for the manager's life."""
 
     def __init__(self) -> None:
         # (conversation, parent run, call id) -> the run that call started.

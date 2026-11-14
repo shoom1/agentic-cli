@@ -876,11 +876,12 @@ _REASONING_BLOCKS = frozenset({"reasoning", "thinking", "redacted_thinking"})
 class SubAgentOutcomeMiddleware(AgentMiddleware):
     """A sub-agent's refused or cut final answer, said so (``workflow/agents/outcome.py``).
 
-    Deep Agents' ``task`` hands the parent the sub-agent's last text: a
-    refusal reached it as an empty result (before deepagents 0.7.34, which
-    words its own notice), and an answer cut at the output limit as a
-    complete one. Outermost on each sub-agent's model side (never the
-    root's, whose answers reach the user as its model gave them), this
+    Deep Agents' ``task`` hands the parent the sub-agent's last non-empty
+    text: a refusal reached it as the text before it, empty when there was
+    none (before deepagents 0.7.34, which words its own notice), and an
+    answer cut at the output limit as a complete one. Outermost on each
+    sub-agent's model side (never the root's, whose answers reach the user
+    as its model gave them), this
     rewrites a final answer (one without tool calls) that a model refused (a
     refusal block, Claude's ``refusal`` stop, OpenAI's ``content_filter``, a
     Gemini block of the answer or of the prompt: ``marked_answer`` says what

@@ -312,9 +312,13 @@ def unsealed(events: list[Event], open_calls: OpenCalls, runs: AgentRuns) -> lis
     other ``INTERRUPTED_BY_USER``. The manager writes them before the turn
     clears its record.
 
-    Only once ADK has sealed the stopped invocation (its seals are the
-    session's last events): seals written after these answers would answer
-    a call twice. ``left_open`` answers, at the next turn, what is left.
+    Only once ADK has sealed the stopped invocation: seals written after
+    these answers would answer a call twice. The check is that the
+    session's last event is a seal, which is also so between two of ADK's
+    seal appends; a read made there is caught by the durable store's stale
+    check (an append to a session changed since it was read fails, and
+    ``left_open`` answers the call at the next turn), not by this check.
+    ``left_open`` answers, at the next turn, what is left.
     """
     if not events or events[-1].error_code != ABORTED:
         return []

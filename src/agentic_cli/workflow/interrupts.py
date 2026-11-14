@@ -81,12 +81,12 @@ def job_for_call(call_id: str | None, *, started_by: str | None = None) -> Any |
 
     Only a job of the active turn's conversation (its session and user), and
     none outside a turn: the job store holds all the user's jobs, from every
-    run, and a provider that numbers its call ids (``call_0``, ...) repeats
-    them in every conversation. And only a job ``started_by`` started: the
-    caller names the run whose call it is by its instance (None for the
-    root's own call), as ``JobRecord.started_by`` records it, since such a
-    provider repeats them across agents too, and a sub-agent's job must not
-    answer its parent's call. A caller that cannot name the run (ADK's
+    start of the app, and a provider that numbers its call ids (``call_0``,
+    ...) repeats them in every conversation. And only a job ``started_by``
+    started: the caller names the run whose call it is by its instance (None
+    for the root's own call), as ``JobRecord.started_by`` records it, since
+    such a provider repeats them across agents too, and a sub-agent's job
+    must not answer its parent's call. A caller that cannot name the run (ADK's
     ``left_open``, for a sub-agent's call) asks for no job.
 
     Looked up among the jobs the manager holds (``JobManager.snapshot``), with

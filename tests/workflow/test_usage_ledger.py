@@ -1,8 +1,8 @@
 """Token usage: the ledger that keeps a conversation's model calls, a row each.
 
 Each manager keeps a ledger per conversation (``UsageLedgers``), in memory for
-the process; it answers totals by run, agent, model, purpose and turn. A side
-call's caller says what it is for (``side_call``).
+the manager's life; it answers totals by run, agent, model, purpose and turn.
+A side call's caller says what it is for (``side_call``).
 """
 
 from __future__ import annotations

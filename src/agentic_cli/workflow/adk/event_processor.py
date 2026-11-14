@@ -68,8 +68,12 @@ class ADKEventProcessor:
     delegation tool hands its parent "Error running sub-agent: …" and the
     parent carries on. ADK records the provider's reason on the sub-agent's
     error event, which becomes a recoverable ``ERROR``, "<agent> failed:
-    <reason>", so the user is told why. With neither a root nor reply agents,
-    nothing is marked.
+    <reason>", so the user is told why. The parent does not read that
+    reason, unlike on Deep Agents: ADK's private delegation tool
+    (``_SingleTurnAgentTool``) catches the wrapper error its node runner
+    raises, so the parent reads "Error running sub-agent: Dynamic node
+    <agent> failed". With neither a root nor reply agents, nothing is
+    marked.
 
     A call's ``LLM_USAGE`` is credited to the agent that made it, the event's
     author: ``metadata["agent"]``, that agent's own model (``models``; the

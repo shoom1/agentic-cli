@@ -1165,7 +1165,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._open_calls.clear(ref)
 
     def _end_returned_runs(self, ref: SessionRef) -> None:
-        """End, from the record, each open run whose delegation returned; before the record is cleared.
+        """End each open run whose delegation returned, from the record, before it is cleared.
 
         ADK hands a model step's parallel function responses back in one
         event, after the last one returns, so a delegation that finished
