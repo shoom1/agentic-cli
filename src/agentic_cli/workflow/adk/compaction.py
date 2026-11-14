@@ -345,6 +345,11 @@ class AgentCliSummarizer(BaseEventsSummarizer):
                 )
             finally:
                 self._sized_to = None
+        # Paid for whatever it wrote: an empty summary's call too.
+        spent = self._usage(usage)
+        if self._ledgers is not None:
+            self._ledgers.record(spent)
+        live_events.report(spent)
         if not summary.strip():
             raise ValueError(f"{self.model.ref} wrote an empty summary")
 
@@ -365,10 +370,6 @@ class AgentCliSummarizer(BaseEventsSummarizer):
             tokens_before=estimate_event_tokens(events, kind),
             tokens_after=estimate_event_tokens([event, *kept], kind),
         )
-        spent = self._usage(usage)
-        if self._ledgers is not None:
-            self._ledgers.record(spent)
-        live_events.report(spent)
         trimmed = WorkflowEvent.context_trimmed(
             len(events), len(kept) + 1, self.source,
             self.root, messages_summarized=result.messages_summarized,

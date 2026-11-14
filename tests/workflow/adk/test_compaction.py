@@ -438,6 +438,24 @@ class TestTheSummary:
         (row,) = ledgers.ledger(None).rows
         assert (row.purpose, row.agent, row.input, row.output) == ("summarization", "solo", 7_300, 40)
 
+    async def test_an_empty_summarys_usage_is_recorded_and_reported_too(self, manager, api):
+        # The call was paid for, its prompt the whole rendered history,
+        # though it wrote nothing to keep.
+        api.script = [written("")]
+        ledgers = UsageLedgers()
+        live = Recorded()
+        made = summarizer(manager, ledgers=ledgers)
+
+        event = await as_agent(
+            "solo", lambda: made.maybe_summarize_events(events=conversation()), live
+        )
+
+        assert event is None
+        (row,) = ledgers.ledger(None).rows
+        assert (row.purpose, row.input, row.output) == ("summarization", 7_300, 40)
+        assert [e.metadata.get("purpose") for e in live.events
+                if e.type is EventType.LLM_USAGE] == ["summarization"]
+
     async def test_it_reports_as_it_goes(self, manager, api):
         api.script = [written()]
         live = Recorded()
@@ -755,7 +773,10 @@ class TestAFailedSummary:
         ), live)
 
         assert event is None
-        assert [e.type for e in live.events] == [EventType.CONTEXT_SUMMARIZING, EventType.ERROR]
+        # Its call was paid for: its usage is reported before the warning.
+        assert [e.type for e in live.events] == [
+            EventType.CONTEXT_SUMMARIZING, EventType.LLM_USAGE, EventType.ERROR
+        ]
 
     async def test_a_cancel_is_no_failure(self, manager, monkeypatch):
         async def cancelled(*args, **kwargs):

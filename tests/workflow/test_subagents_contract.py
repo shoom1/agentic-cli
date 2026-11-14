@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import sys
 from collections.abc import Awaitable, Callable
@@ -66,12 +67,14 @@ from agentic_cli.workflow.service_registry import (
 )
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
+    PURPOSE_SUMMARIZATION,
     PURPOSE_TOOL,
     UsageLedger,
     UsageTotals,
     side_call,
 )
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
+from tests.workflow.compacting import compact_now
 from tests.workflow.test_manager_models import route
 
 BACKENDS = ("adk", "deepagents")
@@ -80,6 +83,12 @@ SESSION = "s"
 #: The script that answers side calls (``generate_simple``): a model request
 #: that is no agent's (ADK: no agent's prompt; Deep Agents: the default model's).
 SIDE_CALLS = "side_calls"
+#: The script that answers summary calls, whichever agent's conversation they
+#: summarize: a request whose prompt holds the summary prompt's ``<messages>``
+#: (ADK: a request that is no agent's; Deep Agents: one an agent's model gets).
+SUMMARIES = "summaries"
+#: What a summary prompt holds (``workflow/summary_prompt.py``, both backends).
+SUMMARY_MARKER = "<messages>"
 
 
 # -- backend-neutral model answers ---------------------------------------------
@@ -236,9 +245,40 @@ class _ClaudeTeam:
         name = next(
             (name for name in self.scripts if system.startswith(prompt_of(name))), SIDE_CALLS
         )
+        if name == SIDE_CALLS and SUMMARY_MARKER in _last_text(body):
+            name = SUMMARIES
         self.sent.append((name, body))
         script = self.scripts[name]
         return _claude_answer(script.pop(0) if script else says(f"[{name} has no scripted answer]"))
+
+
+def _last_text(body: dict[str, Any]) -> str:
+    """The text of the last message a Claude request holds."""
+    content = body["messages"][-1]["content"] if body.get("messages") else ""
+    if isinstance(content, str):
+        return content
+    return "".join(block.get("text", "") for block in content if isinstance(block, dict))
+
+
+@functools.cache
+def _team_chat() -> type:
+    """A ``ScriptedChat`` whose summary requests the team's summaries script answers.
+
+    Deep Agents summarizes an agent's conversation on that agent's model; the
+    scenarios script the summaries apart, as ADK sends them apart.
+    """
+    from tests.workflow.deepagents.fakes import ScriptedChat
+
+    class TeamChat(ScriptedChat):
+        #: The chat that answers summary requests (Any: not copied by pydantic).
+        summaries: Any = None
+
+        def _answer(self, messages):
+            if self.summaries is not None and SUMMARY_MARKER in (messages[-1].text or ""):
+                return self.summaries._answer(messages)
+            return super()._answer(messages)
+
+    return TeamChat
 
 
 def _claude_results(body: dict[str, Any]) -> dict[str, str]:
@@ -407,6 +447,13 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
     })
     # A side call runs on the default model, which serves no agent.
     models.chats[None] = models.chats.pop(SIDE_CALLS)
+    # A summary runs on the agent's model: its own script answers it.
+    summaries = models.chats.pop(SUMMARIES)
+    for name, chat in list(models.chats.items()):
+        if name is not None:
+            models.chats[name] = _team_chat()(
+                label=chat.label, script=chat.script, summaries=summaries
+            )
     monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
     manager = deepagents_manager.DeepAgentsWorkflowManager(agent_configs=team, settings=_settings())
 
@@ -604,6 +651,7 @@ async def make_crew(backend, project, monkeypatch):
     def make(team: list[AgentConfig], **scripts: list[Step]) -> Crew:
         complete = {config.name: list(scripts.get(config.name, ())) for config in team}
         complete[SIDE_CALLS] = list(scripts.get(SIDE_CALLS, ()))
+        complete[SUMMARIES] = list(scripts.get(SUMMARIES, ()))
         build = _adk_crew if backend == "adk" else _deepagents_crew
         crew = build(team, complete, monkeypatch)
         made.append(crew)
@@ -1545,3 +1593,37 @@ class TestUsage:
         assert (record.status, record.usage) == (
             RUN_INTERRUPTED, {model: {"input": 50, "output": 5}}
         )
+
+    @pytest.mark.parametrize("summary", ["A summary.", ""], ids=["written", "empty"])
+    async def test_a_summarys_usage_is_recorded_whether_it_is_written_or_not(
+        self, make_crew, summary
+    ):
+        # Three long turns: /compact has the first to summarize. An empty
+        # summary is no summary, but its call was paid for all the same.
+        crew = make_crew(
+            team(),
+            coordinator=[says("One."), says("Two."), says("Three.")],
+            summaries=[says(summary, usage=(700, 20))],
+        )
+        for n in (1, 2, 3):
+            await crew.turn(f"Turn {n}: {LONG_TURN}")
+        reported: list[WorkflowEvent] = []
+
+        if summary:
+            await compact_now(crew.manager, events=reported, session_id=SESSION, user_id=USER)
+        else:
+            with pytest.raises(ValueError, match="empty summary"):
+                await compact_now(
+                    crew.manager, events=reported, session_id=SESSION, user_id=USER
+                )
+
+        (row,) = [row for row in crew.ledger().rows if row.purpose == PURPOSE_SUMMARIZATION]
+        assert (row.agent, row.run, row.input, row.output, row.turn) == (
+            "coordinator", None, 700, 20, 4
+        )
+        (usage,) = [e for e in reported if e.type is EventType.LLM_USAGE]
+        assert usage.metadata["purpose"] == PURPOSE_SUMMARIZATION
+
+
+#: A long user turn: three of them hold more than a summary keeps word for word.
+LONG_TURN = "word " * 8_000
