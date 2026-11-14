@@ -219,3 +219,31 @@ async def test_preserve_sessions_false_starts_afresh(manager, tmp_path, monkeypa
     assert approver.asked == 2
     assert len(closes) == 1
     assert manager.services[JOB_MANAGER] is not jobs
+
+
+async def test_the_runs_and_the_token_usage_survive_a_model_switch(manager):
+    """A conversation's sub-agent runs and its ledger belong to the
+    conversation: the release a switch runs resets the base's state, and
+    neither goes with it."""
+    from agentic_cli.workflow.events import WorkflowEvent
+    from agentic_cli.workflow.sessions import reset_active_turn, set_active_turn
+    from agentic_cli.workflow.usage import UsageTotals
+
+    conversation = manager.session_ref("s", "u")
+    token = set_active_turn(conversation)
+    try:
+        run = manager.agent_runs.run_for(conversation, None, "c1", "researcher")
+        manager.agent_runs.observe(WorkflowEvent.agent_run(run, "started", call_id="c1"))
+        manager.agent_runs.observe(WorkflowEvent.agent_run(run, "completed", call_id="c1"))
+        manager.usage_of(conversation).record(
+            WorkflowEvent.llm_usage(model=MODELS[0], prompt_tokens=100, completion_tokens=10)
+        )
+    finally:
+        reset_active_turn(token)
+
+    await manager.reinitialize(model=_other_model(manager), preserve_sessions=True)
+
+    assert [(r.ref, r.status) for r in manager.agent_runs.records(conversation)] == [
+        (run, "completed")
+    ]
+    assert manager.usage_of(conversation).totals() == UsageTotals(input=100, output=10, calls=1)

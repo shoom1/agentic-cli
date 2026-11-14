@@ -196,6 +196,7 @@ class WorkflowEvent:
         result: str | None = None,
         error: str | None = None,
         partial: bool = False,
+        usage: dict[str, dict[str, int]] | None = None,
     ) -> "WorkflowEvent":
         """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
 
@@ -203,8 +204,9 @@ class WorkflowEvent:
         ``started`` (with its ``title``), then one end status (``completed``,
         ``failed``, ``refused``, ``cancelled``, ``interrupted``: the constants
         of ``workflow/agents/runs.py``) with the first of its ``result``, its
-        ``error`` and whether the result is ``partial``. ``metadata["agent"]``
-        is the sub-agent, as on every event an agent wrote.
+        ``error``, whether the result is ``partial`` and the tokens the run
+        used (``usage``). ``metadata["agent"]`` is the sub-agent, as on every
+        event an agent wrote.
 
         Args:
             ref: The sub-agent's run.
@@ -214,6 +216,7 @@ class WorkflowEvent:
             result: An end's result, its first characters.
             error: Why a run that did not complete ended.
             partial: Whether the result is cut short (a reply at its output limit).
+            usage: An end's tokens, by model: ``{model: {"input": ..., "output": ...}}``.
         """
         metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
         if title is not None:
@@ -224,6 +227,8 @@ class WorkflowEvent:
             metadata["result"] = result
         if error is not None:
             metadata["error"] = error
+        if usage is not None:
+            metadata["usage"] = usage
         return cls(
             type=EventType.AGENT_RUN,
             content=f"{ref.instance} {status}",

@@ -29,11 +29,14 @@ known.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import contextlib
+from collections.abc import Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.events import EventType, WorkflowEvent
+from agentic_cli.workflow.sessions import SessionRef, get_active_run, get_active_turn
 
 #: Why a model call was made (``LLM_USAGE``'s ``metadata["purpose"]``). The
 #: root's own step has none.
@@ -207,3 +210,235 @@ def llm_usage_event(
         invocation_id=invocation_id,
         latency_ms=latency_ms,
     )
+
+
+# -- what a side call is for ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SideCall:
+    """What a side call (``generate_simple``) is made for.
+
+    Attributes:
+        purpose: Why it is made (``PURPOSE_*``).
+        conversation: The conversation it is made for, outside a turn (the
+            memory proposals of a conversation that ends); None inside one.
+    """
+
+    purpose: str
+    conversation: SessionRef | None = None
+
+
+_side_call: ContextVar[SideCall | None] = ContextVar("agentic_cli_side_call", default=None)
+
+
+@contextlib.contextmanager
+def side_call(purpose: str, conversation: SessionRef | None = None) -> Iterator[SideCall]:
+    """The side calls made in the block are for ``purpose`` (and ``conversation``)."""
+    made = SideCall(purpose, conversation)
+    token = _side_call.set(made)
+    try:
+        yield made
+    finally:
+        _side_call.reset(token)
+
+
+def current_side_call() -> SideCall | None:
+    """What the side calls made now are for, as the caller said (``side_call``); None unsaid."""
+    return _side_call.get()
+
+
+# -- the ledger -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UsageRow:
+    """One model call in a conversation's ledger.
+
+    Attributes:
+        run: The run that made it (``RunRef.run``); None for the root's own
+            work, and a call made in no run (outside a turn).
+        agent: The agent whose work it was.
+        purpose: Why it was made (``PURPOSE_*``); None for the root's own step.
+        model: The model that answered.
+        input: Every input token, cached and cache-write included.
+        output: Every output token, thinking included.
+        cached: The input tokens read from a cache.
+        cache_write: The input tokens written to a cache.
+        thinking: The output tokens spent thinking.
+        latency_ms: How long the call took, when it was measured.
+        turn: The conversation's turn it was made in (from 1); None outside a turn.
+        cost: What it cost; None while no price is known.
+    """
+
+    run: str | None
+    agent: str | None
+    purpose: str | None
+    model: str
+    input: int
+    output: int
+    cached: int
+    cache_write: int
+    thinking: int
+    latency_ms: float | None
+    turn: int | None
+    cost: float | None = None
+
+    @property
+    def tokens(self) -> UsageTotals:
+        """Its counts, as one call's totals."""
+        return UsageTotals(
+            input=self.input,
+            output=self.output,
+            cached=self.cached,
+            cache_write=self.cache_write,
+            thinking=self.thinking,
+            calls=1,
+        )
+
+
+class UsageLedger:
+    """One conversation's model calls, a row each, in memory for the process.
+
+    ``record`` makes a row from an ``LLM_USAGE`` event; the totals are read
+    by run, agent, model, purpose and turn (``totals``), or grouped
+    (``by_agent``, ``by_purpose``, ``by_model``).
+    """
+
+    def __init__(self) -> None:
+        self._rows: list[UsageRow] = []
+        self._total = UsageTotals()
+        #: The turns begun in the conversation (``begin_turn``).
+        self.turns = 0
+
+    @property
+    def rows(self) -> tuple[UsageRow, ...]:
+        """Every call recorded, in order."""
+        return tuple(self._rows)
+
+    def begin_turn(self) -> int:
+        """Count a turn of the conversation starting; the calls made in it carry its number."""
+        self.turns += 1
+        return self.turns
+
+    def record(self, event: WorkflowEvent) -> UsageRow | None:
+        """A row for ``event``, an ``LLM_USAGE`` whose counts are normalized; else None.
+
+        The call is the run's the event names, else the one in progress
+        (``get_active_run``), which the event is then given, so the stream
+        and the ledger agree; its agent is the event's (``metadata["agent"]``),
+        else that run's.
+        """
+        if event.type is not EventType.LLM_USAGE:
+            return None
+        if event.run is None:
+            event.run = get_active_run()
+        ref = event.run
+        metadata = event.metadata
+        latency = metadata.get("latency_ms")
+        row = UsageRow(
+            run=ref.run if ref is not None else None,
+            agent=metadata.get("agent") or (ref.agent if ref is not None else None),
+            purpose=metadata.get("purpose"),
+            model=str(metadata.get("model") or "unknown"),
+            input=_count(metadata.get("prompt_tokens")) or 0,
+            output=_count(metadata.get("completion_tokens")) or 0,
+            cached=_count(metadata.get("cached_tokens")) or 0,
+            cache_write=_count(metadata.get("cache_creation_tokens")) or 0,
+            thinking=_count(metadata.get("thinking_tokens")) or 0,
+            latency_ms=float(latency) if isinstance(latency, (int, float)) else None,
+            turn=self.turns if self.turns and get_active_turn() is not None else None,
+        )
+        self._rows.append(row)
+        self._total = self._total + row.tokens
+        return row
+
+    def totals(
+        self,
+        *,
+        run: str | None = ...,  # type: ignore[assignment]
+        agent: str | None = None,
+        model: str | None = None,
+        purpose: str | None = None,
+        turn: int | None = None,
+    ) -> UsageTotals:
+        """The tokens of the calls that match, all of them by default.
+
+        Args:
+            run: One run's calls (``researcher-1#1``); None for the root's own
+                work (and calls made in no run). Any run when not given.
+            agent: One agent's calls (its steps and its tools' side calls).
+            model: One model's calls.
+            purpose: The calls made for one purpose.
+            turn: The calls of one turn (``turns`` is the last one begun).
+        """
+        if run is ... and agent is None and model is None and purpose is None and turn is None:
+            return self._total
+        total = UsageTotals()
+        for row in self._rows:
+            if (
+                (run is ... or row.run == run)
+                and (agent is None or row.agent == agent)
+                and (model is None or row.model == model)
+                and (purpose is None or row.purpose == purpose)
+                and (turn is None or row.turn == turn)
+            ):
+                total = total + row.tokens
+        return total
+
+    def by_agent(self) -> dict[str, UsageTotals]:
+        """The agents' own steps, by agent name, in the order each first ran."""
+        return self._grouped(lambda row: row.agent, lambda row: row.purpose in AGENT_STEP_PURPOSES)
+
+    def by_purpose(self) -> dict[str, UsageTotals]:
+        """The side calls, by purpose, in the order each was first made."""
+        return self._grouped(
+            lambda row: row.purpose, lambda row: row.purpose not in AGENT_STEP_PURPOSES
+        )
+
+    def by_model(self, *, run: str | None = ...) -> dict[str, UsageTotals]:  # type: ignore[assignment]
+        """The calls by model; one run's when ``run`` is given (None: the root's own)."""
+        return self._grouped(lambda row: row.model, lambda row: run is ... or row.run == run)
+
+    def run_usage(self, run: str) -> dict[str, dict[str, int]]:
+        """What ``run`` used, by model, as its ``AGENT_RUN`` end carries it.
+
+        ``{model: {"input": ..., "output": ...}}``: the run's own calls, its
+        steps and its tools' side calls; a run it started has its own.
+        """
+        return {
+            model: {"input": totals.input, "output": totals.output}
+            for model, totals in self.by_model(run=run).items()
+        }
+
+    def _grouped(
+        self,
+        key: Callable[[UsageRow], str | None],
+        keep: Callable[[UsageRow], bool],
+    ) -> dict[str, UsageTotals]:
+        grouped: dict[str, UsageTotals] = {}
+        for row in self._rows:
+            name = key(row)
+            if name is None or not keep(row):
+                continue
+            grouped[name] = grouped.get(name, UsageTotals()) + row.tokens
+        return grouped
+
+
+class UsageLedgers:
+    """A manager's ledgers, one per conversation (a ``SessionRef``, or None
+    for a processor driven outside a manager, as unit tests do)."""
+
+    def __init__(self) -> None:
+        self._ledgers: dict[Any, UsageLedger] = {}
+
+    def ledger(self, conversation: SessionRef | None) -> UsageLedger:
+        """``conversation``'s ledger, made on first use."""
+        ledger = self._ledgers.get(conversation)
+        if ledger is None:
+            ledger = self._ledgers[conversation] = UsageLedger()
+        return ledger
+
+    def record(self, event: WorkflowEvent) -> UsageRow | None:
+        """Record an ``LLM_USAGE`` in the ledger of the turn it is made in (``get_active_turn``)."""
+        return self.ledger(get_active_turn()).record(event)

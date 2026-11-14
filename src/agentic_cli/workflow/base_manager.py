@@ -50,6 +50,7 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow.usage import UsageLedger, UsageLedgers
 from agentic_cli.workflow.interrupts import OpenCalls
 # The two limits are still importable from here.
 from agentic_cli.workflow.memory_index import (  # noqa: F401
@@ -518,6 +519,30 @@ class BaseWorkflowManager(ABC):
         if runs is None:
             runs = self.__dict__["_agent_runs"] = AgentRuns()
         return runs
+
+    @property
+    def usage(self) -> UsageLedger:
+        """The open conversation's token usage: every model call made in it (provisional).
+
+        A row per call, the root's and its sub-agents' steps and the side
+        calls (summaries, ``generate_simple``), each counted alike on every
+        backend (``workflow/usage.py``): totals by run, agent, model, purpose
+        and turn. In memory, for the process. ``usage_of`` reads another
+        conversation's.
+        """
+        return self.usage_of(self.session_ref())
+
+    def usage_of(self, conversation: SessionRef) -> UsageLedger:
+        """``conversation``'s token usage, as ``usage`` is the open one's (provisional)."""
+        return self._usage_ledgers.ledger(conversation)
+
+    @property
+    def _usage_ledgers(self) -> UsageLedgers:
+        """Every conversation's ledger, made on first use (as ``agent_runs``)."""
+        ledgers = self.__dict__.get("_usage_ledgers")
+        if ledgers is None:
+            ledgers = self.__dict__["_usage_ledgers"] = UsageLedgers()
+        return ledgers
 
     @property
     def settings(self) -> "BaseSettings":
@@ -2037,7 +2062,8 @@ class BaseWorkflowManager(ABC):
         (:meth:`_workflow_context`: the settings, the services and the
         active turn, reset as the block ends) are entered, in that order.
         As the block ends, however it ends, the sub-agent runs it left open
-        are recorded interrupted (``agent_runs``).
+        are recorded interrupted (``agent_runs``), with what they used; each
+        turn is counted in its conversation's usage ledger (``usage_of``).
 
         Yields:
             The turn's conversation.
@@ -2049,12 +2075,14 @@ class BaseWorkflowManager(ABC):
         bind_context(session_id=ref.session_id, user_id=ref.user_id)
         async with self._turn_admission():
             with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
+                ledger = self.usage_of(ref)
+                ledger.begin_turn()
                 try:
                     yield ref
                 finally:
                     # A sub-agent run the turn leaves open (a cancel, a
                     # failure) ends with it: no event can say so any more.
-                    self.agent_runs.interrupt_open(ref)
+                    self.agent_runs.interrupt_open(ref, usage=ledger.run_usage)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False
