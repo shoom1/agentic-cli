@@ -40,7 +40,7 @@ Agentic CLI provides the core infrastructure for building interactive CLI applic
 │  + PermissionPlugin, LLMLoggingPlugin, ToolResultCapPlugin          │
 ├─────────────────────────────────────────────────────────────────────┤
 │  DeepAgentsWorkflowManager (deepagents extra)                       │
-│  + PermissionMiddleware, SubAgentMiddleware (task), summarization   │
+│  + PermissionMiddleware, summarization                              │
 ├─────────────────────────────────────────────────────────────────────┤
 │  LangGraphWorkflowManager (langgraph extra; deprecated)             │
 │  + wrap_tool_for_permission, native ToolNode                        │
@@ -334,15 +334,16 @@ ADK integrations:
   `OpenAIResponsesLlm`, and `OpenAICompatibleLlm` for the providers in
   `model_providers` (OpenRouter and OpenAI-compatible hosts), which shows
   their reasoning text
-- **Delegation** — a sub-agent runs in ADK's `single_turn` mode: its parent
-  calls it as a tool named after it and gets its answer back in the same turn
+- **Delegation** — its parent calls the framework's `task` tool with a
+  brief; the sub-agent runs on a runner of its own, on a child session of
+  the run, and its parent gets the run's envelope back in the same turn
   (see [Sub-agent context](#sub-agent-context))
 - **Summarizing** — ADK's `EventsCompactionConfig` with the framework's
   summarizer: the main agent's conversation is summarized on its own model
   once a prompt reaches the trigger Deep Agents uses (the smaller of
   `context_summarize_at` of the input budget and `context_max_tokens`),
   keeping the current turn and the newest 12% of that word for word; a
-  sub-agent never summarizes the shared session. The fit guard leaves the
+  sub-agent's run, on its own child session, is never summarized. The fit guard leaves the
   oldest turns out of a request still over its agent's budget, and a
   request the provider refuses as too long is summarized or trimmed and
   retried once, then ends in one clear error (see
@@ -358,7 +359,7 @@ ADK integrations:
 ### DeepAgentsWorkflowManager
 
 Builds each agent as a LangChain `create_agent` graph with selected Deep
-Agents middleware (its `task` delegation and its summarization) and, on
+Agents middleware (its summarization) and, on
 Claude, LangChain's Anthropic prompt caching. Deep Agents' file tools, virtual
 filesystem and `write_todos` are not used: the agents run on the framework's
 tools, permission engine and models, as on ADK. Best for:
@@ -378,13 +379,14 @@ manager = DeepAgentsWorkflowManager(
 
 What it supports:
 - **Delegation through `task`**: a coordinator (an agent with `sub_agents`)
-  gets Deep Agents' `task` tool, which lists each sub-agent as
-  `- name: description`, so give sub-agents real descriptions. A sub-agent
-  sees the brief the coordinator writes and the coordinator's plan and tasks;
-  with `inherit_context=True` it is a fork that also continues the
-  coordinator's conversation (see [Sub-agent context](#sub-agent-context)).
-  Its last answer is the call's result, and the coordinator answers the user.
-  Two sub-agents can run at once. `task` is a reserved tool name.
+  gets the framework's `task` tool, as on ADK (see
+  [Sub-agent context](#sub-agent-context)). Each sub-agent's graph runs
+  apart from its coordinator's, in a task of its own, from the brief the
+  coordinator writes and the coordinator's plan and tasks; with
+  `inherit_context=True` it also starts from the coordinator's
+  conversation. Its run's envelope is the call's result, and the
+  coordinator answers the user. Two sub-agents can run at once. `task` is a
+  reserved tool name.
 - **The permission gate on every call**: `PermissionMiddleware`, in every
   agent's stack, identifies each tool by the object the registry issued and
   asks through the input callback, for sub-agents' calls too. A tool that
@@ -401,12 +403,10 @@ What it supports:
   12% of that word for word. A model whose window is unknown counts as
   128,000 tokens. A request the provider refuses as too long is summarized
   and retried once; a conversation that still does not fit ends the turn
-  with one error naming the model. A sub-agent's fails only its `task`
-  call: its parent reads the error, its run fails, and the user is warned
-  as on ADK, `<agent>: the request no longer fits <model>'s context
-  window.` (ADK answers the sub-agent's call with text instead, "I could not
-  do this task: …", and its run completes). The checkpoint keeps every
-  message.
+  with one error naming the model. A sub-agent's fails only its run, as on
+  ADK: the user is warned `<agent>: the request no longer fits <model>'s
+  context window.`, and its parent reads those words as the run's error.
+  The checkpoint keeps every message.
 - **Prompt caching** on Claude, as on ADK (see [Prompt caching](#prompt-caching)).
 - **MCP tools, Agent Skills, raw LLM logging and job resume**, from the same
   `AgentConfig.mcp_servers`, `AgentConfig.skills`, `raw_llm_logging` and
@@ -417,10 +417,6 @@ What it supports:
   it, as on ADK.
 
 How it differs from ADK:
-- **The delegation tool's name**: a sub-agent is delegated to and returns
-  on both backends, but the coordinator calls `task` on Deep Agents and a
-  tool named after the sub-agent on ADK (see
-  [Sub-agent context](#sub-agent-context)).
 - **No Gemini explicit caches**: Gemini runs on its implicit caching, which is
   automatic and bills no storage.
 - **No code-execution events**: `CODE_EXECUTION`, `EXECUTABLE_CODE` and
@@ -479,8 +475,8 @@ Requires: `pip install agentic-cli[langgraph]`
 |---------|------------|-------------|------------------------|
 | Install | Core | `deepagents` extra | `langgraph` extra |
 | Model providers | Gemini, Claude, GPT (Responses API), and OpenRouter and OpenAI-compatible hosts (`model_providers`) | The same | The same |
-| Delegation | `<sub-agent>(request=...)`: the sub-agent answers its parent, the coordinator answers the user | `task`: the same | Routing between agent nodes |
-| Sub-agent context | `inherit_context` false or true | `inherit_context` false or true (a fork) | Ignored |
+| Delegation | `task(agent_type=, title=, objective=, ...)`: the sub-agent's run answers its parent with its envelope, the coordinator answers the user | The same | Routing between agent nodes |
+| Sub-agent context | `inherit_context` false or true | The same | Ignored |
 | State persistence | SQLite (default), PostgreSQL, or memory | The same, as a LangGraph checkpointer | Memory, PostgreSQL, or SQLite |
 | Thinking support | Every model with a thinking knob, one set of levels | The same | The same |
 | Prompt caching | Claude (three breakpoints) and Gemini (server-side caches) | Claude (three breakpoints) | Claude on Anthropic's API (one breakpoint) |
@@ -1266,7 +1262,7 @@ configs = [coordinator, researcher, analyst]
 | `prompt` | str \| Callable | System instruction; a callable may take no arguments or a single `settings` argument |
 | `tools` | list[Callable] | Available tool functions |
 | `sub_agents` | list[str] | Names of agents this one can delegate to |
-| `description` | str | Short description for routing (defaults to `""`). On Deep Agents the coordinator's `task` tool lists it; without one the agent is "The <name> agent." |
+| `description` | str | Short description for routing (defaults to `""`). The coordinator's `task` tool lists it; without one the agent is "The <name> agent." |
 | `model` | str \| None | A model reference (`anthropic:claude-sonnet-5-5`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
@@ -1281,9 +1277,8 @@ offending agents. Exactly one agent may be unreferenced: the runner starts from
 a single root, so agents under any other root would never run.
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
 on an agent below another sub-agent, and an `inherit_context` that is not True
-or False, raise it too, and on ADK,
-when the agents are built, so does a sub-agent named like one of its parent's
-tools. Agents are built in dependency order, so declaration order does not
+or False, raise it too, and, when the agents are built, so does a coordinator
+whose own tools include one named `task`. Agents are built in dependency order, so declaration order does not
 matter. Then every agent's model is resolved, with the default model, before
 anything is built: an agent whose model cannot run fails startup, named in
 the error.
@@ -1296,70 +1291,81 @@ signatures, `async def` factories, and non-string results raise
 ### Sub-agent context
 
 A sub-agent is a task its parent hands off and gets back in the same turn, on
-both backends. The parent calls it with a request; the sub-agent works with its
-own prompt, tools and model, and its last answer is the call's result. Only the
-main agent replies to the user: a sub-agent's own text shows in the events box
-under its name (and is left out of fact extraction), its answer passes the
+both backends. The parent calls the framework's `task` tool, the same on both:
+`agent_type`, one of its own sub-agents, and a brief, `title` and `objective`
+(required), `deliverable`, `constraints`, `known` (what the parent already
+knows that the task needs) and `done_when`. The sub-agent's run starts from its
+task message, the brief as sections (`# Task: <title>`, `## Objective`, …), and
+from the conversation's plan and tasks (its changes to them come back to its
+parent); it works with its own prompt, tools and model, and its parent reads
+its run's envelope as the call's result, a JSON object:
+
+```json
+{"success": true, "agent": "researcher-1", "run": "researcher-1#1",
+ "status": "completed", "partial": false, "result": "X is 42.", "error": null}
+```
+
+`status` is `completed` (`partial` for an answer cut at its output limit),
+`refused`, `failed` (`error`: the provider's reason) or `interrupted`, and
+`result` is the run's last text. Only the main agent replies to the user: a
+sub-agent's own text shows in the events box under its run's name (and is
+left out of fact extraction), its envelope passes the
 [tool result cap](#tool-results), and the next turn starts at the main agent
 again. Delegating needs no permission; each tool the sub-agent calls is gated
-like the main agent's. Give each sub-agent a `description`: its parent chooses
-by it, and one without is offered as "The <name> agent.", with a warning.
+like the main agent's. Give each sub-agent a `description`: `task`'s
+description lists each type with it, and one without is offered as "The
+<name> agent.", with a warning. A type's `brief_required` names the brief
+fields its parent must fill: a call that leaves one empty starts no run, and
+the parent reads which (`{"success": false, "error": "The brief for
+'researcher' is missing: deliverable."}`).
 
 Each sub-agent's `inherit_context` sets what it sees:
 
 | `inherit_context` | The sub-agent sees |
 |-------------------|--------------------|
-| `False` (the default) | The request alone (and on Deep Agents the parent's plan and tasks) |
-| `True` | Also its parent's conversation as it stands: after any summary, without the parent's reasoning |
+| `False` (the default) | Its task message alone (and the conversation's plan and tasks) |
+| `True` | First its parent's conversation as it stands: after any summary, without the parent's reasoning; its task message then ends with a note that the conversation is its parent's |
 
 ```python
 coordinator = AgentConfig(
     name="coordinator",
     prompt="Delegate research to researcher and reviews to reviewer, each with a "
-           "complete request; they report back to you, and you answer the user.",
+           "complete brief; they report back to you, and you answer the user.",
     sub_agents=["researcher", "reviewer"],
 )
 researcher = AgentConfig(name="researcher", prompt="Find facts.",
-                         description="Finds facts.")                  # the request alone
+                         description="Finds facts.")                  # the brief alone
 reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
                        description="Reviews the conversation.", inherit_context=True)
 ```
 
-- **Prompts say "delegate to X".** The tool the parent calls is named after
-  the sub-agent on ADK (`researcher(request=...)`) and is `task` on Deep
-  Agents, so a coordinator's prompt should tell it to delegate to an agent
-  with a complete request, never name a tool. A fresh sub-agent knows only
-  what the request says. An inheriting one sees the conversation, not its
+- **Prompts say "delegate to X".** A coordinator's prompt should tell it to
+  delegate to an agent with a complete brief. A fresh sub-agent knows only
+  what the brief says. An inheriting one sees the conversation, not its
   parent's instructions: it keeps its own prompt, so put what it must know in
-  the request too. (On Deep Agents the coordinator's `task` tool says a fork
-  inherits its system prompt; it does not.) A specialist's prompt should
-  have it report its result, not address the user: its answer goes to its
-  parent.
-- **On ADK**, a sub-agent runs in ADK's `single_turn` mode with transfers
-  off, so no agent built from a config is offered `transfer_to_agent`; an
-  inheriting one is shown its parent's turns as quoted context. **On Deep
-  Agents**, a fresh sub-agent is isolated and an inheriting one is a fork
-  (Deep Agents' `mode="fork"`, in beta): the conversation, then Deep Agents'
-  preamble and the request. Its own summarization compacts an inherited
-  conversation too large for its model.
+  the brief too. A specialist's prompt should have it report its result, not
+  address the user: its answer goes to its parent.
+- **On ADK**, each agent is built on its own, with no ADK sub-agents, so no
+  agent built from a config is offered `transfer_to_agent`; each sub-agent
+  type runs on a runner of its own, each run on a child session (app
+  `<app_name>--agents`, id `<conversation id>/<instance>`), which
+  `/sessions` never lists; an inheriting run's child session starts with
+  the conversation's events. **On Deep Agents**, each sub-agent's graph runs
+  apart from its parent's, in a task of its own; an inheriting run starts
+  from the conversation's messages, which its own summarization compacts
+  when they are too large for its model.
 - **The limits in 0.7.0.** `inherit_context` is for sub-agents only, and
-  only for an agent without sub-agents of its own: Deep Agents tells a forked
-  sub-agent that delegating "will be refused", which a coordinator would
-  believe. And only for the main agent's own sub-agents: below
-  another sub-agent, ADK would show it the main agent's whole conversation,
-  what its fresh parent was kept from. A sub-agent on ADK cannot share its
-  name with one of its parent's tools. Each raises `AgentGraphError` at
-  startup.
+  only for the main agent's own sub-agents that have none of their own. A
+  coordinator cannot have a tool of its own named `task`. Each raises
+  `AgentGraphError` at startup.
 - **A sub-agent's failure.** A sub-agent whose model call fails does not
-  end the turn, on either backend: its parent is handed "Error running
-  sub-agent: …" as the call's error result, the user sees a warning,
-  `<agent> failed: <the provider's reason>`, and the parent answers. Only
-  the main agent's own failure ends the turn. (On ADK, ADK's delegation
-  tool words the parent's reason "Dynamic node <agent> failed".) A
-  sub-agent's request too long for its model is warned of alike, `<agent>:
-  the request no longer fits <model>'s context window.`; on ADK the
-  sub-agent answers "I could not do this task: …" and its run completes,
-  on Deep Agents the parent reads the error and the run fails.
+  end the turn, on either backend: its run fails, its parent reads the
+  provider's reason in the envelope, the user sees a warning,
+  `<instance> failed: <the provider's reason>` (`researcher-1 failed: …`),
+  and the parent answers. Only the main agent's own failure ends the turn.
+  A sub-agent's request too long for its model fails its run alike, with the
+  warning `<agent>: the request no longer fits <model>'s context window.`,
+  the words its parent reads as the run's error.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
@@ -1642,7 +1648,7 @@ Variants share one identity and one permission contract while keeping their own
 signature and docstring, and a bare name that maps to several variants raises
 rather than silently picking one by import order.
 
-The framework reserves `task`, Deep Agents' delegation tool, whichever backend
+The framework reserves `task`, its delegation tool, whichever backend
 runs: registering another tool named `task` raises.
 
 ### Capabilities
@@ -1985,8 +1991,8 @@ the rest, and the stored session keeps every message. A model whose window
 is unknown counts as 128,000 tokens. While a summary is written the CLI
 shows "Summarizing the earlier conversation…".
 
-On ADK only the main agent's conversation is summarized: a sub-agent leaves
-the shared session alone (on Deep Agents each agent summarizes its own). A
+On ADK only the main agent's conversation is summarized: a sub-agent's run,
+on its own child session, is not (on Deep Agents each agent summarizes its own). A
 request still over its agent's budget (the summary follows the previous
 call's size, a sub-agent may run on a smaller model) has its oldest whole
 turns left out of that request, never a tool call without its result, with
@@ -2036,7 +2042,7 @@ folder), the call still succeeds: the result is cut, its note says the full
 output could not be saved, and the log warns once per folder.
 
 Every result passes the cap: registered tools, MCP and skill tools,
-`job_result`, and a sub-agent's answer. Each tool's own limits
+`job_result`, and a sub-agent run's envelope. Each tool's own limits
 stay (`web_fetch` returns a summary, `grep` a number of matches); the cap is
 the net beneath them. On ADK it is the `ToolResultCapPlugin`, for every
 agent but one with `after_tool_callbacks` of its own (a native ADK YAML
@@ -2358,6 +2364,7 @@ agentic-cli/
 │   │   ├── service_registry.py   # Unified service ContextVar for tools
 │   │   ├── events.py             # WorkflowEvent, EventType
 │   │   ├── config.py             # AgentConfig
+│   │   ├── agents/               # Sub-agents: delegate.py (the framework's task: the brief read, the run started and ended, its envelope), brief.py, envelope.py, runs.py, policy.py, outcome.py
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # is_rate_limit_error: a provider's 429 (the provider clients retry)
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
@@ -2376,7 +2383,7 @@ agentic-cli/
 │   │   ├── adk/
 │   │   │   ├── manager.py                # GoogleADKWorkflowManager
 │   │   │   ├── build.py                  # ADKBuild; a native ADK YAML app loaded and checked; the agents that reply
-│   │   │   ├── delegation.py             # Sub-agents as single_turn tools; their permission binding
+│   │   │   ├── task_tool.py              # TaskTool: the framework's task on ADK
 │   │   │   ├── compaction.py             # AgentCliSummarizer: the main agent's conversation summarized
 │   │   │   ├── fit_guard_plugin.py       # FitGuardPlugin: a request over its budget trimmed to fit
 │   │   │   ├── overflow_plugin.py        # OverflowPlugin: a provider's overflow retried once, or one clear error
@@ -2391,7 +2398,8 @@ agentic-cli/
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)
 │   │   │   ├── manager.py                # DeepAgentsWorkflowManager
-│   │   │   ├── agent_builder.py          # One create_agent graph per AgentConfig; task delegation
+│   │   │   ├── agent_builder.py          # One create_agent graph per AgentConfig, each on its own
+│   │   │   ├── task_tool.py              # build_task_tool: the framework's task on Deep Agents
 │   │   │   ├── middleware.py             # Permission gate, result cap, tool errors, active tool call, foreign reasoning
 │   │   │   ├── tools.py                  # Framework tools → LangChain tools
 │   │   │   ├── event_processor.py        # The stream → WorkflowEvents; the run callback
@@ -2437,7 +2445,7 @@ agentic-cli/
 │   │   │   ├── planning.py
 │   │   │   ├── tasks.py
 │   │   │   ├── state_tools.py    # save_plan / get_plan / save_tasks / get_tasks, declared
-│   │   │   └── delegation.py     # task, declared (Deep Agents' delegation tool)
+│   │   │   └── delegation.py     # task, declared (the framework's delegation tool)
 │   │   ├── adk/state_tools.py       # ADK-native planning/task tools
 │   │   ├── langgraph/state_tools.py # LangGraph-library planning/task tools (Deep Agents, LangGraph)
 │   │   ├── skills/               # Agent Skills: SkillStore, ADK toolset, LangChain tools (langchain_tools.py)
