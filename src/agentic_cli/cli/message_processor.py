@@ -17,6 +17,7 @@ from thinking_prompt import ButtonConfig, Dialog, TextField
 
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
+from agentic_cli.workflow.agents.runs import RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
 from agentic_cli.workflow.sessions import ConversationChangedError, instance_of
 
 if TYPE_CHECKING:
@@ -336,6 +337,16 @@ class _EventProcessingState:
         if self.line_by is None:
             return self.status_line
         return f"{self.line_by} › {self.status_line}"
+
+
+#: The events box's line for a sub-agent run that says how it works now
+#: (``AGENT_RUN``), under its name: waiting for a free working slot, waiting
+#: on the user, working again.
+_RUN_LINES = {
+    RUN_QUEUED: "Queued: waiting for a free slot",
+    RUN_INPUT_REQUIRED: "Waiting for your answer",
+    RUN_RUNNING: "Working...",
+}
 
 
 def _at_work(event: "WorkflowEvent") -> str | None:
@@ -1315,6 +1326,25 @@ class MessageProcessor:
         """
         state.status_line = event.content
 
+    async def _handle_agent_run(
+        self,
+        event: "WorkflowEvent",
+        state: _EventProcessingState,
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        workflow: object,
+    ) -> None:
+        """Handle AGENT_RUN events — a run that waits, or works again, says so in the events box.
+
+        Under the run's name: ``queued`` (waiting for a free working slot),
+        ``input_required`` (waiting on the user) and ``running`` each write
+        the line (``_RUN_LINES``); a run's start and end write none, nor is
+        anything printed (``/agents`` lists the runs).
+        """
+        line = _RUN_LINES.get(event.metadata.get("status"))
+        if line is not None:
+            state.status_line = line
+
     async def _handle_llm_usage(
         self,
         event: "WorkflowEvent",
@@ -1361,5 +1391,6 @@ class MessageProcessor:
                 EventType.CONTEXT_TRIMMED: cls._handle_context_trimmed,
                 EventType.CONTEXT_SUMMARIZING: cls._handle_context_summarizing,
                 EventType.LLM_USAGE: cls._handle_llm_usage,
+                EventType.AGENT_RUN: cls._handle_agent_run,
             }
         return cls._EVENT_DISPATCH

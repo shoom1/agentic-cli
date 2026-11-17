@@ -40,6 +40,7 @@ from agentic_cli.workflow.agents import (
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_REFUSED,
+    RUN_RUNNING,
     RUN_STARTED,
     AgentLimits,
     RunRecord,
@@ -1028,7 +1029,7 @@ class TestRunIdentity:
         turn = crew.start()
         try:
             await asyncio.wait_for(BLOCKING["started"].wait(), 10)
-            await until(lambda: [r.status for r in crew.records()] == [RUN_STARTED])
+            await until(lambda: [r.status for r in crew.records()] == [RUN_RUNNING])
         finally:
             # Stopped whatever happened: a turn left running holds the turn
             # lock, and the fixture's cleanup would wait for it forever.

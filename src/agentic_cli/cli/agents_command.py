@@ -2,8 +2,9 @@
 
 ``/agents`` lists them in a table, each run followed by the runs it
 started, a level deeper: its instance (``researcher-2``), its type, its
-status (``running`` while it runs; a completion cut at its output limit
-``completed (partial)``), its run, its title, the tokens it used, and how
+status (while it works ``running``, ``queued`` waiting for a free working
+slot, or ``needs you`` waiting on the user; a completion cut at its output
+limit ``completed (partial)``), its run, its title, the tokens it used, and how
 long it ran (or has been running). ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent,
 its title, then each run's status, the fields of its brief its parent filled
@@ -30,7 +31,7 @@ from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
-from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_STARTED
+from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_INPUT_REQUIRED, RUN_STARTED
 from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
 from agentic_cli.workflow.agents.runs import run_number
 
@@ -181,10 +182,13 @@ def _in_tree(records: list["RunRecord"]) -> list[tuple[int, "RunRecord"]]:
 
 
 def _status(record: "RunRecord") -> str:
-    """A run's status as ``/agents`` says it: ``running`` while it runs, and
+    """A run's status as ``/agents`` says it: as recorded (``running``,
+    ``queued``, an end), but ``needs you`` while it waits on the user, and
     a completion cut at its output limit ``completed (partial)``."""
     if record.status == RUN_STARTED:
         return "running"
+    if record.status == RUN_INPUT_REQUIRED:
+        return "needs you"
     if record.status == RUN_COMPLETED and record.partial:
         return "completed (partial)"
     return record.status

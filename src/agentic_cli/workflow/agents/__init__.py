@@ -3,7 +3,8 @@
 A sub-agent run is one piece of work a sub-agent does for its parent: one
 delegation (its parent's tool call). ``runs`` names each run within its
 conversation and records it from its ``AGENT_RUN`` events; ``policy`` holds
-an app's sub-agent policy and a run's limits.
+an app's sub-agent policy and a run's limits; ``slots`` how many runs work
+at once.
 """
 
 from agentic_cli.workflow.agents.policy import DEFAULT_LIMITS, AgentLimits, SubAgentPolicy
@@ -13,9 +14,13 @@ from agentic_cli.workflow.agents.runs import (
     RUN_COMPLETED,
     RUN_END_STATUSES,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
+    RUN_QUEUED,
     RUN_REFUSED,
+    RUN_RUNNING,
     RUN_STARTED,
+    RUN_WORKING_STATUSES,
     SUBAGENT_ERROR_PREFIX,
     TITLE_MAX,
     AgentRuns,
@@ -34,9 +39,13 @@ __all__ = [
     "RUN_COMPLETED",
     "RUN_END_STATUSES",
     "RUN_FAILED",
+    "RUN_INPUT_REQUIRED",
     "RUN_INTERRUPTED",
+    "RUN_QUEUED",
     "RUN_REFUSED",
+    "RUN_RUNNING",
     "RUN_STARTED",
+    "RUN_WORKING_STATUSES",
     "RunRecord",
     "SUBAGENT_ERROR_PREFIX",
     "SubAgentPolicy",
