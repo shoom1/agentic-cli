@@ -18,11 +18,14 @@ import pytest
 
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents import (
+    DEFAULT_LIMITS,
+    RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_REFUSED,
     RUN_STARTED,
+    AgentLimits,
     AgentRuns,
     SubAgentPolicy,
 )
@@ -36,7 +39,12 @@ from agentic_cli.workflow.agents.delegate import (
     RunFailed,
     started_by,
 )
-from agentic_cli.workflow.agents.envelope import INTERRUPTED_ERROR
+from agentic_cli.workflow.agents.envelope import (
+    INTERRUPTED_ERROR,
+    STEP_LIMIT_ERROR,
+    TIME_LIMIT_ERROR,
+    TOKEN_LIMIT_ERROR,
+)
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
@@ -87,8 +95,8 @@ def answering(text: str = "X is 42.", **fields: Any) -> tuple[Hook, list[AgentRu
 
 def delegations(hook: Hook, **options: Any) -> Delegations:
     return Delegations(
-        runs=options.pop("runs", AgentRuns()), policy=SubAgentPolicy(), types=TYPES, hook=hook,
-        **options,
+        runs=options.pop("runs", AgentRuns()), policy=options.pop("policy", SubAgentPolicy()),
+        types=options.pop("types", TYPES), hook=hook, **options,
     )
 
 
@@ -662,3 +670,251 @@ class TestNumberedPastTheStored:
 
         assert base == {}
         assert result.result["agent"] == "researcher-5"
+
+
+# -- each run under its control: its limits, a cancel of the run alone --------------------
+
+
+def waiting(text: str = "Half done.", *, lets_it_out: bool = False) -> tuple[Hook, asyncio.Event]:
+    """A hook that works until cancelled, and the event set once it works.
+
+    On its run's own cancel it returns ``text`` and the tasks it saved (or,
+    ``lets_it_out``, lets the cancel out); any other cancel goes on.
+    """
+    working = asyncio.Event()
+
+    async def hook(run: AgentRun) -> RunAnswer:
+        working.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if lets_it_out or not run.control.own_cancel():
+                raise
+            return RunAnswer(text=text, state={"tasks": [{"description": "half"}]})
+        return RunAnswer()  # pragma: no cover
+
+    return hook, working
+
+
+async def stopped(
+    made: Delegations, working: asyncio.Event, *, by: str, error: str
+) -> tuple[Any, list[WorkflowEvent], bool]:
+    """A delegation in a turn of ``CONVERSATION`` whose run is cancelled once
+    it works: its result, what it reported, and what ``cancel`` returned."""
+    live = LiveEvents()
+    out: dict[str, Any] = {}
+
+    async def source():
+        token = set_active_turn(CONVERSATION)
+        try:
+            with live_events.reporting(live):
+                running = asyncio.create_task(made.delegate(request()))
+                await working.wait()
+                out["cancelled"] = made.cancel("researcher-1#1", by=by, error=error)
+                out["result"] = await running
+        finally:
+            reset_active_turn(token)
+        if False:  # pragma: no cover
+            yield
+
+    events = [item async for item in merged(source(), live)]
+    return out["result"], events, out["cancelled"]
+
+
+class TestARunsControl:
+    async def test_the_hook_runs_with_its_types_limits_over_the_policys(self):
+        hook, asked = answering()
+        policy = SubAgentPolicy(limits=AgentLimits(max_model_calls=50, timeout=60.0))
+        types = {
+            **TYPES,
+            "researcher": AgentConfig(name="researcher", prompt="p", description="Finds.",
+                                      limits=AgentLimits(timeout=5.0)),
+        }
+
+        await delegated(delegations(hook, policy=policy, types=types), request())
+        await delegated(delegations(hook, policy=policy, types=types), request(
+            {"agent_type": "middle", "title": "Plan", "objective": "Plan X."}
+        ))
+
+        researcher, middle = asked
+        assert (researcher.control.ref, researcher.control.limits) == (
+            RESEARCHER, AgentLimits(max_model_calls=50, timeout=5.0)
+        )
+        assert middle.control.limits == AgentLimits(max_model_calls=50, timeout=60.0)
+
+    async def test_by_default_a_run_makes_at_most_100_model_calls(self):
+        hook, asked = answering()
+
+        await delegated(delegations(hook), request())
+
+        assert asked[0].control.limits == DEFAULT_LIMITS == AgentLimits(max_model_calls=100)
+
+    async def test_a_working_runs_control_is_found_until_its_end(self):
+        seen: list[Any] = []
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            seen.append(made.control(run.ref) is run.control)
+            seen.append(made.control(None))
+            return RunAnswer(text="Done.")
+
+        made = delegations(hook)
+        await delegated(made, request())
+
+        assert seen == [True, None]
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.control(RESEARCHER) is None
+        finally:
+            reset_active_turn(token)
+
+
+class TestCancellingOneRun:
+    async def test_a_hook_that_returns_ends_it_cancelled_with_what_it_had(self):
+        hook, working = waiting("Half done.")
+        runs = AgentRuns()
+
+        result, events, cancelled = await stopped(
+            delegations(hook, runs=runs), working, by="parent", error="no longer needed"
+        )
+
+        assert cancelled is True
+        assert result.result == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "Half done.",
+            "error": "no longer needed", "cancelled_by": "parent",
+        }
+        assert result.state == {"tasks": [{"description": "half"}]}
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
+        ended = events[-1]
+        assert (ended.metadata["cancelled_by"], ended.metadata["error"],
+                ended.metadata["partial"]) == ("parent", "no longer needed", True)
+        (record,) = runs.records(CONVERSATION)
+        assert (record.status, record.cancelled_by, record.error, record.result) == (
+            RUN_CANCELLED, "parent", "no longer needed", "Half done."
+        )
+
+    async def test_a_hook_that_lets_the_cancel_out_ends_it_cancelled_with_nothing(self):
+        hook, working = waiting(lets_it_out=True)
+
+        result, _, _ = await stopped(delegations(hook), working, by="user", error="stopped")
+
+        assert (result.result["status"], result.result["cancelled_by"], result.result["result"],
+                result.result["partial"], result.state) == (
+            RUN_CANCELLED, "user", "", False, {}
+        )
+
+    async def test_only_a_working_run_is_cancelled(self):
+        hook, _ = answering()
+        made = delegations(hook)
+        await delegated(made, request())
+
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.cancel("researcher-1#1", by="parent", error="late") is False
+            assert made.cancel("nobody-1#1", by="parent", error="who") is False
+            with pytest.raises(ValueError, match="parent, user or limit"):
+                made.cancel("researcher-1#1", by="someone", error="why")
+        finally:
+            reset_active_turn(token)
+
+    async def test_the_turns_cancel_wins(self):
+        """The run's own cancel and its turn's at once: the run is the turn's,
+        interrupted, and the cancel goes on."""
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def caller():
+            token = set_active_turn(CONVERSATION)
+            try:
+                with live_events.reporting(LiveEvents()):
+                    await made.delegate(request())
+            finally:
+                reset_active_turn(token)
+
+        task = asyncio.create_task(caller())
+        await asyncio.wait_for(working.wait(), 5)
+        token = set_active_turn(CONVERSATION)
+        try:
+            made.cancel("researcher-1#1", by="parent", error="no longer needed")
+        finally:
+            reset_active_turn(token)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (record,) = runs.records(CONVERSATION)
+        assert (record.status, record.error, record.cancelled_by) == (
+            RUN_INTERRUPTED, INTERRUPTED_ERROR, None
+        )
+
+
+class TestTheTimeLimit:
+    async def test_past_it_the_run_is_cancelled_by_its_limit(self):
+        hook, _ = waiting("So far: 42.")
+        types = {
+            **TYPES,
+            "researcher": AgentConfig(name="researcher", prompt="p", description="Finds.",
+                                      limits=AgentLimits(timeout=0.05)),
+        }
+
+        result, events = await asyncio.wait_for(
+            delegated(delegations(hook, types=types), request()), 5
+        )
+
+        assert (result.result["status"], result.result["cancelled_by"], result.result["error"],
+                result.result["result"]) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR, "So far: 42."
+        )
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
+
+
+class TestTheLimitsAtModelCalls:
+    """What a backend's run reports to its control at each model call, and how the run ends."""
+
+    async def test_a_run_that_made_its_last_allowed_call_completes_partial(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            calls = [run.control.model_call() for _ in range(3)]
+            assert calls == [False, False, True]
+            return RunAnswer(text="X is about 42.")
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_model_calls=3))
+        result, events = await delegated(delegations(hook, policy=policy), request())
+
+        assert result.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": "X is about 42.",
+            "error": STEP_LIMIT_ERROR,
+        }
+        # No cut-off warning: the answer was not cut at its output limit.
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_COMPLETED)]
+        assert (events[-1].metadata["partial"], events[-1].metadata["error"]) == (
+            True, STEP_LIMIT_ERROR
+        )
+
+    async def test_a_cut_last_answer_is_still_warned_of(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.model_call()
+            return RunAnswer(text="X is\n\n[cut off at the output limit]", outcome=CUT)
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_model_calls=1))
+        result, events = await delegated(delegations(hook, policy=policy), request())
+
+        assert (result.result["partial"], result.result["error"]) == (True, STEP_LIMIT_ERROR)
+        assert events[-1].content == "researcher-1's answer was cut off at the output limit"
+
+    async def test_a_run_over_its_tokens_ends_cancelled_with_that_answer(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.used(80, 20)
+            run.control.used(90, 30)
+            return RunAnswer(text="Found it.")
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_tokens=150))
+        result, events = await delegated(delegations(hook, policy=policy), request())
+
+        assert (result.result["status"], result.result["cancelled_by"], result.result["error"],
+                result.result["result"], result.result["partial"]) == (
+            RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR, "Found it.", True
+        )
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
