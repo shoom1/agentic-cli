@@ -32,10 +32,15 @@ class OSSandboxResult:
         success: Whether wrapping succeeded.
         error: Error message if wrapping failed.
         sandbox_type: Identifier for which sandbox was used.
-        release: Called once the command has run, or will not: it removes
-            what the wrap made on the host for the run (bubblewrap's
-            placeholders over missing protected paths), which a caller that
-            never calls it leaves behind. A failed wrap holds nothing.
+        release: Called once the command has ended on its own, or will not
+            run: it removes what the wrap made on the host for the run
+            (bubblewrap's placeholders over missing protected paths). Not
+            called after a timeout or a kill, which may leave the sandbox's
+            processes alive a moment longer: what the run holds then stays
+            (a placeholder is empty and protected, and later runs hold it in
+            turn), as it does for a caller that never calls it. A failed wrap
+            holds nothing. No part of the result's value: two results that
+            run the same command compare equal.
     """
 
     command: str
@@ -43,7 +48,7 @@ class OSSandboxResult:
     success: bool = True
     error: str | None = None
     sandbox_type: str = "none"
-    release: Callable[[], None] = field(default=_nothing_to_release, repr=False)
+    release: Callable[[], None] = field(default=_nothing_to_release, repr=False, compare=False)
 
 
 class OSSandbox(ABC):

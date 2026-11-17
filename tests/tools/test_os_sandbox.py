@@ -287,6 +287,13 @@ class TestNoOpSandbox:
         assert sandbox.sandbox_type == "none"
 
 
+class TestOSSandboxResult:
+    def test_results_are_equal_by_what_they_run(self):
+        """``release`` is what to undo after the run, not part of the result's
+        value: two wraps of the same command compare equal."""
+        assert OSSandboxResult("cmd", release=lambda: None) == OSSandboxResult("cmd")
+
+
 # ---------------------------------------------------------------------------
 # TestSafePythonExecutorIntegration
 # ---------------------------------------------------------------------------

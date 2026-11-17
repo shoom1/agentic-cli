@@ -484,6 +484,22 @@ def test_the_wrap_is_released_once_the_code_has_run(monkeypatch: pytest.MonkeyPa
     assert events == ["run", "release", "release"]
 
 
+def test_a_run_that_times_out_keeps_its_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run killed at its timeout may leave the sandbox's processes alive a
+    moment longer (they are killed asynchronously): what the wrap holds for
+    the run, bubblewrap's placeholders, is kept rather than released."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    released: list[str] = []
+    _use_backend(monkeypatch, _Backend("seatbelt", release=lambda: released.append("release")))
+    with MockContext():
+        result = execute_python("while True:\n    pass", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    assert released == []
+
+
 def test_a_sandboxed_run_gets_the_sandboxed_module_set(monkeypatch: pytest.MonkeyPatch) -> None:
     from agentic_cli.tools.execution_tools import execute_python
     from tests.conftest import MockContext

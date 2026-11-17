@@ -6,7 +6,9 @@ Wraps commands via:
 Bubblewrap creates a lightweight user namespace with:
 - Read-only root filesystem
 - Writable bind mounts for allowed paths
-- PID namespace isolation
+- PID namespace isolation, the command its pid 1 (``--as-pid-1``): when it
+  exits, the kernel kills and reaps everything it started before bwrap
+  returns, so a run that returned has left nothing behind in the sandbox
 - Network namespace isolation (no network)
 
 A protected path that does not exist (``~/.bash_profile``, a project's
@@ -17,33 +19,51 @@ create file at …: Read-only file system" before the code runs. In a folder
 the code may write, bwrap would make the mount point on the host, an empty
 file left behind after the run (an empty ``.git`` file breaks git: "invalid
 gitfile format"), so the wrap makes a placeholder there instead: an empty
-folder bound read-only, removed once the last run holding it is over
-(``OSSandboxResult.release``).
+folder bound read-only. Each run holds it with a file of its own, in this
+process or another, and ``OSSandboxResult.release`` drops the run's hold and
+removes the folder once no hold is left. A run that did not end on its own
+(a timeout, a kill) is not released: its placeholder stays, empty and
+protected, and later runs hold it in turn.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import shlex
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from agentic_cli.file_utils import open_dir_no_follow
 from agentic_cli.tools.os_sandbox.base import OSSandbox, OSSandboxResult
 
 if TYPE_CHECKING:
     from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 #: A run's hold in a placeholder is a file named so. A placeholder is a folder
-#: holding nothing else; each run that binds it holds it, in this process or
-#: another, and the last to end removes it.
+#: below a writable bind holding nothing else; each run that binds it holds
+#: it, and the last to release removes it.
 _HOLD = ".agentic-cli-sandbox-hold-"
 #: The folder a placeholder is made in, with its first hold, before it is
 #: renamed into place: it never appears without one.
 _STAGING = ".agentic-cli-sandbox-staging-"
 _HOLD_NOTE = "A sandboxed agentic-cli run keeps the folder this file is in until it ends.\n"
+#: How often the wrap looks again at a protected path that changed under it.
+_TRIES = 5
+
+
+@dataclass(frozen=True)
+class _Hold:
+    """A run's hold: the file ``name`` in the placeholder ``point``, which
+    lies below the writable bind ``root``."""
+
+    root: Path
+    point: Path
+    name: str
 
 
 class BubblewrapSandbox(OSSandbox):
@@ -64,14 +84,17 @@ class BubblewrapSandbox(OSSandbox):
 
         Returns:
             OSSandboxResult with the wrapped command; call its ``release``
-            once the command has run.
+            once the command has ended on its own.
         """
+        release: Callable[[], None] | None = None
         try:
             bwrap_args, release = self._prepare(working_dir, policy)
             escaped_command = command.replace("'", "'\\''")
             wrapped = f"{shlex.join(bwrap_args)} -- /bin/bash -c '{escaped_command}'"
             return OSSandboxResult(command=wrapped, sandbox_type="bubblewrap", release=release)
         except Exception as e:
+            if release is not None:
+                release()
             return OSSandboxResult(
                 command=command,
                 success=False,
@@ -94,13 +117,16 @@ class BubblewrapSandbox(OSSandbox):
 
         Returns:
             OSSandboxResult with the wrapped command; call its ``release``
-            once the command has run.
+            once the command has ended on its own.
         """
+        release: Callable[[], None] | None = None
         try:
             bwrap_args, release = self._prepare(working_dir, policy)
             wrapped = shlex.join(bwrap_args + ["--"] + python_args)
             return OSSandboxResult(command=wrapped, sandbox_type="bubblewrap", release=release)
         except Exception as e:
+            if release is not None:
+                release()
             return OSSandboxResult(
                 command=shlex.join(python_args),
                 success=False,
@@ -113,46 +139,73 @@ class BubblewrapSandbox(OSSandbox):
     ) -> tuple[list[str], Callable[[], None]]:
         """The bwrap arguments, with the placeholders they bind held, and the
         release of those holds."""
-        release = _releaser(self._hold_placeholders(working_dir, policy))
+        holds = self._hold_placeholders(working_dir, policy)
+        release = _releaser(holds)
         try:
-            return self._build_bwrap_args(working_dir, policy), release
+            held = [hold.point for hold in holds]
+            return self._build_bwrap_args(working_dir, policy, held=held), release
         except BaseException:
             release()
             raise
 
     def _hold_placeholders(
         self, working_dir: Path, policy: OSSandboxPolicy
-    ) -> list[Path]:
+    ) -> list[_Hold]:
         """Hold a placeholder at each missing protected path the code could
-        create, made if no other run holds one there; returns this run's holds.
+        create (joining one another run holds, or one being removed), and
+        return this run's holds.
+
+        A path the code cannot create needs none: one below the read-only
+        root, or where no placeholder can be made because the file system is
+        read-only, or the folder is one the user may not write and does not
+        own (so the code cannot give itself the right).
 
         Raises:
-            RuntimeError: A placeholder could not be made (a folder of the
-                user's that is read-only by its mode, which the code may
-                chmod): the code could create the path, so no run.
+            RuntimeError: Any other placeholder could not be made (a folder of
+                the user's that is read-only by its mode, which the code may
+                chmod; a folder swapped for a symlink), or a path kept
+                changing: the code could create the path, so no run.
         """
-        writable = policy.resolved_writable_paths(working_dir)
+        writable = _bound(policy, working_dir)
         deny_writes = policy.resolved_deny_write_paths(working_dir)
-        read_only = [d for d in deny_writes if os.path.lexists(d)]
-        points = dict.fromkeys(p for p in map(_creation_point, deny_writes) if p is not None)
-        holds: list[Path] = []
-        for point in points:
-            if not _could_create(point, writable, read_only):
-                continue
+        read_only = _real(deny_writes, writable)
+        holds: dict[Path, _Hold] = {}
+        try:
+            for path in deny_writes:
+                self._hold_one(path, writable, read_only, holds)
+        except BaseException:
+            _releaser(list(holds.values()))()
+            raise
+        return list(holds.values())
+
+    @staticmethod
+    def _hold_one(
+        path: Path, writable: list[Path], read_only: list[Path], holds: dict[Path, _Hold]
+    ) -> None:
+        """Hold the placeholder ``path`` needs, if any, adding it to ``holds``."""
+        for _ in range(_TRIES):
+            point = _creation_point(path, writable)
+            root = None if point is None else _writable_root(point, writable, read_only)
+            if point is None or root is None or point in holds:
+                return
             try:
-                hold = _hold(point)
+                hold = _hold(root, point)
             except OSError as e:
-                _releaser(holds)()
+                if _code_cannot_create(e, point):
+                    return
                 raise RuntimeError(
                     f"no placeholder could be made at {point}, a protected path "
                     f"the code could otherwise create: {e.strerror or e}"
                 ) from e
             if hold is not None:
-                holds.append(hold)
-        return holds
+                holds[point] = hold
+                return
+            # A real file or folder took its place, or another run's
+            # placeholder came and went: look again.
+        raise RuntimeError(f"{path} kept changing while its placeholder was made")
 
     def _build_bwrap_args(
-        self, working_dir: Path, policy: OSSandboxPolicy
+        self, working_dir: Path, policy: OSSandboxPolicy, held: Collection[Path] = ()
     ) -> list[str]:
         """Build bwrap command-line arguments from policy.
 
@@ -160,19 +213,22 @@ class BubblewrapSandbox(OSSandbox):
         so more specific mounts must come after less specific ones.
 
         Structure:
-        1. Isolation flags (session, die-with-parent, PID namespace)
+        1. Isolation flags (session, die-with-parent, PID namespace, the
+           command as its pid 1)
         2. Network namespace (if blocking network)
         3. Read-only root (--ro-bind / /)
         4. Writable bind mounts for allowed paths
-        5. Read-only overrides for denied paths within writable regions,
-           and for the placeholders of missing ones the code could create
-           (``_hold_placeholders`` makes them before bwrap runs)
+        5. Read-only overrides for denied paths that exist within writable
+           regions, and for the placeholders this run holds
         6. Hide denied read paths
         7. Device and proc filesystems
 
         Args:
             working_dir: Working directory (always writable).
             policy: Sandbox policy.
+            held: The placeholders this run holds (``_hold_placeholders``,
+                which the wraps call first). A missing protected path the
+                code could create is bound only through one of them.
 
         Returns:
             List of bwrap arguments (without the trailing command).
@@ -182,6 +238,7 @@ class BubblewrapSandbox(OSSandbox):
             "--new-session",
             "--die-with-parent",
             "--unshare-pid",
+            "--as-pid-1",
         ]
 
         # Network isolation
@@ -201,19 +258,12 @@ class BubblewrapSandbox(OSSandbox):
                 # can be written to inside the sandbox
                 args.extend(["--tmpfs", str(wp)])
 
-        # Deny writes within writable regions: re-mount as read-only. A
-        # missing one is bound at its placeholder where the code could create
-        # it; elsewhere the read-only root covers it (see the module docstring).
+        # Deny writes within writable regions: re-mount as read-only what
+        # exists, and the placeholders of what does not; elsewhere the
+        # read-only root covers a missing path (see the module docstring).
         deny_writes = policy.resolved_deny_write_paths(working_dir)
-        read_only = [d for d in deny_writes if os.path.lexists(d)]
-        bound: set[Path] = set()
-        for dp in deny_writes:
-            target = _creation_point(dp) or dp
-            if target in bound:
-                continue
-            if os.path.lexists(target) or _could_create(target, writable, read_only):
-                args.extend(["--ro-bind", str(target), str(target)])
-                bound.add(target)
+        for target in dict.fromkeys([*_real(deny_writes, _bound(policy, working_dir)), *held]):
+            args.extend(["--ro-bind", str(target), str(target)])
 
         # Hide denied read paths with empty tmpfs overlays
         deny_reads = policy.resolved_deny_read_paths(working_dir)
@@ -241,93 +291,182 @@ class BubblewrapSandbox(OSSandbox):
         return "bubblewrap"
 
 
-def _is_placeholder(path: Path) -> bool:
-    """A folder holding nothing but holds: a placeholder some run keeps."""
-    if path.is_symlink():
-        return False
+def _bound(policy: OSSandboxPolicy, working_dir: Path) -> list[Path]:
+    """The writable paths bound from the host (a missing one is a tmpfs,
+    which nothing of the host's lies below)."""
+    return [w for w in policy.resolved_writable_paths(working_dir) if w.exists()]
+
+
+def _below(path: Path, place: Path) -> bool:
+    return path != place and path.is_relative_to(place)
+
+
+def _real(deny_writes: list[Path], writable: list[Path]) -> list[Path]:
+    """The protected paths that exist as themselves, not as placeholders."""
+    return [d for d in deny_writes if os.path.lexists(d) and _creation_point(d, writable) is None]
+
+
+def _holds_only(fd_or_path: int | Path) -> bool:
+    """A folder holding nothing but holds, or nothing at all: a placeholder,
+    or one whose last run is removing it (a folder at a protected path that is
+    empty is joined, never taken for a real one the release could remove)."""
     try:
-        with os.scandir(path) as entries:
-            held = False
-            for entry in entries:
-                if not entry.name.startswith(_HOLD):
-                    return False
-                held = True
-            return held
+        with os.scandir(fd_or_path) as entries:
+            return all(entry.name.startswith(_HOLD) for entry in entries)
     except OSError:  # not a folder, or one this user cannot list
         return False
 
 
-def _creation_point(path: Path) -> Path | None:
+def _creation_point(path: Path, writable: list[Path]) -> Path | None:
     """Where code would start creating ``path``: its first component that is
-    missing or a placeholder (``path`` itself, or a missing folder above it).
-    None when ``path`` exists."""
+    missing or, below a writable bind, a placeholder (``path`` itself, or a
+    folder above it). None when ``path`` exists as itself."""
     for part in (*reversed(path.parents), path):
-        if not os.path.lexists(part) or _is_placeholder(part):
+        if not os.path.lexists(part):
+            return part
+        if any(_below(part, w) for w in writable) and not part.is_symlink() and _holds_only(part):
             return part
     return None
 
 
-def _could_create(point: Path, writable: list[Path], read_only: list[Path]) -> bool:
-    """Whether the code could create ``point`` (missing, or a placeholder):
-    it lies below a writable bind, and below no protected path bound
-    read-only over it."""
-    def below(place: Path) -> bool:
-        return point != place and point.is_relative_to(place)
+def _writable_root(point: Path, writable: list[Path], read_only: list[Path]) -> Path | None:
+    """The writable bind ``point`` lies below, when the code could create it
+    there (below no protected path bound read-only over it); else None."""
+    if any(_below(point, d) for d in read_only):
+        return None
+    roots = [w for w in writable if _below(point, w)]
+    return max(roots, key=lambda w: len(w.parts), default=None)
 
-    return any(below(w) for w in writable if w.exists()) and not any(map(below, read_only))
 
-
-def _hold(point: Path) -> Path | None:
-    """This run's hold on the placeholder at ``point``, made if missing; None
-    when a real file or folder took its place meanwhile (it is then bound as
-    it is)."""
-    name = f"{_HOLD}{os.getpid()}-{uuid.uuid4().hex}"
-    for _ in range(5):
-        if _is_placeholder(point):
-            try:
-                _write_hold(point / name)
-                return point / name
-            except FileNotFoundError:
-                continue  # its last run removed it meanwhile: make it anew
-        if os.path.lexists(point):
-            return None
-        staging = point.parent / f"{_STAGING}{uuid.uuid4().hex}"
-        os.mkdir(staging, 0o700)
+def _code_cannot_create(error: OSError, point: Path) -> bool:
+    """Whether making the placeholder failed where the code would fail too: a
+    read-only file system, or a folder the user may not write and does not
+    own (its owner could give the code the right with chmod)."""
+    if error.errno == errno.EROFS:
+        return True
+    if error.errno in (errno.EACCES, errno.EPERM):
         try:
-            _write_hold(staging / name)
-            os.rename(staging, point)
-            return point / name
+            return os.stat(point.parent).st_uid != os.geteuid()
         except OSError:
-            _drop(staging / name)
-            if not os.path.lexists(point):
+            return False
+    return False
+
+
+def _open_dir_below(root: Path, folder: Path) -> int:
+    """Open ``folder``, ``root`` or below it, following no symlink below
+    ``root``: code a run may write there could swap a folder for one. ``root``
+    is a writable bind, a mount point in every sandbox, which the code cannot
+    move."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in folder.relative_to(root).parts:
+            inner = open_dir_no_follow(name, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _hold(root: Path, point: Path) -> _Hold | None:
+    """This run's hold on the placeholder at ``point``, made if missing; None
+    when the place changed meanwhile (a real file or folder now stands there,
+    the placeholder was removed before the hold was written, or another run
+    made it first). Every step is taken in folders opened without following a
+    symlink below ``root``."""
+    name = f"{_HOLD}{os.getpid()}-{uuid.uuid4().hex}"
+    parent = _open_dir_below(root, point.parent)
+    try:
+        try:
+            folder = open_dir_no_follow(point.name, dir_fd=parent)
+        except FileNotFoundError:
+            folder = None
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                return None  # a symlink or a file: no placeholder of ours
+            raise
+        if folder is not None:
+            try:
+                if not _holds_only(folder):
+                    return None
+                _write_hold(name, folder)
+                return _Hold(root, point, name)
+            except FileNotFoundError:
+                return None  # removed by its last run before the hold was written
+            finally:
+                os.close(folder)
+        staging = f"{_STAGING}{uuid.uuid4().hex}"
+        os.mkdir(staging, 0o700, dir_fd=parent)
+        try:
+            folder = open_dir_no_follow(staging, dir_fd=parent)
+            try:
+                _write_hold(name, folder)
+            finally:
+                os.close(folder)
+            os.rename(staging, point.name, src_dir_fd=parent, dst_dir_fd=parent)
+        except BaseException as error:
+            _unhold(parent, staging, name)
+            if not (isinstance(error, OSError) and _exists(point.name, parent)):
                 raise
-            # Made meanwhile, by another run or for real: look again.
-    raise OSError(f"{point} kept changing")
+            return None  # made meanwhile, by another run or for real
+        return _Hold(root, point, name)
+    finally:
+        os.close(parent)
 
 
-def _write_hold(path: Path) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+def _exists(name: str, parent: int) -> bool:
+    try:
+        os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _write_hold(name: str, folder: int) -> None:
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
     try:
         os.write(fd, _HOLD_NOTE.encode())
     finally:
         os.close(fd)
 
 
-def _drop(hold: Path) -> None:
-    """Remove a hold, and its placeholder if no other run holds it (``rmdir``:
-    only while it is empty, so whatever was put in it meanwhile stays)."""
+def _unhold(parent: int, folder_name: str, hold_name: str) -> None:
+    """Remove the hold ``hold_name`` from the folder ``folder_name`` of
+    ``parent``, then the folder if nothing is left in it (``rmdir``: another
+    run's hold, or whatever the user put there meanwhile, keeps it)."""
     with contextlib.suppress(OSError):
-        os.unlink(hold)
+        folder = open_dir_no_follow(folder_name, dir_fd=parent)
+        try:
+            os.unlink(hold_name, dir_fd=folder)
+        finally:
+            os.close(folder)
     with contextlib.suppress(OSError):
-        os.rmdir(hold.parent)
+        os.rmdir(folder_name, dir_fd=parent)
 
 
-def _releaser(holds: list[Path]) -> Callable[[], None]:
-    """The release of ``holds``: each is dropped once, however often it is
-    called."""
+def _drop(hold: _Hold) -> None:
+    """Drop a hold, and its placeholder if no other run holds it."""
+    try:
+        parent = _open_dir_below(hold.root, hold.point.parent)
+    except OSError:
+        return  # moved or swapped meanwhile: left as it is
+    try:
+        _unhold(parent, hold.point.name, hold.name)
+    finally:
+        os.close(parent)
+
+
+def _releaser(holds: list[_Hold]) -> Callable[[], None]:
+    """The release of ``holds``: each is dropped once, however often and from
+    however many threads it is called."""
 
     def release() -> None:
-        while holds:
-            _drop(holds.pop())
+        while True:
+            try:
+                hold = holds.pop()
+            except IndexError:
+                return
+            _drop(hold)
 
     return release

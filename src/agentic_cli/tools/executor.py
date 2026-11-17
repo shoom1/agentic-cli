@@ -66,7 +66,8 @@ class _Run:
     ``command`` is what ``subprocess.run`` gets (a shell string when the
     sandbox wrapped it), ``modules`` what the code may import there,
     ``refusal`` the error when it runs nowhere, and ``release`` the wrap's
-    (``OSSandboxResult.release``), called once the call is over.
+    (``OSSandboxResult.release``), called once the code was refused by the
+    checks or its process ended on its own, never after a timeout.
     """
 
     command: str | list[str] = ""
@@ -449,12 +450,9 @@ class SafePythonExecutor:
         """
         start_time = time.time()
         run = self._choose_run(context)
-        try:
-            if run.refusal is not None:
-                return self._sandbox_refused(run.refusal, start_time)
-            return self._validate_and_run(run, code, context, timeout, start_time)
-        finally:
-            run.release()
+        if run.refusal is not None:
+            return self._sandbox_refused(run.refusal, start_time)
+        return self._validate_and_run(run, code, context, timeout, start_time)
 
     def _validate_and_run(
         self,
@@ -469,6 +467,7 @@ class SafePythonExecutor:
         logger.debug("python_executor.validation", code_length=len(code))
         is_valid, error = self.validate_code(code, allowed_modules=run.modules)
         if not is_valid:
+            run.release()  # nothing ran
             return {
                 "success": False,
                 "output": "",
@@ -494,6 +493,8 @@ class SafePythonExecutor:
                 env=self._subprocess_env(),
             )
         except subprocess.TimeoutExpired:
+            # Killed: the sandbox's processes may outlive this return for a
+            # moment, so what the wrap holds for the run is kept, not released.
             elapsed = (time.time() - start_time) * 1000
             logger.warning("python_executor.timeout", timeout=timeout)
             return {
@@ -503,6 +504,9 @@ class SafePythonExecutor:
                 "error": f"Execution timed out after {timeout} seconds",
                 "execution_time_ms": round(elapsed, 2),
             }
+        # Ended on its own: in bubblewrap the code is the sandbox's pid 1, so
+        # every process it started is gone by now.
+        run.release()
 
         elapsed = (time.time() - start_time) * 1000
 

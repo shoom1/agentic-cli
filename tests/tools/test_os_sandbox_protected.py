@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -210,6 +211,25 @@ def _run(code: str, cwd: Path, policy: OSSandboxPolicy) -> str:
     return proc.stdout.strip()
 
 
+def _bubblewrap_only() -> None:
+    if _sandbox().sandbox_type != "bubblewrap":
+        pytest.skip("needs bubblewrap's pid namespace (a forked process outlives sandbox-exec)")
+
+
+#: Forks a process that closes its output and writes ``path`` a second later,
+#: then runs ``parent``.
+LATE_WRITER = """
+import os, time
+if os.fork() == 0:
+    for fd in (0, 1, 2):
+        os.close(fd)
+    time.sleep(1)
+    open({path!r}, "w").write("late")
+    os._exit(0)
+{parent}
+"""
+
+
 ATTEMPT = """
 import sys
 try:
@@ -273,6 +293,40 @@ class TestLiveSandbox:
                    OSSandboxPolicy(app_name=APP))
         assert out == "blocked"
         assert os.listdir(plain) == []
+
+    def test_the_code_is_pid_1_of_its_sandbox(self, home, project):
+        """bubblewrap runs the code as its pid 1 (``--as-pid-1``): when it
+        exits, the kernel kills and reaps what it started before bwrap
+        returns, so a run that returned leaves no process behind."""
+        _bubblewrap_only()
+        out = _run("import os; print(os.getpid())", project, OSSandboxPolicy(app_name=APP))
+        assert out == "1"
+
+    def test_what_the_code_forks_ends_with_it(self, home, project):
+        _bubblewrap_only()
+        late = project / "late.txt"
+        out = _run(LATE_WRITER.format(path=str(late), parent="print('forked')"), project,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "forked"
+        time.sleep(3)
+        assert not late.exists()
+
+    def test_a_timeout_stops_the_code_and_what_it_forked(self, home, project):
+        """As pid 1 the code ignores the signals it has no handler for, but not
+        the SIGKILL bwrap's death sends it (``--die-with-parent``), so a run
+        killed at its timeout still ends, with all it started."""
+        _bubblewrap_only()
+        late = project / "late.txt"
+        code = LATE_WRITER.format(path=str(late), parent="while True: pass")
+        wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], project,
+                                                 OSSandboxPolicy(app_name=APP))
+        assert wrapped.success, wrapped.error
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(wrapped.command, shell=True, cwd=project, capture_output=True,
+                           text=True, timeout=2)
+        time.sleep(3)
+        assert not late.exists()
+        wrapped.release()
 
     def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
         """With the default settings the code runs inside the real sandbox, so

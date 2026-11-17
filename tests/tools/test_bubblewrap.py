@@ -15,6 +15,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 from pathlib import Path
@@ -22,7 +23,8 @@ from unittest.mock import patch
 
 import pytest
 
-from agentic_cli.tools.os_sandbox.bubblewrap import BubblewrapSandbox
+from agentic_cli.tools.os_sandbox import bubblewrap
+from agentic_cli.tools.os_sandbox.bubblewrap import _STAGING, BubblewrapSandbox
 from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
 
 
@@ -96,6 +98,14 @@ class TestBasicBwrapArgs:
         assert "--new-session" in args
         assert "--die-with-parent" in args
         assert "--unshare-pid" in args
+
+    def test_the_code_is_pid_1(self, tmp_path: Path):
+        """The command is the sandbox's pid 1, not a child of bwrap's reaper:
+        when it exits the kernel kills and reaps everything it started, and
+        bwrap returns only after that. With the reaper, bwrap returned as
+        soon as the command exited, while what it forked could still run."""
+        args = BubblewrapSandbox()._build_bwrap_args(tmp_path, _minimal_policy())
+        assert "--as-pid-1" in args
 
     def test_ro_bind_root(self, tmp_path: Path):
         sandbox = BubblewrapSandbox()
@@ -175,6 +185,7 @@ class TestDenyWritePaths:
     def test_existing_deny_write_path_gets_ro_bind(self, tmp_path: Path):
         protected_dir = tmp_path / "protected"
         protected_dir.mkdir()
+        (protected_dir / "config").write_text("x")
 
         sandbox = BubblewrapSandbox()
         policy = _minimal_policy(deny_write_paths=[str(protected_dir)])
@@ -206,6 +217,22 @@ class TestDenyWritePaths:
         assert (str(missing_file), str(missing_file)) in _ro_binds(_bwrap_args(result))
         result.release()
         assert not os.path.lexists(missing_file)
+
+    def test_an_empty_deny_write_folder_in_a_writable_dir_is_held_as_a_placeholder(
+        self, tmp_path: Path
+    ):
+        """An empty folder there may be a placeholder whose last run is
+        removing it, so it is held like one: bound read-only, and removed once
+        the run is over if it is still empty."""
+        empty = (tmp_path / "protected").resolve()
+        empty.mkdir()
+        policy = _minimal_policy(deny_write_paths=[str(empty)])
+
+        result = BubblewrapSandbox().wrap_python_command(["python3", "-c", "pass"], tmp_path, policy)
+
+        assert (str(empty), str(empty)) in _ro_binds(_bwrap_args(result))
+        result.release()
+        assert not os.path.lexists(empty)
 
     def test_a_missing_folder_above_a_deny_write_path_is_held_too(self, tmp_path: Path):
         """Below a missing folder, the code would create the folder first: the
@@ -315,14 +342,14 @@ class TestMissingProtectedPaths:
             ), str(project)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
         )
+        git = project / ".git"
         try:
             assert child.stdout.readline().strip() == "held"
             ours = _wrap(project)
+            ours.release()
+            assert git.is_dir()  # the child still holds it
         finally:
             child.communicate("\n", timeout=30)
-        git = project / ".git"
-        assert git.is_dir()
-        ours.release()
         assert not os.path.lexists(git)
 
     def test_what_the_user_puts_in_a_placeholder_is_kept(self, home, project):
@@ -335,6 +362,7 @@ class TestMissingProtectedPaths:
         result.release()
         assert os.listdir(git) == ["HEAD"]
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a folder whatever its mode")
     def test_a_placeholder_that_cannot_be_made_is_a_failed_wrap(self, home, project):
         """The code could still create the path (a folder of the user's, read-only
         by its mode, is one the code may chmod), so the wrap fails rather than
@@ -347,6 +375,173 @@ class TestMissingProtectedPaths:
         assert result.success is False
         assert str(project / ".git") in result.error
         assert os.listdir(project) == []
+
+
+    def test_a_read_only_file_system_needs_no_placeholder(self, home, project, monkeypatch):
+        """Where no placeholder can be made because the file system is
+        read-only, the code cannot create the path either."""
+        real_mkdir = os.mkdir
+
+        def read_only(path, *args, **kwargs):
+            if os.path.basename(path).startswith(_STAGING):
+                raise OSError(errno.EROFS, "Read-only file system", str(path))
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", read_only)
+        result = _wrap(project)
+        monkeypatch.undo()
+        assert result.success, result.error
+        assert str(project / ".git") not in _bwrap_args(result)
+        assert os.listdir(project) == []
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a folder whatever its mode")
+    def test_a_folder_of_another_user_needs_no_placeholder(self, home, project, monkeypatch):
+        """A folder the user may not write and does not own: the code can
+        neither write it nor give itself the right to."""
+        uid = os.geteuid()
+        project.chmod(0o555)
+        monkeypatch.setattr(os, "geteuid", lambda: uid + 1)
+        try:
+            result = _wrap(project)
+        finally:
+            monkeypatch.undo()
+            project.chmod(0o755)
+        assert result.success, result.error
+        assert str(project / ".git") not in _bwrap_args(result)
+
+    def test_a_placeholder_mid_release_is_joined(self, home, project, monkeypatch):
+        """Between a release's unlink of the last hold and its rmdir the
+        placeholder is an empty folder. A run that wraps then holds it, so the
+        rmdir finds it not empty, rather than binding it as a real folder that
+        the rmdir then removes from under it."""
+        first = _wrap(project)
+        real_rmdir = os.rmdir
+        second = []
+
+        def rmdir_after_another_wrap(path, *args, **kwargs):
+            if not second:
+                second.append(None)
+                second[0] = _wrap(project)
+            return real_rmdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rmdir", rmdir_after_another_wrap)
+        first.release()
+        monkeypatch.undo()
+        [later] = second
+        binds = _ro_binds(_bwrap_args(later))
+        for name in (".git", f".{APP}"):
+            assert (project / name).is_dir(), name
+            assert (str(project / name), str(project / name)) in binds
+        later.release()
+        assert os.listdir(project) == []
+
+    def test_the_argv_alone_binds_only_what_exists_or_the_run_holds(self, home, project):
+        """Built without the wrap's holds, the argv binds no missing path (bwrap
+        would exit: no source) and no placeholder another run holds (that run
+        could remove it while this one runs)."""
+        policy = OSSandboxPolicy(app_name=APP)
+        assert _what_bwrap_cannot_set_up(BubblewrapSandbox()._build_bwrap_args(project, policy)) == []
+        other = _wrap(project)
+        try:
+            args = BubblewrapSandbox()._build_bwrap_args(project, policy)
+            assert str(project / ".git") not in args
+        finally:
+            other.release()
+
+    def test_a_wrap_that_fails_after_holding_releases(self, home, project):
+        """A wrap that fails once the placeholders are held (here, on a command
+        that is no string) holds nothing."""
+        result = BubblewrapSandbox().wrap_shell_command(None, project, OSSandboxPolicy(app_name=APP))
+        assert result.success is False
+        assert os.listdir(project) == []
+
+    def test_no_hold_is_made_through_a_folder_swapped_for_a_symlink(
+        self, home, project, tmp_path, monkeypatch
+    ):
+        """A folder below the writable bind replaced by a symlink after the
+        policy was resolved: nothing is made where it points."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (project / "link").symlink_to(outside)
+        policy = OSSandboxPolicy(app_name=APP)
+        swapped = project / "link" / ".git"
+        monkeypatch.setattr(policy, "resolved_deny_write_paths", lambda working_dir=None: [swapped])
+        result = BubblewrapSandbox().wrap_python_command(["python3"], project, policy)
+        assert result.success is False
+        assert os.listdir(outside) == []
+
+    def test_wrap_shell_command_holds_and_releases_too(self, home, project):
+        result = BubblewrapSandbox().wrap_shell_command("true", project, OSSandboxPolicy(app_name=APP))
+        assert (project / ".git").is_dir()
+        result.release()
+        assert os.listdir(project) == []
+
+
+class TestHoldRetries:
+    """A placeholder can change between the look and the hold: another run
+    removes it, or makes it first."""
+
+    def test_a_placeholder_removed_while_joining_is_made_anew(self, home, project, monkeypatch):
+        first = _wrap(project)
+        real_write = bubblewrap._write_hold
+        calls = []
+
+        def release_first_then_write(*args, **kwargs):
+            if not calls:
+                calls.append(1)
+                first.release()  # the folder is gone before the hold is written
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(bubblewrap, "_write_hold", release_first_then_write)
+        second = _wrap(project)
+        monkeypatch.undo()
+        assert second.success, second.error
+        assert (project / ".git").is_dir()
+        second.release()
+        assert os.listdir(project) == []
+
+    def test_a_lost_rename_joins_the_winner(self, home, project, monkeypatch):
+        real_rename = os.rename
+        winner = []
+
+        def another_run_first(src, dst, *args, **kwargs):
+            if not winner:
+                monkeypatch.setattr(os, "rename", real_rename)
+                winner.append(_wrap(project))
+            return real_rename(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rename", another_run_first)
+        loser = _wrap(project)
+        monkeypatch.undo()
+        assert loser.success, loser.error
+        git = project / ".git"
+        assert len(os.listdir(git)) == 2  # both runs hold it
+        assert not [n for n in os.listdir(project) if n.startswith(_STAGING)]
+        winner[0].release()
+        assert git.is_dir()
+        loser.release()
+        assert os.listdir(project) == []
+
+    def test_a_place_that_keeps_changing_fails_the_wrap(self, home, project, monkeypatch):
+        monkeypatch.setattr(bubblewrap, "_hold", lambda *args, **kwargs: None)
+        result = _wrap(project)
+        assert result.success is False
+        assert str(project / ".git") in result.error
+
+
+class TestRelease:
+    def test_release_survives_a_hold_another_thread_took(self):
+        """Two threads releasing at once: the holds list empties between one's
+        check and its pop."""
+
+        class TakenMeanwhile(list):
+            def __bool__(self) -> bool:
+                return True
+
+            def __len__(self) -> int:
+                return 1
+
+        bubblewrap._releaser(TakenMeanwhile())()
 
 
 # ---------------------------------------------------------------------------
