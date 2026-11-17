@@ -2794,11 +2794,14 @@ step; each entry says what to use instead.
   bubblewrap's monitor), so the code ran on: on Linux the sandbox's init,
   in a session of its own, outlived bubblewrap, and on macOS a process the
   code forked outlived `sandbox-exec`. The command now runs in a session of
-  its own, and a timeout, or an interruption while it waits, kills its whole
-  process group and, on Linux, each child of it that left the group
-  (bubblewrap's sandbox init, whose death ends every process in the
-  sandbox). On macOS, code that calls `setsid()` itself can still outlive
-  the timeout.
+  its own, and a timeout, a KeyboardInterrupt while it waits (in a caller
+  on the main thread), or the end of the app (an exit, and in the CLI a
+  hangup or SIGTERM) kills its whole process group and, on Linux, each child
+  of it that left the group (bubblewrap's sandbox init, whose death ends
+  every process in the sandbox); a run that ends on its own takes with it
+  what it left in its group. Outside a pid namespace (on macOS, and on Linux
+  without the sandbox), code that calls `setsid()` and forks again can still
+  outlive them.
 
 - **`execute_python` runs inside bubblewrap on Linux.** It never did: every
   call was refused with "it did not start (bubblewrap, exit status 1): bwrap:
@@ -2824,7 +2827,8 @@ step; each entry says what to use instead.
   The code runs as the sandbox's pid 1
   (`--as-pid-1`), so a run that returned has left no process behind; one that
   timed out, or that a signal ended, is not released, and its placeholder
-  stays, empty and protected, for later runs to hold. A placeholder that
+  stays, holding the run's hidden hold file and protected, for later runs to
+  hold. A placeholder that
   cannot be made where the code could still create the path fails the wrap.
 
 - **A model call a tool makes reports its usage.** `generate_simple`

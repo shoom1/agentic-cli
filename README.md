@@ -1686,8 +1686,10 @@ timed out or that a signal ended (holding only that run's hidden hold file,
 and still protected). An `os_sandbox_writable_paths` entry that holds your
 home directory puts such folders at the shell start-up files it lacks
 (`~/.bash_profile`, `~/.zshrc`, …), and a folder at `~/.bash_profile` makes a
-login bash skip `~/.profile`. A timeout stops the code and every process it
-started. On a host with no sandbox backend
+login bash skip `~/.profile`. A timeout stops the code and the processes it
+started (code that calls `setsid()` and forks again can escape outside
+bubblewrap's pid namespace: on macOS, and on Linux without the sandbox).
+On a host with no sandbox backend
 (Windows has none), when the sandbox cannot be set up, or when the sandbox tool
 fails as it starts (on Ubuntu 24.04 and later, `bwrap` needs unprivileged user
 namespaces, which AppArmor restricts by default), the call is refused with an
