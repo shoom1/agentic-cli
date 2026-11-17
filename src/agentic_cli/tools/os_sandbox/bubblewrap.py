@@ -25,8 +25,8 @@ removes the folder once no hold is left. A run never removes a folder it did
 not make: a protected folder that is there and empty is held and bound like a
 placeholder (it may be one whose last run is removing it), but a hold in it
 says no run made it, and the folder stays. A run that did not end on its own
-(a timeout, a kill) is not released: its placeholder stays, empty and
-protected, and later runs hold it in turn.
+(a timeout, a kill) is not released: its placeholder stays, holding the run's
+hold file and protected, and later runs hold it in turn.
 """
 
 from __future__ import annotations

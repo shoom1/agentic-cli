@@ -38,8 +38,9 @@ class OSSandboxResult:
             called after a timeout or a kill (a status that says a signal
             ended the command), which may leave the sandbox's processes alive
             a moment longer: what the run holds then stays
-            (a placeholder is empty and protected, and later runs hold it in
-            turn), as it does for a caller that never calls it. A failed wrap
+            (a placeholder holds the run's hold file and stays protected,
+            and later runs hold it in turn), as it does for a caller that
+            never calls it. A failed wrap
             holds nothing. No part of the result's value: two results that
             run the same command compare equal.
     """

@@ -14,12 +14,10 @@ Usage:
     if not result.success:  # result.command is then the bare command
         raise RuntimeError(result.error)
     # result.command is now "sandbox-exec -p '...' /bin/bash -c 'echo hello'"
-    proc = subprocess.run(result.command, shell=True, timeout=60)
-    # It ended on its own: release what the wrap holds for the run. Not after
-    # a timeout (TimeoutExpired skips this line), nor when a signal ended it
-    # (see OSSandboxResult.release).
-    if 0 <= proc.returncode < 128:
-        result.release()
+    # Run it in a session of its own, and on a timeout kill the session, not
+    # the shell alone (subprocess.run's way: the sandbox runs on), as
+    # tools/executor.py::_run_command does. Once it ended on its own (a
+    # status from 0 to 127), result.release(); never after a timeout.
 """
 
 from __future__ import annotations

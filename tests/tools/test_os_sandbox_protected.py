@@ -198,12 +198,13 @@ def _sandbox():
 
 
 def _run(code: str, cwd: Path, policy: OSSandboxPolicy) -> str:
+    """Run ``code`` in the sandbox as the executor runs a call."""
+    from agentic_cli.tools.executor import _run_command
+
     wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], cwd, policy)
     assert wrapped.success, wrapped.error
     try:
-        proc = subprocess.run(
-            wrapped.command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=60
-        )
+        proc = _run_command(wrapped.command, shell=True, input="", timeout=60, cwd=cwd)
     finally:
         wrapped.release()
     # A sandbox that did not start ran no code: say why, rather than "".
@@ -224,7 +225,7 @@ def _processes() -> str:
 
 def _bubblewrap_only() -> None:
     if _sandbox().sandbox_type != "bubblewrap":
-        pytest.skip("needs bubblewrap's pid namespace (a forked process outlives sandbox-exec)")
+        pytest.skip("needs bubblewrap's pid namespace")
 
 
 #: Forks a process that closes its output and writes ``path`` ``delay``
@@ -314,7 +315,9 @@ class TestLiveSandbox:
         assert out == "1"
 
     def test_what_the_code_forks_ends_with_it(self, home, project):
-        _bubblewrap_only()
+        """In bubblewrap the sandbox ends with its pid 1, the code; on
+        seatbelt the fork stays in the run's process group, which the run's
+        end kills."""
         late = project / "late.txt"
         out = _run(LATE_WRITER.format(path=str(late), delay=1, parent="print('forked')"), project,
                    OSSandboxPolicy(app_name=APP))

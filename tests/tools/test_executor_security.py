@@ -554,8 +554,9 @@ def test_a_timeout_kills_a_child_that_left_the_process_group(
 def test_an_interrupted_run_kills_its_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """A run interrupted while it waits (Ctrl+C, a cancel) kills the whole
-    group too, then lets the interruption through."""
+    """A KeyboardInterrupt while the run waits (in a caller on the main
+    thread: the CLI runs calls on a worker thread, which none reaches) kills
+    the whole group too, then goes through."""
     import time
 
     from agentic_cli.tools.execution_tools import execute_python
