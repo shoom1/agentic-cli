@@ -16,6 +16,7 @@ pytest.importorskip("deepagents")
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl  # noqa: E402
+from agentic_cli.workflow.agents.envelope import TOKEN_LIMIT_ERROR  # noqa: E402
 from agentic_cli.workflow.agents.policy import AgentLimits  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     RunControlMiddleware,
@@ -81,6 +82,29 @@ async def test_the_roots_calls_are_left_alone():
         return answer
 
     assert await middleware.awrap_model_call("the request", handler) is answer
+
+
+REF = RunRef(agent="researcher", instance="researcher-1", run="researcher-1#1",
+             parent_run=None, depth=1)
+USAGE = {"input_tokens": 90, "output_tokens": 20, "total_tokens": 110}
+
+
+@pytest.mark.parametrize("calls", [True, False])
+async def test_an_answer_past_the_token_limit_is_the_last_only_when_it_would_go_on(calls):
+    control = RunControl(REF, AgentLimits(max_tokens=100))
+    middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
+    answer = AIMessage("Found it.", tool_calls=[CALL] if calls else [], usage_metadata=USAGE)
+
+    async def handler(request):
+        return answer
+
+    kept = await middleware.awrap_model_call("the request", handler)
+
+    if calls:
+        assert control.cancelled == ("limit", TOKEN_LIMIT_ERROR)
+        assert (kept.content, kept.tool_calls) == ("Found it.", [])
+    else:
+        assert (control.cancelled, kept) == (None, answer)
 
 
 async def test_the_messages_steered_since_the_last_call_join_the_runs_state():

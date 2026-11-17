@@ -249,6 +249,20 @@ class TestTheTokenLimit:
 
         assert made.cancelled is None
 
+    async def test_an_answer_past_it_that_makes_no_call_ends_the_run_as_it_would(self):
+        made = control(max_tokens=100)
+        task, _ = await a_run(made)
+
+        made.used(60, 20)
+        made.used(30, 10, calls=False)
+
+        # It is the run's last answer anyway: its result, whole.
+        assert (made.cancelled, made.final_call) == (None, False)
+        # Counted all the same: an answer past it that would go on is the last.
+        made.used(1, 1)
+        assert (made.cancelled, made.final_call) == (("limit", TOKEN_LIMIT_ERROR), True)
+        task.cancel()
+
 
 class TestSteering:
     def test_messages_are_taken_oldest_first_once(self):

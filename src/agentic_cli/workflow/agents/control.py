@@ -16,11 +16,13 @@ the run's own task, and hands it to the backend's hook as
 - The limits checked at the run's model calls: before each, ``model_call``
   counts it and says whether it is the last allowed (``max_model_calls``),
   whose request ends with ``STEP_LIMIT_NOTE``; after each, ``used`` counts
-  its tokens, and past ``max_tokens`` the run is cancelled by its limit at
-  that answer. On the call that is the run's last (``final_call``) the
-  backend drops the answer's tool calls, so the run ends with that answer:
-  no call past a limit is made, and nothing the model asked for runs after
-  it.
+  its tokens, and an answer past ``max_tokens`` that asks for tools (the
+  run would go on) has the run cancelled by its limit at that answer; one
+  that asks for none ends the run as it would, its result. On the call that
+  is the run's last (``final_call``) the backend drops the answer's tool
+  calls, so the run ends with that answer: no call past a limit is made,
+  and nothing the model asked for runs after it. A model that reports no
+  usage is not limited by tokens.
 - ``steer(message)`` gives the run a message, which its next model call
   (``take_steering``) adds after its last message, as a user's.
 
@@ -161,18 +163,22 @@ class RunControl:
         self._final = self.at_step_limit
         return self._final
 
-    def used(self, input_tokens: int, output_tokens: int) -> None:
+    def used(self, input_tokens: int, output_tokens: int, *, calls: bool = True) -> None:
         """Count what one of the run's model calls used, as ``workflow/usage.py`` counts it.
 
-        Past ``max_tokens`` the run is cancelled by its limit at this answer:
-        ``cancelled`` is set and the answer is the run's last
-        (``final_call``), so it ends with it rather than losing it.
+        Past ``max_tokens``, an answer that makes tool calls (``calls``: the
+        run would go on past it) is the run's last, cancelled by its limit:
+        ``cancelled`` is set and the call is the run's last
+        (``final_call``), so it ends with that answer rather than losing it.
+        An answer that makes none ends the run anyway: it is its result,
+        whole, and nothing is cancelled. Its tokens are counted either way.
         """
         self._tokens += input_tokens + output_tokens
         limit = self.limits.max_tokens
-        if limit is not None and self._tokens > limit and self.cancelled is None:
-            self.cancelled = (LIMIT, TOKEN_LIMIT_ERROR)
-            self._final = True
+        if limit is None or self._tokens <= limit or self.cancelled is not None or not calls:
+            return
+        self.cancelled = (LIMIT, TOKEN_LIMIT_ERROR)
+        self._final = True
 
     @property
     def at_step_limit(self) -> bool:

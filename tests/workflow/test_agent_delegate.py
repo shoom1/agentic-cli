@@ -919,6 +919,21 @@ class TestTheLimitsAtModelCalls:
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
 
+    async def test_a_finishing_answer_over_its_tokens_completes_it_whole(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.used(80, 20)
+            run.control.used(90, 30, calls=False)
+            return RunAnswer(text="Found it.")
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_tokens=150))
+        result, events = await delegated(delegations(hook, policy=policy), request())
+
+        assert result.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Found it.", "error": None,
+        }
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_COMPLETED)]
+
 
 # -- the runs one turn may start ------------------------------------------------------
 

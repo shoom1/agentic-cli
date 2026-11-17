@@ -2719,8 +2719,10 @@ class TestTheStepLimit:
 
 
 class TestTheTokenLimit:
-    """Spec 5.4: the run's input plus output tokens, checked after each model
-    call; past them the run ends at that answer, cancelled by its limit."""
+    """A run's input plus output tokens, checked after each model call: an
+    answer past them that asks for tools is the run's last, cancelled by its
+    limit, its calls dropped; one that asks for none ends the run as it
+    would, its result whole."""
 
     async def test_past_it_the_run_ends_at_that_answer_cancelled(self, make_crew):
         crew = make_crew(
@@ -2743,6 +2745,27 @@ class TestTheTokenLimit:
             "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
             "error": TOKEN_LIMIT_ERROR, "cancelled_by": "limit",
         }
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (140, 40, 2)
+
+    async def test_a_finishing_answer_past_it_completes_the_run_whole(self, make_crew):
+        crew = make_crew(
+            limited(max_tokens=150),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking.",
+                              usage=(60, 20)),
+                        says("X is 42.", usage=(80, 20))],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by, record.error) == (RUN_COMPLETED, None, None)
+        assert [e for e in events if e.type is EventType.ERROR] == []
         used = crew.ledger().totals(run="researcher-1#1")
         assert (used.input, used.output, used.calls) == (140, 40, 2)
 

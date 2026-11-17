@@ -119,6 +119,21 @@ class TestThePlugin:
         assert control.cancelled == ("limit", TOKEN_LIMIT_ERROR)
         assert answer.content == model(text("Found it."))
 
+    async def test_a_finishing_answer_past_the_token_limit_is_left_as_it_is(self):
+        control = RunControl(REF, AgentLimits(max_tokens=100))
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+        usage = types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=90, candidates_token_count=20
+        )
+        content = model(text("Found it."))
+        answer = LlmResponse(content=content, usage_metadata=usage)
+
+        await plugin.before_model_callback(callback_context=None, llm_request=LlmRequest())
+        await plugin.after_model_callback(callback_context=None, llm_response=answer)
+
+        assert (control.cancelled, control.final_call) == (None, False)
+        assert answer.content is content
+
     async def test_a_partial_answer_counts_nothing(self):
         control = RunControl(REF, AgentLimits(max_tokens=1))
         plugin = RunControlPlugin(lambda: control, "anthropic")

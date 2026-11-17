@@ -912,10 +912,13 @@ class RunControlMiddleware(AgentMiddleware):
       Claude refuses a request whose messages hold tool calls or results
       when it defines no tools, and no call that answer makes is run (below);
     - after each, what it used (``workflow/usage.py::langchain_tokens``) goes
-      to ``RunControl.used``;
+      to ``RunControl.used``, with whether the answer makes tool calls: one
+      past the token limit that makes none is the run's result, whole. A
+      model that reports no usage counts none, so it is not limited by
+      tokens;
     - on the run's last call (``RunControl.final_call``: its step limit's,
-      or one past its token limit) the answer's tool calls are dropped
-      (``without_calls``), so the agent ends with that answer.
+      or one past its token limit that makes calls) the answer's tool calls
+      are dropped (``without_calls``), so the agent ends with that answer.
 
     The summarization inside it counts the note; the outcome middleware
     outside it reads an answer whose calls were dropped as the run's final
@@ -954,7 +957,10 @@ class RunControlMiddleware(AgentMiddleware):
         response = await handler(request)
         for answer in _answers(response):
             tokens = langchain_tokens(answer.usage_metadata)
-            control.used(tokens.input, tokens.output)
+            control.used(
+                tokens.input, tokens.output,
+                calls=bool(answer.tool_calls or answer.invalid_tool_calls),
+            )
         if control.final_call:
             response = _mapped(response, without_calls)
         return response

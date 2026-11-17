@@ -22,9 +22,13 @@ for the run in progress (``get_active_run``: the run's own task,
   request whose messages hold tool calls or results when it defines no
   tools, and no call that answer makes is run (below);
 - after each, what it used (``workflow/usage.py::adk_tokens``, by its
-  model's provider kind) goes to ``RunControl.used``;
+  model's provider kind) goes to ``RunControl.used``, with whether the
+  answer makes function calls: one past the token limit that makes none
+  is the run's result, whole. A model that reports no usage is not limited
+  by tokens;
 - on the run's last call (``RunControl.final_call``: its step limit's, or
-  one past its token limit) the answer's function calls are dropped, so ADK
+  one past its token limit that makes calls) the answer's function calls
+  are dropped, so ADK
   runs none and the run ends with that answer; an answer that was calls
   alone keeps an empty text, which ADK takes as the run's last answer
   (``MODEL_RETURNED_NO_CONTENT``, no failure for a run).
@@ -107,7 +111,7 @@ class RunControlPlugin(BasePlugin):
             return None
         if llm_response.usage_metadata is not None:
             tokens = adk_tokens(llm_response.usage_metadata, self._kind)
-            control.used(tokens.input, tokens.output)
+            control.used(tokens.input, tokens.output, calls=_calls(llm_response))
         if control.final_call:
             drop_calls(llm_response)
         return None
@@ -167,6 +171,12 @@ def with_note(contents: list[types.Content], note: str) -> list[types.Content]:
         last = contents[-1]
         return [*contents[:-1], last.model_copy(update={"parts": [*(last.parts or []), text]})]
     return [*contents, types.Content(role="user", parts=[text])]
+
+
+def _calls(llm_response: Any) -> bool:
+    """Whether ``llm_response`` makes function calls: the run would go on past it."""
+    content = llm_response.content
+    return content is not None and any(part.function_call for part in content.parts or ())
 
 
 def drop_calls(llm_response: Any) -> None:
