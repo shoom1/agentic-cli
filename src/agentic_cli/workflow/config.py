@@ -4,10 +4,20 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Callable, Any, TYPE_CHECKING
 
+from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
+from agentic_cli.workflow.agents.policy import AgentLimits
+
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.model_settings import ModelSettings
     from agentic_cli.workflow.mcp import MCPServerConfig
+
+
+#: The brief fields a delegation must fill unless an agent asks for more.
+_DEFAULT_BRIEF_REQUIRED = ("objective",)
+
+#: What ``brief_required`` may name: the title, or a brief field.
+_BRIEF_NAMES = ("title", *BRIEF_FIELDS)
 
 
 @dataclass
@@ -50,6 +60,16 @@ class AgentConfig:
             replies to the user. True only on sub-agents, and in 0.7.0 only
             on the root's own sub-agents without sub-agents of their own
             (``validate_agent_graph`` checks it).
+        brief_required: The brief fields a delegation to this agent must
+            fill (``workflow/agents/brief.py``: ``objective``,
+            ``deliverable``, ``constraints``, ``known``, ``done_when``, or
+            ``title``); a brief always needs its title and its objective,
+            so the default asks for nothing more. Only on sub-agents: the
+            root is never delegated to.
+        limits: This agent's own run limits (``AgentLimits``), over the
+            policy's (``SubAgentPolicy.limits``) field by field: a field
+            left None takes the policy's. None (the default) takes the
+            policy's as they are. Only on sub-agents.
     """
 
     name: str
@@ -63,6 +83,8 @@ class AgentConfig:
     skills: list[str] = field(default_factory=list)
     include_state_tools: bool = True
     inherit_context: bool = False
+    brief_required: tuple[str, ...] = _DEFAULT_BRIEF_REQUIRED
+    limits: AgentLimits | None = None
 
     def get_prompt(self, settings: "BaseSettings | None" = None) -> str:
         """Get the prompt string, calling the factory if the prompt is callable.
@@ -193,7 +215,12 @@ def validate_agent_graph(
         the root's own sub-agents. In 0.7.0 a forked Deep Agents coordinator
         is told that delegating will be refused, which is false for ours, so
         a real model might never delegate; and below another sub-agent ADK
-        would show it the main agent's whole conversation.
+        would show it the main agent's whole conversation;
+    11. each agent's ``brief_required`` is a tuple (or list) of brief field
+        names: ``title``, or one of ``BRIEF_FIELDS``;
+    12. each agent's ``limits`` is None or an ``AgentLimits``;
+    13. the root sets neither ``brief_required`` (beyond its default, the
+        objective) nor ``limits``: it is never delegated to.
 
     Args:
         configs: The declared agents.
@@ -268,6 +295,7 @@ def validate_agent_graph(
             "the extra root(s) to a coordinator's sub_agents."
         )
     _check_inherit_context(config_map, roots[0])
+    _check_delegation_fields(config_map, roots[0])
     return AgentGraph(config_map=config_map, build_order=order, root_name=roots[0])
 
 
@@ -327,6 +355,58 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
             f"agent's ({root!r}) own sub-agents. Leave it False, or make it a "
             f"sub-agent of {root!r}."
         )
+
+
+def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> None:
+    """Each agent's ``brief_required`` and ``limits`` are what they say, and the root sets neither.
+
+    Raises:
+        AgentGraphError: Naming the agent(s), the value and what to change.
+    """
+    unknown = [
+        f"{name!r} ({config.brief_required!r})"
+        for name, config in config_map.items()
+        if not _names_brief_fields(config.brief_required)
+    ]
+    if unknown:
+        raise AgentGraphError(
+            f"brief_required must be a tuple of brief field names "
+            f"({', '.join(_BRIEF_NAMES)}): {', '.join(unknown)}."
+        )
+
+    not_limits = [
+        f"{name!r} ({config.limits!r})"
+        for name, config in config_map.items()
+        if config.limits is not None and not isinstance(config.limits, AgentLimits)
+    ]
+    if not_limits:
+        raise AgentGraphError(
+            f"limits must be an AgentLimits or None: {', '.join(not_limits)}. "
+            "Write limits=AgentLimits(max_model_calls=..., timeout=..., max_tokens=...)."
+        )
+
+    config = config_map[root]
+    on_root = [
+        name
+        for name, is_set in (
+            ("brief_required", tuple(config.brief_required) != _DEFAULT_BRIEF_REQUIRED),
+            ("limits", config.limits is not None),
+        )
+        if is_set
+    ]
+    if on_root:
+        raise AgentGraphError(
+            f"Agent {root!r} is the root agent, but sets {' and '.join(on_root)}: "
+            "they apply to a delegation, and the root is never delegated to. "
+            "Remove them from the root."
+        )
+
+
+def _names_brief_fields(value: object) -> bool:
+    """Whether ``value`` is a tuple or list of brief field names (a string is neither)."""
+    return isinstance(value, (tuple, list)) and all(
+        isinstance(name, str) and name in _BRIEF_NAMES for name in value
+    )
 
 
 def _topological_order(config_map: dict[str, AgentConfig]) -> tuple[str, ...]:

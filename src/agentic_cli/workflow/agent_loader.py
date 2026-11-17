@@ -20,6 +20,8 @@ Example YAML::
         instruction_file: prompts/researcher.md
         tools: [web_search]
         inherit_context: false  # true: also see the coordinator's conversation
+        brief_required: [objective, deliverable]  # what a delegation must fill
+        limits: {max_model_calls: 30, timeout: 600}  # over the policy's, per field
 
 A top-level bare list of agents (without the ``agents:`` key) is also accepted.
 Tool entries stay as strings here and are resolved to callables when the
@@ -32,11 +34,39 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+from agentic_cli.workflow.agents.policy import AgentLimits
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.mcp import MCPServerConfig
 from agentic_cli.workflow.model_settings import ModelSettings
+
+
+class LimitsSpec(BaseModel):
+    """YAML schema for an agent's ``limits`` (mapped to ``AgentLimits``).
+
+    Strict: a value is read as the YAML wrote it, so ``true`` is no count and
+    ``'30'`` no number. ``AgentLimits`` refuses a limit that is not positive.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    max_model_calls: int | None = None
+    timeout: float | None = None
+    max_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def _are_limits(self) -> "LimitsSpec":
+        self.to_limits()
+        return self
+
+    def to_limits(self) -> AgentLimits:
+        """These limits as an ``AgentLimits``."""
+        return AgentLimits(
+            max_model_calls=self.max_model_calls,
+            timeout=self.timeout,
+            max_tokens=self.max_tokens,
+        )
 
 
 class AgentSpec(BaseModel):
@@ -60,6 +90,9 @@ class AgentSpec(BaseModel):
     sub_agents: list[str] = Field(default_factory=list)
     include_state_tools: bool = True
     inherit_context: bool = False
+    # None: AgentConfig's own default.
+    brief_required: list[str] | None = None
+    limits: LimitsSpec | None = None
 
 
 class AgentsFile(BaseModel):
@@ -131,6 +164,11 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
 
     configs: list[AgentConfig] = []
     for spec in spec_file.agents:
+        delegation: dict[str, Any] = {}
+        if spec.brief_required is not None:
+            delegation["brief_required"] = tuple(spec.brief_required)
+        if spec.limits is not None:
+            delegation["limits"] = spec.limits.to_limits()
         configs.append(
             AgentConfig(
                 name=spec.name,
@@ -144,6 +182,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 skills=list(spec.skills),
                 include_state_tools=spec.include_state_tools,
                 inherit_context=spec.inherit_context,
+                **delegation,
             )
         )
     return configs
