@@ -100,6 +100,46 @@ def test_a_handler_the_app_had_still_runs(tmp_path):
     assert status == 3
 
 
+def test_an_ignored_signal_stays_ignored(tmp_path):
+    """Under ``nohup``, or in an app that ignores SIGHUP, a hangup changes
+    nothing: no handler is installed for it, the app goes on, and so does
+    its run (whose timeout still applies)."""
+    pidfile = tmp_path / "run.pid"
+    before = "import signal; signal.signal(signal.SIGHUP, signal.SIG_IGN)"
+    job = subprocess.Popen([sys.executable, "-c", _app(pidfile, before)], process_group=0)
+    run = None
+    try:
+        deadline = time.monotonic() + 20
+        while not (pidfile.exists() and pidfile.read_text()):
+            assert time.monotonic() < deadline, "the run never started"
+            assert job.poll() is None, f"the app ended first: {job.returncode}"
+            time.sleep(0.05)
+        run = int(pidfile.read_text())
+        os.killpg(job.pid, signal.SIGHUP)
+        time.sleep(1)
+        assert job.poll() is None, "the app died of a signal it ignores"
+        assert _alive(run), "the hangup killed the run of an app that ignores it"
+    finally:
+        job.kill()
+        job.wait(10)
+        if run is not None and _alive(run):
+            os.kill(run, signal.SIGKILL)
+
+
+def test_the_signal_still_does_what_it_did_when_killing_the_runs_fails():
+    """The chain (or the default's re-raise) runs whatever killing the runs
+    does."""
+    chained: list[int] = []
+
+    def broken():
+        raise RuntimeError("no runs today")
+
+    handler = app_module._killing_runs_first(broken, lambda signum, frame: chained.append(signum))
+    with pytest.raises(RuntimeError):
+        handler(signal.SIGTERM, None)
+    assert chained == [signal.SIGTERM]
+
+
 def test_run_installs_the_handlers_first(tmp_path, monkeypatch):
     (tmp_path / "home").mkdir()
     monkeypatch.chdir(tmp_path)

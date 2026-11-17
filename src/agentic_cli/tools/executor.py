@@ -92,7 +92,7 @@ def _run_command(
     """``subprocess.run(command, input=input, capture_output=True, text=True,
     timeout=timeout)``, in a session of its own, so that a timeout, a
     KeyboardInterrupt while it waits (in a main-thread caller: the CLI runs
-    it on a worker thread, where none reaches it), or the end of the app
+    it on a worker thread, where none reaches it), or ``_kill_live_runs``
     kills every process the command started, and a run that ends on its own
     takes with it what it left in its process group.
 
@@ -106,9 +106,10 @@ def _run_command(
     it execs the code, but an exec into another AppArmor label clears it
     (``security/apparmor/lsm.c::apparmor_bprm_committing_creds``; Ubuntu's
     ``bwrap-userns-restrict`` profile execs the code so, with ``pix``), so it
-    does not die with bwrap. Code that calls ``setsid()`` and forks again
-    escapes outside a pid namespace (on macOS, and on Linux without the
-    sandbox): the walk goes one level deep.
+    does not die with bwrap. Outside a pid namespace, code that calls
+    ``setsid()`` can outlive the run: on macOS, which has no ``/proc`` walk,
+    a fork that calls it once; on Linux the walk only catches a direct child
+    of a live group member.
 
     Raises:
         subprocess.TimeoutExpired: The command was killed at ``timeout``.
@@ -125,9 +126,9 @@ def _run_command(
         cwd=cwd,
         start_new_session=own_session,
     ) as proc:
-        with _live_runs_lock:
-            _live_runs.add(proc)
         try:
+            with _live_runs_lock:
+                _live_runs.add(proc)
             try:
                 stdout, stderr = proc.communicate(input, timeout=timeout)
             except BaseException:
@@ -149,7 +150,7 @@ def _kill_live_runs() -> None:
     """Kill every run still going, as a timeout does. Registered with
     ``atexit``; the CLI also calls it on SIGHUP and SIGTERM."""
     with _live_runs_lock:
-        runs = list(_live_runs)
+        runs = [proc for proc in _live_runs if proc.returncode is None]  # not reaped
     for proc in runs:
         _kill_run(proc, _own_sessions())
 
@@ -180,20 +181,24 @@ def _kill_session(leader: int) -> None:
     or reap a child, so a child the walk finds keeps its pid until it is
     killed. A SIGKILL from the parent namespace is delivered to a pid
     namespace's init, and its death ends every process in it; it also ends
-    stopped processes. The walk is best effort: if it fails, the group is
-    killed all the same."""
+    stopped processes. The walk is best effort: if it fails, or anything
+    interrupts it, the group is killed all the same."""
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(leader, signal.SIGSTOP)
     try:
-        children = _children_out_of_group(leader)
-    except Exception:  # noqa: BLE001 - the group is killed whatever the walk does
-        logger.warning("python_executor.kill_walk_failed", exc_info=True)
-        children = []
-    for pid in children:
+        try:
+            children = _children_out_of_group(leader)
+        except Exception:  # noqa: BLE001 - the group is killed whatever the walk does
+            logger.warning("python_executor.kill_walk_failed", exc_info=True)
+            children = []
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+    finally:
+        # Whatever interrupts the walk: a group left stopped, orphaned in a
+        # session of its own, would never be continued.
         with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(pid, signal.SIGKILL)
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(leader, signal.SIGKILL)
+            os.killpg(leader, signal.SIGKILL)
 
 
 def _children_out_of_group(group: int) -> list[int]:
@@ -267,12 +272,13 @@ class SafePythonExecutor:
     Every run also has a timeout, an address-space limit (``RLIMIT_AS``,
     which macOS does not enforce), the sentinel output protocol, and an
     environment without the provider keys. The timeout kills every process
-    the run started, and so does the end of the app (``_run_command``): an
-    exit, through ``atexit``, and, where the CLI runs (``BaseCLIApp.run``),
-    a hangup or SIGTERM; a library user who never runs it gets the ``atexit``
-    cleanup alone. Outside a pid namespace (on macOS, and on Linux without
-    the sandbox) code that calls ``setsid()`` and forks again can outlive
-    them.
+    the run started (``_run_command``), and so do, where the CLI runs
+    (``BaseCLIApp.run``), a hangup or SIGTERM the app does not ignore. A
+    normal exit waits for a call still running on the tool thread pool, as
+    before (to its timeout); ``atexit`` kills what is left, a run on a daemon
+    thread, which is all a library user who never runs the CLI gets. Outside a pid namespace, code that calls ``setsid()``
+    can outlive them (on Linux the walk only catches a direct child of a
+    live group member).
     """
 
     # Modules that expose file, network, or pickle I/O through public,

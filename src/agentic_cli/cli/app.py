@@ -175,8 +175,10 @@ def _stop_runs_on_signals() -> None:
     reach it. Each handler kills the live runs, then does what the signal did
     before: it calls the handler it replaced, or, where that was the default,
     restores the default and sends the signal again, so the app still dies
-    of it. Installed once per process, from the main thread (where a handler
-    can be set); SIGINT is left alone.
+    of it. A signal the app ignores (under ``nohup``) gets no handler: the
+    app goes on, and so do its runs, each to its timeout. Installed once per
+    process, from the main thread (where a handler can be set); SIGINT is
+    left alone.
     """
     global _runs_stop_on_signals
     if _runs_stop_on_signals or threading.current_thread() is not threading.main_thread():
@@ -185,23 +187,28 @@ def _stop_runs_on_signals() -> None:
 
     for name in ("SIGHUP", "SIGTERM"):
         signum = getattr(signal, name, None)
-        if signum is not None:
-            signal.signal(signum, _killing_runs_first(_kill_live_runs, signal.getsignal(signum)))
+        if signum is None:
+            continue
+        previous = signal.getsignal(signum)
+        if previous != signal.SIG_IGN:
+            signal.signal(signum, _killing_runs_first(_kill_live_runs, previous))
     _runs_stop_on_signals = True
 
 
 def _killing_runs_first(kill_runs, previous):
-    """A handler that calls ``kill_runs``, then does what ``previous`` (a
-    handler, ``SIG_IGN``, ``SIG_DFL``, or None for one set outside Python)
+    """A handler that calls ``kill_runs``, then, whatever that did, does what
+    ``previous`` (a handler, ``SIG_DFL``, or None for one set outside Python)
     did."""
 
     def handler(signum, frame):
-        kill_runs()
-        if callable(previous):
-            previous(signum, frame)
-        elif previous != signal.SIG_IGN:
-            signal.signal(signum, signal.SIG_DFL)
-            os.kill(os.getpid(), signum)
+        try:
+            kill_runs()
+        finally:
+            if callable(previous):
+                previous(signum, frame)
+            else:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
 
     return handler
 

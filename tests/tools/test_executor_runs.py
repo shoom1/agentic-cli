@@ -84,6 +84,40 @@ class TestKillingTheRun:
                                   shell=False, input="", timeout=1)
         assert time.monotonic() - start < 4
 
+    def test_a_group_stopped_for_the_walk_is_killed_whatever_interrupts_it(
+        self, monkeypatch, tmp_path
+    ):
+        """Interrupted between its stop and its kill (a KeyboardInterrupt, a
+        second signal), the group is still killed: stopped, in a session of
+        its own, nothing would ever continue it."""
+        pidfile = tmp_path / "forked.pid"
+        command = (
+            f"(exec {shlex.join(_sleeper(pidfile))}) </dev/null >/dev/null 2>&1 & "
+            "exec sleep 30"
+        )
+
+        def interrupted(group):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(executor, "_children_out_of_group", interrupted)
+        thread_result: list = []
+
+        def run():
+            try:
+                executor._run_command(command, shell=True, input="", timeout=1)
+            except BaseException as e:  # noqa: BLE001 - recorded for the test
+                thread_result.append(e)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        forked = _wait_for_pid(pidfile)
+        worker.join(10)
+        assert isinstance(thread_result[0], KeyboardInterrupt)
+        dead = _dead_within(forked, 2)
+        if not dead:
+            os.kill(forked, signal.SIGKILL)
+        assert dead, f"{forked} was left stopped"
+
     def test_the_group_is_stopped_before_its_children_are_looked_for(self, monkeypatch):
         """Stopped, nothing in the group can fork, leave it, or reap a child
         whose pid the walk has read: the children found are still those."""
