@@ -584,9 +584,9 @@ class BaseWorkflowManager(ABC):
         """This manager's delegations (``workflow/agents/delegate.py``), made on first use.
 
         From the agent configs, the policy (``subagent_policy``) and the
-        backend's hook (``_run_agent``): each ``task`` call of a delegating
-        agent hands its brief to ``delegate``, which names, runs, ends and
-        records the run.
+        backend's hooks (``_run_agent``, ``_stored_instances``): each
+        ``task`` call of a delegating agent hands its brief to ``delegate``,
+        which names, runs, ends and records the run.
         """
         delegations = self.__dict__.get("_delegations_made")
         if delegations is None:
@@ -596,8 +596,21 @@ class BaseWorkflowManager(ABC):
                 types={config.name: config for config in self._agent_configs},
                 hook=self._run_agent,
                 ledgers=self._usage_ledgers,
+                stored=self._stored_instances,
             )
         return delegations
+
+    async def _stored_instances(self, conversation: SessionRef) -> Mapping[str, int]:
+        """How many instances of each agent type ``conversation``'s store keeps (a backend hook).
+
+        The highest stored instance number of each type, by type: what a
+        store holds of an earlier manager's runs (a restart, a switch of
+        backend or store), which this manager's numbering goes past
+        (``Delegations``, once per conversation). The base keeps no
+        sub-agent transcript, and so keeps none (Deep Agents: a sub-agent is
+        compiled without a checkpointer).
+        """
+        return {}
 
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).

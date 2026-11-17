@@ -9,8 +9,10 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
   a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
 - names the run (``AgentRuns.run_for``: its instance ``<type>-<n>`` and its run
-  ``<instance>#1``, under the caller's run) and reports its ``AGENT_RUN``
-  ``started``: the title, the call, the brief, who started it, ``blocking``;
+  ``<instance>#1``, under the caller's run; a conversation's first run is
+  numbered past the instances its store keeps, which ``stored`` says once
+  per conversation) and reports its ``AGENT_RUN`` ``started``: the title,
+  the call, the brief, who started it, ``blocking``;
 - runs it through the backend's hook (``BaseWorkflowManager._run_agent``) in
   an asyncio task of its own, in which the run is the active run
   (``get_active_run``) and no tool call is (``get_active_tool_call``): the
@@ -172,6 +174,9 @@ class Delegated:
 
 
 RunHook = Callable[[AgentRun], Awaitable[RunAnswer]]
+#: How many instances of each type a conversation's store already keeps, by
+#: type: the highest instance number (``BaseWorkflowManager._stored_instances``).
+StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
 
 
 class RunFailed(Exception):
@@ -201,6 +206,11 @@ class Delegations:
         hook: Runs one run (``BaseWorkflowManager._run_agent``).
         ledgers: The manager's usage ledgers: a run's end carries what it
             used, by model. None: an end carries no usage.
+        stored: How many instances of each type a conversation's store
+            already keeps (``BaseWorkflowManager._stored_instances``), asked
+            once per conversation, before its first run is named, so a
+            conversation an earlier manager ran is numbered past them. None:
+            every conversation is numbered from 1.
     """
 
     def __init__(
@@ -211,12 +221,18 @@ class Delegations:
         types: Mapping[str, AgentConfig],
         hook: RunHook,
         ledgers: UsageLedgers | None = None,
+        stored: StoredInstances | None = None,
     ) -> None:
         self._runs = runs
         self.policy = policy
         self._types = dict(types)
         self._hook = hook
         self._ledgers = ledgers
+        self._stored = stored
+        # The conversations whose stored instances were read, and the lock a
+        # conversation's parallel first runs wait at while one reads them.
+        self._numbered: set[SessionRef] = set()
+        self._numbering = asyncio.Lock()
 
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
         """The types ``agent`` may start, by name, in its ``sub_agents``' order."""
@@ -236,6 +252,7 @@ class Delegations:
         except BriefError as error:
             return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
         conversation = get_active_turn()
+        await self._number_past_stored(conversation)
         ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
         self._emit(WorkflowEvent.agent_run(
             ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
@@ -281,6 +298,31 @@ class Delegations:
                 self._report(warning)
             result = envelope(ref, RUN_COMPLETED, result=answer.text, partial=partial)
         return Delegated(result=result, state=dict(answer.state), run=ref)
+
+    async def _number_past_stored(self, conversation: SessionRef | None) -> None:
+        """Number ``conversation``'s instances past the ones its store keeps.
+
+        Asked once per conversation (``stored``), before its first run is
+        named; its parallel first runs wait for that one ask. A store that
+        cannot be read is warned of in the log and asked again at the next
+        run, and this one is numbered from what the manager knows (a stored
+        instance it meets is its backend's to refuse); a cancel leaves it to
+        be asked again too.
+        """
+        if self._stored is None or conversation is None or conversation in self._numbered:
+            return
+        async with self._numbering:
+            if conversation in self._numbered:
+                return
+            try:
+                counts = await self._stored(conversation)
+            except Exception as error:  # noqa: BLE001 - the run goes on: the next one asks again
+                logger.warning("subagent_instances_unread", session_id=conversation.session_id,
+                               error=truncate(str(error), _MAX_LOGGED_ERROR))
+                logger.debug("subagent_instances_unread", exc_info=error)
+                return
+            self._runs.number_from(conversation, counts)
+            self._numbered.add(conversation)
 
     async def _in_run(
         self,
