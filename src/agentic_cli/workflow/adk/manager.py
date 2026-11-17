@@ -1850,8 +1850,19 @@ def _tool_names(tools: list[Any]) -> set[str]:
 
 
 def _changed(state: "Mapping[str, Any]", start: "Mapping[str, Any]") -> dict[str, Any]:
-    """The shared keys ``state`` holds that differ from what a run started from."""
-    return {
-        key: state[key] for key in SHARED_KEYS
-        if key in state and (key not in start or state[key] != start[key])
-    }
+    """The shared keys ``state`` holds that differ from what a run started from.
+
+    Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
+    private, copied, as the Deep Agents manager's ``_changed`` copies it): a
+    key returned exactly as it was received is no change; ``is True`` takes
+    an ambiguous comparison (an array's) as one.
+    """
+    changed: dict[str, Any] = {}
+    for key in SHARED_KEYS:
+        if key not in state:
+            continue
+        value = state[key]
+        if key in start and (value is start[key] or (value == start[key]) is True):
+            continue
+        changed[key] = value
+    return changed
