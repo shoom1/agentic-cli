@@ -33,6 +33,7 @@ from agentic_cli.logging import Loggers, bind_context
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
 
 logger = Loggers.workflow()
 
@@ -114,6 +115,8 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
         model: str | None = None,
         checkpointer: Literal["memory", "postgres", "sqlite"] | None = "memory",
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        *,
+        subagents: SubAgentPolicy | None = None,
     ) -> None:
         """Initialize the LangGraph workflow manager.
 
@@ -128,6 +131,9 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
                          "memory" for in-memory, "postgres" for PostgreSQL,
                          "sqlite" for SQLite. None to disable checkpointing.
             on_event: Optional hook to transform/filter events before yielding.
+            subagents: Taken as the other backends take it, and kept
+                (``subagent_policy``); LangGraph's own delegation does not
+                read it.
         """
         # First, so a manager that fails to build still says it is deprecated;
         # blamed on the caller, whose module Python's filters then judge.
@@ -138,6 +144,7 @@ class LangGraphWorkflowManager(BaseWorkflowManager):
             app_name=app_name,
             model=model,
             on_event=on_event,
+            subagents=subagents,
         )
         # LangGraph's gate tracks no outside content: every memory write asks.
         self._outside_marks = OutsideContentMarks(always=LANGGRAPH_MARK)

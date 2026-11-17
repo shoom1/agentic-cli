@@ -12,6 +12,7 @@ from agentic_cli.workflow.agent_loader import (
     create_workflow_manager_from_yaml,
     load_agents_from_yaml,
 )
+from agentic_cli.workflow.agents.policy import AgentLimits
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 
 
@@ -103,6 +104,8 @@ class TestLoadAgentsFromYaml:
         assert cfg.model_settings is None
         assert cfg.include_state_tools is True
         assert cfg.inherit_context is False
+        assert cfg.brief_required == ("objective",)
+        assert cfg.limits is None
 
     def test_a_sub_agents_inherit_context(self, tmp_path):
         path = _write(
@@ -147,6 +150,72 @@ class TestLoadAgentsFromYaml:
         message = str(exc.value)
         assert "agents.0.context" in message
         assert "Extra inputs are not permitted" in message
+
+    def test_a_sub_agents_brief_and_limits(self, tmp_path):
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [researcher]
+              - name: researcher
+                instruction: Find facts.
+                brief_required: [objective, deliverable]
+                limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}
+            """,
+        )
+        configs = {c.name: c for c in load_agents_from_yaml(path)}
+        assert configs["researcher"].brief_required == ("objective", "deliverable")
+        assert configs["researcher"].limits == AgentLimits(
+            max_model_calls=30, timeout=600, max_tokens=200_000
+        )
+        assert configs["coordinator"].brief_required == ("objective",)
+        assert configs["coordinator"].limits is None
+
+    def test_limits_may_name_some_of_their_fields(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    limits: {timeout: 90.5}\n"
+        )
+        assert load_agents_from_yaml(path)[0].limits == AgentLimits(timeout=90.5)
+
+    @pytest.mark.parametrize("limits, field, why", [
+        ("{max_model_calls: 0}", "max_model_calls", "must be a positive int"),
+        # Read as the YAML wrote them: true is no count, '5' no number.
+        ("{max_model_calls: true}", "max_model_calls", "valid integer"),
+        ("{max_model_calls: '5'}", "max_model_calls", "valid integer"),
+        ("{timeout: -1}", "timeout", "must be a positive number"),
+        ("{timeout: '30'}", "timeout", "valid number"),
+        ("{max_tokens: 1.5}", "max_tokens", "valid integer"),
+    ])
+    def test_a_limit_that_is_no_limit_is_rejected(self, tmp_path, limits, field, why):
+        path = _write(
+            tmp_path, f"agents:\n  - name: a\n    instruction: hi\n    limits: {limits}\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.limits" in message and field in message and why in message
+
+    def test_an_unknown_limit_is_rejected(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    limits: {steps: 5}\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.limits.steps" in message
+        assert "Extra inputs are not permitted" in message
+
+    def test_brief_required_is_a_list(self, tmp_path):
+        path = _write(
+            tmp_path,
+            "agents:\n  - name: a\n    instruction: hi\n    brief_required: deliverable\n",
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.brief_required" in message and "valid list" in message
 
     def test_missing_prompt_raises(self, tmp_path):
         path = _write(tmp_path, "agents:\n  - name: a\n")

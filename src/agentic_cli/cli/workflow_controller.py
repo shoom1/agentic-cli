@@ -18,6 +18,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, AsyncIterator
 
 from agentic_cli.logging import Loggers
+from agentic_cli.workflow.agents.policy import as_policy
 
 # Re-export the factory for backward compatibility
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings  # noqa: F401
@@ -27,6 +28,7 @@ from agentic_cli.workflow.settings import OrchestratorType
 if TYPE_CHECKING:
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
     from thinking_prompt import ThinkingPromptSession
@@ -145,13 +147,22 @@ class WorkflowController:
         self,
         agent_configs: list["AgentConfig"],
         settings: "BaseSettings",
+        *,
+        subagents: "SubAgentPolicy | None" = None,
     ) -> None:
         """Initialize the workflow controller.
 
         Args:
             agent_configs: List of agent configurations for the workflow
             settings: Application settings instance
+            subagents: The sub-agent policy every manager it builds gets
+                (the first start's, and each ``switch_backend``'s); None is
+                ``SubAgentPolicy()``.
+
+        Raises:
+            TypeError: ``subagents`` is neither a ``SubAgentPolicy`` nor None.
         """
+        self._subagents = as_policy(subagents)
         self._settings = settings
         self._agent_configs = agent_configs
         self._app_name = settings.app_name
@@ -170,6 +181,7 @@ class WorkflowController:
                 app_name=self._app_name,
                 orchestrator=self.backend,
                 session_store=self.store,
+                subagents=self._subagents,
             )
 
         self._create_fn = _create_workflow
@@ -696,6 +708,7 @@ class WorkflowController:
             app_name=self._app_name,
             orchestrator=backend,
             session_store=self.store,
+            subagents=self._subagents,
         )
         lend = getattr(old_workflow, "lend_services", None)
         loan = lend() if callable(lend) else None

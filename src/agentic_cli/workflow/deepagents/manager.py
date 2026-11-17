@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.sessions import SessionInfo, SessionRef
 
 logger = Loggers.workflow()
@@ -133,6 +134,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         app_name: str | None = None,
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        *,
+        subagents: SubAgentPolicy | None = None,
     ) -> None:
         """Initialize the workflow manager.
 
@@ -145,6 +148,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 or a model id (see ``BaseWorkflowManager``).
             on_event: Optional hook to transform or drop events before they
                 are yielded.
+            subagents: How the sub-agents run (``subagent_policy``); None is
+                ``SubAgentPolicy()`` (see ``BaseWorkflowManager``).
         """
         super().__init__(
             agent_configs=agent_configs,
@@ -152,6 +157,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             app_name=app_name,
             model=model,
             on_event=on_event,
+            subagents=subagents,
         )
 
         # The checkpointer, and what owns its connection and the session

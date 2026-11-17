@@ -49,6 +49,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
@@ -371,6 +372,11 @@ class BaseWorkflowManager(ABC):
     #: None outside one. A class default, as ``_keeping_store`` is.
     _services_closing: "list[asyncio.Future[None]] | None" = None
 
+    #: How this manager's sub-agents run (``subagent_policy``): the one
+    #: ``__init__`` was given. A class default, so a manager made without
+    #: ``__init__`` (a test harness's ``__new__``) has the default policy.
+    _subagent_policy: SubAgentPolicy = SubAgentPolicy()
+
     def __init__(
         self,
         agent_configs: list[AgentConfig],
@@ -378,6 +384,8 @@ class BaseWorkflowManager(ABC):
         app_name: str | None = None,
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
+        *,
+        subagents: SubAgentPolicy | None = None,
     ) -> None:
         """Initialize the workflow manager base.
 
@@ -399,9 +407,15 @@ class BaseWorkflowManager(ABC):
                 default-tier model in ``settings.models``, else of the first
                 provider with a key.
             on_event: Optional hook to transform/filter events before yielding.
+            subagents: How this manager's sub-agents run
+                (``subagent_policy``); None is ``SubAgentPolicy()``.
+
+        Raises:
+            TypeError: ``subagents`` is neither a ``SubAgentPolicy`` nor None.
         """
         from agentic_cli.config import get_settings
 
+        self._subagent_policy = as_policy(subagents)
         self._agent_configs = agent_configs
         self._settings = settings or get_settings()
         self._app_name = app_name or self._settings.app_name
@@ -513,6 +527,16 @@ class BaseWorkflowManager(ABC):
     def agent_configs(self) -> list[AgentConfig]:
         """Get the agent configurations."""
         return self._agent_configs
+
+    @property
+    def subagent_policy(self) -> SubAgentPolicy:
+        """How this manager's sub-agents run (provisional): the ``subagents=``
+        it was built with, ``SubAgentPolicy()`` without one.
+
+        Read-only: a manager keeps its policy for its life, a model switch
+        (``reinitialize``) included; another policy is another manager's.
+        """
+        return self._subagent_policy
 
     @property
     def agent_runs(self) -> AgentRuns:

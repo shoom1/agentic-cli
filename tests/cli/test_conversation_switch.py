@@ -415,7 +415,7 @@ class TestAPlaceChangeWhileTheWorkflowIsDown:
         built: list = []
 
         def create(agent_configs, settings, app_name=None, model=None, orchestrator=None,
-                   session_store=None):
+                   session_store=None, subagents=None):
             backend = orchestrator or getattr(settings.orchestrator, "value", settings.orchestrator)
             manager = cls.Manager(backend, fails(len(built), backend))
             manager.session_store = session_store  # the store it was built for

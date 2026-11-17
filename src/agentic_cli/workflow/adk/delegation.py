@@ -59,27 +59,13 @@ from google.adk.tools.agent_tool import _SingleTurnAgentTool
 from agentic_cli.logging import Loggers
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
+from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 
 if TYPE_CHECKING:
     from google.adk.agents import LlmAgent
 
 logger = Loggers.workflow()
-
-#: The end of an inheriting sub-agent's instruction: whose conversation it
-#: reads, and which message is its task (Deep Agents' ``_FORK_TASK_PREAMBLE``,
-#: told the way ADK shows that conversation). Sent as written, as the whole
-#: prompt is (``manager._as_written``).
-INHERITED_CONTEXT_NOTE = (
-    "You are a sub-agent: another agent has handed you a task. The conversation "
-    "before the task is that agent's, shown so you know what has been established: "
-    "the user's messages in it were addressed to that agent, not to you, and what "
-    "that agent did is quoted, its call handing you this task included. Do not "
-    "carry out those messages yourself or answer as that agent. Your task is the "
-    "request that follows the conversation: complete it directly, and use the "
-    "specific facts, figures and identifiers already established in the "
-    "conversation rather than answering generically."
-)
 
 
 def subagent_fields(config: AgentConfig) -> dict[str, Any]:

@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 
     from agentic_cli.models import Provider, ResolvedModel, RoleMap
     from agentic_cli.workflow.adk.build import ADKBuild
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.sessions import SessionRef
 
 
@@ -210,6 +211,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         model: str | None = None,
         on_event: Callable[[WorkflowEvent], WorkflowEvent | None] | None = None,
         adk_config_path: str | None = None,
+        *,
+        subagents: SubAgentPolicy | None = None,
     ) -> None:
         """Initialize the workflow manager.
 
@@ -230,6 +233,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 differs: the app runs as one built from configs
                 (``workflow/adk/build.py``). Library-only for now: no
                 ``BaseCLIApp`` starts such an app.
+            subagents: How the sub-agents run (``subagent_policy``); None is
+                ``SubAgentPolicy()`` (see ``BaseWorkflowManager``).
         """
         if adk_config_path and agent_configs:
             # ADK builds the agents from the YAML: configs beside it would be
@@ -246,6 +251,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app_name=app_name,
             model=model,
             on_event=on_event,
+            subagents=subagents,
         )
         _check_app_name(self.app_name)
         self._adk_config_path = adk_config_path

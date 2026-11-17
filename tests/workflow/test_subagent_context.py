@@ -46,9 +46,10 @@ class TestTheField:
     def test_it_is_false_by_default(self):
         assert AgentConfig(name="a", prompt="p").inherit_context is False
 
-    def test_it_is_the_last_field(self):
+    def test_it_follows_the_fields_of_0_6(self):
         # Appended, so a positional AgentConfig(...) written for 0.6 still binds.
-        assert [f.name for f in dataclasses.fields(AgentConfig)][-1] == "inherit_context"
+        names = [f.name for f in dataclasses.fields(AgentConfig)]
+        assert names.index("inherit_context") == names.index("include_state_tools") + 1
 
     def test_the_old_names_are_gone(self):
         # Never released, so no alias: a config written against a develop
