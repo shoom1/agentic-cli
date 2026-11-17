@@ -559,6 +559,46 @@ the start of the entry's title.
 
 ### Added
 
+- **`SubAgentPolicy` and `AgentLimits`: an app's sub-agent policy and a
+  run's limits** (`agentic_cli.workflow`, and `agentic_cli.workflow.agents`
+  with `DEFAULT_LIMITS`). Frozen dataclasses. `SubAgentPolicy` holds an
+  app's numbers for its sub-agents: `max_active` (4, the runs working at
+  once in a conversation, at any depth), `max_runs_per_turn` (20, the runs
+  one turn may start) and `limits`, every run's `AgentLimits`
+  (`DEFAULT_LIMITS`, `AgentLimits(max_model_calls=100)`, unless the app sets
+  its own). `AgentLimits` holds a run's `max_model_calls`, `timeout`
+  (seconds) and `max_tokens` (input plus output), each None for no limit of
+  its own, and `over(base)` lays one over another field by field: a field
+  left None takes the base's, so an agent type's limits never lift the
+  policy's. Construction refuses, with a `ValueError` naming the field, a
+  limit that is not a positive int (a timeout: a positive, finite number;
+  `True` and `False` are no numbers here) and a policy whose `limits` is
+  not an `AgentLimits`.
+- **`AgentConfig.brief_required` and `AgentConfig.limits`.**
+  `brief_required` (default `("objective",)`) names the brief fields the
+  agent asks a delegation to fill: `objective`, `deliverable`,
+  `constraints`, `known`, `done_when` or `title` (a brief always has its
+  title and its objective); `limits` (default None) is the agent's own
+  `AgentLimits`, over the policy's field by field. Both come after
+  `inherit_context`, so a positional `AgentConfig(...)` still binds, and
+  the framework's agent YAML takes them: `brief_required: [objective,
+  deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens:
+  200000}` (each limit read as written, so `true` or `'30'` is refused, as
+  is a key that is no limit). `validate_agent_graph` raises
+  `AgentGraphError` for a `brief_required` that is not a tuple or list of
+  those names, a `limits` that is not an `AgentLimits`, and either set on
+  the root, which is never delegated to.
+- **`subagents=`: the sub-agent policy, given to the app, a manager or the
+  factory.** `BaseCLIApp`, `BaseWorkflowManager` (the ADK, Deep Agents and
+  LangGraph managers pass it on) and `create_workflow_manager_from_settings`
+  take `subagents=` (keyword; a `SubAgentPolicy`, None for
+  `SubAgentPolicy()`). A manager keeps it for its life, a model switch
+  included: `BaseWorkflowManager.subagent_policy` (read-only, provisional).
+  Every manager an app builds gets the app's (`WorkflowController(subagents=)`),
+  a conversation's on another backend included. Anything else is a
+  `TypeError` where it is passed: the factory's before any backend is
+  imported, the app's before it builds anything. LangGraph's delegation
+  does not read it.
 - **A sub-agent's questions and permission prompts name it, on both
   backends.** `UserInputRequest.run` is the sub-agent run that asks (a
   `RunRef`; None for the root's own), filled by `request_user_input` from
