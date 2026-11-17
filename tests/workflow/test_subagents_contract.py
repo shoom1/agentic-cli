@@ -2500,7 +2500,8 @@ async def contract_await_a_cancelled_run() -> dict:
 
 
 class TestCancellingOneRun:
-    """Spec 13: stopping one run while its siblings finish."""
+    """One run stopped alone, by its parent, while its sibling works: the
+    sibling finishes, and the coordinator reads both envelopes."""
 
     async def test_stopping_one_of_two_parallel_runs_lets_the_other_finish(self, make_crew):
         crew = make_crew(
@@ -2568,10 +2569,10 @@ class TestTheTimeLimit:
 
 
 class TestALimitAtAPrompt:
-    """Review Focus 2: a limit that fires while the run waits at a permission
-    prompt (the user slow to answer): the prompt is withdrawn, the call is
-    answered as not run, the run ends cancelled by its limit, the turn goes
-    on with its envelope, and the prompts after it still reach the user."""
+    """A limit that fires while the run waits at a permission prompt (the
+    user slow to answer): the prompt is withdrawn, the call is answered as
+    not run, the run ends cancelled by its limit, the turn goes on with its
+    envelope, and the prompts after it still reach the user."""
 
     async def test_the_prompt_is_withdrawn_and_the_turn_goes_on(self, make_crew):
         crew = make_crew(
@@ -2642,8 +2643,8 @@ def calls_to(events: list[WorkflowEvent], call_id: str) -> list[WorkflowEvent]:
 
 
 class TestTheStepLimit:
-    """Spec 5.4: the run's last allowed model call is told to answer now, and
-    no call it makes runs; the run completes partial."""
+    """The run's last allowed model call is told to answer now, and no call
+    it makes runs; the run completes partial."""
 
     async def test_the_last_allowed_call_is_told_and_the_run_completes_partial(self, make_crew):
         crew = make_crew(
@@ -2775,9 +2776,9 @@ class TestTheTokenLimit:
 
 
 class TestSteering:
-    """Spec 13: a message steered to a run while its tool call is in progress
-    is in its next model request, after its last message, as the user's, and
-    stays in its transcript: still there in the request after."""
+    """A message steered to a run while its tool call is in progress is in
+    its next model request, after its last message, as the user's, and stays
+    in its transcript: still there in the request after."""
 
     async def test_a_steered_message_reaches_the_next_request_and_stays(self, make_crew):
         crew = make_crew(

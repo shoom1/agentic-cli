@@ -730,10 +730,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         turn's live events as they are made, through a processor made for
         the run. Its input is the shared state it starts from and its
         messages: an inheriting run's history, then the task message. A
-        cancel of the run alone (its control's: a limit, its parent) closes
-        its stream, which stops its graph, and it returns what it has: the
-        last text it wrote and the shared keys it changed, as of its last
-        finished step; ``Delegations`` ends it cancelled.
+        cancel of the run alone (its control's: a limit, its parent or the
+        user) closes its stream, which stops its graph, and it returns what
+        it has: the last text it wrote and the shared keys it changed, as of
+        its last finished step; ``Delegations`` ends it cancelled.
 
         Returns:
             Its last non-empty answer, as Deep Agents' own ``task`` read one

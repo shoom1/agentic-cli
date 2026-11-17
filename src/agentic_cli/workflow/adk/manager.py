@@ -1484,9 +1484,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         so do the raw log's records of its calls. As a turn's runner is, it
         is stopped with its abort signal set first, so ADK seals the calls
         it leaves open, in its child session, before the cancel goes on.
-        A cancel of the run alone (its control's: a limit, its parent) stops
-        it so too, and it returns what it has: the last text it wrote and the
-        shared keys it changed; ``Delegations`` ends it cancelled.
+        A cancel of the run alone (its control's: a limit, its parent or the
+        user) stops it so too, and it returns what it has: the last text it
+        wrote and the shared keys it changed; ``Delegations`` ends it
+        cancelled.
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared

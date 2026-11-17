@@ -1,12 +1,12 @@
 """A sub-agent run stopped while its prompt is on screen, the turn going on.
 
-A run's limit (its time limit, while the user is slow to answer) or its
-parent cancels the run alone: the task awaiting its question is cancelled,
-not the turn's. The dialog is withdrawn (thinking-prompt closes a dialog
-whose awaiter is cancelled), the turn's events box comes back, since the
-turn goes on, and the turn's next question reaches the user. A cancel of the
-turn itself (Ctrl+C) still leaves the box closed: the turn is unwinding
-(``test_turn_boundary.py``).
+A run's limit (its time limit, while the user is slow to answer), its
+parent or the user cancels the run alone: the task awaiting its question is
+cancelled, not the turn's. The dialog is withdrawn (thinking-prompt closes a
+dialog whose awaiter is cancelled, in either placement), the turn's events
+box comes back, since the turn goes on, and the turn's next question
+reaches the user. A cancel of the turn itself (Ctrl+C) still leaves the box
+closed: the turn is unwinding (``test_turn_boundary.py``).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
 
+import pytest
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
@@ -44,8 +45,8 @@ class _Workflow:
         self.callback = None
 
 
-def _settings() -> SimpleNamespace:
-    return SimpleNamespace(verbose_thinking=False, default_user="u", dialog_placement="box")
+def _settings(placement: str = "box") -> SimpleNamespace:
+    return SimpleNamespace(verbose_thinking=False, default_user="u", dialog_placement=placement)
 
 
 def _controller(workflow: _Workflow) -> SimpleNamespace:
@@ -98,7 +99,8 @@ async def test_the_events_box_comes_back_and_the_next_question_is_asked():
     assert [box.finish.call_count for box in ui.boxes] == [1, 1, 1]
 
 
-async def test_on_a_real_session_the_dialog_is_withdrawn_and_the_next_one_shown():
+@pytest.mark.parametrize("placement", ["box", "inline"])
+async def test_on_a_real_session_the_dialog_is_withdrawn_and_the_next_one_shown(placement):
     workflow = _Workflow()
     seen: dict = {}
 
@@ -125,7 +127,9 @@ async def test_on_a_real_session_the_dialog_is_withdrawn_and_the_next_one_shown(
         turn_done = asyncio.Event()
 
         async def handler(_line: str) -> None:
-            await MessageProcessor()._run_turn(source, _controller(workflow), ui, _settings())
+            await MessageProcessor()._run_turn(
+                source, _controller(workflow), ui, _settings(placement)
+            )
             turn_done.set()
 
         running = asyncio.create_task(ui.run_async(handler))

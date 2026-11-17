@@ -694,8 +694,8 @@ class MessageProcessor:
         request's processing opened end with it, out of the transcript, and
         the cancel is re-raised; the request (``process`` /
         ``process_resume``) says ``CANCELLED_LINE`` once. A question whose
-        asking task alone is cancelled (a sub-agent run stopped by its limit
-        or its parent while its prompt is on screen) has its dialog
+        asking task alone is cancelled (a sub-agent run stopped by its limit,
+        its parent or the user while its prompt is on screen) has its dialog
         withdrawn, and the turn goes on with its events box back.
 
         Errors reported as ``EventType.ERROR`` are rendered as they arrive. A
@@ -759,19 +759,21 @@ class MessageProcessor:
             # permission prompt as a denial the user never saw.
             async with self._asking:
                 _finish_events_box()
-                # If the dialog raises, the turn is unwinding (cancelled, or
-                # the dialog failed): reopening the events box then would
-                # leave a panel on screen that nothing downstream will ever
-                # finish. The placement is read now: /settings may have
-                # changed it since the session started with its own.
+                # The events box comes back after the answer. A dialog that
+                # raises because the turn is unwinding (Ctrl+C, or the dialog
+                # failed) leaves it closed: reopened then, it would be a
+                # panel on screen that nothing downstream will ever finish.
+                # A cancel of the asking task alone (below) is no unwinding.
+                # The placement is read now: /settings may have changed it
+                # since the session started with its own.
                 try:
                     response = await self._prompt_user_input(
                         request, ui, settings.dialog_placement
                     )
                 except asyncio.CancelledError:
                     # The asking task alone was stopped (a sub-agent run's
-                    # limit, its parent), not the turn: the dialog is
-                    # withdrawn and the turn goes on, so its box comes back.
+                    # limit, its parent, the user), not the turn: the dialog
+                    # is withdrawn and the turn goes on, so its box comes back.
                     if proc_task is not None and not proc_task.cancelling():
                         _open_events_box()
                     raise
