@@ -364,3 +364,43 @@ class TestTheSessionsCommand:
         await app.process_input("/sessions --delete=zzz")
 
         assert said(app.session, "add_error") == ["Session 'zzz' not found."]
+
+
+class TestASubAgentsTranscriptIsNoRow:
+    """On the real ADK manager (sqlite), each sub-agent run's transcript is a
+    child session of its conversation's (``adk/sessions.py::child_app``):
+    neither the app's list (what the picker and ``/sessions`` show) nor
+    ``--continue``'s newest conversation is ever one."""
+
+    async def test_the_list_and_continue_name_the_conversation_alone(self, project, monkeypatch):
+        import anthropic
+
+        from agentic_cli.cli import AppInfo
+        from agentic_cli.cli.app import BaseCLIApp
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+        from tests.workflow.adk.fakes import FakeAPI
+        from tests.workflow.test_adk_delegation import Team, delegation, route, says, team
+
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[delegation("toolu_c1"), says("Done.")], researcher=[says("X is 42.")],
+        )))
+        app_settings = BaseSettings(session_store="sqlite", default_model="claude-sonnet-4-6")
+        manager = GoogleADKWorkflowManager(agent_configs=team(), settings=app_settings)
+        await manager.initialize_services()
+        app = app_on(manager, app_settings)
+        try:
+            await app.process_input("Have the researcher find X.")
+            listed = await app.list_conversations()
+        finally:
+            await manager.cleanup()
+            app._conversation.release()
+
+        later = BaseCLIApp(  # the next start, before its workflow is built
+            app_info=AppInfo(name="Transcripts test", version="0"),
+            agent_configs=team(), settings=app_settings,
+        )
+        hold, passed_over = await later._newest_stored()
+        later._conversation.abandon(hold)
+
+        assert [(row.session_id, row.backend) for row in listed] == [(app.session_id, "adk")]
+        assert (hold.session_id, hold.place.backend, passed_over) == (app.session_id, "adk", [])

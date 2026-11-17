@@ -2399,3 +2399,17 @@ class TestARunsTranscriptIsNoConversation:
         assert deleted is True
         assert await transcripts(crew) == []
         assert await manager.list_sessions(user_id=USER) == []
+
+    async def test_none_lists_or_opens_as_a_conversation(self, make_crew):
+        crew = self.two_runs(make_crew)
+        manager = crew.manager
+
+        await crew.turn()
+
+        assert [row.session_id for row in await manager.list_sessions(user_id=USER)] == [SESSION]
+        for instance in ("researcher-1", "researcher-2"):
+            assert await manager.session_info(f"{SESSION}/{instance}", user_id=USER) is None
+            assert await manager.session_exists(f"{SESSION}/{instance}", user_id=USER) is False
+        assert await manager.recent_messages(SESSION, user_id=USER) == [
+            {"role": "user", "content": "Go."}, {"role": "assistant", "content": "Done."},
+        ]

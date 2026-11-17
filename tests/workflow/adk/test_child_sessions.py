@@ -417,3 +417,39 @@ class TestAModelSwitchBetweenTurns:
         assert [body["model"] for body in answers.bodies("researcher")] == [
             "claude-sonnet-4-6", "claude-haiku-4-5",
         ]
+
+
+class TestNeverListed:
+    """A child session is under the conversation's child app, so none lists,
+    or is found, as a conversation: not by a reader (``/sessions`` and the
+    picker on a backend that is not running), nor by the CLI's look at every
+    backend's conversations (``cli/stored_conversations.py``), the running
+    manager's or the readers'."""
+
+    async def test_no_reader_or_look_shows_one(self, project, monkeypatch):
+        from agentic_cli.cli.stored_conversations import StoredConversations
+
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        manager = manager_on("sqlite")
+        try:
+            await say(manager, "Find X.")
+            async with StoredConversations(
+                manager._settings, "sqlite", workflow=manager, backend="adk"
+            ) as look:
+                running = await look.rows()
+                found = await look.where("s/researcher-1")
+        finally:
+            await manager.cleanup()
+
+        async with await open_session_reader("adk", manager._settings) as reader:
+            listed = await reader.list()
+            info = await reader.info("s/researcher-1")
+            exists = await reader.exists("s/researcher-1")
+        async with StoredConversations(manager._settings, "sqlite") as look:  # no manager runs
+            read = await look.rows()
+
+        assert [(row.session_id, row.backend) for row in running] == [("s", "adk")]
+        assert found == []
+        assert [row.session_id for row in listed] == ["s"]
+        assert (info, exists) == (None, False)
+        assert [(row.session_id, row.backend) for row in read] == [("s", "adk")]
