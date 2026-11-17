@@ -102,6 +102,32 @@ class TestCancel:
             await task
         assert made.cancelled == ("user", "stopped")
 
+    async def test_a_task_its_turn_is_unwinding_is_not_cancelled_again(self):
+        """A limit that fires while the turn's cancel (Ctrl+C) unwinds the run
+        adds no cancel of its own, which would cut the run's cleanup short:
+        the hook sees the turn's cancel alone."""
+        made = control()
+        seen: dict = {}
+
+        async def run() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                seen["own"] = made.own_cancel()
+                seen["cancelling"] = asyncio.current_task().cancelling()
+                raise
+
+        task = asyncio.create_task(run())
+        made.bind(task)
+        await asyncio.sleep(0)
+
+        task.cancel()  # the turn's, not yet delivered
+        made.cancel(by="limit", error=TIME_LIMIT_ERROR)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert seen == {"own": False, "cancelling": 1}
+
     def test_who_cancels_is_the_parent_the_user_or_a_limit(self):
         with pytest.raises(ValueError, match="parent, user or limit"):
             control().cancel(by="someone", error="why")
@@ -188,10 +214,10 @@ class TestTheTimeLimit:
         assert made.cancelled is None
 
     async def test_the_clock_starts_with_the_block(self):
-        made = control(timeout=0.2)
+        made = control(timeout=1.0)
 
         async def run() -> str:
-            await asyncio.sleep(0.3)  # waiting before it works: not counted
+            await asyncio.sleep(1.2)  # waiting before it works: not counted
             with made.timing():
                 await asyncio.sleep(0.05)
             return "done"
@@ -242,6 +268,17 @@ class TestTheTokenLimit:
         assert (made.cancelled, made.final_call) == (("limit", TOKEN_LIMIT_ERROR), True)
         assert not task.cancelled() and not task.done()
         task.cancel()
+
+    def test_once_past_it_every_call_is_the_last(self):
+        """The token limit makes the call in progress the run's last; a call
+        after it (should a backend make one) is the last too."""
+        made = control(max_tokens=100)
+        made.model_call()
+        made.used(90, 20)
+
+        made.model_call()
+
+        assert made.final_call is True
 
     def test_without_a_limit_any_number_is_fine(self):
         made = control()

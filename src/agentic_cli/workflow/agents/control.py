@@ -97,7 +97,8 @@ class RunControl:
         """Cancel the run's task: ``by`` its parent, the user or a limit, for ``error``.
 
         Does nothing once the run is cancelled (the first cancel wins) or
-        its task has ended.
+        its task has ended, and cancels no task its turn is cancelling
+        already (the run ends as the turn's).
 
         Raises:
             ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.
@@ -148,19 +149,25 @@ class RunControl:
 
     def _cancel_task(self) -> None:
         assert self._task is not None
+        if self._task.cancelling():
+            # Its turn is unwinding it already (Ctrl+C): one more cancel
+            # would cut its cleanup short, and the run is the turn's.
+            return
         self._cancelled_task = True
         self._task.cancel()
 
     # -- the limits at its model calls -------------------------------------------
 
     def model_call(self) -> bool:
-        """Count a model call the run is about to make; True when it is the last allowed.
+        """Count a model call the run is about to make; True when it is the run's last.
 
-        That call's request ends with ``STEP_LIMIT_NOTE``, and its answer is
-        the run's last (``final_call``).
+        The last allowed (``max_model_calls``), or any call after one the
+        token limit made the last, should a backend make one. That call's
+        request ends with ``STEP_LIMIT_NOTE``, and its answer is the run's
+        last (``final_call``).
         """
         self._calls += 1
-        self._final = self.at_step_limit
+        self._final = self._final or self.at_step_limit
         return self._final
 
     def used(self, input_tokens: int, output_tokens: int, *, calls: bool = True) -> None:
