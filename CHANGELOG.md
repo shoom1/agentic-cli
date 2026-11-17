@@ -177,6 +177,10 @@ the start of the entry's title.
 - On ADK `TASK_PROGRESS` comes only when a tool call changed the task list,
   and a list whose tasks are all done stays: `get_tasks` answers it, where
   0.6 cleared it. (Changed: **On ADK, task progress is reported…**)
+- A sub-agent run past 100 model calls ends with a partial answer, and a turn
+  starts at most 20 sub-agent runs; an app sets other numbers with
+  `subagents=SubAgentPolicy(...)`. (Added: **`SubAgentPolicy` and
+  `AgentLimits`…**)
 
 #### Settings that moved or changed meaning
 
@@ -568,35 +572,52 @@ the start of the entry's title.
 ### Added
 
 - **`SubAgentPolicy` and `AgentLimits`: an app's sub-agent policy and a
-  run's limits** (`agentic_cli.workflow`, and `agentic_cli.workflow.agents`
-  with `DEFAULT_LIMITS`). Frozen dataclasses. `SubAgentPolicy` holds an
-  app's numbers for its sub-agents: `max_active` (4, the runs working at
-  once in a conversation, at any depth), `max_runs_per_turn` (20, the runs
-  one turn may start) and `limits`, every run's `AgentLimits`
-  (`DEFAULT_LIMITS`, `AgentLimits(max_model_calls=100)`, unless the app sets
-  its own). A policy's own `limits` replace `DEFAULT_LIMITS` whole:
+  run's limits, enforced on both backends** (`agentic_cli.workflow`, and
+  `agentic_cli.workflow.agents` with `DEFAULT_LIMITS`). Frozen dataclasses.
+  `SubAgentPolicy` holds an app's numbers for its sub-agents: `max_active`
+  (4, the runs working at once in a conversation, at any depth),
+  `max_runs_per_turn` (20: a turn starts at most that many runs, at any
+  depth; a `task` call past it starts no run, and its caller reads
+  `{"success": false, "error": "This turn has already started 20 sub-agent
+  runs, the most one turn may start. Answer with what you have."}`;
+  `task`'s description says "At most 20 runs per turn.") and `limits`,
+  every run's `AgentLimits` (`DEFAULT_LIMITS`,
+  `AgentLimits(max_model_calls=100)`, unless the app sets its own). A
+  policy's own `limits` replace `DEFAULT_LIMITS` whole:
   `SubAgentPolicy(limits=AgentLimits(timeout=60))` has no model-call limit,
   while `AgentLimits(timeout=60).over(DEFAULT_LIMITS)` keeps the 100 calls.
   `AgentLimits` holds a run's `max_model_calls`, `timeout` (seconds) and
-  `max_tokens` (input plus output), each None for no limit of its own, and
-  `over(base)` lays one over another field by field: a field left None
-  takes the base's. So an agent type's field left None keeps the policy's
-  limit, and a type may set its own, higher or lower, but cannot remove a
-  limit the policy sets. Construction refuses, with a `ValueError` naming
-  the field, a limit that is not a positive int (a timeout: a positive,
-  finite number; `True` and `False` are no numbers here) and a policy whose
-  `limits` is not an `AgentLimits`.
+  `max_tokens` (input plus output, as the usage ledger counts them), each
+  None for no limit of its own, and `over(base)` lays one over another
+  field by field: a field left None takes the base's. So an agent type's
+  field left None keeps the policy's limit, and a type may set its own,
+  higher or lower, but cannot remove a limit the policy sets. Each is
+  enforced: a run's last allowed model call is told to answer now with
+  what it has (its tools still listed, since Claude refuses tool calls in
+  a request that defines no tools; any call that answer makes is dropped,
+  never run), and the run completes with `"partial": true`, `"error":
+  "step limit reached"`; a run past its `timeout`, counted from when it
+  starts, is cancelled (`"status": "cancelled"`, `"cancelled_by":
+  "limit"`, `"error": "time limit reached"`), the text it wrote so far its
+  partial result, and a question or permission prompt it waited at is
+  withdrawn; a model call that takes a run past its `max_tokens` is its
+  last, its calls dropped, and the run is cancelled likewise (`"token
+  limit reached"`), that answer's text its result. Construction refuses,
+  with a `ValueError` naming the field, a limit that is not a positive int
+  (a timeout: a positive, finite number; `True` and `False` are no numbers
+  here) and a policy whose `limits` is not an `AgentLimits`.
 - **`AgentConfig.brief_required` and `AgentConfig.limits`.**
   `brief_required` (default `("objective",)`) names the brief fields the
   agent asks a delegation to fill: `objective`, `deliverable`,
   `constraints`, `known`, `done_when` or `title` (a brief always has its
   title and its objective); `limits` (default None) is the agent's own
-  `AgentLimits`, over the policy's field by field. Both come after
-  `inherit_context`, so a positional `AgentConfig(...)` still binds, and
-  the framework's agent YAML takes them: `brief_required: [objective,
-  deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens:
-  200000}` (each limit read as written, so `true` or `'30'` is refused, as
-  is a key that is no limit). `validate_agent_graph` raises
+  `AgentLimits`, over the policy's field by field: its runs work under
+  them. Both come after `inherit_context`, so a positional
+  `AgentConfig(...)` still binds, and the framework's agent YAML takes
+  them: `brief_required: [objective, deliverable]`, `limits:
+  {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit
+  read as written, so `true` or `'30'` is refused, as is a key that is no
+  limit). `validate_agent_graph` raises
   `AgentGraphError` for a `brief_required` that is not a tuple or list of
   those names, a `limits` that is not an `AgentLimits`, and either set on
   the root, which is never delegated to. A delegation's brief is read
@@ -614,6 +635,19 @@ the start of the entry's title.
   `TypeError` where it is passed: the factory's before any backend is
   imported, the app's before it builds anything. LangGraph's delegation
   does not read it.
+- **One sub-agent run can be cancelled alone, and steered** (provisional:
+  `agentic_cli.workflow.agents.control.RunControl`, and the manager's
+  delegations' `control(run)` and `cancel(run_id, by=, error=)`). Each run
+  works under a `RunControl`: `cancel(by=, error=)` stops the run alone
+  (`by` its parent, the user or a limit) while its siblings and the turn go
+  on, and its parent reads `{"status": "cancelled", "cancelled_by": ...,
+  "error": ..., "partial": <it wrote any text>, "result": "<what it wrote
+  so far>"}`; the run's record and its `AGENT_RUN` end say who cancelled it
+  (`cancelled_by`). Ctrl+C still stops the whole turn, every run
+  `interrupted`. `steer(message)` gives a working run a message, added
+  after its last message, as the user's, before its next model call, where
+  it stays (ADK: in its child session). A sub-agent's dialog is withdrawn
+  when its run is stopped, and the turn goes on with its events box.
 - **A sub-agent's questions and permission prompts name it, on both
   backends.** `UserInputRequest.run` is the sub-agent run that asks (a
   `RunRef`; None for the root's own), filled by `request_user_input` from
