@@ -133,8 +133,9 @@ def test_executed_code_cannot_write_there_either(project):
 
 def test_a_folder_that_does_not_exist_is_not_made_a_mount_point(project, tmp_path):
     """A folder that cannot be made is still denied (seatbelt names a path, not
-    a mount) but is left out of the list bubblewrap binds, which would bind
-    /dev/null over it and can leave a stray file where the store makes its folder."""
+    a mount) but is left out of the list bubblewrap binds, which covers a
+    missing path with a placeholder folder: none could be made there either,
+    and the run would be refused."""
     (tmp_path / "blocker").write_text("a file, so nothing can be made below it")
     settings = BaseSettings(app_name="app", workspace_dir=tmp_path / "blocker" / "data")
     policy = _policy(settings)

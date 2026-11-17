@@ -188,17 +188,19 @@ class _Backend:
     """A stand-in OS sandbox: ``"none"`` is no backend; ``wrap_error`` makes
     the wrap fail; ``command(argv)``, when given, is the wrapped command (one
     that fails before Python starts, say); otherwise the "wrap" is the plain
-    command."""
+    command. ``release``, when given, is the wrap's release."""
 
     def __init__(
         self,
         sandbox_type: str = "seatbelt",
         wrap_error: str | None = None,
         command=None,
+        release=None,
     ) -> None:
         self.sandbox_type = sandbox_type
         self.wrap_error = wrap_error
         self.command = command
+        self.release = release
         self.wrapped: list[list[str]] = []
 
     def wrap_python_command(self, argv, working_dir, policy):
@@ -212,7 +214,10 @@ class _Backend:
                 command="", success=False, error=self.wrap_error, sandbox_type=self.sandbox_type
             )
         command = self.command(argv) if self.command else shlex.join(argv)
-        return OSSandboxResult(command=command, sandbox_type=self.sandbox_type)
+        result = OSSandboxResult(command=command, sandbox_type=self.sandbox_type)
+        if self.release is not None:
+            result.release = self.release
+        return result
 
 
 def _fails_at_start(message: str, status: int):
@@ -452,6 +457,31 @@ def test_a_failed_wrap_without_strict_runs_core_modules_only(
     [(args, kwargs)] = runs  # only the math run started a process, unwrapped
     assert kwargs.get("shell") is not True
     assert _runner_modules(args[0][2]) == SafePythonExecutor.CORE_MODULES
+
+
+def test_the_wrap_is_released_once_the_code_has_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wrap may hold something on the host for its run (bubblewrap's
+    placeholders over missing protected paths): it is released once the run
+    is over, and when the code is refused before it runs."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    events: list[str] = []
+    _use_backend(monkeypatch, _Backend("seatbelt", release=lambda: events.append("release")))
+    real_run = subprocess.run
+
+    def _run(*args, **kwargs):
+        events.append("run")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    with MockContext():
+        ran = execute_python("1 + 1")
+        invalid = execute_python("def (")
+
+    assert ran["success"] is True, ran
+    assert invalid["error"].startswith("Validation error"), invalid
+    assert events == ["run", "release", "release"]
 
 
 def test_a_sandboxed_run_gets_the_sandboxed_module_set(monkeypatch: pytest.MonkeyPatch) -> None:

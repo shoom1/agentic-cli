@@ -2789,6 +2789,26 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **`execute_python` runs inside bubblewrap on Linux.** It never did: every
+  call was refused with "it did not start (bubblewrap, exit status 1): bwrap:
+  Can't create file at ~/.bash_profile: Read-only file system" (or another
+  protected file the home lacks: most homes lack some of `~/.bashrc`,
+  `~/.bash_profile`, `~/.zshrc`, `~/.profile`, …, and `/System`, a macOS
+  path in the same list, is on no Linux host), or, with `os_sandbox_strict`
+  off, run without the sandbox. The bubblewrap backend bound `/dev/null`
+  over each protected path that did not exist, and bwrap must make that
+  mount point itself, which it cannot do below the read-only root; seen
+  first on GitHub's ubuntu-26.04 runner, the first image with `bwrap` on
+  it, and the same with every bwrap version. A missing protected path the
+  read-only root covers is now left to it (the code still cannot create
+  it). One the code could create (a project's `.git` before `git init`, its
+  `.{app_name}` before the app makes it) is held by a placeholder, an empty
+  folder bound read-only, which the wrap makes and removes once the last run
+  holding it is over (`OSSandboxResult.release`, which the executor calls):
+  bwrap would have left an empty file there, and an empty `.git` file breaks
+  git ("invalid gitfile format"). A placeholder that cannot be made fails
+  the wrap.
+
 - **A model call a tool makes reports its usage.** `generate_simple`
   (web_fetch's and the knowledge base's summaries, the memory proposals)
   reported no `LLM_USAGE` on ADK or Deep Agents, so the status bar's totals

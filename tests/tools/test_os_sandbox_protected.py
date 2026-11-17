@@ -14,6 +14,7 @@ policy cannot drop them.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -198,9 +199,14 @@ def _sandbox():
 def _run(code: str, cwd: Path, policy: OSSandboxPolicy) -> str:
     wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], cwd, policy)
     assert wrapped.success, wrapped.error
-    proc = subprocess.run(
-        wrapped.command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=60
-    )
+    try:
+        proc = subprocess.run(
+            wrapped.command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=60
+        )
+    finally:
+        wrapped.release()
+    # A sandbox that did not start ran no code: say why, rather than "".
+    assert proc.returncode == 0 or proc.stdout, proc.stderr
     return proc.stdout.strip()
 
 
@@ -235,16 +241,38 @@ class TestLiveSandbox:
         assert out == "blocked"
 
     def test_project_env_file_cannot_be_read(self, home, project):
+        """Seatbelt refuses the open; bubblewrap shows ``/dev/null`` in its
+        place, which reads empty. Either way the key never reaches the code."""
         (project / ".env").write_text("NAME=value\n")
-        out = _run(ATTEMPT.format(action="open('.env').read()"), project,
+        out = _run(ATTEMPT.format(action="print(open('.env').read())"), project,
                    OSSandboxPolicy(app_name=APP))
-        assert out == "blocked"
+        assert out in ("blocked", "done")
+        assert "NAME=value" not in out
 
     def test_nothing_is_writable_when_started_from_home(self, home):
         out = _run(ATTEMPT.format(action="open('note.txt', 'w').write('x')"), home,
                    OSSandboxPolicy(app_name=APP))
         assert out == "blocked"
         assert not (home / "note.txt").exists()
+
+    def test_a_missing_shell_start_up_file_cannot_be_created(self, home, project):
+        """The home holds none of the protected files: the sandbox still starts,
+        and the code cannot create one."""
+        profile = home / ".bash_profile"
+        out = _run(ATTEMPT.format(action=f"open({str(profile)!r}, 'w').write('x')"), project,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "blocked"
+        assert not os.path.lexists(profile)
+
+    def test_a_project_that_is_no_repository_cannot_be_made_one(self, home):
+        """``.git`` is missing in a folder the code may write: the code cannot
+        create it, and the run leaves nothing in its place."""
+        plain = home / "plain"
+        plain.mkdir()
+        out = _run(ATTEMPT.format(action="__import__('os').makedirs('.git/hooks')"), plain,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "blocked"
+        assert os.listdir(plain) == []
 
     def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
         """With the default settings the code runs inside the real sandbox, so

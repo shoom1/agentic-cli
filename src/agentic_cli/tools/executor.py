@@ -15,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -63,8 +64,9 @@ class _Run:
     """Where one call's code runs, decided before it is validated.
 
     ``command`` is what ``subprocess.run`` gets (a shell string when the
-    sandbox wrapped it), ``modules`` what the code may import there, and
-    ``refusal`` the error when it runs nowhere.
+    sandbox wrapped it), ``modules`` what the code may import there,
+    ``refusal`` the error when it runs nowhere, and ``release`` the wrap's
+    (``OSSandboxResult.release``), called once the call is over.
     """
 
     command: str | list[str] = ""
@@ -73,6 +75,7 @@ class _Run:
     sandboxed: bool = False
     sandbox_type: str = ""
     refusal: str | None = None
+    release: Callable[[], None] = lambda: None
 
 
 class SafePythonExecutor:
@@ -406,6 +409,7 @@ class SafePythonExecutor:
                 modules=modules,
                 sandboxed=True,
                 sandbox_type=wrap.sandbox_type,
+                release=wrap.release,
             )
         if strict:
             return _Run(refusal=(
@@ -445,9 +449,12 @@ class SafePythonExecutor:
         """
         start_time = time.time()
         run = self._choose_run(context)
-        if run.refusal is not None:
-            return self._sandbox_refused(run.refusal, start_time)
-        return self._validate_and_run(run, code, context, timeout, start_time)
+        try:
+            if run.refusal is not None:
+                return self._sandbox_refused(run.refusal, start_time)
+            return self._validate_and_run(run, code, context, timeout, start_time)
+        finally:
+            run.release()
 
     def _validate_and_run(
         self,

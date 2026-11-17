@@ -72,10 +72,12 @@ class OSSandboxPolicy:
             list replaces it (the framework never passes one).
         deny_write_missing_paths: Paths denied for writing that may not exist
             yet, so the code cannot create them. Seatbelt names a path in a
-            rule, so it denies them all; bubblewrap binds only what exists
-            (a bind over a missing path leaves a stray file behind), so it
-            leaves out those that do not. A path that exists belongs in
-            ``deny_write_paths``, which both backends honor.
+            rule, so it denies them all; bubblewrap leaves out those that do
+            not exist: it covers a missing path with a placeholder folder,
+            and these are folders that could not be made, where no
+            placeholder could be either (the run would be refused). A path
+            that exists belongs in ``deny_write_paths``, which both backends
+            honor.
         deny_rename_paths: Paths whose own entry cannot be renamed, moved or
             removed, though what is below them may still be written (a
             ``literal`` rule). Code that may write a folder's parent could
