@@ -631,7 +631,8 @@ def runs_of(events: list[WorkflowEvent], status: str | None = None) -> list[Work
 
 #: What each ``contract_whoami`` call saw: the active run, and its own call id.
 SEEN: list[tuple[RunRef | None, str | None]] = []
-#: ``BLOCKING["started"]`` is set when a ``contract_block`` call starts (made per test).
+#: ``BLOCKING["started"]`` is set when a ``contract_block`` call starts (made per
+#: test); ``BLOCKING["stopped"]`` is made by each call and set as it stops.
 BLOCKING: dict[str, asyncio.Event] = {}
 
 
@@ -658,9 +659,13 @@ async def contract_summarize(text: str = "") -> dict:
 
 @register_tool(capabilities=EXEMPT, description="Wait until stopped (a contract-test tool).")
 async def contract_block() -> dict:
-    """Wait, as a slow tool does, until the turn is stopped."""
+    """Wait, as a slow tool does, until the turn is stopped; say so as it stops."""
+    stopped = BLOCKING["stopped"] = asyncio.Event()
     BLOCKING["started"].set()
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        stopped.set()
     return {"success": True}
 
 
@@ -989,6 +994,8 @@ class TestRunIdentity:
             # lock, and the fixture's cleanup would wait for it forever.
             await crew.stop(turn)
 
+        # The run's tool in flight stopped before the stop returned.
+        assert BLOCKING["stopped"].is_set()
         (record,) = crew.records()
         assert (record.ref, record.status) == (RESEARCHER, RUN_INTERRUPTED)
         assert record.ended is not None
@@ -1414,7 +1421,10 @@ class TestASubAgentsFailure:
         assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
             True, "leaf", leaf,
         )
-        assert envelope_read(crew.results_read("middle")["m1"])["status"] == RUN_FAILED
+        # The middle reads why its leaf failed: the provider's reason.
+        read = envelope_read(crew.results_read("middle")["m1"])
+        assert read["status"] == RUN_FAILED
+        assert "overloaded" in read["error"]
         assert [(e.run, e.metadata["status"]) for e in runs_of(events)] == [
             (middle, RUN_STARTED), (leaf, RUN_STARTED), (leaf, RUN_FAILED), (middle, RUN_COMPLETED),
         ]
@@ -1989,6 +1999,24 @@ def contract_echo(q: str = "") -> dict:
     return {"success": True, "echo": f"echo-{q}"}
 
 
+#: ``contract_echo_together``'s calls: ``TOGETHER["open"]`` in flight now,
+#: ``TOGETHER["most"]`` the most at once (made per test).
+TOGETHER: dict[str, int] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Echo once two calls are in (a contract-test tool).")
+async def contract_echo_together(q: str = "") -> dict:
+    """Echo ``q`` back, marked, once two calls are in flight at once: a
+    barrier, so two runs' calls are open together before either answers."""
+    TOGETHER["open"] += 1
+    TOGETHER["most"] = max(TOGETHER["most"], TOGETHER["open"])
+    try:
+        await until(lambda: TOGETHER["most"] >= 2, within=10)
+    finally:
+        TOGETHER["open"] -= 1
+    return {"success": True, "echo": f"echo-{q}"}
+
+
 @register_tool(capabilities=EXEMPT, description="Wait for a run to end (a contract-test tool).")
 async def contract_await_a_finished_run() -> dict:
     """Wait until a run of this conversation has completed, as a slow tool would."""
@@ -2179,18 +2207,23 @@ class TestRunsOfOneTypeWithTheSameCallIds:
     call's result, never the other's."""
 
     async def test_each_run_keeps_its_own_results(self, make_crew):
+        TOGETHER.update(open=0, most=0)
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",)),
-             agent("researcher", tools=(contract_echo,))],
+             agent("researcher", tools=(contract_echo_together,))],
             coordinator=[calls(delegate("researcher", "Find A.", "c1"),
                                delegate("researcher", "Find B.", "c2")),
                          says("Both.")],
-            researcher=[calls(use("contract_echo", "call_0", q="A")),
-                        calls(use("contract_echo", "call_0", q="B")),
+            researcher=[calls(use("contract_echo_together", "call_0", q="A")),
+                        calls(use("contract_echo_together", "call_0", q="B")),
                         says("One done."), says("The other done.")],
         )
 
         events = await crew.turn()
+
+        # Both calls named call_0 were open at once (the barrier held each
+        # until the other came in), yet each run read its own result.
+        assert TOGETHER["most"] == 2
 
         echoed = [
             {value for value in ("echo-A", "echo-B") if value in body}

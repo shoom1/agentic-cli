@@ -119,7 +119,8 @@ class TestTheClock:
         assert len(clock) == 0
 
     async def test_parallel_calls_each_time_their_own(self, plugins, ticks):
-        # Two delegations to one sub-agent share the invocation and the agent.
+        # Two calls out at once in one invocation of one agent: each is told
+        # apart by its own EventActions.
         sent, latency, _ = plugins
         first, second = _call(), _call()
         first_answer, second_answer = _answer(), _answer()
@@ -138,16 +139,24 @@ class TestTheClock:
         2.14: its run's end lets its clock go, never another run's, which
         may be out at once (two runs of one sub-agent type share a chain)."""
         sent, latency, clock = plugins
-        ticks += [10.0, 11.0]
-        await sent.before_model_callback(callback_context=_call("inv-1"), llm_request=None)
-        await sent.before_model_callback(callback_context=_call("inv-2"), llm_request=None)
+        left, other, failed = _call("inv-1"), _call("inv-2"), _call("inv-3")
+        ticks += [10.0, 11.0, 13.0, 20.0]
+        await sent.before_model_callback(callback_context=left, llm_request=None)
+        await sent.before_model_callback(callback_context=other, llm_request=None)
 
         await latency.after_run_callback(
             invocation_context=SimpleNamespace(invocation_id="inv-1")
         )
-        assert len(clock) == 1
+
+        # inv-2's call is still out: its answer is timed, from 11 s to 13 s.
+        answer = _answer()
+        await latency.after_model_callback(callback_context=other, llm_response=answer)
+        assert answer.custom_metadata == {LATENCY_KEY: 2_000.0}
+        assert len(clock) == 0
+        # A run that fails lets go of its own too.
+        await sent.before_model_callback(callback_context=failed, llm_request=None)
         await latency.on_run_error_callback(
-            invocation_context=SimpleNamespace(invocation_id="inv-2"), error=RuntimeError("x")
+            invocation_context=SimpleNamespace(invocation_id="inv-3"), error=RuntimeError("x")
         )
         assert len(clock) == 0
 
