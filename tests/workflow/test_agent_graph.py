@@ -100,16 +100,32 @@ class TestConstructionOrderIndependence:
 
     @pytest.mark.parametrize("order", ["top-first", "leaf-first"])
     async def test_two_level_hierarchy_is_built_completely(self, order: str):
+        from agentic_cli.workflow.adk.task_tool import TaskTool
+
+        def delegates_to(agent) -> list[str]:
+            """The types an agent's ``task`` offers, by name ([] without one)."""
+            return [
+                name for tool in agent.tools if isinstance(tool, TaskTool)
+                for name in tool._get_declaration().parameters_json_schema[
+                    "properties"]["agent_type"]["enum"]
+            ]
+
         with MockContext(google_api_key="test-key", session_store="memory") as ctx:
             mgr = GoogleADKWorkflowManager(
                 agent_configs=self._nested_configs(order), settings=ctx.settings
             )
-            root = await _built(mgr)
+            await mgr.initialize_services()
+            try:
+                root, agents = mgr._root_agent, dict(mgr._agents)
+            finally:
+                await mgr.cleanup()
 
         assert root.name == "top"
-        assert [a.name for a in root.sub_agents] == ["mid"]
+        assert sorted(agents) == ["leaf", "mid", "top"]
+        assert delegates_to(agents["top"]) == ["mid"]
         # The nested coordinator must keep its own child.
-        assert [a.name for a in root.sub_agents[0].sub_agents] == ["leaf"]
+        assert delegates_to(agents["mid"]) == ["leaf"]
+        assert delegates_to(agents["leaf"]) == []
 
 
 class TestPromptSettingsScope:

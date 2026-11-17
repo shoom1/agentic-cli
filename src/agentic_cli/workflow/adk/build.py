@@ -11,9 +11,9 @@ run reads what it needs from the tree itself:
   turn at it. Their text is the reply, the conversation they hold is the
   user's, and a conversation their model no longer takes is the turn's
   error; only the root's is summarized, and only the root carries the memory
-  index. A single-turn sub-agent is a tool of its parent's (every agent
-  built from configs but the root is one): its text is its work, and the
-  agents under it run inside its call.
+  index. Agents built from configs have no ADK sub-agents: the root is the
+  one that replies, and each of its sub-agents runs on a runner of its own
+  (``GoogleADKWorkflowManager._run_agent``).
 - **The agents with after-tool callbacks of their own**
   (``own_after_tool_agents``, a native ADK YAML app's): ADK runs them only
   when no plugin answered the call, so the result cap leaves these agents'
@@ -160,27 +160,6 @@ def reply_agents(root: Any) -> frozenset[str]:
         if _mode(sub_agent) not in (_SINGLE_TURN, _TASK):
             names |= reply_agents(sub_agent)
     return frozenset(names)
-
-
-def delegated_agents(root: Any) -> dict[str, frozenset[str]]:
-    """Each agent in ``root``'s tree that delegates, and the sub-agents it delegates to.
-
-    A delegation is a single-turn sub-agent: its parent calls it like a tool
-    named after it and reads its answer as the result (the event processor
-    names each such call's run). Only the agent's own count: a call another
-    agent makes of that name runs no sub-agent (ADK answers an unknown tool).
-    Empty for a tree that delegates nowhere.
-    """
-    delegating: dict[str, frozenset[str]] = {}
-    for agent in walk(root):
-        own = frozenset(
-            sub_agent.name
-            for sub_agent in getattr(agent, "sub_agents", None) or ()
-            if _mode(sub_agent) == _SINGLE_TURN
-        )
-        if own:
-            delegating[agent.name] = own
-    return delegating
 
 
 def own_after_tool_agents(root: Any) -> frozenset[str]:

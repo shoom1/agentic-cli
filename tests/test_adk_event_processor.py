@@ -8,6 +8,7 @@ from google.genai import types
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor
 from agentic_cli.workflow.context import ContextBudget
 from agentic_cli.workflow.events import EventType
+from agentic_cli.workflow.sessions import RunRef
 
 
 class TestThinkingDetectionInline:
@@ -104,21 +105,20 @@ class TestSubAgentActivity:
         assert "subagent" not in events[EventType.TEXT].metadata
         assert "purpose" not in events[EventType.LLM_USAGE].metadata
 
-    async def test_a_sub_agents_failure_is_a_warning_naming_it(self):
-        # The coordinator carries on (ADK hands it "Error running sub-agent:
-        # …"), so the user is told why, as a warning.
+    async def test_a_sub_agents_failure_is_its_runs_to_report(self):
+        # A sub-agent run's failure ends its run failed, and the framework's
+        # delegation warns the user once (agents/delegate.py): no processor
+        # reports it, the conversation's or the run's.
         failed = Event(
             author="researcher", invocation_id="i1", error_code="BadRequestError",
             error_message="Error code: 400 - max_tokens: 100000 > 64000",
         )
+        run = RunRef(agent="researcher", instance="researcher-1", run="researcher-1#1",
+                     parent_run=None, depth=1)
 
-        (event,) = [e async for e in ADKEventProcessor(model="m", root="coordinator")
-                    .process_event(failed, "s1")]
-
-        assert event.type is EventType.ERROR
-        assert event.content == "researcher failed: Error code: 400 - max_tokens: 100000 > 64000"
-        assert (event.metadata["error_code"], event.metadata["recoverable"],
-                event.metadata["agent"]) == ("BadRequestError", True, "researcher")
+        for processor in (ADKEventProcessor(model="m", root="coordinator"),
+                          ADKEventProcessor(model="m", root="coordinator", run=run)):
+            assert [e async for e in processor.process_event(failed, "s1")] == []
 
     async def test_the_roots_failure_is_left_to_the_turn(self):
         # Its exception leaves the run, which reports it: no second report.
@@ -274,12 +274,10 @@ class TestAContextOverflow:
         assert [e async for e in ADKEventProcessor(model="m", root="coordinator")
                 .process_event(failed, "s1")] == []
 
-    async def test_a_sub_agents_is_still_a_warning_naming_it(self):
-        (event,) = [e async for e in ADKEventProcessor(model="m", root="coordinator")
-                    .process_event(self._overflowed("researcher"), "s1")]
-
-        assert (event.metadata["recoverable"], event.metadata["agent"]) == (True, "researcher")
-        assert event.content.startswith("researcher failed: ")
+    async def test_a_sub_agents_is_no_turns_error(self):
+        # It ends its run failed (tests/workflow/adk/test_run_identity.py).
+        assert [e async for e in ADKEventProcessor(model="m", root="coordinator")
+                .process_event(self._overflowed("researcher"), "s1")] == []
 
 
 # --- a tool's result ----------------------------------------------------------------

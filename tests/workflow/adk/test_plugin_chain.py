@@ -15,9 +15,6 @@ and these tests pin it whole, so a move anywhere fails one of them:
   answer;
 - ``tool_error`` answers a call that raised (and one to an unknown tool);
 - ``llm_logging`` records each call as the model answers it;
-- ``subagent_outcome``, when the tree delegates, after the raw log (which
-  records an answer as the model gave it): a sub-agent's refused or cut answer
-  is said so, in place, so every plugin after it still runs;
 - ``foreign_reasoning`` drops the thoughts another provider wrote, before
   the request is measured;
 - ``context_cache`` makes one Gemini cache attempt a turn;
@@ -32,7 +29,11 @@ and these tests pin it whole, so a move anywhere fails one of them:
 - ``call_sent`` last: each call's clock starts as its request goes out.
 
 A native ADK YAML app gets the same chain: only the building of its agents
-differs (``workflow/adk/build.py``).
+differs (``workflow/adk/build.py``). Each sub-agent type's runner has a chain
+of its own in the same order (``_agent_plugin_chain``): no memory index, and
+``subagent_outcome`` after the raw log (which records an answer as the model
+gave it), where a sub-agent's refused or cut answer is said so, in place, so
+every plugin after it still runs.
 """
 
 from __future__ import annotations
@@ -123,16 +124,44 @@ async def test_a_plain_config_built_app(project):
 
 
 async def test_a_delegating_app(project):
-    """A tree with a sub-agent: its answers pass ``subagent_outcome``."""
+    """A tree with a sub-agent: the conversation's chain is the app's; the
+    sub-agent type's own runner's passes its answers through ``subagent_outcome``."""
     manager = GoogleADKWorkflowManager(
         agent_configs=[
-            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
-            AgentConfig(name="helper", prompt="Help.", description="Helps."),
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"],
+                        tools=[search_memory]),
+            AgentConfig(name="helper", prompt="Help.", description="Helps.",
+                        tools=[search_memory]),
         ],
         settings=_settings(extras=True),
     )
 
-    assert await _chain(manager) == [
+    try:
+        await manager.initialize_services()
+        chain = [plugin.name for plugin in manager._runner.app.plugins]
+        helpers = [plugin.name for plugin in manager._agent_runners["helper"].app.plugins]
+        shared = manager._llm_logging_plugin
+        logs = [p for p in manager._agent_runners["helper"].app.plugins if p.name == "llm_logging"]
+    finally:
+        await manager.cleanup()
+
+    assert chain == [
+        "main_agent",
+        "call_latency",
+        "permission",
+        "tool_error",
+        "llm_logging",
+        "foreign_reasoning",
+        "context_cache",
+        "interrupted_calls",
+        "tool_result_cap",
+        "memory_index",
+        "context_overflow",
+        "fit_guard",
+        "llm_logging_sent",
+        "call_sent",
+    ]
+    assert helpers == [
         "main_agent",
         "call_latency",
         "permission",
@@ -148,6 +177,8 @@ async def test_a_delegating_app(project):
         "llm_logging_sent",
         "call_sent",
     ]
+    # One raw log for every runner, whose buffer the manager drains.
+    assert logs == [shared]
 
 
 async def test_a_native_adk_yaml_app_gets_the_same_chain(project):

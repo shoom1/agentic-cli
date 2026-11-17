@@ -61,6 +61,10 @@ class LLMLoggingPlugin(BasePlugin):
     ``after_model_callback`` like any response, timed. Each run lets go of
     what it left as it ends, its own only.
 
+    One instance serves the conversation's runner and every sub-agent
+    type's (``GoogleADKWorkflowManager._agent_plugin_chain``): the manager
+    drains its buffer as a turn's events and a sub-agent run's go out.
+
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
         models: Each agent's model reference, by agent name

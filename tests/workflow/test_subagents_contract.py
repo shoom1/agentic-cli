@@ -756,8 +756,6 @@ async def make_crew(backend, project, monkeypatch):
     ``backend``, with the sub-agent policy ``subagents``, each agent answering
     from its script (an agent without one has none); every manager made is
     cleaned up after the test."""
-    if backend == "adk":
-        pytest.xfail("ADK runs sub-agents through the framework's task from the next task on")
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
     made: list[Crew] = []

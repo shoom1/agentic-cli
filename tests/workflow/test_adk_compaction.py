@@ -51,6 +51,7 @@ from agentic_cli.workflow.adk.compaction import (  # noqa: E402
     running_agent,
 )
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
+from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
     CompactResult,
@@ -93,6 +94,17 @@ def calls(name: str, call_id: str, prompt_tokens: int = UNDER, **args) -> dict:
     message["content"] = [{"type": "tool_use", "id": call_id, "name": name, "input": args}]
     message["stop_reason"] = "tool_use"
     return message
+
+
+def delegate(prompt_tokens: int = UNDER) -> dict:
+    """The coordinator's ``task`` call ``toolu_c1``: the researcher is to find X."""
+    return calls("task", "toolu_c1", prompt_tokens, agent_type="researcher", title="Find X",
+                 objective="Find X.")
+
+
+def task_of(inherit: bool = False) -> str:
+    """The researcher's task message for ``delegate()``'s call."""
+    return task_message(Brief(title="Find X", objective="Find X."), inherit=inherit)
 
 
 def is_summary(body: dict) -> bool:
@@ -558,8 +570,7 @@ class TestSubAgents:
 
         monkeypatch.setattr(AgentCliSummarizer, "maybe_summarize_events", spy)
         answers = serve(monkeypatch, Claude(
-            coordinator=[says("Noted."), says("Noted again."),
-                         calls("researcher", "toolu_c1", request="Find X."), says("X is 42.")],
+            coordinator=[says("Noted."), says("Noted again."), delegate(), says("X is 42.")],
             # Both of the researcher's prompts pass its trigger.
             researcher=[calls("get_plan", "toolu_r1", OVER), says("X is 42.", OVER)],
         ))
@@ -573,25 +584,26 @@ class TestSubAgents:
         finally:
             await manager.cleanup()
 
-        # ADK asked: for the researcher, whose last prompt passed the trigger.
-        assert "researcher" in consulted
+        # The researcher runs on its own runner, whose app summarizes
+        # nothing: ADK never asks for it, whose prompts passed its trigger.
+        assert "researcher" not in consulted
         assert "summary" not in answers.asked
         assert answers.asked == ["coordinator"] * 3 + ["researcher", "researcher",
                                                         "coordinator"]  # no loop
         assert summaries_in(session) == []
         first, second = answers.bodies("researcher")
-        assert lines(first)[-1] == "user: Find X."  # its brief
+        assert lines(first)[-1] == f"user: {task_of(inherit_context)}"  # its task message
         assert lines(second) == [*lines(first), "assistant: called get_plan#toolu_r1",
                                  "user: result#toolu_r1"]
         assert texts(events)[-1] == "X is 42."
 
     @pytest.mark.parametrize("inherit_context", [False, True])
     async def test_a_delegation_after_a_summary(self, project, monkeypatch, inherit_context):
-        """A fresh sub-agent is sent its brief alone; an inheriting one the
-        conversation as it now is, the summary first."""
+        """A fresh sub-agent is sent its task message alone; an inheriting one
+        the conversation as it now is, the summary first."""
         answers = serve(monkeypatch, Claude(
-            coordinator=[says("Noted."), says("Noted again.", OVER),
-                         calls("researcher", "toolu_c1", request="Find X."), says("X is 42.")],
+            coordinator=[says("Noted."), says("Noted again.", OVER), delegate(),
+                         says("X is 42.")],
             researcher=[says("X is 42.")],
         ))
         manager = GoogleADKWorkflowManager(agent_configs=team(inherit_context), settings=settings())
@@ -609,15 +621,16 @@ class TestSubAgents:
         (research,) = answers.bodies("researcher")
         sent = lines(research)
         if not inherit_context:
-            assert sent == ["user: Find X."]
+            assert sent == [f"user: {task_of()}"]
         else:
             assert sent[0] == f"user: {SUMMARY_PREFIX}\n\n{SUMMARY}"
-            assert sent[-1] == "user: Find X."
+            assert sent[-1] == f"user: {task_of(inherit=True)}"
         assert texts(events)[-1] == "X is 42."
 
     async def test_the_main_agent_still_summarizes_after_a_delegation(self, project, monkeypatch):
-        """A sub-agent runs in a task of its own: what it records as the running
-        agent never reaches its coordinator's next model call."""
+        """A sub-agent runs in a task of its own, on a runner of its own: what
+        it records as the running agent never reaches its coordinator's next
+        model call."""
         consulted: list[str | None] = []
         real = AgentCliSummarizer.maybe_summarize_events
 
@@ -628,8 +641,7 @@ class TestSubAgents:
         monkeypatch.setattr(AgentCliSummarizer, "maybe_summarize_events", spy)
         # The coordinator's delegating call passes its trigger.
         answers = serve(monkeypatch, Claude(
-            coordinator=[says("Noted."), says("Noted again."),
-                         calls("researcher", "toolu_c1", OVER, request="Find X."),
+            coordinator=[says("Noted."), says("Noted again."), delegate(OVER),
                          says("X is 42.")],
             researcher=[says("X is 42.")],
         ))
@@ -647,7 +659,7 @@ class TestSubAgents:
         assert len(summaries_in(session)) == 1
         final = lines(answers.bodies("coordinator")[-1])
         assert final[0] == f"user: {SUMMARY_PREFIX}\n\n{SUMMARY}"
-        assert final[-2:] == ["assistant: called researcher#toolu_c1", "user: result#toolu_c1"]
+        assert final[-2:] == ["assistant: called task#toolu_c1", "user: result#toolu_c1"]
 
 
 class TestCancelledTurns:

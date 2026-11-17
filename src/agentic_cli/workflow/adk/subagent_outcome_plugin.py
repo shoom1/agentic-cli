@@ -1,11 +1,11 @@
 """A sub-agent's refused or cut answer, said so to its parent (``workflow/agents/outcome.py``).
 
-ADK hands a sub-agent's last answer to its parent as the delegation's result,
-whatever stopped it: a refusal reached the parent as an empty result, and an
-answer cut at the output limit as a complete one. ``SubAgentOutcomePlugin``
-looks at each final answer of a sub-agent run (``get_active_run()`` is set:
-``MainAgentPlugin`` makes the run active as the agent starts) and reads how it
-stopped from what ADK's adapters give it:
+A sub-agent run's last answer is its result, whatever stopped it: a refusal
+would reach its parent as an empty result, and an answer cut at the output
+limit as a complete one. ``SubAgentOutcomePlugin``, in each sub-agent type's
+plugin chain, looks at each final answer of a sub-agent run
+(``get_active_run()`` is set: the run's own task, ``agents/delegate.py``) and
+reads how it stopped from what ADK's adapters give it:
 
 - its ``finish_reason``: Claude's ``refusal`` arrives as ``SAFETY`` and its
   ``max_tokens`` as ``MAX_TOKENS``, a Chat Completions ``content_filter`` as
@@ -22,9 +22,9 @@ stopped from what ADK's adapters give it:
 It rewrites one a model refused into the refusal notice (that text its
 explanation), and one cut at the output limit into its text followed by the
 cut-off note, its thoughts kept. It marks the answer with its outcome
-(``custom_metadata[OUTCOME_KEY]``), which the event carries, so the event
-processor ends the run ``refused``, or ``completed`` and ``partial`` with one
-warning.
+(``custom_metadata[OUTCOME_KEY]``), which the event carries, so the run's
+event processor keeps it and the run ends ``refused``, or ``completed`` and
+``partial`` with one warning.
 
 It changes the response in place and returns None, as
 ``ForeignReasoningPlugin`` does, so every plugin after it still runs; it sits

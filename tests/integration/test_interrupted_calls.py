@@ -482,12 +482,9 @@ async def test_a_cancel_during_the_model_call_leaves_a_note(hermetic, monkeypatc
 async def test_a_delegation_cut_off_in_its_sub_agent_is_answered_as_interrupted(
     hermetic, monkeypatch, backend
 ):
-    delegation = "researcher" if backend == "adk" else "task"
-    brief = {"request": "Look."} if backend == "adk" else {
-        "agent_type": "researcher", "title": "Look", "objective": "Look.",
-    }
+    brief = {"agent_type": "researcher", "title": "Look", "objective": "Look."}
     claude = serve(monkeypatch, Claude(
-        Coordinate=[calls((delegation, brief, "toolu_d")), say("Back again.")],
+        Coordinate=[calls(("task", brief, "toolu_d")), say("Back again.")],
         Research=[calls(("ic_wait", {}, "toolu_w"))],
     ), backend)
     manager = manager_for(backend, [
@@ -681,8 +678,7 @@ async def test_a_failed_delegation_keeps_its_siblings_results(hermetic, monkeypa
     coordinator is told and goes on, on both backends. The next turn sends
     save_tasks' own result, and its tasks are saved."""
     tasks = [{"description": "Brew tea", "status": "in_progress"}]
-    delegation = ("researcher", {"request": "Look."}) if backend == "adk" else (
-        "task", {"agent_type": "researcher", "title": "Look", "objective": "Look."})
+    delegation = ("task", {"agent_type": "researcher", "title": "Look", "objective": "Look."})
     coordinate = [calls(("save_tasks", {"tasks": tasks}, "toolu_t"), (*delegation, "toolu_d")),
                   say("The research failed.")]
     claude = serve(monkeypatch, Claude(

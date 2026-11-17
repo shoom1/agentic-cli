@@ -1,46 +1,46 @@
-"""ADK delegates to a sub-agent and gets its answer back, in the same turn.
+"""ADK delegates to a sub-agent and gets its result back, in the same turn.
 
-An agent built from an ``AgentConfig`` that is not the root runs in ADK's
-``single_turn`` mode, with transfers to its parent and peers off. Its parent
-is offered it as a tool named after it (``<agent>(request=...)``, ADK's
-private ``_SingleTurnAgentTool``), calls it, and reads its answer as the
-tool's result, ``{"result": <its last text>}``; the root then answers the
-user, and the next turn starts at the root again. No agent built from a
-config is offered ``transfer_to_agent``. A sub-agent with ``inherit_context``
-False (the default) sees only the request; one with ``inherit_context=True``
-also sees its parent's conversation, which ADK gives a ``single_turn`` agent
-only when ``include_contents`` is passed explicitly.
+Every agent built from an ``AgentConfig`` is built on its own: no ADK
+``sub_agents``, so none is offered ``transfer_to_agent``. A delegating agent
+is offered one tool, the framework's ``task`` (``adk/task_tool.py``): its
+call carries a brief (``agent_type``, ``title``, ``objective``, ...), the
+sub-agent runs on a runner of its own, on a child session of the
+conversation's (``<app>--agents``, ``<conversation>/<instance>``), its first
+message the task message (``agents/brief.py::task_message``), and the call's
+result is the run's envelope, as JSON text (``agents/envelope.py``). The root
+then answers the user, and the next turn starts at the root again. A
+sub-agent with ``inherit_context`` False (the default) sees only its task
+message; one with ``inherit_context=True`` sees the conversation first, and
+its task message ends with ``INHERITED_CONTEXT_NOTE``.
 
-ADK builds the delegation tool in the parent's constructor, and it calls no
-``func`` the permission plugin could verify, so the manager binds each one to
-the exempt delegation declaration (``tools/_core/delegation.py``) right after
-the parent is built: only the exact ``_SingleTurnAgentTool`` ADK made for a
-child the framework built. Anything else that looks like one is denied. The
-sub-agent's own tool calls go through the same gate.
+The framework builds the ``task`` tool, so it binds it to the exempt
+delegation declaration (``tools/_core/delegation.py``) as it is made: an
+application's tool of that name, or a look-alike, is denied. A delegating
+agent's own tool named ``task`` fails the build. The sub-agent's own tool
+calls go through the same gate.
 
-A sub-agent's long-running tool is an ordinary call there: ADK pauses the
-whole invocation on a pending long-running call, delegation included, so
-only the root's are wrapped. A job a sub-agent started is told to the root
-when it finishes, in the notice Deep Agents sends. A sub-agent without a
-description is offered as "The <name> agent.", as on Deep Agents.
+A sub-agent's long-running tool is an ordinary call there: only the root's
+are wrapped. A job a sub-agent started is told to the root when it
+finishes, in the notice Deep Agents sends. A sub-agent without a description
+is offered as "The <name> agent.", as on Deep Agents.
 
 A native ADK YAML app (``adk_config_path``) is built by ADK and keeps
 transferring (``tests/workflow/test_adk_transfer_tool.py``).
 
-Turns run the real manager on ``FakeAPI`` (Claude); the private ADK pieces
-this rests on have contract tests at the end.
+Turns run the real manager on ``FakeAPI`` (Claude); what the ``task`` tool
+relies on of ADK's ``BaseTool`` has contract tests at the end.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
 import anthropic
-import httpx
 import pytest
 
 pytest.importorskip("google.adk")
@@ -53,7 +53,7 @@ from google.adk.events import Event  # noqa: E402
 from google.adk.models.anthropic_llm import AnthropicLlm  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.adk.tools import BaseTool, LongRunningFunctionTool  # noqa: E402
-from google.adk.tools.agent_tool import AgentTool, _SingleTurnAgentTool  # noqa: E402
+from google.adk.tools.agent_tool import AgentTool  # noqa: E402
 from google.adk.tools.skill_toolset import SkillToolset  # noqa: E402
 from google.genai import types  # noqa: E402
 
@@ -73,9 +73,16 @@ from agentic_cli.tools.registry import (  # noqa: E402
     register_tool,
 )
 from agentic_cli.tools.skills import SkillStore  # noqa: E402
-from agentic_cli.workflow.adk import delegation  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.permission_plugin import _UNVERIFIED, PermissionPlugin  # noqa: E402
+from agentic_cli.workflow.adk.sessions import child_app  # noqa: E402
+from agentic_cli.workflow.adk.task_tool import TaskTool  # noqa: E402
+from agentic_cli.workflow.agents import brief as brief_module  # noqa: E402
+from agentic_cli.workflow.agents.brief import (  # noqa: E402
+    INHERITED_CONTEXT_NOTE,
+    Brief,
+    task_message,
+)
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
@@ -98,6 +105,22 @@ def calls(name: str, call_id: str, **args) -> dict:
     message = anthropic_message({"type": "tool_use", "id": call_id, "name": name, "input": args})
     message["stop_reason"] = "tool_use"
     return message
+
+
+def delegation(call_id: str, objective: str = BRIEF, *, agent: str = "researcher",
+               title: str = "Find X", **fields) -> dict:
+    """A ``task`` call delegating ``objective`` to ``agent``."""
+    return calls(TASK_TOOL, call_id, agent_type=agent, title=title, objective=objective, **fields)
+
+
+def message_of(objective: str = BRIEF, *, title: str = "Find X", inherit: bool = False) -> str:
+    """The task message a delegation of ``objective`` starts its run with."""
+    return task_message(Brief(title=title, objective=objective), inherit=inherit)
+
+
+def result_of(line: str) -> dict:
+    """The envelope a ``lines`` result line holds: ``user: result "<JSON>"``."""
+    return json.loads(json.loads(line.removeprefix("user: result ")))
 
 
 #: The call id each start of the probe job was given.
@@ -229,7 +252,7 @@ def delegating() -> Team:
     return Team(
         coordinator=[
             says("Noted, Ada."),
-            calls("researcher", "toolu_c1", request=BRIEF),
+            delegation("toolu_c1"),
             says("The researcher says X is 42."),
             says("The coordinator answers turn 3."),
         ],
@@ -247,14 +270,16 @@ async def three_turns(monkeypatch, configs: list[AgentConfig], answers: Team) ->
 
 
 class TestDelegation:
-    async def test_the_root_is_offered_the_sub_agent_and_no_transfer(self, project, monkeypatch):
+    async def test_the_root_is_offered_task_and_no_transfer(self, project, monkeypatch):
         answers = delegating()
         await three_turns(monkeypatch, team(), answers)
 
         for body in answers.bodies("coordinator"):
-            assert tool_names(body) == ["researcher"]
+            assert tool_names(body) == [TASK_TOOL]
         (declaration,) = answers.bodies("coordinator")[0]["tools"]
-        assert declaration["input_schema"]["required"] == ["request"]
+        schema = declaration["input_schema"]
+        assert schema["required"] == ["agent_type", "title", "objective"]
+        assert schema["properties"]["agent_type"]["enum"] == ["researcher"]
 
     async def test_a_sub_agent_is_offered_no_transfer(self, project, monkeypatch):
         answers = delegating()
@@ -279,17 +304,22 @@ class TestDelegation:
             await manager.cleanup()
 
         assert answers.agents == ["coordinator", "coordinator", "researcher", "coordinator"]
-        assert lines(answers.bodies("coordinator")[2])[-2:] == [
-            f"assistant: called researcher({json.dumps({'request': BRIEF})})",
-            'user: result "X is 42."',
-        ]
+        called, result = lines(answers.bodies("coordinator")[2])[-2:]
+        assert called == "assistant: called task({})".format(json.dumps(
+            {"agent_type": "researcher", "title": "Find X", "objective": BRIEF}
+        ))
+        assert result_of(result) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": "completed", "partial": False, "result": "X is 42.", "error": None,
+        }
         (response,) = [
             part.function_response
             for event in session.events
             for part in (event.content.parts if event.content else [])
             if part.function_response
         ]
-        assert (response.name, response.response) == ("researcher", {"result": "X is 42."})
+        assert response.name == TASK_TOOL
+        assert json.loads(response.response["result"])["result"] == "X is 42."
         assert texts(events)[-1] == "The researcher says X is 42."
 
     async def test_the_next_turn_starts_at_the_root(self, project, monkeypatch):
@@ -300,19 +330,19 @@ class TestDelegation:
         assert texts(events[2]) == ["The coordinator answers turn 3."]
         assert len(answers.bodies("researcher")) == 1
 
-    async def test_a_fresh_sub_agent_sees_only_the_request(self, project, monkeypatch):
+    async def test_a_fresh_sub_agent_sees_only_its_task_message(self, project, monkeypatch):
         answers = delegating()
         await three_turns(monkeypatch, team(inherit_context=False), answers)
 
         (body,) = answers.bodies("researcher")
-        assert lines(body) == [f"user: {BRIEF}"]
+        assert lines(body) == [f"user: {message_of()}"]
 
     async def test_the_default_is_fresh(self, project, monkeypatch):
         answers = delegating()
         await three_turns(monkeypatch, team(), answers)
 
         (body,) = answers.bodies("researcher")
-        assert lines(body) == [f"user: {BRIEF}"]
+        assert lines(body) == [f"user: {message_of()}"]
 
     async def test_an_inheriting_sub_agent_sees_the_conversation(self, project, monkeypatch):
         answers = delegating()
@@ -323,34 +353,36 @@ class TestDelegation:
         assert sent[0] == f"user: {TURNS[0]}"
         assert f"user: {TURNS[1]}" in sent
         assert any("Noted, Ada." in line for line in sent)  # the coordinator's reply, quoted
-        assert sent[-1] == f"user: {BRIEF}"
+        assert sent[-1] == f"user: {message_of(inherit=True)}"
         assert "assistant" not in {line.partition(":")[0] for line in sent}
 
-    async def test_an_inheriting_sub_agent_is_told_whose_conversation_it_reads(
+    async def test_an_inheriting_sub_agents_task_message_says_whose_conversation_it_reads(
         self, project, monkeypatch
     ):
         # The user's turns reach it as plain user messages, so without the
         # note it may take them as its own instructions and answer as the
-        # coordinator.
+        # coordinator. The note ends the task message; the prompt is its own.
         answers = delegating()
         await three_turns(monkeypatch, team(inherit_context=True), answers)
 
         (body,) = answers.bodies("researcher")
-        assert system_text(body) == f"{PROMPTS['researcher']}\n\n{delegation.INHERITED_CONTEXT_NOTE}"
+        assert lines(body)[-1].endswith(INHERITED_CONTEXT_NOTE)
+        assert system_text(body).startswith(PROMPTS["researcher"])
+        assert INHERITED_CONTEXT_NOTE not in system_text(body)
         for body in answers.bodies("coordinator"):
-            assert delegation.INHERITED_CONTEXT_NOTE not in system_text(body)
+            assert INHERITED_CONTEXT_NOTE not in system_text(body)
 
     async def test_a_fresh_sub_agent_is_given_no_note(self, project, monkeypatch):
         answers = delegating()
         await three_turns(monkeypatch, team(inherit_context=False), answers)
 
         (body,) = answers.bodies("researcher")
-        assert system_text(body) == PROMPTS["researcher"]
+        assert system_text(body).startswith(PROMPTS["researcher"])
+        assert INHERITED_CONTEXT_NOTE not in json.dumps(body)
 
     async def test_the_sub_agents_own_tool_calls_are_gated(self, project, monkeypatch):
         answers = Team(
-            coordinator=[calls("researcher", "toolu_c1", request="Write a note."),
-                         says("It could not.")],
+            coordinator=[delegation("toolu_c1", "Write a note."), says("It could not.")],
             researcher=[calls("write_file", "toolu_r1", path="note.txt", content="hi"),
                         says("Writing was denied.")],
         )
@@ -375,8 +407,9 @@ class TestDelegation:
 
     async def test_a_middle_coordinator_delegates_in_turn(self, project, monkeypatch):
         answers = Team(
-            coordinator=[calls("middle", "toolu_c1", request="Plan X."), says("Planned: 42.")],
-            middle=[calls("leaf", "toolu_m1", request="Look X up."), says("X is 42, says the leaf.")],
+            coordinator=[delegation("toolu_c1", "Plan X.", agent="middle"), says("Planned: 42.")],
+            middle=[delegation("toolu_m1", "Look X up.", agent="leaf"),
+                    says("X is 42, says the leaf.")],
             leaf=[says("42.")],
         )
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
@@ -394,20 +427,22 @@ class TestDelegation:
             await manager.cleanup()
 
         assert answers.agents == ["coordinator", "middle", "leaf", "middle", "coordinator"]
-        assert tool_names(answers.bodies("middle")[0]) == ["leaf"]
-        # Two levels down, each sub-agent is sent its own request alone.
-        assert lines(answers.bodies("middle")[0]) == ["user: Plan X."]
-        assert lines(answers.bodies("leaf")[0]) == ["user: Look X up."]
-        assert lines(answers.bodies("middle")[1])[-1] == 'user: result "42."'
-        assert lines(answers.bodies("coordinator")[1])[-1] == (
-            'user: result "X is 42, says the leaf."'
+        assert tool_names(answers.bodies("middle")[0]) == [TASK_TOOL]
+        # Two levels down, each sub-agent is sent its own task message alone.
+        assert lines(answers.bodies("middle")[0]) == [f"user: {message_of('Plan X.')}"]
+        assert lines(answers.bodies("leaf")[0]) == [f"user: {message_of('Look X up.')}"]
+        assert result_of(lines(answers.bodies("middle")[1])[-1])["result"] == "42."
+        assert result_of(lines(answers.bodies("coordinator")[1])[-1])["result"] == (
+            "X is 42, says the leaf."
         )
         assert texts(events)[-1] == "Planned: 42."
 
     async def test_two_delegations_in_one_response(self, project, monkeypatch):
         both = anthropic_message(
-            {"type": "tool_use", "id": "toolu_a", "name": "researcher", "input": {"request": "X?"}},
-            {"type": "tool_use", "id": "toolu_b", "name": "researcher", "input": {"request": "Z?"}},
+            {"type": "tool_use", "id": "toolu_a", "name": TASK_TOOL,
+             "input": {"agent_type": "researcher", "title": "X", "objective": "X?"}},
+            {"type": "tool_use", "id": "toolu_b", "name": TASK_TOOL,
+             "input": {"agent_type": "researcher", "title": "Z", "objective": "Z?"}},
         )
         both["stop_reason"] = "tool_use"
         answers = Team(coordinator=[both, says("Both.")],
@@ -419,16 +454,19 @@ class TestDelegation:
         finally:
             await manager.cleanup()
 
-        # Each run sees only its own request; both results come back together.
-        assert sorted(lines(b)[-1] for b in answers.bodies("researcher")) == ["user: X?", "user: Z?"]
-        assert sorted(lines(answers.bodies("coordinator")[1])[-2:]) == [
-            'user: result "X is 42."', 'user: result "Z is 7."',
+        # Each run sees only its own task message; both results come back.
+        assert sorted(lines(b)[-1] for b in answers.bodies("researcher")) == [
+            f"user: {message_of('X?', title='X')}", f"user: {message_of('Z?', title='Z')}",
+        ]
+        read = [result_of(line) for line in lines(answers.bodies("coordinator")[1])[-2:]]
+        assert sorted((r["agent"], r["result"]) for r in read) == [
+            ("researcher-1", "X is 42."), ("researcher-2", "Z is 7."),
         ]
         assert texts(events)[-1] == "Both."
 
     async def test_a_sub_agents_long_answer_is_capped(self, project, monkeypatch):
         answers = Team(
-            coordinator=[calls("researcher", "toolu_c1", request=BRIEF), says("Done.")],
+            coordinator=[delegation("toolu_c1"), says("Done.")],
             researcher=[says("word " * 30_000)],
         )
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
@@ -440,8 +478,8 @@ class TestDelegation:
 
         result = lines(answers.bodies("coordinator")[1])[-1]
         assert len(result) < 60_000
-        assert "Cut: " in result and "tool-output/researcher-" in result
-        (saved,) = (project / ".agentic_cli" / "tool-output").glob("researcher-*.txt")
+        assert "Cut: " in result and "tool-output/task-" in result
+        (saved,) = (project / ".agentic_cli" / "tool-output").glob("task-*.txt")
         assert saved.read_text().count("word") == 30_000  # all of it, in lines to page
 
     async def test_an_inheriting_sub_agent_is_sent_none_of_the_coordinators_thinking(
@@ -454,7 +492,7 @@ class TestDelegation:
                     {"type": "thinking", "thinking": thought, "signature": "sig-c1"},
                     {"type": "text", "text": "Noted, Ada."},
                 ),
-                calls("researcher", "toolu_c1", request=BRIEF),
+                delegation("toolu_c1"),
                 says("The researcher says X is 42."),
             ],
             researcher=[says("X is 42.")],
@@ -468,6 +506,26 @@ class TestDelegation:
         assert any("Noted, Ada." in line for line in lines(body))
         assert thought not in json.dumps(body)
         assert "sig-c1" not in json.dumps(body)
+
+    async def test_each_run_is_kept_in_a_child_session(self, project, monkeypatch):
+        """The run's transcript: its own app's session, under the conversation's id."""
+        answers = delegating()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        manager = manager_for(team())
+        try:
+            await turn(manager, TURNS[0])
+            await turn(manager, TURNS[1])
+            service = manager._session_service
+            child = await service.get_session(
+                app_name=child_app(manager.app_name), user_id="u", session_id="s/researcher-1"
+            )
+            listed = await manager.list_sessions(user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert [e.author for e in child.events] == ["user", "researcher"]
+        assert child.events[0].content.parts[0].text == message_of()
+        assert [row.session_id for row in listed] == ["s"]
 
     async def test_a_native_adk_app_keeps_transferring(self, project, tmp_path):
         (tmp_path / "helper.yaml").write_text(textwrap.dedent("""
@@ -493,7 +551,8 @@ class TestDelegation:
         try:
             root = manager._root_agent
             assert root.sub_agents[0].mode == "chat"
-            assert not any(isinstance(tool, AgentTool) for tool in root.tools)
+            assert not any(isinstance(tool, (AgentTool, TaskTool)) for tool in root.tools)
+            assert manager._agent_runners == {}
         finally:
             await manager.cleanup()
 
@@ -552,31 +611,6 @@ class TestTheStream:
         ]
         assert [e.metadata.get("purpose") for e in delegated
                 if e.type is EventType.LLM_USAGE] == [None, "subagent", None]
-
-    async def test_a_sub_agents_failure_is_a_warning_and_the_turn_goes_on(
-        self, project, monkeypatch
-    ):
-        refused = httpx.Response(400, json={"type": "error", "error": {
-            "type": "invalid_request_error", "message": "max_tokens: 100000 > 64000"}})
-        answers = Team(
-            coordinator=[calls("researcher", "toolu_c1", request=BRIEF),
-                         says("The researcher could not do it.")],
-            researcher=[refused],
-        )
-        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
-        manager = manager_for(team())
-        try:
-            events = await turn(manager, "Find X.")
-        finally:
-            await manager.cleanup()
-
-        (error,) = [e for e in events if e.type is EventType.ERROR]
-        assert error.content.startswith("researcher failed: ")
-        assert "max_tokens: 100000 > 64000" in error.content
-        assert (error.metadata["recoverable"], error.metadata["agent"]) == (True, "researcher")
-        # The coordinator is asked again, and answers the user.
-        assert answers.agents == ["coordinator", "researcher", "coordinator"]
-        assert texts(events)[-1] == "The researcher could not do it."
 
     async def test_fact_extraction_reads_only_the_user_and_the_main_agent(
         self, project, monkeypatch
@@ -698,7 +732,7 @@ class TestUsagePerAgent:
         self, project, monkeypatch, inherit_context
     ):
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
-            coordinator=[sized(calls("researcher", "toolu_c1", request=BRIEF), 4_000),
+            coordinator=[sized(delegation("toolu_c1"), 4_000),
                          sized(says("The researcher says X is 42."), 4_200)],
             # A prompt far larger than the coordinator's, as an inheriting
             # sub-agent's may be: it is still not the main agent's context.
@@ -732,7 +766,7 @@ class TestUsagePerAgent:
         A second, unattributed copy made a sub-agent's prompt the context and
         counted every call twice."""
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
-            coordinator=[sized(calls("researcher", "toolu_c1", request=BRIEF), 4_000),
+            coordinator=[sized(delegation("toolu_c1"), 4_000),
                          sized(says("The researcher says X is 42."), 4_200)],
             researcher=[sized(says("X is 42."), 150_000)],
         )))
@@ -768,7 +802,7 @@ class TestUsagePerAgent:
     async def test_the_raw_log_names_each_calls_own_model(self, project, monkeypatch):
         coordinator, researcher = team()
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
-            coordinator=[calls("researcher", "toolu_c1", request=BRIEF), says("X is 42.")],
+            coordinator=[delegation("toolu_c1"), says("X is 42.")],
             researcher=[says("X is 42.")],
         )))
         manager = GoogleADKWorkflowManager(
@@ -832,32 +866,42 @@ def sized(message: dict, prompt_tokens: int) -> dict:
 
 async def built(configs: list[AgentConfig]) -> LlmAgent:
     """The root agent a manager over ``configs`` builds."""
+    return (await built_all(configs))[0]
+
+
+async def built_all(configs: list[AgentConfig]) -> tuple[LlmAgent, GoogleADKWorkflowManager]:
+    """The root agent a manager over ``configs`` builds, and the manager (cleaned up)."""
     manager = manager_for(configs)
     await manager.initialize_services()
     try:
-        return manager._root_agent
+        return manager._root_agent, manager
     finally:
         await manager.cleanup()
 
 
 class TestTheAgents:
-    async def test_a_sub_agent_is_a_single_turn_agent_that_cannot_transfer(self, project):
-        root = await built(team())
-        (researcher,) = root.sub_agents
+    async def test_every_agent_is_built_on_its_own(self, project):
+        manager = manager_for(team())
+        await manager.initialize_services()
+        try:
+            root, agents = manager._root_agent, dict(manager._agents)
+            runners = dict(manager._agent_runners)
+        finally:
+            await manager.cleanup()
 
-        assert root.mode in (None, "chat")
-        assert researcher.mode == "single_turn"
-        assert researcher.disallow_transfer_to_parent is True
-        assert researcher.disallow_transfer_to_peers is True
-
-    async def test_a_fresh_one_leaves_include_contents_to_adk(self, project):
-        (researcher,) = (await built(team())).sub_agents
-        assert "include_contents" not in researcher.model_fields_set
-
-    async def test_an_inheriting_one_passes_it_explicitly(self, project):
-        (researcher,) = (await built(team(inherit_context=True))).sub_agents
-        assert "include_contents" in researcher.model_fields_set
-        assert researcher.include_contents == "default"
+        researcher = agents["researcher"]
+        assert root is agents["coordinator"]
+        assert (root.sub_agents, researcher.sub_agents) == ([], [])
+        assert researcher.mode in (None, "chat")
+        (task,) = [tool for tool in root.tools if isinstance(tool, TaskTool)]
+        assert identify_tool(task) is get_registry().get(TASK_TOOL)
+        assert not any(isinstance(tool, TaskTool) for tool in researcher.tools)
+        # The sub-agent type's own runner: its own app, never summarized.
+        (runner,) = runners.values()
+        assert list(runners) == ["researcher"]
+        assert runner.app.name == child_app(manager.app_name)
+        assert runner.app.root_agent is researcher
+        assert runner.app.events_compaction_config is None
 
     async def test_a_middle_coordinator_delegates_too(self, project):
         configs = [
@@ -865,25 +909,34 @@ class TestTheAgents:
             AgentConfig(name="middle", prompt="p", sub_agents=["leaf"], description="Mid."),
             AgentConfig(name="leaf", prompt="p", description="Leaf."),
         ]
-        root = await built(configs)
-        (middle,) = root.sub_agents
-        (leaf,) = middle.sub_agents
+        manager = manager_for(configs)
+        await manager.initialize_services()
+        try:
+            agents = dict(manager._agents)
+            runners = sorted(manager._agent_runners)
+        finally:
+            await manager.cleanup()
 
-        assert (middle.mode, leaf.mode) == ("single_turn", "single_turn")
-        for parent, child in ((root, middle), (middle, leaf)):
-            (tool,) = [t for t in parent.tools if isinstance(t, AgentTool)]
-            assert type(tool) is _SingleTurnAgentTool and tool.agent is child
-            assert identify_tool(tool) is get_registry().get(TASK_TOOL)
+        assert runners == ["leaf", "middle"]
+        for parent in ("coordinator", "middle"):
+            (task,) = [t for t in agents[parent].tools if isinstance(t, TaskTool)]
+            assert identify_tool(task) is get_registry().get(TASK_TOOL)
+        assert not any(isinstance(t, TaskTool) for t in agents["leaf"].tools)
 
 
 class TestWhatTheAgentsAreOffered:
     async def test_only_the_roots_long_running_tools_are_wrapped(self, project):
-        root = await built(team(
+        configs = team(
             researcher_tools=[delegation_probe_start_job], tools=[delegation_probe_start_job]
-        ))
-        (researcher,) = root.sub_agents
+        )
+        manager = manager_for(configs)
+        await manager.initialize_services()
+        try:
+            root, researcher = manager._root_agent, manager._agents["researcher"]
+        finally:
+            await manager.cleanup()
 
-        assert [type(t) for t in root.tools if not isinstance(t, AgentTool)] == [
+        assert [type(t) for t in root.tools if not isinstance(t, TaskTool)] == [
             LongRunningFunctionTool
         ]
         assert researcher.tools == [delegation_probe_start_job]
@@ -892,7 +945,7 @@ class TestWhatTheAgentsAreOffered:
         self, project, monkeypatch
     ):
         recorder = _Recorder()
-        monkeypatch.setattr(delegation, "logger", recorder)
+        monkeypatch.setattr(brief_module, "logger", recorder)
         answers = Team(coordinator=[says("ok")])
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
         configs = team()
@@ -904,61 +957,43 @@ class TestWhatTheAgentsAreOffered:
             await manager.cleanup()
 
         (tool,) = answers.bodies("coordinator")[0]["tools"]
-        assert tool["description"] == "The researcher agent."  # as on Deep Agents
-        assert ("warning", "adk_subagent_without_description", {"agent": "researcher"}) in (
+        assert "- researcher: The researcher agent." in tool["description"]  # as on Deep Agents
+        assert ("warning", "subagent_without_description", {"agent": "researcher"}) in (
             recorder.calls
         )
 
     async def test_a_described_one_keeps_its_description(self, project, monkeypatch):
         recorder = _Recorder()
-        monkeypatch.setattr(delegation, "logger", recorder)
-        (researcher,) = (await built(team())).sub_agents
+        monkeypatch.setattr(brief_module, "logger", recorder)
+        root = await built(team())
 
-        assert researcher.description == "Finds facts."
+        (task,) = [tool for tool in root.tools if isinstance(tool, TaskTool)]
+        assert "- researcher: Finds facts." in task.description
         assert recorder.calls == []
 
 
-class TestTheNameClash:
-    """ADK names the delegation tool after the sub-agent, and the tool appended
-    last takes the name: a parent's own tool of that name would be shadowed."""
+def task(objective: str) -> dict:
+    """An application's function named ``task``: not the framework's."""
+    return {"success": True}
 
-    async def test_a_sub_agent_named_like_its_parents_tool(self, project):
-        configs = team(tools=["read_file"])
-        configs[1] = AgentConfig(name="read_file", prompt="p", description="Reads.")
-        configs[0].sub_agents = ["read_file"]
+
+class TestTheNameClash:
+    """A delegating agent is offered the framework's ``task``: a tool of its
+    own by that name would be offered beside it, under the same name."""
+
+    async def test_a_delegating_agents_own_task_tool_fails_the_build(self, project):
+        configs = team(tools=[task])
 
         with pytest.raises(AgentGraphError) as exc:
             await built(configs)
         message = str(exc.value)
-        assert "'coordinator'" in message and "'read_file'" in message
+        assert "'coordinator'" in message and "'task'" in message
 
-    async def test_a_state_tool_counts(self, project):
-        configs = [
-            AgentConfig(name="coordinator", prompt="p", sub_agents=["save_plan"]),
-            AgentConfig(name="save_plan", prompt="p", description="Plans."),
-        ]
-        with pytest.raises(AgentGraphError, match="'save_plan'"):
-            await built(configs)
+    async def test_an_agent_that_does_not_delegate_may_have_one(self, project):
+        configs = [AgentConfig(name="solo", prompt="p", tools=[task])]
 
-    async def test_a_skill_tool_counts(self, project, tmp_path):
-        skill = _make_skill(tmp_path / "skills")
-        configs = [
-            AgentConfig(name="coordinator", prompt="p", sub_agents=["load_skill"],
-                        skills=[str(skill)]),
-            AgentConfig(name="load_skill", prompt="p", description="Loads."),
-        ]
-        with pytest.raises(AgentGraphError, match="'load_skill'"):
-            await built(configs)
-
-    async def test_another_agents_tool_does_not(self, project):
-        # Only the parent's own tools share its tool list with the delegation tool.
-        configs = [
-            AgentConfig(name="coordinator", prompt="p", sub_agents=["read_file", "writer"]),
-            AgentConfig(name="read_file", prompt="p", description="Reads."),
-            AgentConfig(name="writer", prompt="p", description="Writes.", tools=["read_file"]),
-        ]
         root = await built(configs)
-        assert [t.name for t in root.tools if isinstance(t, AgentTool)] == ["read_file", "writer"]
+        assert not any(isinstance(tool, TaskTool) for tool in root.tools)
 
 
 # --- permission identity ---------------------------------------------------------------
@@ -966,7 +1001,7 @@ class TestTheNameClash:
 
 async def _gate(tool) -> dict | None:
     return await PermissionPlugin().before_tool_callback(
-        tool=tool, tool_args={"request": "Do it."}, tool_context=None
+        tool=tool, tool_args={"agent_type": "researcher"}, tool_context=None
     )
 
 
@@ -975,66 +1010,42 @@ def _denied(result: dict | None) -> bool:
 
 
 class TestPermissionIdentity:
-    """Only the exact delegation tools ADK built for the framework's children pass."""
+    """Only the ``task`` tool the framework built passes."""
 
-    async def test_the_delegation_tool_the_framework_built_passes(self, project):
+    async def test_the_task_tool_the_framework_built_passes(self, project):
         root = await built(team())
-        (tool,) = [t for t in root.tools if isinstance(t, AgentTool)]
+        (tool,) = [t for t in root.tools if isinstance(t, TaskTool)]
 
         assert identify_tool(tool) is get_registry().get(TASK_TOOL)
         assert await _gate(tool) is None
 
-    async def test_an_apps_agent_tool_is_denied(self, project):
-        (researcher,) = (await built(team())).sub_agents
-        tool = AgentTool(researcher)
-
-        assert PermissionPlugin._resolve_definition(tool) is _UNVERIFIED
-        assert _denied(await _gate(tool))
-
     async def test_a_look_alike_with_the_same_name_is_denied(self, project):
-        class Researcher(BaseTool):
+        class Task(BaseTool):
             async def run_async(self, *, args, tool_context):  # pragma: no cover
                 return "anything"
 
         await built(team())
-        assert _denied(await _gate(Researcher(name="researcher", description="Finds facts.")))
+        tool = Task(name=TASK_TOOL, description="Delegates.")
+        assert PermissionPlugin._resolve_definition(tool) is _UNVERIFIED
+        assert _denied(await _gate(tool))
 
-    async def test_a_subclass_around_the_frameworks_child_is_denied(self, project):
-        class Delegate(_SingleTurnAgentTool):
+    async def test_a_subclass_is_denied(self, project):
+        class Delegate(TaskTool):
             pass
 
-        (researcher,) = (await built(team())).sub_agents
-        assert _denied(await _gate(Delegate(researcher)))
+        manager = manager_for(team())
+        await manager.initialize_services()
+        try:
+            tool = Delegate("coordinator", {"researcher": team()[1]}, lambda: manager._delegations)
+        finally:
+            await manager.cleanup()
+        # A subclass may run anything: only an exact TaskTool is bound.
+        assert identify_tool(tool) is None
+        assert _denied(await _gate(tool))
 
-    async def test_another_one_around_the_frameworks_child_is_denied(self, project):
-        # The exact class and the framework's own child, but not the object
-        # ADK built in the parent's constructor: identity is the object's.
-        (researcher,) = (await built(team())).sub_agents
-        assert _denied(await _gate(_SingleTurnAgentTool(researcher)))
-
-    async def test_one_around_an_agent_the_framework_did_not_build_is_denied(self):
-        stranger = LlmAgent(name="researcher", mode="single_turn", description="Finds facts.")
-        assert _denied(await _gate(_SingleTurnAgentTool(stranger)))
-
-    def test_binding_takes_only_the_tools_adk_built_for_the_children(self):
-        from agentic_cli.workflow.adk.delegation import bind_delegation_tools
-
-        child = LlmAgent(name="child", mode="single_turn", description="Child.")
-        stranger = LlmAgent(name="stranger", mode="single_turn", description="Not ours.")
-
-        class Delegate(_SingleTurnAgentTool):
-            pass
-
-        supplied = [_SingleTurnAgentTool(stranger), AgentTool(child), Delegate(child)]
-        parent = LlmAgent(name="parent", tools=list(supplied), sub_agents=[child])
-
-        bind_delegation_tools(parent, [child])
-
-        task = get_registry().get(TASK_TOOL)
-        (made,) = [t for t in parent.tools if not any(t is s for s in supplied)]
-        assert type(made) is _SingleTurnAgentTool and made.agent is child
-        assert identify_tool(made) is task
-        assert [identify_tool(t) for t in supplied] == [None, None, None]
+    async def test_an_apps_agent_tool_is_denied(self, project):
+        stranger = LlmAgent(name="researcher", description="Finds facts.")
+        assert _denied(await _gate(AgentTool(stranger)))
 
 
 # --- jobs -----------------------------------------------------------------------------
@@ -1062,7 +1073,7 @@ class TestJobs:
     @staticmethod
     def _sub_agents_job() -> Team:
         return Team(
-            coordinator=[calls("researcher", "toolu_c1", request="Start the build."),
+            coordinator=[delegation("toolu_c1", "Start the build."),
                          says("The researcher started job j1."),
                          says("The build finished: built ok.")],
             researcher=[calls("delegation_probe_start_job", "toolu_r1", command="make"),
@@ -1083,7 +1094,9 @@ class TestJobs:
         # The sub-agent's starter returned at once, with the job's id.
         started = lines(answers.bodies("researcher")[1])[-1].removeprefix("user: result ")
         assert json.loads(json.loads(started))["job_id"] == "j1"
-        assert lines(answers.bodies("coordinator")[1])[-1] == 'user: result "Started job j1."'
+        assert result_of(lines(answers.bodies("coordinator")[1])[-1])["result"] == (
+            "Started job j1."
+        )
         assert texts(events)[-1] == "The researcher started job j1."
 
     async def test_its_finished_job_is_told_to_the_main_agent(self, project, monkeypatch):
@@ -1192,17 +1205,30 @@ async def _run(root: LlmAgent, texts_in: list[str]) -> None:
             pass
 
 
+class _Probe(BaseTool):
+    """A ``BaseTool`` as ``TaskTool`` is one: its declaration from a JSON schema,
+    its run from ``run_async(args=, tool_context=)``."""
+
+    def __init__(self) -> None:
+        super().__init__(name="probe", description="Probe a thing.")
+        self.ran: list[tuple[dict, str | None, dict]] = []
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name, description=self.description,
+            parameters_json_schema={
+                "type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"],
+            },
+        )
+
+    async def run_async(self, *, args, tool_context):
+        tool_context.state["plan"] = "probed"
+        self.ran.append((dict(args), tool_context.function_call_id,
+                         {"events": len(tool_context.session.events)}))
+        return json.dumps({"success": True})
+
+
 class TestTheADKItRestsOn:
-    def test_a_pending_long_running_call_escapes_the_delegation_tool(self):
-        # ADK pauses a delegation on a pending long-running call by raising
-        # NodeInterruptedError out of run_node; _SingleTurnAgentTool catches
-        # Exception only, so the pause takes the whole invocation with it.
-        # Hence a sub-agent's long-running tools are not wrapped.
-        from google.adk.workflow._errors import NodeInterruptedError
-
-        assert issubclass(NodeInterruptedError, BaseException)
-        assert not issubclass(NodeInterruptedError, Exception)
-
     async def test_a_skill_toolsets_tools_are_its_static_list(self, tmp_path):
         # The name-clash check reads SkillToolset._tools: it is what ADK offers.
         skills = SkillStore().resolve([str(_make_skill(tmp_path))])
@@ -1216,58 +1242,40 @@ class TestTheADKItRestsOn:
             t.name for t in toolset._tools
         }
 
-    def test_the_delegation_tool_class(self):
-        child = LlmAgent(name="researcher", mode="single_turn", description="Finds facts.")
-        tool = _SingleTurnAgentTool(child)
+    def test_a_base_tool_is_made_from_its_name_and_description(self):
+        parameters = inspect.signature(BaseTool.__init__).parameters
+        assert {"name", "description"} <= set(parameters)
+        assert set(inspect.signature(BaseTool.run_async).parameters) == {
+            "self", "args", "tool_context",
+        }
 
-        assert issubclass(_SingleTurnAgentTool, AgentTool)
-        assert tool.agent is child
-        assert tool.name == "researcher"
+    async def test_a_tool_is_declared_and_run_as_task_is(self):
+        """ADK offers a tool by its ``_get_declaration`` (a JSON schema, sent
+        as given), calls ``run_async`` with the model's arguments and a tool
+        context (its call id, its state, its session), stores a text result
+        as ``{"result": <text>}``, and writes its state changes with the
+        result."""
+        api = FakeAPI(Team(
+            coordinator=[calls("probe", "toolu_p1", q="X"), says("Done.")],
+        ))
+        probe = _Probe()
+        root = LlmAgent(name="coordinator", model=claude(api),
+                        instruction=PROMPTS["coordinator"], tools=[probe])
+        service = InMemorySessionService()
+        runner = Runner(app=App(name="contract", root_agent=root), session_service=service)
+        session = await service.create_session(app_name="contract", user_id="u")
+        async for _ in runner.run_async(
+            user_id="u", session_id=session.id, new_message=_user("Probe X.")
+        ):
+            pass
+        stored = await service.get_session(app_name="contract", user_id="u", session_id=session.id)
 
-    def test_a_parent_gets_one_tool_for_a_single_turn_child(self):
-        child = LlmAgent(
-            name="researcher", mode="single_turn", description="Finds facts.",
-            disallow_transfer_to_parent=True, disallow_transfer_to_peers=True,
-        )
-        parent = LlmAgent(name="coordinator", sub_agents=[child])
-
-        (tool,) = parent.tools
-        assert type(tool) is _SingleTurnAgentTool
-        assert tool.agent is child and tool.name == "researcher"
-
-    @pytest.mark.parametrize(
-        "include, sees_the_conversation",
-        [
-            pytest.param(None, False, id="left-unset"),
-            pytest.param("default", True, id="default-passed"),
-        ],
-    )
-    async def test_a_single_turn_child_sees_the_conversation_only_when_asked_explicitly(
-        self, include, sees_the_conversation
-    ):
-        answers = Team(
-            coordinator=[says("Noted, Ada."), calls("researcher", "toolu_c1", request=BRIEF),
-                         says("Done.")],
-            researcher=[says("X is 42.")],
-        )
-        api = FakeAPI(answers)
-        extra = {} if include is None else {"include_contents": include}
-        child = LlmAgent(
-            name="researcher", model=claude(api), instruction=PROMPTS["researcher"],
-            description="Finds facts.", mode="single_turn",
-            disallow_transfer_to_parent=True, disallow_transfer_to_peers=True, **extra,
-        )
-        parent = LlmAgent(
-            name="coordinator", model=claude(api), instruction=PROMPTS["coordinator"],
-            sub_agents=[child],
-        )
-
-        await _run(parent, TURNS[:2])
-
-        assert answers.agents == ["coordinator", "coordinator", "researcher", "coordinator"]
-        assert tool_names(answers.bodies("coordinator")[1]) == ["researcher"]
-        (body,) = answers.bodies("researcher")
-        assert tool_names(body) == []
-        sent = lines(body)
-        assert sent[-1] == f"user: {BRIEF}"
-        assert (f"user: {TURNS[0]}" in sent) is sees_the_conversation
+        (declared,) = api.bodies[0]["tools"]
+        assert (declared["name"], declared["input_schema"]["required"]) == ("probe", ["q"])
+        assert probe.ran == [({"q": "X"}, "toolu_p1", {"events": 2})]
+        (response,) = [
+            part.function_response for event in stored.events
+            for part in (event.content.parts if event.content else []) if part.function_response
+        ]
+        assert response.response == {"result": json.dumps({"success": True})}
+        assert stored.state["plan"] == "probed"

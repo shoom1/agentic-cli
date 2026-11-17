@@ -146,11 +146,11 @@ async def test_a_0_6_settings_file_still_starts(providers, home, monkeypatch):
         assert manager.catalog.is_authoritative("google")
         assert manager.catalog.is_authoritative("anthropic")
         # Each agent runs on its own provider's model class.
-        root = manager._root_agent
+        root, writer = manager._root_agent, manager._agents["writer"]
         assert type(root.model) is Gemini
         assert root.model.model == "gemini-2.5-flash"
-        assert type(root.sub_agents[0].model) is AnthropicLlm
-        assert root.sub_agents[0].model.model == "claude-sonnet-4-5"
+        assert type(writer.model) is AnthropicLlm
+        assert writer.model.model == "claude-sonnet-4-5"
     finally:
         await manager.cleanup()
 
@@ -248,7 +248,7 @@ class TestResolution:
         await manager.initialize_services()
         try:
             assert str(manager._resolved_models["writer"].ref) == "google:gemini-2.5-flash-lite"
-            assert manager._root_agent.sub_agents[0].model.model == "gemini-2.5-flash-lite"
+            assert manager._agents["writer"].model.model == "gemini-2.5-flash-lite"
         finally:
             await manager.cleanup()
 
@@ -527,8 +527,7 @@ class TestManagerModel:
             await manager.reinitialize(model="anthropic:claude-sonnet-4-5", preserve_sessions=True)
 
             assert manager.model == "anthropic:claude-sonnet-4-5"
-            root = manager._root_agent
-            for agent in (root, root.sub_agents[0]):
+            for agent in (manager._root_agent, manager._agents["writer"]):
                 assert type(agent.model) is AnthropicLlm
                 assert agent.model.model == "claude-sonnet-4-5"
             assert manager._session_service is service
@@ -557,7 +556,7 @@ class TestAdkModels:
         await manager.initialize_services()
         try:
             root = manager._root_agent
-            researcher, drafter = root.sub_agents
+            researcher, drafter = manager._agents["researcher"], manager._agents["drafter"]
             assert type(root.model) is AnthropicLlm
             assert type(researcher.model) is Gemini
             assert type(drafter.model) is OpenAICompatibleLlm
@@ -582,7 +581,7 @@ class TestAdkModels:
 
         await manager.initialize_services()
         try:
-            root, writer = manager._root_agent, manager._root_agent.sub_agents[0]
+            root, writer = manager._root_agent, manager._agents["writer"]
             assert writer.generate_content_config.temperature == 0.2
             assert writer.generate_content_config.max_output_tokens == 1000
             assert writer.planner.thinking_config.thinking_budget == 4096
@@ -712,7 +711,7 @@ class TestBackendGates:
 
         await manager.initialize_services()
         try:
-            writer = manager._root_agent.sub_agents[0]
+            writer = manager._agents["writer"]
             assert type(writer.model) is OpenAIResponsesLlm
             assert writer.model.model == "gpt-5.5"
         finally:
@@ -742,7 +741,7 @@ class TestBackendGates:
 
         await manager.initialize_services()
         try:
-            writer = manager._root_agent.sub_agents[0]
+            writer = manager._agents["writer"]
             assert writer.generate_content_config.effort == "xhigh"
             assert writer.planner.thinking_config.thinking_budget == -1  # adaptive
         finally:

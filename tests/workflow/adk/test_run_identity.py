@@ -1,15 +1,19 @@
-"""Each ADK event is its run's: the branch a sub-agent's work runs on names it.
+"""Each ADK event is its run's: the conversation's own, or the sub-agent run whose runner wrote it.
 
-ADK runs a sub-agent its parent delegated to on the branch
-``<agent>@<call id>``, under its parent's (``middle@c1.leaf@m1`` two levels
-down); the root, and an agent the root transfers to, on none. The event
-processor names each event's run from it, gives a delegation's call and
-result an ``AGENT_RUN`` (started; completed, failed or interrupted), and
-records it; ``MainAgentPlugin`` makes the run the active one as the agent
-starts, and its parent's the active one again as it ends. ADK runs a
-delegated sub-agent inside its parent's call (``run_node``, in that call's
-own task), so what the agent sets as it starts is still set when it returns:
-the call's after-tool callbacks are the parent's, and see the parent's run.
+The conversation's processor names each event of its runner the root's
+(``root_run``), an agent the root transfers to at depth 0 (a native ADK YAML
+app's), and the user's message no one's. A sub-agent run runs on its type's
+own runner, on its child session, read by a processor made for that run
+(``ADKEventProcessor(run=)``): every event is the run's, its text is
+activity and its usage the sub-agent's, it reports no ``ERROR`` of its own,
+and it keeps what ends the run (its last answer with text, that answer's
+outcome, its failure) for the manager. The ``AGENT_RUN`` events are the
+framework's (``agents/delegate.py``). A ``task`` call's result is read back
+from its JSON text and shown from its envelope.
+
+A delegation's call is its parent's: its after-tool callbacks (every
+plugin's) see the parent's run, whether the sub-agent answered or failed;
+the run's own calls ran in a task of their own.
 """
 
 from __future__ import annotations
@@ -29,31 +33,17 @@ from google.adk.events import Event  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
-from agentic_cli.workflow.adk.branches import (  # noqa: E402
-    branch_run,
-    delegations,
-    parent_branch_run,
-)
-from agentic_cli.workflow.adk.build import delegated_agents  # noqa: E402
 from agentic_cli.workflow.adk.compaction import MainAgentPlugin, running_agent  # noqa: E402
 from agentic_cli.workflow.adk.event_processor import ADKEventProcessor  # noqa: E402
-from agentic_cli.workflow.adk.interrupted_calls_plugin import (  # noqa: E402
-    ABORTED,
-    InterruptedCallsPlugin,
-)
+from agentic_cli.workflow.adk.interrupted_calls_plugin import InterruptedCallsPlugin  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.agents import (  # noqa: E402
-    RUN_COMPLETED,
-    RUN_FAILED,
-    RUN_INTERRUPTED,
-    RUN_STARTED,
-    AgentRuns,
-)
+from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY  # noqa: E402
+from agentic_cli.workflow.agents.envelope import envelope  # noqa: E402
+from agentic_cli.workflow.agents.outcome import CUT  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
-from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER  # noqa: E402
 from agentic_cli.workflow.sessions import RunRef, get_active_run, root_run  # noqa: E402
-from agentic_cli.workflow.tool_errors import unknown_tool_result  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -61,19 +51,19 @@ RESEARCHER = RunRef(
     agent="researcher", instance="researcher-1", run="researcher-1#1", parent_run=None, depth=1
 )
 MIDDLE = RunRef(agent="middle", instance="middle-1", run="middle-1#1", parent_run=None, depth=1)
-LEAF = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1", parent_run="middle-1#1", depth=2)
 
 
-def _text(author: str, text: str = "X is 42.", *, branch: str | None = None) -> Event:
+def _text(author: str, text: str = "X is 42.", **fields) -> Event:
     return Event(
-        author=author, invocation_id="i1", branch=branch,
+        author=author, invocation_id="i1",
         content=types.Content(role="model", parts=[types.Part.from_text(text=text)]),
+        **fields,
     )
 
 
-def _calls(author: str, *made: tuple[str, str, dict], branch: str | None = None) -> Event:
+def _calls(author: str, *made: tuple[str, str, dict]) -> Event:
     return Event(
-        author=author, invocation_id="i1", branch=branch,
+        author=author, invocation_id="i1",
         content=types.Content(role="model", parts=[
             types.Part(function_call=types.FunctionCall(id=call_id, name=name, args=args))
             for name, call_id, args in made
@@ -92,42 +82,11 @@ def _results(author: str, *made: tuple[str, str, dict], error_code: str | None =
 
 
 def _processor(**kwargs) -> ADKEventProcessor:
-    return ADKEventProcessor(
-        model="m", root="coordinator", delegates={"researcher"}, **kwargs
-    )
+    return ADKEventProcessor(model="m", root="coordinator", **kwargs)
 
 
 async def _process(processor: ADKEventProcessor, event: Event) -> list:
     return [e async for e in processor.process_event(event, "s1")]
-
-
-async def _delegated(processor: ADKEventProcessor, request: str = "Find X.") -> None:
-    await _process(processor, _calls("coordinator", ("researcher", "toolu_c1", {"request": request})))
-
-
-class TestBranches:
-    def test_a_branch_is_its_delegations_outermost_first(self):
-        assert delegations("middle@toolu_c1.leaf@toolu_m1") == [
-            ("middle", "toolu_c1"), ("leaf", "toolu_m1"),
-        ]
-
-    def test_no_branch_is_no_delegation(self):
-        assert delegations(None) == []
-        assert delegations("") == []
-
-    def test_a_segment_without_a_call_is_no_delegation(self):
-        assert delegations("node.researcher@toolu_c1") == [("researcher", "toolu_c1")]
-
-    def test_a_branch_names_its_run_under_its_parents(self):
-        assert branch_run(AgentRuns(), None, "middle@c1.leaf@m1") == LEAF
-        assert branch_run(AgentRuns(), None, None) is None
-
-    def test_a_branchs_parent_run_made_its_delegation(self):
-        runs = AgentRuns()
-
-        assert parent_branch_run(runs, None, "middle@c1.leaf@m1") == MIDDLE
-        assert parent_branch_run(runs, None, "middle@c1") is None
-        assert parent_branch_run(runs, None, None) is None
 
 
 class TestEveryEventIsItsRuns:
@@ -135,16 +94,6 @@ class TestEveryEventIsItsRuns:
         (text,) = await _process(_processor(), _text("coordinator"))
 
         assert text.run == root_run("coordinator")
-
-    async def test_a_sub_agents_events_are_its_runs(self):
-        (text,) = await _process(_processor(), _text("researcher", branch="researcher@toolu_c1"))
-
-        assert text.run == RESEARCHER
-
-    async def test_a_nested_run_is_named_under_its_parents(self):
-        (text,) = await _process(_processor(), _text("leaf", branch="middle@c1.leaf@m1"))
-
-        assert text.run == LEAF
 
     async def test_an_agent_the_root_transfers_to_runs_at_depth_0(self):
         processor = ADKEventProcessor(
@@ -181,171 +130,145 @@ class TestCallIds:
         assert result.metadata["tool_call_id"] == "toolu_1"
 
 
-class TestDelegationRuns:
-    async def test_a_delegation_starts_a_run_after_its_call(self):
-        events = await _process(_processor(), _calls(
-            "coordinator", ("researcher", "toolu_c1", {"request": "Find X.\nThen report."})
+class TestATaskCallsResult:
+    async def test_an_envelope_is_shown_from_its_result(self):
+        found = envelope(RESEARCHER, "completed", result="X is 42.\nMore.")
+
+        (result,) = await _process(_processor(), _results(
+            "coordinator", ("task", "toolu_c1", {"result": json.dumps(found)})
         ))
 
-        assert [e.type for e in events] == [EventType.TOOL_CALL, EventType.AGENT_RUN]
-        call, started = events
-        assert call.run == root_run("coordinator")
-        assert started.run == RESEARCHER
-        assert started.content == "researcher-1 started"
-        assert started.metadata == {
-            "status": RUN_STARTED, "agent": "researcher", "partial": False,
-            "call_id": "toolu_c1", "title": "Find X.",
-        }
+        assert (result.content, result.metadata["success"]) == ("X is 42.", True)
+        assert result.metadata["result"] == found
 
-    async def test_its_result_ends_it(self):
-        processor = _processor()
-        await _delegated(processor)
+    async def test_a_failed_one_is_a_failed_result(self):
+        found = envelope(RESEARCHER, "failed", error="overloaded")
 
-        events = await _process(processor, _results(
-            "coordinator", ("researcher", "toolu_c1", {"result": "X is 42."})
+        (result,) = await _process(_processor(), _results(
+            "coordinator", ("task", "toolu_c1", {"result": json.dumps(found)})
         ))
 
-        assert [e.type for e in events] == [EventType.TOOL_RESULT, EventType.AGENT_RUN]
-        ended = events[1]
-        assert ended.run == RESEARCHER
-        assert (ended.metadata["status"], ended.metadata["result"]) == (RUN_COMPLETED, "X is 42.")
-        (record,) = processor.runs.records(None)
-        assert (record.status, record.title, record.result) == (RUN_COMPLETED, "Find X.", "X is 42.")
+        assert result.content == "Failed: overloaded"
+        assert (result.metadata["success"], result.metadata["error"]) == (False, "overloaded")
 
-    async def test_a_long_result_is_cut(self):
-        processor = _processor()
-        await _delegated(processor)
+    async def test_a_brief_that_started_no_run_is_an_error_result(self):
+        refused = {"success": False, "error": "task needs agent_type: one of researcher."}
 
-        (_, ended) = await _process(processor, _results(
-            "coordinator", ("researcher", "toolu_c1", {"result": "z" * 500})
+        (result,) = await _process(_processor(), _results(
+            "coordinator", ("task", "toolu_c1", {"result": json.dumps(refused)})
         ))
 
-        assert ended.metadata["result"] == "z" * 200
-
-    async def test_a_sub_agent_that_failed_ends_its_run_failed(self):
-        processor = _processor()
-        await _delegated(processor)
-
-        (_, ended) = await _process(processor, _results(
-            "coordinator",
-            ("researcher", "toolu_c1", {"result": "Error running sub-agent: 529 overloaded"}),
-        ))
-
-        assert ended.metadata["status"] == RUN_FAILED
-        assert (ended.metadata["error"], ended.metadata["result"]) == ("529 overloaded", "")
-
-    async def test_a_stopped_turns_seal_ends_it_interrupted(self):
-        processor = _processor()
-        await _delegated(processor)
-
-        (_, ended) = await _process(processor, _results(
-            "coordinator",
-            ("researcher", "toolu_c1", {"success": False, "error": INTERRUPTED_BY_USER}),
-            error_code=ABORTED,
-        ))
-
-        assert ended.metadata["status"] == RUN_INTERRUPTED
-
-    async def test_another_tool_starts_no_run(self):
-        events = await _process(_processor(), _calls("coordinator", ("lookup", "toolu_1", {})))
-
-        assert [e.type for e in events] == [EventType.TOOL_CALL]
-
-    async def test_an_error_result_ends_it_failed(self):
-        """The delegation tool raised: ``ToolErrorPlugin`` answers an error result."""
-        processor = _processor()
-        await _delegated(processor)
-
-        (_, ended) = await _process(processor, _results(
-            "coordinator",
-            ("researcher", "toolu_c1", {"success": False, "error": "researcher failed: boom"}),
-        ))
-
-        assert ended.metadata["status"] == RUN_FAILED
-        assert (ended.metadata["error"], ended.metadata["result"]) == (
-            "researcher failed: boom", "",
+        assert result.metadata["result"] == refused
+        assert (result.metadata["success"], result.metadata["error"]) == (
+            False, refused["error"]
         )
 
-
-class TestOnlyTheCallersOwnSubAgents:
-    """A run starts only for a delegation to one of the calling agent's own
-    single-turn sub-agents (``delegates``, by the caller, the event's author)."""
-
-    def test_each_agent_names_its_own_single_turn_sub_agents(self):
-        leaf = SimpleNamespace(name="leaf", mode="single_turn", sub_agents=[])
-        helper = SimpleNamespace(name="helper", mode="chat", sub_agents=[])
-        middle = SimpleNamespace(name="middle", mode="single_turn", sub_agents=[leaf])
-        root = SimpleNamespace(name="coordinator", mode=None, sub_agents=[middle, helper])
-
-        assert delegated_agents(root) == {"coordinator": {"middle"}, "middle": {"leaf"}}
-        assert delegated_agents(helper) == {}
-
-    async def test_a_call_of_another_agents_sub_agent_is_a_tool_call(self):
-        processor = ADKEventProcessor(
-            model="m", root="coordinator",
-            delegates={"coordinator": {"middle"}, "middle": {"leaf"}},
-        )
-
-        called = await _process(
-            processor, _calls("coordinator", ("leaf", "toolu_c1", {"request": "x"}))
-        )
-        answered = await _process(processor, _results(
-            "coordinator", ("leaf", "toolu_c1", unknown_tool_result("leaf", ["middle"]))
+    async def test_another_tools_result_is_read_as_it_is(self):
+        (result,) = await _process(_processor(), _results(
+            "coordinator", ("lookup", "toolu_c1", {"result": json.dumps({"success": False})})
         ))
 
-        assert [e.type for e in called + answered] == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
-        assert processor.runs.records(None) == []
+        assert result.metadata["result"] == {"result": json.dumps({"success": False})}
+        assert result.metadata["success"] is True
 
-    async def test_a_sub_agent_delegates_to_its_own(self):
-        processor = ADKEventProcessor(
-            model="m", root="coordinator",
-            delegates={"coordinator": {"middle"}, "middle": {"leaf"}},
-        )
 
-        events = await _process(processor, _calls(
-            "middle", ("leaf", "m1", {"request": "x"}), branch="middle@c1"
-        ))
+class TestARunsProcessor:
+    """``run=``: every event is that run's, and what ends the run is kept."""
 
-        assert [(e.type, e.run) for e in events] == [
-            (EventType.TOOL_CALL, MIDDLE), (EventType.AGENT_RUN, LEAF),
+    async def test_every_event_is_the_runs(self):
+        processor = _processor(run=RESEARCHER)
+
+        events = [
+            *await _process(processor, _calls("researcher", ("lookup", "toolu_1", {"q": "x"}))),
+            *await _process(processor, _results("researcher", ("lookup", "toolu_1", {"v": 1}))),
+            *await _process(processor, _text("researcher")),
         ]
 
-    async def test_a_set_of_names_is_the_roots(self):
-        events = await _process(_processor(), _calls(
-            "middle", ("researcher", "m1", {"request": "x"}), branch="middle@c1"
+        assert [(e.type, e.run) for e in events] == [
+            (EventType.TOOL_CALL, RESEARCHER), (EventType.TOOL_RESULT, RESEARCHER),
+            (EventType.TEXT, RESEARCHER),
+        ]
+        assert (events[-1].metadata["agent"], events[-1].metadata["subagent"]) == (
+            "researcher", True
+        )
+
+    async def test_its_usage_is_the_sub_agents(self):
+        event = _text("researcher", usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=50, candidates_token_count=5,
         ))
 
-        assert [e.type for e in events] == [EventType.TOOL_CALL]
+        (usage, _) = await _process(_processor(run=RESEARCHER), event)
+
+        assert (usage.run, usage.metadata["agent"], usage.metadata["purpose"]) == (
+            RESEARCHER, "researcher", "subagent"
+        )
+
+    async def test_its_last_answer_with_text_is_kept(self):
+        processor = _processor(run=RESEARCHER)
+
+        await _process(processor, _text("researcher", "X is 42."))
+        # Anthropic may end with an empty end_turn after its final tool call.
+        await _process(processor, Event(
+            author="researcher", invocation_id="i1", error_code="MODEL_RETURNED_NO_CONTENT",
+        ))
+
+        assert (processor.answer, processor.outcome, processor.failure) == ("X is 42.", None, None)
+
+    async def test_an_answers_text_counts_beside_its_tool_call(self):
+        """As Deep Agents' own ``task`` reads a run: its last text, whatever
+        else the reply held."""
+        processor = _processor(run=RESEARCHER)
+        event = _calls("researcher", ("lookup", "toolu_1", {}))
+        event.content.parts.insert(0, types.Part.from_text(text="X is 42. "))
+
+        await _process(processor, event)
+
+        assert processor.answer == "X is 42."
+
+    async def test_its_outcome_mark_is_kept(self):
+        processor = _processor(run=RESEARCHER)
+
+        await _process(processor, _text("researcher", "X is", custom_metadata={OUTCOME_KEY: CUT}))
+
+        assert (processor.answer, processor.outcome) == ("X is", CUT)
+
+    async def test_an_overflow_is_its_failure_and_no_error_is_reported(self):
+        processor = _processor(run=RESEARCHER)
+        event = Event(
+            author="researcher", invocation_id="i1", error_code=OVERFLOW_ERROR_CODE,
+            error_message="researcher: the request no longer fits m's context window.",
+        )
+
+        assert await _process(processor, event) == []
+        assert processor.failure == (
+            "researcher: the request no longer fits m's context window.", OVERFLOW_ERROR_CODE
+        )
+
+    async def test_a_reply_that_is_no_answer_is_its_failure(self):
+        processor = _processor(run=RESEARCHER, models={"researcher": "anthropic:claude"})
+        event = Event(
+            author="researcher", invocation_id="i1", error_code="MALFORMED_FUNCTION_CALL",
+            error_message="bad call",
+        )
+
+        assert await _process(processor, event) == []
+        assert processor.failure == (
+            "anthropic:claude returned no answer: bad call", "MALFORMED_FUNCTION_CALL"
+        )
+
+    async def test_it_reports_no_task_progress(self):
+        event = _results("researcher", ("save_tasks", "toolu_1", {"success": True}))
+        event.actions.state_delta["tasks"] = [
+            {"id": "1", "description": "Look", "status": "in_progress"}
+        ]
+
+        events = await _process(_processor(run=RESEARCHER), event)
+
+        assert [e.type for e in events] == [EventType.TOOL_RESULT]
 
 
-class TestTheActiveRun:
-    async def test_an_agent_on_a_delegations_branch_runs_as_that_run(self):
-        plugin = MainAgentPlugin(AgentRuns())
-
-        async def start() -> RunRef | None:
-            await plugin.before_agent_callback(
-                agent=SimpleNamespace(name="leaf"),
-                callback_context=SimpleNamespace(branch="middle@c1.leaf@m1"),
-            )
-            return get_active_run()
-
-        # ADK runs each agent in a task of its own: the run is that task's.
-        assert await asyncio.create_task(start()) == LEAF
-        assert get_active_run() is None
-
-    async def test_the_root_runs_as_no_run(self):
-        plugin = MainAgentPlugin(AgentRuns())
-
-        async def start() -> RunRef | None:
-            await plugin.before_agent_callback(
-                agent=SimpleNamespace(name="coordinator"),
-                callback_context=SimpleNamespace(branch=None),
-            )
-            return get_active_run()
-
-        assert await asyncio.create_task(start()) is None
-
-    async def test_without_the_runs_it_records_the_agent_alone(self):
+class TestTheRunningAgent:
+    async def test_main_agent_plugin_records_the_agent_alone(self):
         async def start() -> tuple[str | None, RunRef | None]:
             await MainAgentPlugin().before_agent_callback(
                 agent=SimpleNamespace(name="researcher"), callback_context=None
@@ -353,31 +276,6 @@ class TestTheActiveRun:
             return running_agent(), get_active_run()
 
         assert await asyncio.create_task(start()) == ("researcher", None)
-
-    async def test_as_an_agent_ends_its_parents_run_is_active_again(self):
-        plugin = MainAgentPlugin(AgentRuns())
-        leaf, on_leaf = SimpleNamespace(name="leaf"), SimpleNamespace(branch="middle@c1.leaf@m1")
-
-        async def run() -> tuple[RunRef | None, RunRef | None]:
-            await plugin.before_agent_callback(agent=leaf, callback_context=on_leaf)
-            during = get_active_run()
-            await plugin.after_agent_callback(agent=leaf, callback_context=on_leaf)
-            return during, get_active_run()
-
-        assert await asyncio.create_task(run()) == (LEAF, MIDDLE)
-
-    async def test_as_an_agent_fails_its_parents_run_is_active_again(self):
-        plugin = MainAgentPlugin(AgentRuns())
-        leaf, on_leaf = SimpleNamespace(name="leaf"), SimpleNamespace(branch="middle@c1.leaf@m1")
-
-        async def run() -> RunRef | None:
-            await plugin.before_agent_callback(agent=leaf, callback_context=on_leaf)
-            await plugin.on_agent_error_callback(
-                agent=leaf, callback_context=on_leaf, error=RuntimeError("overloaded")
-            )
-            return get_active_run()
-
-        assert await asyncio.create_task(run()) == MIDDLE
 
 
 # -- after a delegation, its parent's run: two turns on Claude, through FakeAPI --
@@ -389,10 +287,11 @@ def _says(text: str) -> dict:
     return anthropic_message({"type": "text", "text": text})
 
 
-def _delegates(agent: str, call_id: str, request: str) -> dict:
-    message = anthropic_message(
-        {"type": "tool_use", "id": call_id, "name": agent, "input": {"request": request}}
-    )
+def _delegates(agent: str, call_id: str, objective: str) -> dict:
+    message = anthropic_message({
+        "type": "tool_use", "id": call_id, "name": "task",
+        "input": {"agent_type": agent, "title": objective, "objective": objective},
+    })
     message["stop_reason"] = "tool_use"
     return message
 
@@ -464,7 +363,7 @@ class TestAfterADelegation:
             leaf=[_says("42.")],
         ))
 
-        assert seen == [("leaf", MIDDLE), ("middle", None)]
+        assert seen == [("task", MIDDLE), ("task", None)]
 
     async def test_after_a_sub_agent_failed(self, project, monkeypatch):
         refused = httpx.Response(400, json={
@@ -477,4 +376,4 @@ class TestAfterADelegation:
             leaf=[refused],
         ))
 
-        assert seen == [("leaf", MIDDLE), ("middle", None)]
+        assert seen == [("task", MIDDLE), ("task", None)]
