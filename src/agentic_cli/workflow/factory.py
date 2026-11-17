@@ -15,10 +15,12 @@ import importlib
 from typing import TYPE_CHECKING, Any, Callable
 
 from agentic_cli.logging import Loggers
+from agentic_cli.workflow.agents.policy import as_policy
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.config import AgentConfig
 
@@ -127,6 +129,8 @@ def create_workflow_manager_from_settings(
     adk_config_mode: str = "native",
     orchestrator: "str | OrchestratorType | None" = None,
     session_store: str | None = None,
+    *,
+    subagents: "SubAgentPolicy | None" = None,
     **kwargs,
 ) -> "BaseWorkflowManager":
     """Factory function to create the appropriate workflow manager based on settings.
@@ -153,12 +157,16 @@ def create_workflow_manager_from_settings(
         session_store: The session store the manager keeps conversations in
             (``BaseWorkflowManager.session_store``), when it is not the one
             the settings name: a CLI run keeps the store it started with.
+        subagents: How the manager's sub-agents run (a ``SubAgentPolicy``;
+            None is ``SubAgentPolicy()``), passed to whichever backend it builds.
         **kwargs: Additional arguments passed to the specific manager.
 
     Returns:
         The orchestrator's ``BaseWorkflowManager``.
 
     Raises:
+        TypeError: ``subagents`` is no ``SubAgentPolicy``, before any backend
+            is imported.
         ImportError: If the orchestrator's extra is not installed.
         ValueError: ``orchestrator`` is no orchestrator.
 
@@ -167,6 +175,7 @@ def create_workflow_manager_from_settings(
         configs = [AgentConfig(name="agent", prompt="...")]
         manager = create_workflow_manager_from_settings(configs, settings)
     """
+    policy = as_policy(subagents)
     orchestrator = (
         orchestrator_of(settings) if orchestrator is None else OrchestratorType(orchestrator)
     )
@@ -191,6 +200,7 @@ def create_workflow_manager_from_settings(
                 app_name=app_name,
                 model=model,
                 adk_config_path=adk_config_path,
+                subagents=policy,
                 **kwargs,
             ), session_store)
 
@@ -200,6 +210,7 @@ def create_workflow_manager_from_settings(
         settings=settings,
         app_name=app_name,
         model=model,
+        subagents=policy,
         **_backend_kwargs(orchestrator, settings, session_store),
         **kwargs,
     ), session_store)
