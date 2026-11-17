@@ -768,7 +768,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
 
             plugins.append(MemoryIndexPlugin(root=root, index_for=self._memory_index_now))
-        fit_guard = FitGuardPlugin(self._budgets, kinds)
+        # A sub-agent type's chain (no main agent): a run's task message is
+        # never trimmed, whatever was steered to it after.
+        keep_task = root is None
+        fit_guard = FitGuardPlugin(self._budgets, kinds, keep_task=keep_task)
         plugins.append(OverflowPlugin(
             root=root,
             reply_agents=replies,
@@ -777,6 +780,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             models=self._agent_model_refs(),
             summarize_now=self._summarize_now,
             fit_guard=fit_guard,
+            keep_task=keep_task,
         ))
         plugins.append(fit_guard)
         if self._llm_logging_plugin is not None:

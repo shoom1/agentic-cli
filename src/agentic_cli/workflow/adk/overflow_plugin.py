@@ -17,7 +17,8 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   main agent) never summarizes; nor does the main agent when the summary
   covers nothing the request holds. The request is then retried with its
   oldest whole turns left out down to half the budget
-  (``fit_guard_plugin.drop_turns``).
+  (``fit_guard_plugin.drop_turns``); a sub-agent run's task message, its
+  invocation's user content, is never among them (``keep_task``).
 - The retry is built from the request as the fit guard saw it
   (``FitGuardPlugin.request_as_seen``, this call's own copy, never a parallel
   call's), without the model's context cache: a model's adapter may have
@@ -124,6 +125,9 @@ class OverflowPlugin(BasePlugin):
             when nothing was summarized; raises when the summary failed.
         fit_guard: The app's fit guard, whose copy of each request a retry
             is built from; without one, the request the callback is given.
+        keep_task: Whether a trimmed retry keeps its task message (its
+            invocation's user content) whatever it leaves out: a sub-agent
+            type's chain, whose runs each start from one.
     """
 
     def __init__(
@@ -136,8 +140,10 @@ class OverflowPlugin(BasePlugin):
         models: Mapping[str, str],
         summarize_now: Callable[["CallbackContext"], Awaitable["WrittenSummary | None"]],
         fit_guard: "FitGuardPlugin | None" = None,
+        keep_task: bool = False,
     ) -> None:
         super().__init__(name=OVERFLOW_PLUGIN)
+        self._keep_task = keep_task
         self._root = root
         # The agents whose overflow is the turn's clear error.
         self._replying = frozenset({*reply_agents, *([root] if root is not None else [])})
@@ -170,6 +176,7 @@ class OverflowPlugin(BasePlugin):
                 request.contents,
                 target_tokens=budget.budget // 2 - overhead_tokens(request, kind),
                 kind=kind,
+                task=callback_context.user_content if self._keep_task else None,
             )
         if not dropped:
             return self._does_not_fit(agent)
