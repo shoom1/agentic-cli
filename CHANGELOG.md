@@ -2789,6 +2789,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A timed-out `execute_python` stops the code and what it started.** The
+  timeout killed only the process the executor started (the shell, or
+  bubblewrap's monitor), so the code ran on: on Linux the sandbox's init,
+  in a session of its own, outlived bubblewrap, and on macOS a process the
+  code forked outlived `sandbox-exec`. The command now runs in a session of
+  its own, and a timeout, or an interruption while it waits, kills its whole
+  process group and, on Linux, each child of it that left the group
+  (bubblewrap's sandbox init, whose death ends every process in the
+  sandbox). On macOS, code that calls `setsid()` itself can still outlive
+  the timeout.
+
 - **`execute_python` runs inside bubblewrap on Linux.** It never did: every
   call was refused with "it did not start (bubblewrap, exit status 1): bwrap:
   Can't create file at ~/.bash_profile: Read-only file system" (or another
@@ -2808,7 +2819,9 @@ step; each entry says what to use instead.
   bwrap would have left an empty file there, and an empty `.git` file breaks
   git ("invalid gitfile format"). A run never removes a folder it did not
   make: a protected folder that is there and empty (an empty `.git`) is bound
-  read-only and left as it was. The code runs as the sandbox's pid 1
+  read-only, and left as it was after a run that ended on its own (after a
+  timeout, or a run a signal ended, the run's hidden hold file stays in it).
+  The code runs as the sandbox's pid 1
   (`--as-pid-1`), so a run that returned has left no process behind; one that
   timed out, or that a signal ended, is not released, and its placeholder
   stays, empty and protected, for later runs to hold. A placeholder that
