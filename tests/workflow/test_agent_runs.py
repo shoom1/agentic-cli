@@ -134,6 +134,52 @@ class TestRunFor:
         assert [run_instance(ref.run) for ref in (middle, leaf)] == ["middle-1", "leaf-1"]
 
 
+class TestNumberFrom:
+    """A conversation's store may keep instances an earlier manager numbered
+    (a restart, a switch of backend or store): ``number_from`` numbers the
+    next ones past them."""
+
+    def test_the_next_instance_is_numbered_past_the_count(self):
+        runs = AgentRuns()
+
+        runs.number_from(ONE, {"researcher": 3})
+
+        assert runs.run_for(ONE, None, "c1", "researcher").run == "researcher-4#1"
+
+    def test_another_agent_or_conversation_is_not_moved(self):
+        runs = AgentRuns()
+
+        runs.number_from(ONE, {"researcher": 3})
+
+        assert runs.run_for(ONE, None, "c1", "writer").run == "writer-1#1"
+        assert runs.run_for(TWO, None, "c1", "researcher").run == "researcher-1#1"
+
+    def test_a_count_is_never_lowered(self):
+        runs = AgentRuns()
+        for call_id in ("c1", "c2", "c3"):
+            runs.run_for(ONE, None, call_id, "researcher")
+
+        runs.number_from(ONE, {"researcher": 1})
+
+        assert runs.run_for(ONE, None, "c4", "researcher").run == "researcher-4#1"
+
+    def test_an_open_run_keeps_its_name(self):
+        runs = AgentRuns()
+        open_run = runs.run_for(ONE, None, "c1", "researcher")
+
+        runs.number_from(ONE, {"researcher": 5})
+
+        assert runs.run_for(ONE, None, "c1", "researcher") is open_run
+        assert runs.run_for(ONE, None, "c2", "researcher").run == "researcher-6#1"
+
+    def test_no_conversation_is_one_too(self):
+        runs = AgentRuns()
+
+        runs.number_from(None, {"researcher": 2})
+
+        assert runs.run_for(None, None, "c1", "researcher").run == "researcher-3#1"
+
+
 class TestObserve:
     def test_a_start_is_recorded(self):
         runs = AgentRuns()
