@@ -116,6 +116,12 @@ class TestSubAgentPolicy:
     def test_policies_with_the_same_values_are_equal(self):
         assert SubAgentPolicy() == SubAgentPolicy(limits=AgentLimits(max_model_calls=100))
 
+    def test_its_own_limits_replace_the_default_limits_whole(self):
+        # As the docstring says: laid over DEFAULT_LIMITS, they keep its 100 calls.
+        assert SubAgentPolicy(limits=AgentLimits(timeout=60)).limits.max_model_calls is None
+        kept = SubAgentPolicy(limits=AgentLimits(timeout=60).over(DEFAULT_LIMITS)).limits
+        assert kept == AgentLimits(max_model_calls=100, timeout=60)
+
 
 class TestAsPolicy:
     def test_none_is_the_default_policy(self):

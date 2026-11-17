@@ -566,14 +566,18 @@ the start of the entry's title.
   once in a conversation, at any depth), `max_runs_per_turn` (20, the runs
   one turn may start) and `limits`, every run's `AgentLimits`
   (`DEFAULT_LIMITS`, `AgentLimits(max_model_calls=100)`, unless the app sets
-  its own). `AgentLimits` holds a run's `max_model_calls`, `timeout`
-  (seconds) and `max_tokens` (input plus output), each None for no limit of
-  its own, and `over(base)` lays one over another field by field: a field
-  left None takes the base's, so an agent type's limits never lift the
-  policy's. Construction refuses, with a `ValueError` naming the field, a
-  limit that is not a positive int (a timeout: a positive, finite number;
-  `True` and `False` are no numbers here) and a policy whose `limits` is
-  not an `AgentLimits`.
+  its own). A policy's own `limits` replace `DEFAULT_LIMITS` whole:
+  `SubAgentPolicy(limits=AgentLimits(timeout=60))` has no model-call limit,
+  while `AgentLimits(timeout=60).over(DEFAULT_LIMITS)` keeps the 100 calls.
+  `AgentLimits` holds a run's `max_model_calls`, `timeout` (seconds) and
+  `max_tokens` (input plus output), each None for no limit of its own, and
+  `over(base)` lays one over another field by field: a field left None
+  takes the base's. So an agent type's field left None keeps the policy's
+  limit, and a type may set its own, higher or lower, but cannot remove a
+  limit the policy sets. Construction refuses, with a `ValueError` naming
+  the field, a limit that is not a positive int (a timeout: a positive,
+  finite number; `True` and `False` are no numbers here) and a policy whose
+  `limits` is not an `AgentLimits`.
 - **`AgentConfig.brief_required` and `AgentConfig.limits`.**
   `brief_required` (default `("objective",)`) names the brief fields the
   agent asks a delegation to fill: `objective`, `deliverable`,

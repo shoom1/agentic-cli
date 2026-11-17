@@ -78,7 +78,8 @@ class AgentLimits:
         """These limits over ``base``: each field of this one that is set,
         else ``base``'s (a type's limits over the policy's).
 
-        A field left None never lifts a limit ``base`` sets.
+        A field left None keeps the limit ``base`` sets; a field set
+        replaces it, higher or lower. No field removes one.
         """
         own = {f.name: getattr(self, f.name) for f in fields(self)}
         return replace(base, **{name: value for name, value in own.items() if value is not None})
@@ -97,7 +98,11 @@ class SubAgentPolicy:
             conversation, at any depth.
         max_runs_per_turn: How many sub-agent runs one turn may start.
         limits: Every run's limits (``AgentLimits``), which an agent type's
-            own lie over.
+            own lie over. A policy's own replace ``DEFAULT_LIMITS`` whole:
+            ``SubAgentPolicy(limits=AgentLimits(timeout=60))`` has no
+            model-call limit, while
+            ``AgentLimits(timeout=60).over(DEFAULT_LIMITS)`` keeps the 100
+            calls.
     """
 
     max_active: int = 4
