@@ -85,7 +85,7 @@ from agentic_cli.workflow.outside_content import (
     JOB_RESULT,
     OUTSIDE_CONTENT_KEY,
 )
-from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
+from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo, get_active_run
 from agentic_cli.workflow.tool_output import tool_output_dir
 from agentic_cli.workflow.usage import adk_usage_event
 
@@ -694,9 +694,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
           call (a run's mark reaches the conversation with its result,
           ``adk/task_tool.py``), and the raw log is the app's own instance
           (one buffer, which the manager drains, ``_report_raw_log``);
-        - ``SubAgentOutcomePlugin`` after the raw log: the run's final
-          answer that a model refused or cut is said so, and marked, as its
-          parent reads it;
+        - ``RunControlPlugin`` after the raw log, which records each answer
+          as the model gave it: the run's limits at its model calls (its
+          control, ``Delegations.control``), before anything else edits
+          the request;
+        - ``SubAgentOutcomePlugin`` after it: the run's final answer that a
+          model refused or cut is said so, and marked, as its parent reads
+          it (an answer whose calls the step or token limit dropped among
+          them);
         - no memory index, and an overflow handler with no main agent: a
           sub-agent's overflow, trimmed and retried once, then answers its
           call with an error response (``CONTEXT_OVERFLOW``) that ends the
@@ -707,6 +712,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         run on this one chain at once, and a provider may number their call
         ids alike.
         """
+        from agentic_cli.workflow.adk.run_control_plugin import RunControlPlugin
         from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
@@ -716,6 +722,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ]
         if self._llm_logging_plugin is not None:
             head.append(self._llm_logging_plugin)
+        head.append(RunControlPlugin(
+            lambda: self._delegations.control(get_active_run()),
+            self._agent_kinds().get(agent.name),
+        ))
         head.append(SubAgentOutcomePlugin())
         return self._chain(
             head=head,

@@ -20,6 +20,8 @@ gets these; sub-agents are gated as strictly as the root.
   puts the main agent's memory index first in each request.
 - :class:`SubAgentOutcomeMiddleware`, outermost on a sub-agent's model side,
   says a refused or cut final answer so, for its parent and its run.
+- :class:`RunControlMiddleware`, inside it on a sub-agent's model side, keeps
+  the run's limits at its model calls.
 
 A gate or error result is the call's ``ToolMessage`` with ``status="error"``
 and the result dict as JSON content: the model reads it and carries on.
@@ -40,7 +42,7 @@ import dataclasses
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -68,6 +70,7 @@ from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
 from agentic_cli.paths import resolve_path
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
+from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE
 from agentic_cli.workflow.agents.outcome import (
     REFUSED,
     cut_off,
@@ -82,12 +85,18 @@ from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
+    get_active_run,
     get_active_turn,
     reset_active_tool_call,
     set_active_tool_call,
 )
 from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
 from agentic_cli.workflow.tool_output import cap_tool_result, is_saved_output
+from agentic_cli.workflow.usage import langchain_tokens
+
+if TYPE_CHECKING:
+    from agentic_cli.workflow.agents.control import RunControl
+    from agentic_cli.workflow.agents.delegate import Delegations
 
 logger = Loggers.workflow()
 
@@ -855,15 +864,129 @@ def _refusal(message: AIMessage) -> dict | None:
 
 def _with_outcome(response: Any) -> Any:
     """``response`` (any form a model call returns) with its answers through ``marked_answer``."""
+    return _mapped(response, marked_answer)
+
+
+def _mapped(response: Any, change: Callable[[AIMessage], AIMessage]) -> Any:
+    """``response`` (any form a model call returns) with each answer it holds through ``change``."""
     if isinstance(response, AIMessage):
-        return marked_answer(response)
+        return change(response)
     if isinstance(response, ModelResponse):
         return dataclasses.replace(response, result=[
-            marked_answer(message) if isinstance(message, AIMessage) else message
+            change(message) if isinstance(message, AIMessage) else message
             for message in response.result
         ])
     if isinstance(response, ExtendedModelResponse):
         return dataclasses.replace(
-            response, model_response=_with_outcome(response.model_response)
+            response, model_response=_mapped(response.model_response, change)
         )
     return response
+
+
+def _answers(response: Any) -> list[AIMessage]:
+    """The answers ``response`` (any form a model call returns) holds."""
+    if isinstance(response, AIMessage):
+        return [response]
+    if isinstance(response, ModelResponse):
+        return [message for message in response.result if isinstance(message, AIMessage)]
+    if isinstance(response, ExtendedModelResponse):
+        return _answers(response.model_response)
+    return []
+
+
+class RunControlMiddleware(AgentMiddleware):
+    """A sub-agent run's control at each of its model calls (``workflow/agents/control.py``).
+
+    On each sub-agent's model side, inside ``SubAgentOutcomeMiddleware`` and
+    outside the rest, for the run in progress (``get_active_run``: the run's
+    own task, ``agents/delegate.py``), whose control the manager's
+    ``Delegations`` holds:
+
+    - before each model call the call is counted (``RunControl.model_call``),
+      and the run's last allowed one gets ``STEP_LIMIT_NOTE`` after its last
+      message, in the request only (``with_note``). Its tools stay bound:
+      Claude refuses a request whose messages hold tool calls or results
+      when it defines no tools, and no call that answer makes is run (below);
+    - after each, what it used (``workflow/usage.py::langchain_tokens``) goes
+      to ``RunControl.used``;
+    - on the run's last call (``RunControl.final_call``: its step limit's,
+      or one past its token limit) the answer's tool calls are dropped
+      (``without_calls``), so the agent ends with that answer.
+
+    The summarization inside it counts the note; the outcome middleware
+    outside it reads an answer whose calls were dropped as the run's final
+    one. The root's calls (no active run) and a run without a control are
+    left alone.
+
+    Args:
+        delegations: The manager's delegations, asked at each call for the
+            run's control (``Delegations.control``).
+    """
+
+    def __init__(self, delegations: Callable[[], Delegations]) -> None:
+        super().__init__()
+        self._delegations = delegations
+
+    def _control(self) -> RunControl | None:
+        return self._delegations().control(get_active_run())
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        control = self._control()
+        if control is None:
+            return await handler(request)
+        if control.model_call():
+            request = request.override(messages=with_note(request.messages, STEP_LIMIT_NOTE))
+        response = await handler(request)
+        for answer in _answers(response):
+            tokens = langchain_tokens(answer.usage_metadata)
+            control.used(tokens.input, tokens.output)
+        if control.final_call:
+            response = _mapped(response, without_calls)
+        return response
+
+
+def with_note(messages: list[AnyMessage], note: str) -> list[AnyMessage]:
+    """``messages`` with ``note`` after the last, as the user's.
+
+    Added to the last message when that is the user's own (a
+    ``HumanMessage``: the task message, a steered message), as a text block
+    after its own, so no provider sees two user messages in a row; else a
+    ``HumanMessage`` of its own (after a tool result). ``messages`` are not
+    changed in place.
+    """
+    if messages and isinstance(messages[-1], HumanMessage):
+        last = messages[-1]
+        content = last.content
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+        noted = last.model_copy(update={"content": [*blocks, {"type": "text", "text": note}]})
+        return [*messages[:-1], noted]
+    return [*messages, HumanMessage(content=note)]
+
+
+#: The content blocks that hold a tool call, as the adapters write them.
+_CALL_BLOCKS = frozenset({"tool_use", "tool_call", "function_call"})
+
+
+def without_calls(message: AIMessage) -> AIMessage:
+    """``message`` without its tool calls: the run's last answer, its text and reasoning kept."""
+    if not message.tool_calls and not message.invalid_tool_calls:
+        return message
+    content = message.content
+    if isinstance(content, list):
+        content = [
+            block for block in content
+            if not (isinstance(block, dict) and block.get("type") in _CALL_BLOCKS)
+        ]
+    return message.model_copy(update={
+        "content": content,
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "additional_kwargs": {
+            key: value for key, value in message.additional_kwargs.items()
+            if key not in ("tool_calls", "function_call")
+        },
+    })

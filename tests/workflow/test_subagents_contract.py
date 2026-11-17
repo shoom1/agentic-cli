@@ -45,8 +45,13 @@ from agentic_cli.workflow.agents import (
     RunRecord,
     SubAgentPolicy,
 )
-from agentic_cli.workflow.agents.control import RunControl
-from agentic_cli.workflow.agents.envelope import TIME_LIMIT_ERROR, read_envelope
+from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
+from agentic_cli.workflow.agents.envelope import (
+    STEP_LIMIT_ERROR,
+    TIME_LIMIT_ERROR,
+    TOKEN_LIMIT_ERROR,
+    read_envelope,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import (
     EventType,
@@ -2598,3 +2603,131 @@ class TestALimitAtAPrompt:
         await asyncio.wait_for(crew.turn("Ask me again."), 20)
 
         assert asked == ["contract_ask", "contract_ask"]
+
+
+def limited(**limits: Any) -> list[AgentConfig]:
+    """A coordinator, and a researcher with ``limits`` that may look up and say who it is."""
+    return [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_lookup, contract_whoami),
+              limits=AgentLimits(**limits)),
+    ]
+
+
+def calls_to(events: list[WorkflowEvent], call_id: str) -> list[WorkflowEvent]:
+    """The turn's tool calls and results of the call ``call_id``."""
+    return [
+        event for event in events
+        if event.type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
+        and event.metadata.get("tool_call_id") == call_id
+    ]
+
+
+class TestTheStepLimit:
+    """Spec 5.4: the run's last allowed model call is told to answer now, and
+    no call it makes runs; the run completes partial."""
+
+    async def test_the_last_allowed_call_is_told_and_the_run_completes_partial(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking."),
+                        says("X is 42.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert STEP_LIMIT_NOTE not in crew.bodies("researcher")[0]
+        assert crew.last_message("researcher", 1).endswith(STEP_LIMIT_NOTE)
+        # Its tools stay declared: a request holding tool calls and results
+        # without them is one Claude refuses.
+        assert crew.tool_names("researcher", 1) == ["contract_lookup", "contract_whoami"]
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": "X is 42.",
+            "error": STEP_LIMIT_ERROR,
+        }
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+    async def test_a_first_call_that_is_the_last_has_the_note_in_the_task_message(
+        self, make_crew
+    ):
+        crew = make_crew(
+            limited(max_model_calls=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.message_count("researcher", 0) == 1
+        last = crew.last_message("researcher", 0)
+        assert last.startswith("# Task: Find X.") and last.endswith(STEP_LIMIT_NOTE)
+
+    async def test_a_call_made_on_the_last_call_is_dropped_never_run(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking."),
+                        calls(use("contract_whoami", "r2"), text="X is about 42."),
+                        says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["partial"], read["result"], read["error"]) == (
+            RUN_COMPLETED, True, "X is about 42.", STEP_LIMIT_ERROR
+        )
+
+    async def test_a_last_answer_of_calls_alone_leaves_the_text_before_it(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        calls(use("contract_whoami", "r2")),
+                        says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"], read["error"]) == (
+            RUN_COMPLETED, "X is about 42.", STEP_LIMIT_ERROR
+        )
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+
+class TestTheTokenLimit:
+    """Spec 5.4: the run's input plus output tokens, checked after each model
+    call; past them the run ends at that answer, cancelled by its limit."""
+
+    async def test_past_it_the_run_ends_at_that_answer_cancelled(self, make_crew):
+        crew = make_crew(
+            limited(max_tokens=150),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking.",
+                              usage=(60, 20)),
+                        calls(use("contract_whoami", "r2"), text="X is about 42.",
+                              usage=(80, 20)),
+                        says("[never asked]")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": TOKEN_LIMIT_ERROR, "cancelled_by": "limit",
+        }
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (140, 40, 2)

@@ -30,6 +30,7 @@ from agentic_cli.workflow.deepagents import manager as deepagents_manager  # noq
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
     PermissionMiddleware,
+    RunControlMiddleware,
     SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
     answer_outcome,
@@ -246,11 +247,12 @@ class TestTheStacks:
 
         assert outcome("coordinator") == []
         assert outcome("lead") == outcome("worker") == [SubAgentOutcomeMiddleware]
-        # Outermost on the model side: before the tool side.
+        # Outermost on the model side, the run's control inside it, then the
+        # tool side.
         worker = [type(m) for m in created["worker"]["middleware"]]
-        assert worker[-4:] == [
-            SubAgentOutcomeMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
-            ActiveToolCallMiddleware,
+        assert worker[-5:] == [
+            SubAgentOutcomeMiddleware, RunControlMiddleware, PermissionMiddleware,
+            ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
 
 
