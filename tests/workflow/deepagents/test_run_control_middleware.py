@@ -107,6 +107,18 @@ async def test_an_answer_past_the_token_limit_is_the_last_only_when_it_would_go_
         assert (control.cancelled, kept) == (None, answer)
 
 
+async def test_an_answer_with_no_usage_is_not_limited_by_tokens():
+    control = RunControl(REF, AgentLimits(max_tokens=1))
+    middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
+    answer = AIMessage("Found it.", tool_calls=[CALL])
+
+    async def handler(request):
+        return answer
+
+    assert await middleware.awrap_model_call("the request", handler) is answer
+    assert (control.cancelled, control.final_call) == (None, False)
+
+
 async def test_the_messages_steered_since_the_last_call_join_the_runs_state():
     ref = RunRef(agent="researcher", instance="researcher-1", run="researcher-1#1",
                  parent_run=None, depth=1)

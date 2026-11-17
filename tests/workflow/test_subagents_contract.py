@@ -2528,6 +2528,9 @@ class TestCancellingOneRun:
             "error": "no longer needed", "cancelled_by": "parent",
         }
         assert envelope_read(read["c2"])["result"] == "Checked."
+        # The checker was working when the cancel landed: its tool saw it.
+        assert json.loads(crew.results_read("checker")["k1"]) == {"success": True}
+        assert BLOCKING["stopped"].is_set()  # the researcher's tool was stopped
         assert {r.ref.instance: (r.status, r.cancelled_by) for r in crew.records()} == {
             "researcher-1": (RUN_CANCELLED, "parent"), "checker-1": (RUN_COMPLETED, None),
         }
@@ -2561,6 +2564,7 @@ class TestTheTimeLimit:
             RUN_CANCELLED, "limit", TIME_LIMIT_ERROR
         )
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_CANCELLED]
+        assert BLOCKING["stopped"].is_set()  # its tool was stopped with it
 
 
 class TestALimitAtAPrompt:

@@ -697,10 +697,12 @@ def waiting(text: str = "Half done.", *, lets_it_out: bool = False) -> tuple[Hoo
 
 
 async def stopped(
-    made: Delegations, working: asyncio.Event, *, by: str, error: str
+    made: Delegations, working: asyncio.Event, *, by: str, error: str,
+    asked: DelegationRequest | None = None, run: str = "researcher-1#1",
 ) -> tuple[Any, list[WorkflowEvent], bool]:
-    """A delegation in a turn of ``CONVERSATION`` whose run is cancelled once
-    it works: its result, what it reported, and what ``cancel`` returned."""
+    """A delegation (``asked``, else the researcher's) in a turn of
+    ``CONVERSATION`` whose run ``run`` is cancelled once it works: its result,
+    what it reported, and what ``cancel`` returned."""
     live = LiveEvents()
     out: dict[str, Any] = {}
 
@@ -708,9 +710,9 @@ async def stopped(
         token = set_active_turn(CONVERSATION)
         try:
             with live_events.reporting(live):
-                running = asyncio.create_task(made.delegate(request()))
+                running = asyncio.create_task(made.delegate(asked or request()))
                 await working.wait()
-                out["cancelled"] = made.cancel("researcher-1#1", by=by, error=error)
+                out["cancelled"] = made.cancel(run, by=by, error=error)
                 out["result"] = await running
         finally:
             reset_active_turn(token)
@@ -848,6 +850,131 @@ class TestCancellingOneRun:
         assert (record.status, record.error, record.cancelled_by) == (
             RUN_INTERRUPTED, INTERRUPTED_ERROR, None
         )
+
+    async def test_the_turns_cancel_while_the_hook_cleans_up_after_its_own_wins(self):
+        """The run's own cancel taken, and its turn stopped while the hook
+        cleans up after it: the run is the turn's, interrupted."""
+        working, cleaning = asyncio.Event(), asyncio.Event()
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            working.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if not run.control.own_cancel():
+                    raise
+                cleaning.set()
+                await asyncio.sleep(0.2)  # stopping its work
+                return RunAnswer(text="Half done.")
+            return RunAnswer()  # pragma: no cover
+
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def caller():
+            token = set_active_turn(CONVERSATION)
+            try:
+                with live_events.reporting(LiveEvents()):
+                    await made.delegate(request())
+            finally:
+                reset_active_turn(token)
+
+        task = asyncio.create_task(caller())
+        await asyncio.wait_for(working.wait(), 5)
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.cancel("researcher-1#1", by="parent", error="no longer needed")
+        finally:
+            reset_active_turn(token)
+        await asyncio.wait_for(cleaning.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        (record,) = runs.records(CONVERSATION)
+        assert (record.status, record.cancelled_by) == (RUN_INTERRUPTED, None)
+
+    async def test_a_run_cancelled_already_is_not_cancelled_again(self):
+        working, cleaning = asyncio.Event(), asyncio.Event()
+        out: dict[str, bool] = {}
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            working.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if not run.control.own_cancel():
+                    raise
+                cleaning.set()
+                await asyncio.sleep(0.05)
+                return RunAnswer(text="Half done.")
+            return RunAnswer()  # pragma: no cover
+
+        async def body() -> Any:
+            running = asyncio.create_task(made.delegate(request()))
+            await working.wait()
+            out["first"] = made.cancel("researcher-1#1", by="parent", error="stop")
+            await cleaning.wait()
+            out["again"] = made.cancel("researcher-1#1", by="user", error="stop it")
+            return await running
+
+        made = delegations(hook)
+        token = set_active_turn(CONVERSATION)
+        try:
+            with live_events.reporting(LiveEvents()):
+                result = await asyncio.wait_for(body(), 5)
+        finally:
+            reset_active_turn(token)
+
+        assert out == {"first": True, "again": False}
+        assert (result.result["cancelled_by"], result.result["error"]) == ("parent", "stop")
+
+    async def test_a_parent_cancelled_alone_ends_its_working_child_interrupted(self):
+        """A parent run cancelled by its control while its child works: the
+        child's caller (the parent's call) is stopped, so the child is the
+        parent's, interrupted; the parent ends cancelled with what it had."""
+        child_working = asyncio.Event()
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                try:
+                    # As a backend's task tool does: the delegation in a call of its own.
+                    await asyncio.create_task(made.delegate(request(
+                        {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                        caller=run.ref, caller_agent="middle", call_id="m1",
+                    )))
+                except asyncio.CancelledError:
+                    if not run.control.own_cancel():
+                        raise
+                    return RunAnswer(text="Planned half.")
+                return RunAnswer(text="Planned.")  # pragma: no cover
+            child_working.set()
+            await asyncio.Event().wait()
+            return RunAnswer()  # pragma: no cover
+
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        working = asyncio.Event()
+
+        async def started() -> None:
+            await child_working.wait()
+            working.set()
+
+        watcher = asyncio.create_task(started())
+        result, _, cancelled = await stopped(
+            made, working, by="parent", error="no longer needed",
+            asked=request({"agent_type": "middle", "title": "Plan", "objective": "Plan X."}),
+            run="middle-1#1",
+        )
+        await watcher
+
+        assert cancelled is True
+        assert (result.result["status"], result.result["result"]) == (RUN_CANCELLED, "Planned half.")
+        assert {r.ref.instance: (r.status, r.cancelled_by) for r in runs.records(CONVERSATION)} == {
+            "middle-1": (RUN_CANCELLED, "parent"), "leaf-1": (RUN_INTERRUPTED, None),
+        }
 
 
 class TestTheTimeLimit:

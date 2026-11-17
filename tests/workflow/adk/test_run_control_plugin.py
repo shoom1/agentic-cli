@@ -134,6 +134,17 @@ class TestThePlugin:
         assert (control.cancelled, control.final_call) == (None, False)
         assert answer.content is content
 
+    async def test_an_answer_with_no_usage_is_not_limited_by_tokens(self):
+        control = RunControl(REF, AgentLimits(max_tokens=1))
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+        answer = LlmResponse(content=model(text("Found it."), call("lookup")))
+
+        await plugin.before_model_callback(callback_context=None, llm_request=LlmRequest())
+        await plugin.after_model_callback(callback_context=None, llm_response=answer)
+
+        assert (control.cancelled, control.final_call) == (None, False)
+        assert answer.content == model(text("Found it."), call("lookup"))
+
     async def test_a_partial_answer_counts_nothing(self):
         control = RunControl(REF, AgentLimits(max_tokens=1))
         plugin = RunControlPlugin(lambda: control, "anthropic")
