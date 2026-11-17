@@ -450,7 +450,9 @@ async def test_a_delegation_blocks_no_event_loop():
 def storing(*answers: Any) -> tuple[Callable[[SessionRef], Awaitable[dict[str, int]]], list[SessionRef]]:
     """A ``stored`` that answers each ask with the next of ``answers`` (an
     exception is raised, an ``asyncio.Event`` waited on, then the next
-    answer given); the conversations it was asked about."""
+    answer given); the conversations it was asked about. Each ask yields to
+    the loop before it answers, as a store's read does, so parallel runs
+    meet while one asks."""
     asked: list[SessionRef] = []
     left = list(answers)
 
@@ -460,6 +462,7 @@ def storing(*answers: Any) -> tuple[Callable[[SessionRef], Awaitable[dict[str, i
         if isinstance(answer, asyncio.Event):
             await answer.wait()
             answer = left.pop(0)
+        await asyncio.sleep(0)
         if isinstance(answer, BaseException):
             raise answer
         return answer
