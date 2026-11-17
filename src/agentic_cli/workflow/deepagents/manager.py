@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import functools
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
@@ -733,6 +734,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             (Anthropic may end with an empty ``end_turn`` after its final
             tool call), that answer's outcome mark
             (``SubAgentOutcomeMiddleware``), and the shared keys it changed.
+            Its answers are the messages after its task message
+            (``_own_messages``): an inheriting run's history is not its own.
 
         Raises:
             RunFailed: Its request no longer fits its model's window, still
@@ -740,10 +743,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             Exception: Its model call failed (the provider's error).
         """
         graph = self._agent_graphs[run.ref.agent]
-        inputs: dict[str, Any] = {
-            **run.state,
-            "messages": [*(run.history or ()), HumanMessage(content=run.message)],
-        }
+        task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
+        inputs: dict[str, Any] = {**run.state, "messages": [*(run.history or ()), task]}
         conversation = run.conversation
         processor = DeepAgentsEventProcessor(
             root=self._root_agent_name,
@@ -787,8 +788,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             raise
         finally:
             var_child_runnable_config.reset(detached)
-        messages = final.get("messages") or []
-        answers = [message for message in messages if isinstance(message, AIMessage)]
+        own = _own_messages(final.get("messages") or [], task.id)
+        answers = [message for message in own if isinstance(message, AIMessage)]
         return RunAnswer(
             text=_last_text(answers),
             outcome=answer_outcome(answers[-1]) if answers else None,
@@ -932,6 +933,23 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         if self._sessions is None:
             return []
         return await self._sessions.recent(self.session_ref(session_id, user_id), limit)
+
+
+def _own_messages(messages: list[Any], task_id: str | None) -> list[Any]:
+    """The messages a run wrote: those after its task message, found by its id.
+
+    An inheriting run's messages start with its caller's conversation, whose
+    replies are not its answers. The task message is found by id, not by
+    position: ``InterruptedCallsMiddleware.before_agent`` may answer calls
+    left open in that conversation, inserting messages before it (the list
+    rewritten, each message keeping its id). Were it missing (no rewrite
+    drops an id), none would be the run's: an empty answer, never its
+    caller's.
+    """
+    for index, message in enumerate(messages):
+        if task_id is not None and getattr(message, "id", None) == task_id:
+            return messages[index + 1:]
+    return []
 
 
 def _last_text(answers: list[AIMessage]) -> str:

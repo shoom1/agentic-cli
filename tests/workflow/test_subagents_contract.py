@@ -2150,6 +2150,27 @@ class TestAnInheritingRun:
         )
         assert last.endswith(INHERITED_CONTEXT_NOTE)
 
+    async def test_one_that_writes_no_text_answers_nothing_of_its_parents(self, make_crew):
+        """Its result is what it wrote: none of the conversation it read,
+        the parent's earlier reply included, is its answer."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", inherit_context=True)],
+            coordinator=[says("Noted, Ada. The code is 7."),
+                         calls(delegate("researcher", "Find the code.", "c1")), says("Done.")],
+            researcher=[says("")],
+        )
+
+        await crew.turn("My name is Ada and the code is 7.")
+        events = await crew.turn("Have the researcher find the code.")
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"]) == (RUN_COMPLETED, "")
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                     and e.metadata.get("tool_call_id") == "c1"]
+        assert result.content == "No answer"
+        assert [r.result for r in crew.records()] == [""]
+
 
 class TestRunsOfOneTypeWithTheSameCallIds:
     """Review Focus 1: two instances of one type at once, on a provider that

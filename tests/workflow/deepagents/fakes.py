@@ -147,8 +147,9 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     from its shared state and its messages (an inheriting run's history,
     then its task message), apart from its caller's stream, as
     ``DeepAgentsWorkflowManager._run_agent`` runs one; its answer is its
-    last text, and the plan and tasks it changed flow back. No ledger, no
-    events: a manager-level test reads those.
+    last text after its task message (an inheriting run's history is not its
+    own), and the plan and tasks it changed flow back. No ledger, no events:
+    a manager-level test reads those.
     """
     from langchain_core.messages import HumanMessage
     from langchain_core.runnables.config import var_child_runnable_config
@@ -157,17 +158,18 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     from agentic_cli.workflow.agents.delegate import Delegations, RunAnswer
 
     async def hook(run: Any) -> RunAnswer:
+        task = HumanMessage(content=run.message, id=f"task-{run.ref.run}")
         detached = var_child_runnable_config.set(None)
         try:
             state = await graphs[run.ref.agent].ainvoke({
-                **run.state,
-                "messages": [*(run.history or ()), HumanMessage(content=run.message)],
+                **run.state, "messages": [*(run.history or ()), task],
             })
         finally:
             var_child_runnable_config.reset(detached)
+        ids = [m.id for m in state["messages"]]
+        own = state["messages"][ids.index(task.id) + 1:] if task.id in ids else []
         text = next((
-            m.text for m in reversed(state["messages"])
-            if isinstance(m, AIMessage) and m.text.strip()
+            m.text for m in reversed(own) if isinstance(m, AIMessage) and m.text.strip()
         ), "")
         changed = {
             key: state[key] for key in ("plan", "tasks")
