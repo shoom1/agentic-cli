@@ -91,6 +91,13 @@ def _overflow_plugin_failed() -> str:
     return OVERFLOW_PLUGIN_FAILED
 
 
+# An inheriting sub-agent run's child session holds copies of its
+# conversation's events, written by agents the run's tree does not have (the
+# root among them): ADK warns of each such author as it picks the agent to
+# run, then runs the sub-agent all the same (workflow/adk/manager.py,
+# _child_session). The logger, and what its warning starts with.
+_ADK_UNKNOWN_AUTHOR = ("google_adk.google.adk.agents._agent_router", "Event from an unknown agent")
+
 # ADK logs a failure's traceback through stdlib logging where the user is
 # told otherwise. A summary that failed: ADK goes on with the whole history,
 # and the summarizer itself warns the user once a turn (it never lets its own
@@ -101,8 +108,9 @@ def _overflow_plugin_failed() -> str:
 # failed overflow retry once more, from the plugin manager. ADK also warns on
 # every request of a session holding a call without a result, which it drops:
 # the next turn answers such a call (workflow/adk/interrupted_calls_plugin.py),
-# so the warning has nothing for the user either. Each entry: the logger, what
-# a record's message starts with or (``msg=``) its exact format, and the debug
+# so the warning has nothing for the user either. Nor does the warning of an
+# unknown author (_ADK_UNKNOWN_AUTHOR). Each entry: the logger, what a
+# record's message starts with or (``msg=``) its exact format, and the debug
 # event it becomes.
 _ADK_FAILURES = (
     ("google_adk.google.adk.apps.compaction", {"prefix": "Event compaction failed"},
@@ -115,6 +123,7 @@ _ADK_FAILURES = (
     ("google_adk.google.adk.flows.llm_flows.tools._rearranger",
      {"prefix": "Dropping function calls with no matching function response"},
      "adk_dropped_open_calls"),
+    (_ADK_UNKNOWN_AUTHOR[0], {"prefix": _ADK_UNKNOWN_AUTHOR[1]}, "adk_inherited_unknown_author"),
 )
 
 
@@ -169,10 +178,11 @@ def install_log_filters() -> None:
     context-cache logger for a cache it could not create or delete, one each
     on its compaction, node, runner and plugin-manager loggers for the
     traceback of a summary, a model call or an overflow retry that failed,
-    and one on its rearranger for a call without a result it drops. Only the
-    CLI installs them, as it runs (``BaseCLIApp.run``), so library users and
-    the test suite keep Python's own handling. Installing twice changes
-    nothing.
+    one on its rearranger for a call without a result it drops, and one on
+    its agent router for the authors of an inheriting run's copied events.
+    Only the CLI installs them, as it runs (``BaseCLIApp.run``), so library
+    users and the test suite keep Python's own handling. Installing twice
+    changes nothing.
     """
     for name, kind in (
         (_ADK_RUNNER_LOGGER, _AdkUncachedTransferFilter),

@@ -36,6 +36,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import logging
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,6 +373,21 @@ class TestDelegation:
         assert INHERITED_CONTEXT_NOTE not in system_text(body)
         for body in answers.bodies("coordinator"):
             assert INHERITED_CONTEXT_NOTE not in system_text(body)
+
+    async def test_adk_warns_of_the_inherited_events_authors_as_the_cli_filter_expects(
+        self, project, monkeypatch, caplog
+    ):
+        # The copied events' authors are not in the run's tree, so ADK warns
+        # of each as it picks the agent to run: the CLI logs those warnings
+        # at debug (adk/log_filters.py), by this logger and this text.
+        from agentic_cli.workflow.adk.log_filters import _ADK_UNKNOWN_AUTHOR
+
+        logger_name, prefix = _ADK_UNKNOWN_AUTHOR
+        with caplog.at_level(logging.WARNING, logger=logger_name):
+            await three_turns(monkeypatch, team(inherit_context=True), delegating())
+
+        warned = [r.getMessage() for r in caplog.records if r.name == logger_name]
+        assert warned and all(message.startswith(prefix) for message in warned)
 
     async def test_a_fresh_sub_agent_is_given_no_note(self, project, monkeypatch):
         answers = delegating()
