@@ -984,6 +984,40 @@ class TestOnTheRealBackends:
             "unavailable — fetch the result with /jobs j1.",
         ]
 
+    async def test_adk_drops_its_sub_agents_transcripts_with_it(self, project, monkeypatch):
+        """Each sub-agent run's transcript is a child session of the
+        conversation's (``adk/sessions.py::child_app``): ``/new`` drops them
+        with the conversation it leaves."""
+        from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+        from agentic_cli.workflow.adk.sessions import child_app
+        from tests.workflow.test_adk_delegation import Team, delegation, team
+
+        serve(monkeypatch, Team(
+            coordinator=[delegation("toolu_c1"), says("Done.")], researcher=[says("X is 42.")],
+        ))
+        app_settings = BaseSettings(session_store="memory", default_model="claude-sonnet-4-6")
+        manager = GoogleADKWorkflowManager(agent_configs=team(), settings=app_settings)
+        await manager.initialize_services()
+        app = app_on(manager, app_settings)
+
+        async def children() -> list[str]:
+            listed = await manager._session_service.list_sessions(
+                app_name=child_app(manager.app_name), user_id=app_settings.default_user,
+            )
+            return [session.id for session in listed.sessions]
+
+        try:
+            old = app.session_id
+            await app.process_input("Have the researcher find X.")
+            before = await children()
+            await app.start_new_session()
+            after = await children()
+        finally:
+            await manager.cleanup()
+
+        assert before == [f"{old}/researcher-1"]
+        assert after == []
+
     async def test_deep_agents_drops_it(self, project, monkeypatch):
         pytest.importorskip("deepagents")
         from agentic_cli.workflow.deepagents import manager as deepagents_manager

@@ -220,6 +220,7 @@ class TestAStoreNotYetItsBackends:
             assert await reader.list() == []
             assert await reader.info("s1") is None
             assert await reader.exists("s1") is False
+            assert await reader.delete("s1") is False
 
         assert (_tables(shared), _journal_mode(shared)) == (tables, mode)
         assert await _left_after(before) == set()
