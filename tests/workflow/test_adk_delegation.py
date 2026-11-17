@@ -383,6 +383,9 @@ class TestDelegation:
         from agentic_cli.workflow.adk.log_filters import _ADK_UNKNOWN_AUTHOR
 
         logger_name, prefix = _ADK_UNKNOWN_AUTHOR
+        # ADK's own warning, as it comes: without the filter a test that ran
+        # the CLI (BaseCLIApp.run) may have left on that logger.
+        monkeypatch.setattr(logging.getLogger(logger_name), "filters", [])
         with caplog.at_level(logging.WARNING, logger=logger_name):
             await three_turns(monkeypatch, team(inherit_context=True), delegating())
 
