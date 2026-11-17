@@ -500,6 +500,27 @@ def test_a_run_that_times_out_keeps_its_hold(monkeypatch: pytest.MonkeyPatch) ->
     assert released == []
 
 
+@pytest.mark.parametrize("command", ["kill -9 $$", "exit 143"], ids=["killed", "shell-reported-signal"])
+def test_a_run_killed_by_a_signal_keeps_its_hold(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """A signal from outside that kills the shell or bwrap's monitor returns
+    before the kernel has emptied the sandbox: a status that says a signal
+    ended the run (negative, or 128 and above from a shell) keeps the hold."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    released: list[str] = []
+    _use_backend(monkeypatch, _Backend(
+        "seatbelt", command=lambda argv: command, release=lambda: released.append("release"),
+    ))
+    with MockContext():
+        result = execute_python("1 + 1")
+
+    assert result["success"] is False, result
+    assert released == []
+
+
 def test_a_sandboxed_run_gets_the_sandboxed_module_set(monkeypatch: pytest.MonkeyPatch) -> None:
     from agentic_cli.tools.execution_tools import execute_python
     from tests.conftest import MockContext

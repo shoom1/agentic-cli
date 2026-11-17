@@ -216,14 +216,14 @@ def _bubblewrap_only() -> None:
         pytest.skip("needs bubblewrap's pid namespace (a forked process outlives sandbox-exec)")
 
 
-#: Forks a process that closes its output and writes ``path`` a second later,
-#: then runs ``parent``.
+#: Forks a process that closes its output and writes ``path`` ``delay``
+#: seconds later, then runs ``parent``.
 LATE_WRITER = """
 import os, time
 if os.fork() == 0:
     for fd in (0, 1, 2):
         os.close(fd)
-    time.sleep(1)
+    time.sleep({delay})
     open({path!r}, "w").write("late")
     os._exit(0)
 {parent}
@@ -305,28 +305,36 @@ class TestLiveSandbox:
     def test_what_the_code_forks_ends_with_it(self, home, project):
         _bubblewrap_only()
         late = project / "late.txt"
-        out = _run(LATE_WRITER.format(path=str(late), parent="print('forked')"), project,
+        out = _run(LATE_WRITER.format(path=str(late), delay=1, parent="print('forked')"), project,
                    OSSandboxPolicy(app_name=APP))
         assert out == "forked"
         time.sleep(3)
         assert not late.exists()
 
-    def test_a_timeout_stops_the_code_and_what_it_forked(self, home, project):
+    @pytest.mark.parametrize("shell", ["as the executor runs it", "behind a shell that stays"])
+    def test_a_timeout_stops_the_code_and_what_it_forked(self, home, project, shell):
         """As pid 1 the code ignores the signals it has no handler for, but not
-        the SIGKILL bwrap's death sends it (``--die-with-parent``), so a run
-        killed at its timeout still ends, with all it started."""
+        the SIGKILL bwrap's monitor sends it as it dies (``--die-with-parent``):
+        the timeout kills the shell, the shell's death kills the monitor (its
+        own ``--die-with-parent``), and the code ends, with all it started.
+        The forked writer waits longer than the timeout, so a file means it
+        outlived it. Run as the executor runs it (``sh -c`` may exec bwrap,
+        so the kill reaches the monitor itself) and behind a shell that must
+        stay (the kill reaches only the shell)."""
         _bubblewrap_only()
         late = project / "late.txt"
-        code = LATE_WRITER.format(path=str(late), parent="while True: pass")
+        code = LATE_WRITER.format(path=str(late), delay=5, parent="while True: pass")
         wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], project,
                                                  OSSandboxPolicy(app_name=APP))
         assert wrapped.success, wrapped.error
+        command = wrapped.command if shell == "as the executor runs it" else (
+            f"{wrapped.command}; exit $?")
         with pytest.raises(subprocess.TimeoutExpired):
-            subprocess.run(wrapped.command, shell=True, cwd=project, capture_output=True,
+            subprocess.run(command, shell=True, cwd=project, capture_output=True,
                            text=True, timeout=2)
-        time.sleep(3)
         assert not late.exists()
-        wrapped.release()
+        time.sleep(4)  # past the writer's 5 s
+        assert not late.exists()
 
     def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
         """With the default settings the code runs inside the real sandbox, so

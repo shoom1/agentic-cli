@@ -67,7 +67,8 @@ class _Run:
     sandbox wrapped it), ``modules`` what the code may import there,
     ``refusal`` the error when it runs nowhere, and ``release`` the wrap's
     (``OSSandboxResult.release``), called once the code was refused by the
-    checks or its process ended on its own, never after a timeout.
+    checks or its process ended on its own: never after a timeout, nor after
+    a status that says a signal ended it.
     """
 
     command: str | list[str] = ""
@@ -505,8 +506,12 @@ class SafePythonExecutor:
                 "execution_time_ms": round(elapsed, 2),
             }
         # Ended on its own: in bubblewrap the code is the sandbox's pid 1, so
-        # every process it started is gone by now.
-        run.release()
+        # every process it started is gone by now. A status that says a signal
+        # ended it (negative, or 128 and above from a shell) may be a signal
+        # from outside that killed the shell or bwrap's monitor, which returns
+        # before the kernel has emptied the sandbox: the holds are kept then.
+        if 0 <= proc.returncode < 128:
+            run.release()
 
         elapsed = (time.time() - start_time) * 1000
 

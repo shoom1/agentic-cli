@@ -21,7 +21,10 @@ file left behind after the run (an empty ``.git`` file breaks git: "invalid
 gitfile format"), so the wrap makes a placeholder there instead: an empty
 folder bound read-only. Each run holds it with a file of its own, in this
 process or another, and ``OSSandboxResult.release`` drops the run's hold and
-removes the folder once no hold is left. A run that did not end on its own
+removes the folder once no hold is left. A run never removes a folder it did
+not make: a protected folder that is there and empty is held and bound like a
+placeholder (it may be one whose last run is removing it), but a hold in it
+says no run made it, and the folder stays. A run that did not end on its own
 (a timeout, a kill) is not released: its placeholder stays, empty and
 protected, and later runs hold it in turn.
 """
@@ -48,6 +51,9 @@ if TYPE_CHECKING:
 #: below a writable bind holding nothing else; each run that binds it holds
 #: it, and the last to release removes it.
 _HOLD = ".agentic-cli-sandbox-hold-"
+#: A hold in a folder no run made: one that was there and empty when the run
+#: joined it, or one holding such a hold. No run removes it.
+_KEPT = f"{_HOLD}kept-"
 #: The folder a placeholder is made in, with its first hold, before it is
 #: renamed into place: it never appears without one.
 _STAGING = ".agentic-cli-sandbox-staging-"
@@ -59,11 +65,14 @@ _TRIES = 5
 @dataclass(frozen=True)
 class _Hold:
     """A run's hold: the file ``name`` in the placeholder ``point``, which
-    lies below the writable bind ``root``."""
+    lies below the writable bind ``root``. ``removes``: the release may remove
+    the folder (a run made it). ``name`` None: a protected folder no hold
+    could go in, bound as it is, with nothing to drop."""
 
     root: Path
     point: Path
-    name: str
+    name: str | None
+    removes: bool = False
 
 
 class BubblewrapSandbox(OSSandbox):
@@ -158,7 +167,8 @@ class BubblewrapSandbox(OSSandbox):
         A path the code cannot create needs none: one below the read-only
         root, or where no placeholder can be made because the file system is
         read-only, or the folder is one the user may not write and does not
-        own (so the code cannot give itself the right).
+        own (so the code cannot give itself the right). A protected folder
+        that is there but takes no hold is bound as it is.
 
         Raises:
             RuntimeError: Any other placeholder could not be made (a folder of
@@ -189,7 +199,7 @@ class BubblewrapSandbox(OSSandbox):
             if point is None or root is None or point in holds:
                 return
             try:
-                hold = _hold(root, point)
+                hold = _hold(root, point, own=point == path)
             except OSError as e:
                 if _code_cannot_create(e, point):
                     return
@@ -306,15 +316,25 @@ def _real(deny_writes: list[Path], writable: list[Path]) -> list[Path]:
     return [d for d in deny_writes if os.path.lexists(d) and _creation_point(d, writable) is None]
 
 
-def _holds_only(fd_or_path: int | Path) -> bool:
-    """A folder holding nothing but holds, or nothing at all: a placeholder,
-    or one whose last run is removing it (a folder at a protected path that is
-    empty is joined, never taken for a real one the release could remove)."""
+def _holds_in(fd_or_path: int | Path) -> list[str] | None:
+    """The holds in a folder holding nothing but holds (none, when it is
+    empty); None for anything else (a real folder, a file, one this user
+    cannot list)."""
     try:
         with os.scandir(fd_or_path) as entries:
-            return all(entry.name.startswith(_HOLD) for entry in entries)
-    except OSError:  # not a folder, or one this user cannot list
-        return False
+            names = [entry.name for entry in entries]
+    except OSError:
+        return None
+    return names if all(name.startswith(_HOLD) for name in names) else None
+
+
+def _joinable(holds: list[str] | None, own: bool) -> bool:
+    """A placeholder a run may hold: one holding holds, or, at the protected
+    path itself, an empty folder (a placeholder whose last run is removing
+    it, or one that was there: either way joined, never taken for a real
+    folder the release could remove from under the run). An empty folder
+    above the path is the user's (a working directory, ``~/.config``)."""
+    return holds is not None and (bool(holds) or own)
 
 
 def _creation_point(path: Path, writable: list[Path]) -> Path | None:
@@ -324,7 +344,11 @@ def _creation_point(path: Path, writable: list[Path]) -> Path | None:
     for part in (*reversed(path.parents), path):
         if not os.path.lexists(part):
             return part
-        if any(_below(part, w) for w in writable) and not part.is_symlink() and _holds_only(part):
+        if (
+            any(_below(part, w) for w in writable)
+            and not part.is_symlink()
+            and _joinable(_holds_in(part), own=part == path)
+        ):
             return part
     return None
 
@@ -369,14 +393,18 @@ def _open_dir_below(root: Path, folder: Path) -> int:
         raise
 
 
-def _hold(root: Path, point: Path) -> _Hold | None:
-    """This run's hold on the placeholder at ``point``, made if missing; None
-    when the place changed meanwhile (a real file or folder now stands there,
-    the placeholder was removed before the hold was written, or another run
-    made it first). Every step is taken in folders opened without following a
-    symlink below ``root``."""
-    name = f"{_HOLD}{os.getpid()}-{uuid.uuid4().hex}"
-    parent = _open_dir_below(root, point.parent)
+def _hold(root: Path, point: Path, own: bool) -> _Hold | None:
+    """This run's hold on the placeholder at ``point`` (``own``: the protected
+    path itself, not a folder above it), made if missing; None when the place
+    changed meanwhile (a folder on the way went away, a real file or folder
+    now stands there, the placeholder was removed before the hold was
+    written, or another run made it first). Every step is taken in folders
+    opened without following a symlink below ``root``."""
+    run = f"{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        parent = _open_dir_below(root, point.parent)
+    except FileNotFoundError:
+        return None
     try:
         try:
             folder = open_dir_no_follow(point.name, dir_fd=parent)
@@ -388,16 +416,15 @@ def _hold(root: Path, point: Path) -> _Hold | None:
             raise
         if folder is not None:
             try:
-                if not _holds_only(folder):
-                    return None
-                _write_hold(name, folder)
-                return _Hold(root, point, name)
-            except FileNotFoundError:
-                return None  # removed by its last run before the hold was written
+                return _join(root, point, folder, run, own)
             finally:
                 os.close(folder)
         staging = f"{_STAGING}{uuid.uuid4().hex}"
-        os.mkdir(staging, 0o700, dir_fd=parent)
+        name = f"{_HOLD}{run}"
+        try:
+            os.mkdir(staging, 0o700, dir_fd=parent)
+        except FileNotFoundError:
+            return None  # the folder it goes in went away
         try:
             folder = open_dir_no_follow(staging, dir_fd=parent)
             try:
@@ -410,9 +437,29 @@ def _hold(root: Path, point: Path) -> _Hold | None:
             if not (isinstance(error, OSError) and _exists(point.name, parent)):
                 raise
             return None  # made meanwhile, by another run or for real
-        return _Hold(root, point, name)
+        return _Hold(root, point, name, removes=True)
     finally:
         os.close(parent)
+
+
+def _join(root: Path, point: Path, folder: int, run: str, own: bool) -> _Hold | None:
+    """Hold the existing folder at ``point`` (open as ``folder``) as a
+    placeholder. A folder that holds no hold, or a kept one, was not made by
+    a run: the hold says so, and its release leaves the folder. One that
+    takes no hold (the user may not write it) is bound as it is: the code
+    could still move it aside."""
+    holds = _holds_in(folder)
+    if not _joinable(holds, own):
+        return None  # a real folder now: looked at again, bound as it is
+    kept = not holds or any(name.startswith(_KEPT) for name in holds)
+    name = f"{_KEPT if kept else _HOLD}{run}"
+    try:
+        _write_hold(name, folder)
+    except FileNotFoundError:
+        return None  # removed by its last run before the hold was written
+    except OSError:
+        return _Hold(root, point, None)
+    return _Hold(root, point, name, removes=not kept)
 
 
 def _exists(name: str, parent: int) -> bool:
@@ -431,28 +478,33 @@ def _write_hold(name: str, folder: int) -> None:
         os.close(fd)
 
 
-def _unhold(parent: int, folder_name: str, hold_name: str) -> None:
+def _unhold(parent: int, folder_name: str, hold_name: str, *, remove: bool = True) -> None:
     """Remove the hold ``hold_name`` from the folder ``folder_name`` of
-    ``parent``, then the folder if nothing is left in it (``rmdir``: another
-    run's hold, or whatever the user put there meanwhile, keeps it)."""
+    ``parent``, then, if ``remove``, the folder if nothing is left in it
+    (``rmdir``: another run's hold, or whatever the user put there meanwhile,
+    keeps it)."""
     with contextlib.suppress(OSError):
         folder = open_dir_no_follow(folder_name, dir_fd=parent)
         try:
             os.unlink(hold_name, dir_fd=folder)
         finally:
             os.close(folder)
-    with contextlib.suppress(OSError):
-        os.rmdir(folder_name, dir_fd=parent)
+    if remove:
+        with contextlib.suppress(OSError):
+            os.rmdir(folder_name, dir_fd=parent)
 
 
 def _drop(hold: _Hold) -> None:
-    """Drop a hold, and its placeholder if no other run holds it."""
+    """Drop a hold, and its placeholder if a run made it and no other run
+    holds it."""
+    if hold.name is None:
+        return
     try:
         parent = _open_dir_below(hold.root, hold.point.parent)
     except OSError:
         return  # moved or swapped meanwhile: left as it is
     try:
-        _unhold(parent, hold.point.name, hold.name)
+        _unhold(parent, hold.point.name, hold.name, remove=hold.removes)
     finally:
         os.close(parent)
 

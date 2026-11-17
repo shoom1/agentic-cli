@@ -218,21 +218,25 @@ class TestDenyWritePaths:
         result.release()
         assert not os.path.lexists(missing_file)
 
-    def test_an_empty_deny_write_folder_in_a_writable_dir_is_held_as_a_placeholder(
+    def test_an_empty_deny_write_folder_in_a_writable_dir_is_held_and_kept(
         self, tmp_path: Path
     ):
         """An empty folder there may be a placeholder whose last run is
-        removing it, so it is held like one: bound read-only, and removed once
-        the run is over if it is still empty."""
+        removing it, so it is held like one and bound read-only; but no run
+        made it, so none removes it."""
         empty = (tmp_path / "protected").resolve()
         empty.mkdir()
         policy = _minimal_policy(deny_write_paths=[str(empty)])
 
-        result = BubblewrapSandbox().wrap_python_command(["python3", "-c", "pass"], tmp_path, policy)
+        first = BubblewrapSandbox().wrap_python_command(["python3", "-c", "pass"], tmp_path, policy)
+        second = BubblewrapSandbox().wrap_python_command(["python3", "-c", "pass"], tmp_path, policy)
 
-        assert (str(empty), str(empty)) in _ro_binds(_bwrap_args(result))
-        result.release()
-        assert not os.path.lexists(empty)
+        assert (str(empty), str(empty)) in _ro_binds(_bwrap_args(first))
+        assert (str(empty), str(empty)) in _ro_binds(_bwrap_args(second))
+        first.release()
+        second.release()
+        assert empty.is_dir()
+        assert os.listdir(empty) == []
 
     def test_a_missing_folder_above_a_deny_write_path_is_held_too(self, tmp_path: Path):
         """Below a missing folder, the code would create the folder first: the
@@ -433,7 +437,86 @@ class TestMissingProtectedPaths:
             assert (project / name).is_dir(), name
             assert (str(project / name), str(project / name)) in binds
         later.release()
-        assert os.listdir(project) == []
+        # The run that joined the emptied folder cannot tell it from one that
+        # was there before any run: it leaves it, empty.
+        assert sorted(os.listdir(project)) == [f".{APP}"]
+        assert os.listdir(project / f".{APP}") == []
+
+    def test_a_run_removes_no_folder_it_did_not_make(self, home, project):
+        """The project's ``.git``, there and empty before the run, is still
+        there after it."""
+        (project / ".git").mkdir()
+        result = _wrap(project)
+        assert (str(project / ".git"), str(project / ".git")) in _ro_binds(_bwrap_args(result))
+        result.release()
+        assert sorted(os.listdir(project)) == [".git"]
+        assert os.listdir(project / ".git") == []
+
+    def test_an_empty_folder_above_a_protected_path_is_no_placeholder(
+        self, home, tmp_path, monkeypatch
+    ):
+        """With the home writable, an empty working directory (above ``.git``)
+        and an empty ``~/.config`` (above ``~/.config/git``) are the user's
+        folders: neither is bound read-only, nor removed."""
+        work = home / "work" / "proj"
+        work.mkdir(parents=True)
+        (home / ".config").mkdir()
+        policy = OSSandboxPolicy(app_name=APP, writable_paths=[str(home)])
+        result = BubblewrapSandbox().wrap_python_command(["python3"], work, policy)
+        assert result.success, result.error
+        binds = _ro_binds(_bwrap_args(result))
+        assert (str(work), str(work)) not in binds
+        assert (str(home / ".config"), str(home / ".config")) not in binds
+        assert (str(work / ".git"), str(work / ".git")) in binds
+        assert (str(home / ".config" / "git"), str(home / ".config" / "git")) in binds
+        result.release()
+        assert work.is_dir() and (home / ".config").is_dir()
+        assert os.listdir(work) == [] and os.listdir(home / ".config") == []
+
+    def test_a_folder_that_vanishes_before_the_hold_is_looked_at_again(
+        self, home, project, monkeypatch
+    ):
+        real_open = bubblewrap._open_dir_below
+        calls = []
+
+        def vanished_once(root, folder):
+            if not calls:
+                calls.append(folder)
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(folder))
+            return real_open(root, folder)
+
+        monkeypatch.setattr(bubblewrap, "_open_dir_below", vanished_once)
+        result = _wrap(project)
+        assert result.success, result.error
+        assert (project / ".git").is_dir()
+        result.release()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes a folder whatever its mode")
+    def test_an_empty_protected_folder_that_cannot_be_held_is_bound_as_it_is(
+        self, home, monkeypatch
+    ):
+        """A ``.git`` the user may not write, in a folder another user owns but
+        lets everyone write: no hold can go in, but the code could still move
+        it aside, so it is bound as a real folder."""
+        shared = home / "shared"
+        shared.mkdir()
+        (shared / "README").write_text("x")
+        git = shared / ".git"
+        git.mkdir()
+        git.chmod(0o555)
+        shared.chmod(0o777)
+        uid = os.geteuid()
+        monkeypatch.setattr(os, "geteuid", lambda: uid + 1)
+        try:
+            result = _wrap(shared)
+        finally:
+            monkeypatch.undo()
+            git.chmod(0o755)
+            shared.chmod(0o755)
+        assert result.success, result.error
+        assert (str(git), str(git)) in _ro_binds(_bwrap_args(result))
+        result.release()
+        assert git.is_dir()
 
     def test_the_argv_alone_binds_only_what_exists_or_the_run_holds(self, home, project):
         """Built without the wrap's holds, the argv binds no missing path (bwrap
