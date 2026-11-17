@@ -2202,9 +2202,9 @@ class TestAnInheritingRun:
 
 
 class TestRunsOfOneTypeWithTheSameCallIds:
-    """Review Focus 1: two instances of one type at once, on a provider that
-    numbers its call ids alike in both (``call_0``): each run reads its own
-    call's result, never the other's."""
+    """Two instances of one type at once, on a provider that numbers its call
+    ids alike in both (``call_0``): each run reads its own call's result,
+    never the other's."""
 
     async def test_each_run_keeps_its_own_results(self, make_crew):
         TOGETHER.update(open=0, most=0)
@@ -2239,10 +2239,10 @@ class TestRunsOfOneTypeWithTheSameCallIds:
 
 
 class TestAnEmptyLastAnswer:
-    """Review Focus 5: a run's result is its last non-empty text on both
-    backends (Anthropic may end with an empty ``end_turn`` after a final tool
-    call), and a run with no text at all completes with an empty result,
-    shown as ``No answer``."""
+    """A run's result is its last non-empty text on both backends (Anthropic
+    may end with an empty ``end_turn`` after a final tool call), and a run
+    with no text at all completes with an empty result, shown as
+    ``No answer``."""
 
     async def test_a_trailing_empty_answer_leaves_the_last_text(self, make_crew):
         crew = make_crew(
@@ -2320,7 +2320,7 @@ class TestALongResult:
 
 class TestOffTheLoop:
     async def test_a_delegation_blocks_no_event_loop(self, make_crew):
-        """Spec 13: every new async path once under the loop guard."""
+        """A delegation, on both backends, runs once under the loop guard."""
         crew = make_crew(
             team(),
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
