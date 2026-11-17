@@ -370,7 +370,7 @@ def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> N
     ]
     if unknown:
         raise AgentGraphError(
-            f"brief_required must be a tuple of brief field names "
+            f"brief_required must be a tuple or list of brief field names "
             f"({', '.join(_BRIEF_NAMES)}): {', '.join(unknown)}."
         )
 

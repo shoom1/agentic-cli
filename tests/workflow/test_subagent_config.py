@@ -82,6 +82,7 @@ class TestTheGraphChecks:
             validate_agent_graph(team(writer={"brief_required": value}))
         message = str(exc.value)
         assert "brief_required" in message and "'writer'" in message and repr(value) in message
+        assert "must be a tuple or list of brief field names" in message
 
     @pytest.mark.parametrize("value", [{"timeout": 60}, 60, "fast"])
     def test_limits_is_an_agent_limits(self, value):
