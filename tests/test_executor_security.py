@@ -8,7 +8,6 @@ chosen from where the call actually runs, when it runs.
 """
 
 import shlex
-import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -48,15 +47,17 @@ def _patch_sandbox(monkeypatch, sandbox_type: str) -> _FakeSandbox:
 
 def _scripts_run(monkeypatch) -> list[str]:
     """The runner script of each unwrapped subprocess the executor starts."""
+    from agentic_cli.tools import executor as executor_module
+
     scripts: list[str] = []
-    real_run = subprocess.run
+    real_run = executor_module._run_command
 
     def _run(*args, **kwargs):
         if not kwargs.get("shell"):
             scripts.append(args[0][2])
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(executor_module, "_run_command", _run)
     return scripts
 
 

@@ -452,9 +452,7 @@ class TestMissingProtectedPaths:
         assert sorted(os.listdir(project)) == [".git"]
         assert os.listdir(project / ".git") == []
 
-    def test_an_empty_folder_above_a_protected_path_is_no_placeholder(
-        self, home, tmp_path, monkeypatch
-    ):
+    def test_an_empty_folder_above_a_protected_path_is_no_placeholder(self, home):
         """With the home writable, an empty working directory (above ``.git``)
         and an empty ``~/.config`` (above ``~/.config/git``) are the user's
         folders: neither is bound read-only, nor removed."""
@@ -604,6 +602,52 @@ class TestHoldRetries:
         assert git.is_dir()
         loser.release()
         assert os.listdir(project) == []
+
+    def test_a_folder_gone_before_the_staging_folder_is_made_is_looked_at_again(
+        self, home, project, monkeypatch
+    ):
+        real_mkdir = os.mkdir
+        calls = []
+
+        def gone_once(path, *args, **kwargs):
+            if os.path.basename(path).startswith(_STAGING) and not calls:
+                calls.append(path)
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", gone_once)
+        result = _wrap(project)
+        monkeypatch.undo()
+        assert calls
+        assert result.success, result.error
+        assert (project / ".git").is_dir()
+        result.release()
+        assert os.listdir(project) == []
+
+    def test_a_hold_that_cannot_be_written_for_want_of_space_fails_the_wrap(
+        self, home, project, monkeypatch
+    ):
+        """A placeholder another run holds, joined on a full disk: bound with
+        no hold, it could be removed by that run's release while this one runs,
+        so the wrap fails, and leaves no half-written hold behind."""
+        first = _wrap(project)
+        held = sorted(os.listdir(project / ".git"))
+        real_write = os.write
+
+        def full(fd, data):
+            if data == bubblewrap._HOLD_NOTE.encode():
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_write(fd, data)
+
+        monkeypatch.setattr(os, "write", full)
+        second = _wrap(project)
+        monkeypatch.undo()
+        try:
+            assert second.success is False
+            assert "No space left on device" in second.error
+            assert sorted(os.listdir(project / ".git")) == held
+        finally:
+            first.release()
 
     def test_a_place_that_keeps_changing_fails_the_wrap(self, home, project, monkeypatch):
         monkeypatch.setattr(bubblewrap, "_hold", lambda *args, **kwargs: None)

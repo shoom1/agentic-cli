@@ -10,7 +10,9 @@ runs code outside it.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -127,14 +129,16 @@ def test_api_keys_scrubbed_from_subprocess_env(
     monkeypatch.setenv("SOME_TOKEN", "tok")
     monkeypatch.setenv("PATH", "/usr/bin")
 
+    from agentic_cli.tools import executor as executor_module
+
     captured: dict = {}
-    real_run = subprocess.run
+    real_run = executor_module._run_command
 
     def _capture(*args, **kwargs):
         captured["env"] = kwargs.get("env")
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _capture)
+    monkeypatch.setattr(executor_module, "_run_command", _capture)
     executor.execute("print(1)")
 
     env = captured["env"]
@@ -236,15 +240,17 @@ def _use_backend(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _Backend
 
 
 def _record_runs(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Record each subprocess the executor starts (and still start it)."""
+    """Record each process the executor starts (and still start it)."""
+    from agentic_cli.tools import executor as executor_module
+
     runs: list = []
-    real_run = subprocess.run
+    real_run = executor_module._run_command
 
     def _run(*args, **kwargs):
         runs.append((args, kwargs))
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(executor_module, "_run_command", _run)
     return runs
 
 
@@ -468,13 +474,15 @@ def test_the_wrap_is_released_once_the_code_has_run(monkeypatch: pytest.MonkeyPa
 
     events: list[str] = []
     _use_backend(monkeypatch, _Backend("seatbelt", release=lambda: events.append("release")))
-    real_run = subprocess.run
+    from agentic_cli.tools import executor as executor_module
+
+    real_run = executor_module._run_command
 
     def _run(*args, **kwargs):
         events.append("run")
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(executor_module, "_run_command", _run)
     with MockContext():
         ran = execute_python("1 + 1")
         invalid = execute_python("def (")
@@ -482,6 +490,91 @@ def test_the_wrap_is_released_once_the_code_has_run(monkeypatch: pytest.MonkeyPa
     assert ran["success"] is True, ran
     assert invalid["error"].startswith("Validation error"), invalid
     assert events == ["run", "release", "release"]
+
+
+def _late_writer(late, *, leave_group: bool = False) -> str:
+    """A command that starts a background process writing ``late`` 3 s later
+    (in a session of its own when ``leave_group``, as bubblewrap's sandbox
+    init is), then waits far longer than any timeout here."""
+    import shlex
+
+    writer = f"sleep 3; echo late > {shlex.quote(str(late))}"
+    start = f"setsid sh -c {shlex.quote(writer)}" if leave_group else f"({writer})"
+    return f"{start} & exec sleep 30"
+
+
+def test_a_timeout_kills_every_process_the_command_started(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The timeout kills the command's whole process group, not its shell
+    alone: what it started in the background (a process the code forked)
+    dies with it."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend("seatbelt", command=lambda argv: _late_writer(late)))
+    with MockContext():
+        result = execute_python("1 + 1", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    time.sleep(3.5)
+    assert not late.exists()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or shutil.which("setsid") is None,
+    reason="finds the processes that left the group through /proc",
+)
+def test_a_timeout_kills_a_child_that_left_the_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """bubblewrap's sandbox init runs in a session of its own
+    (``--new-session``), out of the command's process group: the timeout
+    finds it as the child of a process in the group, and kills it too."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend(
+        "seatbelt", command=lambda argv: _late_writer(late, leave_group=True),
+    ))
+    with MockContext():
+        result = execute_python("1 + 1", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    time.sleep(3.5)
+    assert not late.exists()
+
+
+def test_an_interrupted_run_kills_its_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A run interrupted while it waits (Ctrl+C, a cancel) kills the whole
+    group too, then lets the interruption through."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend("seatbelt", command=lambda argv: _late_writer(late)))
+
+    def interrupted(self, *args, **kwargs):
+        time.sleep(0.5)  # the background process has started
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    with MockContext(), pytest.raises(KeyboardInterrupt):
+        execute_python("1 + 1", timeout_seconds=10)
+    monkeypatch.undo()
+
+    time.sleep(3.5)
+    assert not late.exists()
 
 
 def test_a_run_that_times_out_keeps_its_hold(monkeypatch: pytest.MonkeyPatch) -> None:

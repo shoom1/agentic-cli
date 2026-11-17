@@ -211,6 +211,17 @@ def _run(code: str, cwd: Path, policy: OSSandboxPolicy) -> str:
     return proc.stdout.strip()
 
 
+def _processes() -> str:
+    """The shells, sandboxes and Pythons still running, for a failure to show
+    what survived."""
+    columns = "pid,ppid,pgid,sid,stat,args" if sys.platform.startswith("linux") else (
+        "pid,ppid,pgid,stat,args")
+    listing = subprocess.run(["ps", "-eo", columns], capture_output=True, text=True).stdout
+    lines = listing.splitlines()
+    keep = [line for line in lines[1:] if any(n in line for n in ("bwrap", "python", "sh "))]
+    return "still running:\n" + "\n".join(lines[:1] + keep)
+
+
 def _bubblewrap_only() -> None:
     if _sandbox().sandbox_type != "bubblewrap":
         pytest.skip("needs bubblewrap's pid namespace (a forked process outlives sandbox-exec)")
@@ -313,15 +324,17 @@ class TestLiveSandbox:
 
     @pytest.mark.parametrize("shell", ["as the executor runs it", "behind a shell that stays"])
     def test_a_timeout_stops_the_code_and_what_it_forked(self, home, project, shell):
-        """As pid 1 the code ignores the signals it has no handler for, but not
-        the SIGKILL bwrap's monitor sends it as it dies (``--die-with-parent``):
-        the timeout kills the shell, the shell's death kills the monitor (its
-        own ``--die-with-parent``), and the code ends, with all it started.
+        """The executor's timeout kills the command's process group (the
+        shell, bubblewrap's monitor; on seatbelt the code and what it forked,
+        which stay in the group) and, on Linux, each child of the group that
+        left it: bubblewrap's sandbox init, in a session of its own
+        (``--new-session``), whose death ends every process in the sandbox.
         The forked writer waits longer than the timeout, so a file means it
-        outlived it. Run as the executor runs it (``sh -c`` may exec bwrap,
-        so the kill reaches the monitor itself) and behind a shell that must
-        stay (the kill reaches only the shell)."""
-        _bubblewrap_only()
+        outlived it. Run as the executor runs the command (``sh -c`` may exec
+        bwrap) and behind a shell that must stay."""
+        from agentic_cli.tools.executor import _run_command
+
+        _sandbox()  # skips without a backend
         late = project / "late.txt"
         code = LATE_WRITER.format(path=str(late), delay=5, parent="while True: pass")
         wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], project,
@@ -330,11 +343,10 @@ class TestLiveSandbox:
         command = wrapped.command if shell == "as the executor runs it" else (
             f"{wrapped.command}; exit $?")
         with pytest.raises(subprocess.TimeoutExpired):
-            subprocess.run(command, shell=True, cwd=project, capture_output=True,
-                           text=True, timeout=2)
-        assert not late.exists()
+            _run_command(command, shell=True, input="", timeout=2, cwd=project)
+        assert not late.exists(), _processes()
         time.sleep(4)  # past the writer's 5 s
-        assert not late.exists()
+        assert not late.exists(), _processes()
 
     def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
         """With the default settings the code runs inside the real sandbox, so

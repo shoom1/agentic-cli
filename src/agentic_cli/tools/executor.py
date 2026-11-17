@@ -10,7 +10,10 @@ checks are not a security boundary: CPython has no in-process sandbox.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
+import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -59,11 +62,91 @@ def how_to_run(opt_out: str) -> str:
     )
 
 
+def _run_command(
+    command: str | list[str],
+    *,
+    shell: bool,
+    input: str,
+    timeout: float,
+    env: dict[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run(command, input=input, capture_output=True, text=True,
+    timeout=timeout)``, in a session of its own, so that a timeout, or an
+    interruption while it waits, kills every process the command started.
+
+    ``subprocess.run`` kills only the process it started: the shell, or a
+    sandbox tool's monitor, while the code and what it forked ran on. Here
+    the whole process group is killed and, on Linux, each child of the group
+    that left it: bubblewrap's sandbox init, in a session of its own
+    (``--new-session``), whose death ends every process in the sandbox. On
+    macOS, which has no pid namespace, code that calls ``setsid()`` itself
+    escapes the group.
+
+    Raises:
+        subprocess.TimeoutExpired: The command was killed at ``timeout``.
+    """
+    with subprocess.Popen(
+        command,
+        shell=shell,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(input, timeout=timeout)
+        except BaseException:
+            _kill_session(proc.pid)
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def _kill_session(leader: int) -> None:
+    """SIGKILL the process group ``leader`` leads and, first, each child of
+    the group that left it (found while its parent, still alive, keeps its
+    pid from being reused). A SIGKILL from the parent namespace is delivered
+    to a pid namespace's init, and its death ends every process in it."""
+    for pid in _children_out_of_group(leader):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(leader, signal.SIGKILL)
+
+
+def _children_out_of_group(group: int) -> list[int]:
+    """The processes whose parent is in the process group ``group`` but which
+    are not, read from ``/proc`` (Linux; elsewhere none)."""
+    processes: dict[int, tuple[int, int]] = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as stat:
+                fields = stat.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue  # gone meanwhile
+        # After the command's name: state, ppid, pgrp.
+        processes[int(name)] = (int(fields[1]), int(fields[2]))
+    members = {pid for pid, (_, pgrp) in processes.items() if pgrp == group}
+    return [
+        pid for pid, (ppid, pgrp) in processes.items() if ppid in members and pgrp != group
+    ]
+
+
 @dataclass(frozen=True)
 class _Run:
     """Where one call's code runs, decided before it is validated.
 
-    ``command`` is what ``subprocess.run`` gets (a shell string when the
+    ``command`` is what ``_run_command`` gets (a shell string when the
     sandbox wrapped it), ``modules`` what the code may import there,
     ``refusal`` the error when it runs nowhere, and ``release`` the wrap's
     (``OSSandboxResult.release``), called once the code was refused by the
@@ -105,7 +188,9 @@ class SafePythonExecutor:
 
     Every run also has a timeout, an address-space limit (``RLIMIT_AS``,
     which macOS does not enforce), the sentinel output protocol, and an
-    environment without the provider keys.
+    environment without the provider keys. The timeout kills every process
+    the run started (``_run_command``); on macOS, which has no pid namespace,
+    code that calls ``setsid()`` itself can still outlive it.
     """
 
     # Modules that expose file, network, or pickle I/O through public,
@@ -484,18 +569,17 @@ class SafePythonExecutor:
             sandboxed=run.sandboxed,
         )
         try:
-            proc = subprocess.run(
+            proc = _run_command(
                 run.command,
                 shell=run.shell,
                 input=code,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
                 env=self._subprocess_env(),
             )
         except subprocess.TimeoutExpired:
-            # Killed: the sandbox's processes may outlive this return for a
-            # moment, so what the wrap holds for the run is kept, not released.
+            # Killed, every process it started with it, though the kernel may
+            # take a moment to empty the sandbox: what the wrap holds for the
+            # run is kept, not released.
             elapsed = (time.time() - start_time) * 1000
             logger.warning("python_executor.timeout", timeout=timeout)
             return {

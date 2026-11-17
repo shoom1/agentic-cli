@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 #: A run's hold in a placeholder is a file named so. A placeholder is a folder
 #: below a writable bind holding nothing else; each run that binds it holds
-#: it, and the last to release removes it.
+#: it, and the last to release removes it if a run made it (see ``_KEPT``).
 _HOLD = ".agentic-cli-sandbox-hold-"
 #: A hold in a folder no run made: one that was there and empty when the run
 #: joined it, or one holding such a hold. No run removes it.
@@ -445,9 +445,11 @@ def _hold(root: Path, point: Path, own: bool) -> _Hold | None:
 def _join(root: Path, point: Path, folder: int, run: str, own: bool) -> _Hold | None:
     """Hold the existing folder at ``point`` (open as ``folder``) as a
     placeholder. A folder that holds no hold, or a kept one, was not made by
-    a run: the hold says so, and its release leaves the folder. One that
-    takes no hold (the user may not write it) is bound as it is: the code
-    could still move it aside."""
+    a run: the hold says so, and its release leaves the folder. One the user
+    may not write takes no hold, as a run that made it could not have, so no
+    run removes it: it is bound as it is (the code could still move it
+    aside). Any other failure (a full disk) raises: bound without a hold, the
+    folder could be removed by the run that made it while this one runs."""
     holds = _holds_in(folder)
     if not _joinable(holds, own):
         return None  # a real folder now: looked at again, bound as it is
@@ -457,8 +459,10 @@ def _join(root: Path, point: Path, folder: int, run: str, own: bool) -> _Hold | 
         _write_hold(name, folder)
     except FileNotFoundError:
         return None  # removed by its last run before the hold was written
-    except OSError:
-        return _Hold(root, point, None)
+    except OSError as e:
+        if e.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+            return _Hold(root, point, None)
+        raise
     return _Hold(root, point, name, removes=not kept)
 
 
@@ -471,9 +475,14 @@ def _exists(name: str, parent: int) -> bool:
 
 
 def _write_hold(name: str, folder: int) -> None:
+    """Write the hold ``name`` in ``folder``; one whose write fails is removed."""
     fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=folder)
     try:
         os.write(fd, _HOLD_NOTE.encode())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name, dir_fd=folder)
+        raise
     finally:
         os.close(fd)
 
