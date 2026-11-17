@@ -15,12 +15,14 @@ pytest.importorskip("deepagents")
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
-from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE  # noqa: E402
+from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl  # noqa: E402
+from agentic_cli.workflow.agents.policy import AgentLimits  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     RunControlMiddleware,
     with_note,
     without_calls,
 )
+from agentic_cli.workflow.sessions import RunRef  # noqa: E402
 
 CALL = {"name": "lookup", "args": {"q": "X"}, "id": "r1", "type": "tool_call"}
 
@@ -79,3 +81,19 @@ async def test_the_roots_calls_are_left_alone():
         return answer
 
     assert await middleware.awrap_model_call("the request", handler) is answer
+
+
+async def test_the_messages_steered_since_the_last_call_join_the_runs_state():
+    ref = RunRef(agent="researcher", instance="researcher-1", run="researcher-1#1",
+                 parent_run=None, depth=1)
+    control = RunControl(ref, AgentLimits())
+    middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
+    control.steer("Also find Z.")
+    control.steer("Be brief.")
+
+    update = await middleware.abefore_model({}, None)
+
+    assert [(type(m), m.content) for m in update["messages"]] == [
+        (HumanMessage, "Also find Z."), (HumanMessage, "Be brief."),
+    ]
+    assert await middleware.abefore_model({}, None) is None  # given once

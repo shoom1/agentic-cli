@@ -695,6 +695,19 @@ async def contract_block() -> dict:
     return {"success": True}
 
 
+#: ``HELD["started"]`` is set when a ``contract_hold`` call starts, and
+#: ``HELD["go"]`` lets it return (made per test).
+HELD: dict[str, asyncio.Event] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Hold until let go (a contract-test tool).")
+async def contract_hold() -> dict:
+    """Wait, as a slow tool does, until the test lets it go."""
+    HELD["started"].set()
+    await HELD["go"].wait()
+    return {"success": True}
+
+
 #: What ``contract_leave_behind`` did: ``LEFT["during"]`` is the answer to the
 #: question it asked in its turn, ``LEFT["go"]`` lets its task go on,
 #: ``LEFT["task"]`` is the task.
@@ -790,6 +803,7 @@ async def make_crew(backend, project, monkeypatch):
     cleaned up after the test."""
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
+    HELD["started"], HELD["go"] = asyncio.Event(), asyncio.Event()
     made: list[Crew] = []
 
     def make(
@@ -2731,3 +2745,54 @@ class TestTheTokenLimit:
         }
         used = crew.ledger().totals(run="researcher-1#1")
         assert (used.input, used.output, used.calls) == (140, 40, 2)
+
+
+class TestSteering:
+    """Spec 13: a message steered to a run while its tool call is in progress
+    is in its next model request, after its last message, as the user's, and
+    stays in its transcript: still there in the request after."""
+
+    async def test_a_steered_message_reaches_the_next_request_and_stays(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_hold, contract_lookup))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")),
+                        calls(use("contract_lookup", "r2", q="Z")),
+                        says("X is 42; Z is 42.")],
+        )
+
+        with no_blocking_calls():
+            turn = crew.start()
+            await asyncio.wait_for(HELD["started"].wait(), 10)
+            crew.control("researcher-1#1").steer("Also find Z.")
+            HELD["go"].set()
+            await asyncio.wait_for(turn, 10)
+
+        assert "Also find Z." not in crew.bodies("researcher")[0]
+        assert crew.last_message("researcher", 1) == "Also find Z."
+        assert "Also find Z." in crew.bodies("researcher")[2]
+        assert crew.message_count("researcher", 2) == crew.message_count("researcher", 1) + 2
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == (
+            "X is 42; Z is 42."
+        )
+
+    async def test_a_message_steered_before_the_last_allowed_call_comes_before_the_note(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_hold,), limits=AgentLimits(max_model_calls=2))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42.")],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        crew.control("researcher-1#1").steer("Be brief.")
+        HELD["go"].set()
+        await asyncio.wait_for(turn, 10)
+
+        last = crew.bodies("researcher")[1]
+        assert last.index("Be brief.") < last.index(STEP_LIMIT_NOTE)
+        assert crew.last_message("researcher", 1).endswith(STEP_LIMIT_NOTE)

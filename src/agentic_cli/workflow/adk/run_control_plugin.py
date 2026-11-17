@@ -4,13 +4,19 @@ In each sub-agent type's plugin chain (``GoogleADKWorkflowManager._agent_plugin_
 for the run in progress (``get_active_run``: the run's own task,
 ``agents/delegate.py``), whose control the manager's ``Delegations`` holds:
 
-- before each model call the call is counted (``RunControl.model_call``),
-  and the run's last allowed one gets ``STEP_LIMIT_NOTE`` after its last
-  message, in the request only: as a part of the last content when that is
-  the user's (a tool result, the task message), so no provider sees two
-  user messages in a row. Its tools stay declared: Claude refuses a request
-  whose messages hold tool calls or results when it defines no tools, and no
-  call that answer makes is run (below);
+- before each model call, the messages steered to the run since its last
+  (``RunControl.take_steering``) go after its last message, each a user
+  event appended to the run's child session (through the callback
+  context's session service: the invocation's own session, which a session
+  loaded apart would fail ADK's revision check on) and a user content added
+  to the request, so they stay in its transcript;
+- the call is counted (``RunControl.model_call``), and the run's last
+  allowed one gets ``STEP_LIMIT_NOTE`` after its last message, in the
+  request only: as a part of the last content when that is the user's (a
+  tool result, the task message, a steered message), so no provider sees
+  two user messages in a row. Its tools stay declared: Claude refuses a
+  request whose messages hold tool calls or results when it defines no
+  tools, and no call that answer makes is run (below);
 - after each, what it used (``workflow/usage.py::adk_tokens``, by its
   model's provider kind) goes to ``RunControl.used``;
 - on the run's last call (``RunControl.final_call``: its step limit's, or
@@ -31,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Optional
 
+from google.adk.events import Event
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
@@ -66,6 +73,9 @@ class RunControlPlugin(BasePlugin):
         control = self._control()
         if control is None:
             return None
+        steered = control.take_steering()
+        if steered:
+            await _steer(callback_context, llm_request, steered)
         if control.model_call():
             llm_request.contents = with_note(list(llm_request.contents or []), STEP_LIMIT_NOTE)
         return None
@@ -84,6 +94,20 @@ class RunControlPlugin(BasePlugin):
         if control.final_call:
             drop_calls(llm_response)
         return None
+
+
+async def _steer(
+    callback_context: CallbackContext, llm_request: LlmRequest, messages: list[str]
+) -> None:
+    """``messages``, as the user's, in the run's child session and after the request's last content."""
+    service = callback_context.get_invocation_context().session_service
+    session = callback_context.session
+    for message in messages:
+        content = types.Content(role="user", parts=[types.Part.from_text(text=message)])
+        await service.append_event(session, Event(
+            invocation_id=callback_context.invocation_id, author="user", content=content,
+        ))
+        llm_request.contents.append(content)
 
 
 def with_note(contents: list[types.Content], note: str) -> list[types.Content]:

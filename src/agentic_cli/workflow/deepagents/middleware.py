@@ -902,7 +902,11 @@ class RunControlMiddleware(AgentMiddleware):
     own task, ``agents/delegate.py``), whose control the manager's
     ``Delegations`` holds:
 
-    - before each model call the call is counted (``RunControl.model_call``),
+    - before each model call (a node hook, ``abefore_model``), the messages
+      steered to the run since its last (``RunControl.take_steering``) are
+      added to its state after its last message, each a ``HumanMessage``,
+      so they stay in its transcript;
+    - the call is counted (``RunControl.model_call``),
       and the run's last allowed one gets ``STEP_LIMIT_NOTE`` after its last
       message, in the request only (``with_note``). Its tools stay bound:
       Claude refuses a request whose messages hold tool calls or results
@@ -929,6 +933,13 @@ class RunControlMiddleware(AgentMiddleware):
 
     def _control(self) -> RunControl | None:
         return self._delegations().control(get_active_run())
+
+    async def abefore_model(self, state: Any, runtime: Runtime[Any]) -> dict[str, Any] | None:  # noqa: ARG002
+        control = self._control()
+        steered = control.take_steering() if control is not None else []
+        if not steered:
+            return None
+        return {"messages": [HumanMessage(content=message) for message in steered]}
 
     async def awrap_model_call(
         self,
