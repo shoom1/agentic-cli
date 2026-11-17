@@ -1678,7 +1678,19 @@ The `/sandbox` CLI command lists and resets sandbox sessions.
 `execute_python` runs its code only inside the OS sandbox: it writes only to
 the working directory (and `os_sandbox_writable_paths`), reads no credential
 store, no `~/.{app_name}` and not the project's `.env`, and has no network
-unless `os_sandbox_allow_network` is on. On a host with no sandbox backend
+unless `os_sandbox_allow_network` is on. On Linux, bubblewrap keeps the code
+from creating a protected path that does not exist in a folder it may write
+(the project's `.git` before `git init`) with a placeholder: a folder there
+while the code runs and removed once it is over, but kept after a run that
+timed out or that a signal ended (holding only that run's hidden hold file,
+and still protected). An `os_sandbox_writable_paths` entry that holds your
+home directory puts such folders at the shell start-up files it lacks
+(`~/.bash_profile`, `~/.zshrc`, …), and a folder at `~/.bash_profile` makes a
+login bash skip `~/.profile`. A timeout stops the code and the processes it
+started; outside a pid namespace (on macOS, and on Linux without the
+sandbox), code that calls `setsid()` can outlive it (on Linux only a direct
+child of a live group member is caught).
+On a host with no sandbox backend
 (Windows has none), when the sandbox cannot be set up, or when the sandbox tool
 fails as it starts (on Ubuntu 24.04 and later, `bwrap` needs unprivileged user
 namespaces, which AppArmor restricts by default), the call is refused with an

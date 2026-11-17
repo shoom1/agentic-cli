@@ -14,8 +14,10 @@ policy cannot drop them.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -196,12 +198,48 @@ def _sandbox():
 
 
 def _run(code: str, cwd: Path, policy: OSSandboxPolicy) -> str:
+    """Run ``code`` in the sandbox as the executor runs a call."""
+    from agentic_cli.tools.executor import _run_command
+
     wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], cwd, policy)
     assert wrapped.success, wrapped.error
-    proc = subprocess.run(
-        wrapped.command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=60
-    )
+    try:
+        proc = _run_command(wrapped.command, shell=True, input="", timeout=60, cwd=cwd)
+    finally:
+        wrapped.release()
+    # A sandbox that did not start ran no code: say why, rather than "".
+    assert proc.returncode == 0 or proc.stdout, proc.stderr
     return proc.stdout.strip()
+
+
+def _processes() -> str:
+    """The shells, sandboxes and Pythons still running, for a failure to show
+    what survived."""
+    columns = "pid,ppid,pgid,sid,stat,args" if sys.platform.startswith("linux") else (
+        "pid,ppid,pgid,stat,args")
+    listing = subprocess.run(["ps", "-eo", columns], capture_output=True, text=True).stdout
+    lines = listing.splitlines()
+    keep = [line for line in lines[1:] if any(n in line for n in ("bwrap", "python", "sh "))]
+    return "still running:\n" + "\n".join(lines[:1] + keep)
+
+
+def _bubblewrap_only() -> None:
+    if _sandbox().sandbox_type != "bubblewrap":
+        pytest.skip("needs bubblewrap's pid namespace")
+
+
+#: Forks a process that closes its output and writes ``path`` ``delay``
+#: seconds later, then runs ``parent``.
+LATE_WRITER = """
+import os, time
+if os.fork() == 0:
+    for fd in (0, 1, 2):
+        os.close(fd)
+    time.sleep({delay})
+    open({path!r}, "w").write("late")
+    os._exit(0)
+{parent}
+"""
 
 
 ATTEMPT = """
@@ -235,16 +273,83 @@ class TestLiveSandbox:
         assert out == "blocked"
 
     def test_project_env_file_cannot_be_read(self, home, project):
+        """Seatbelt refuses the open; bubblewrap shows ``/dev/null`` in its
+        place, which reads empty. Either way the key never reaches the code."""
         (project / ".env").write_text("NAME=value\n")
-        out = _run(ATTEMPT.format(action="open('.env').read()"), project,
+        out = _run(ATTEMPT.format(action="print(open('.env').read())"), project,
                    OSSandboxPolicy(app_name=APP))
-        assert out == "blocked"
+        assert out in ("blocked", "done")
+        assert "NAME=value" not in out
 
     def test_nothing_is_writable_when_started_from_home(self, home):
         out = _run(ATTEMPT.format(action="open('note.txt', 'w').write('x')"), home,
                    OSSandboxPolicy(app_name=APP))
         assert out == "blocked"
         assert not (home / "note.txt").exists()
+
+    def test_a_missing_shell_start_up_file_cannot_be_created(self, home, project):
+        """The home holds none of the protected files: the sandbox still starts,
+        and the code cannot create one."""
+        profile = home / ".bash_profile"
+        out = _run(ATTEMPT.format(action=f"open({str(profile)!r}, 'w').write('x')"), project,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "blocked"
+        assert not os.path.lexists(profile)
+
+    def test_a_project_that_is_no_repository_cannot_be_made_one(self, home):
+        """``.git`` is missing in a folder the code may write: the code cannot
+        create it, and the run leaves nothing in its place."""
+        plain = home / "plain"
+        plain.mkdir()
+        out = _run(ATTEMPT.format(action="__import__('os').makedirs('.git/hooks')"), plain,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "blocked"
+        assert os.listdir(plain) == []
+
+    def test_the_code_is_pid_1_of_its_sandbox(self, home, project):
+        """bubblewrap runs the code as its pid 1 (``--as-pid-1``): when it
+        exits, the kernel kills and reaps what it started before bwrap
+        returns, so a run that returned leaves no process behind."""
+        _bubblewrap_only()
+        out = _run("import os; print(os.getpid())", project, OSSandboxPolicy(app_name=APP))
+        assert out == "1"
+
+    def test_what_the_code_forks_ends_with_it(self, home, project):
+        """In bubblewrap the sandbox ends with its pid 1, the code; on
+        seatbelt the fork stays in the run's process group, which the run's
+        end kills."""
+        late = project / "late.txt"
+        out = _run(LATE_WRITER.format(path=str(late), delay=1, parent="print('forked')"), project,
+                   OSSandboxPolicy(app_name=APP))
+        assert out == "forked"
+        time.sleep(3)
+        assert not late.exists()
+
+    @pytest.mark.parametrize("shell", ["as the executor runs it", "behind a shell that stays"])
+    def test_a_timeout_stops_the_code_and_what_it_forked(self, home, project, shell):
+        """The executor's timeout kills the command's process group (the
+        shell, bubblewrap's monitor; on seatbelt the code and what it forked,
+        which stay in the group) and, on Linux, each child of the group that
+        left it: bubblewrap's sandbox init, in a session of its own
+        (``--new-session``), whose death ends every process in the sandbox.
+        The forked writer waits longer than the timeout, so a file means it
+        outlived it. Run as the executor runs the command (``sh -c`` may exec
+        bwrap) and behind a shell that must stay."""
+        from agentic_cli.tools.executor import _run_command
+
+        _sandbox()  # skips without a backend
+        late = project / "late.txt"
+        code = LATE_WRITER.format(path=str(late), delay=5, parent="while True: pass")
+        wrapped = _sandbox().wrap_python_command([sys.executable, "-c", code], project,
+                                                 OSSandboxPolicy(app_name=APP))
+        assert wrapped.success, wrapped.error
+        command = wrapped.command if shell == "as the executor runs it" else (
+            f"{wrapped.command}; exit $?")
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_command(command, shell=True, input="", timeout=2, cwd=project)
+        assert not late.exists(), _processes()
+        time.sleep(4)  # past the writer's 5 s
+        assert not late.exists(), _processes()
 
     def test_execute_python_runs_its_code_inside_the_sandbox(self, home, project, monkeypatch):
         """With the default settings the code runs inside the real sandbox, so

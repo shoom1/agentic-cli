@@ -11,7 +11,13 @@ Usage:
     sandbox = get_os_sandbox()
     policy = OSSandboxPolicy(writable_paths=["/tmp"])
     result = sandbox.wrap_shell_command("echo hello", Path.cwd(), policy)
+    if not result.success:  # result.command is then the bare command
+        raise RuntimeError(result.error)
     # result.command is now "sandbox-exec -p '...' /bin/bash -c 'echo hello'"
+    # Run it in a session of its own, and on a timeout kill the session, not
+    # the shell alone (subprocess.run's way: the sandbox runs on), as
+    # tools/executor.py::_run_command does. Once it ended on its own (a
+    # status from 0 to 127), result.release(); never after a timeout.
 """
 
 from __future__ import annotations

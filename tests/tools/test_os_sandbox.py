@@ -287,6 +287,13 @@ class TestNoOpSandbox:
         assert sandbox.sandbox_type == "none"
 
 
+class TestOSSandboxResult:
+    def test_results_are_equal_by_what_they_run(self):
+        """``release`` is what to undo after the run, not part of the result's
+        value: two wraps of the same command compare equal."""
+        assert OSSandboxResult("cmd", release=lambda: None) == OSSandboxResult("cmd")
+
+
 # ---------------------------------------------------------------------------
 # TestSafePythonExecutorIntegration
 # ---------------------------------------------------------------------------
@@ -306,7 +313,7 @@ class TestSafePythonExecutorIntegration:
         mock_proc.stderr = ""
         mock_proc.returncode = 0
 
-        with patch("agentic_cli.tools.executor.subprocess.run", return_value=mock_proc):
+        with patch("agentic_cli.tools.executor._run_command", return_value=mock_proc):
             result = executor.execute("print('hello')")
 
         assert result["success"] is True
@@ -332,7 +339,7 @@ class TestSafePythonExecutorIntegration:
         mock_proc.returncode = 0
 
         with patch(
-            "agentic_cli.tools.executor.subprocess.run", return_value=mock_proc
+            "agentic_cli.tools.executor._run_command", return_value=mock_proc
         ) as mock_run, patch(
             "agentic_cli.tools.os_sandbox.get_os_sandbox",
             return_value=mock_os_sandbox,
@@ -342,7 +349,7 @@ class TestSafePythonExecutorIntegration:
         assert result["success"] is True
         # wrap_python_command was called
         mock_os_sandbox.wrap_python_command.assert_called_once()
-        # subprocess.run was called with shell=True (wrapped command)
+        # The command ran with shell=True (wrapped command)
         assert mock_run.call_args.kwargs.get("shell") is True
 
     def test_enabled_policy_wrap_failure_strict_fails_closed(self):
@@ -360,7 +367,7 @@ class TestSafePythonExecutorIntegration:
         )
 
         with patch(
-            "agentic_cli.tools.executor.subprocess.run"
+            "agentic_cli.tools.executor._run_command"
         ) as mock_run, patch(
             "agentic_cli.tools.os_sandbox.get_os_sandbox",
             return_value=mock_os_sandbox,
@@ -380,7 +387,7 @@ class TestSafePythonExecutorIntegration:
         mock_os_sandbox.sandbox_type = "none"
 
         with patch(
-            "agentic_cli.tools.executor.subprocess.run"
+            "agentic_cli.tools.executor._run_command"
         ) as mock_run, patch(
             "agentic_cli.tools.os_sandbox.get_os_sandbox",
             return_value=mock_os_sandbox,
@@ -411,7 +418,7 @@ class TestSafePythonExecutorIntegration:
         mock_proc.returncode = 0
 
         with patch(
-            "agentic_cli.tools.executor.subprocess.run", return_value=mock_proc
+            "agentic_cli.tools.executor._run_command", return_value=mock_proc
         ) as mock_run, patch(
             "agentic_cli.tools.os_sandbox.get_os_sandbox",
             return_value=mock_os_sandbox,

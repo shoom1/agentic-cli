@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sys
 import threading
 import warnings
@@ -159,6 +160,57 @@ _SESSION_ID_SETTER_DEPRECATED = (
 
 #: Where ``/new``'s line says the conversation left is on the memory store.
 _NOT_KEPT_LEFT = "not kept (session_store is memory)"
+
+
+#: Whether ``_stop_runs_on_signals`` installed its handlers in this process.
+_runs_stop_on_signals = False
+
+
+def _stop_runs_on_signals() -> None:
+    """Have a hangup (the terminal closed) or a SIGTERM kill the code
+    ``execute_python`` runs before the app goes.
+
+    Each run is in a session of its own (``tools/executor.py::_run_command``),
+    where the signal the terminal sends the app's process group does not
+    reach it. Each handler kills the live runs, then does what the signal did
+    before: it calls the handler it replaced, or, where that was the default,
+    restores the default and sends the signal again, so the app still dies
+    of it. A signal the app ignores (under ``nohup``) gets no handler: the
+    app goes on, and so do its runs, each to its timeout. Installed once per
+    process, from the main thread (where a handler can be set); SIGINT is
+    left alone.
+    """
+    global _runs_stop_on_signals
+    if _runs_stop_on_signals or threading.current_thread() is not threading.main_thread():
+        return
+    from agentic_cli.tools.executor import _kill_live_runs
+
+    for name in ("SIGHUP", "SIGTERM"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        previous = signal.getsignal(signum)
+        if previous != signal.SIG_IGN:
+            signal.signal(signum, _killing_runs_first(_kill_live_runs, previous))
+    _runs_stop_on_signals = True
+
+
+def _killing_runs_first(kill_runs, previous):
+    """A handler that calls ``kill_runs``, then, whatever that did, does what
+    ``previous`` (a handler, ``SIG_DFL``, or None for one set outside Python)
+    did."""
+
+    def handler(signum, frame):
+        try:
+            kill_runs()
+        finally:
+            if callable(previous):
+                previous(signum, frame)
+            else:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+
+    return handler
 
 
 def _passed_over_line(passed_over: list[tuple[str, int]], *, continuing: str | None) -> str:
@@ -2174,10 +2226,14 @@ class BaseCLIApp:
 
         It installs the filters that log what ADK would print over the
         prompt (``workflow/adk/log_filters.py``) first: an app that is built
-        but never run, as a library user's, keeps Python's own handling.
+        but never run, as a library user's, keeps Python's own handling. It
+        installs there, likewise, the SIGHUP and SIGTERM handlers that kill
+        the code ``execute_python`` runs before the app goes
+        (``_stop_runs_on_signals``).
         """
         logger.info("repl_starting")
         install_log_filters()
+        _stop_runs_on_signals()
 
         job_monitor = self._new_job_monitor()
         self._job_monitor = job_monitor  # told when a conversation is deleted
