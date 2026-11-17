@@ -9,7 +9,11 @@ for the run in progress (``get_active_run``: the run's own task,
   event appended to the run's child session (through the callback
   context's session service: the invocation's own session, which a session
   loaded apart would fail ADK's revision check on) and a user content added
-  to the request, so they stay in its transcript;
+  to the request, so they stay in its transcript. ADK stamps the call's
+  answer before this callback runs, so each event of the run from then on
+  that is not later than the steered message is stamped just after it
+  (``on_event_callback``): a durable store reads a session's events back by
+  time, and would put the message after the answer it prompted;
 - the call is counted (``RunControl.model_call``), and the run's last
   allowed one gets ``STEP_LIMIT_NOTE`` after its last message, in the
   request only: as a part of the last content when that is the user's (a
@@ -25,8 +29,10 @@ for the run in progress (``get_active_run``: the run's own task,
   alone keeps an empty text, which ADK takes as the run's last answer
   (``MODEL_RETURNED_NO_CONTENT``, no failure for a run).
 
-It changes the request and the answer in place and returns None, as
-``ForeignReasoningPlugin`` does, so every plugin after it still runs. It sits
+It changes the request, the answer and an event's time in place and
+returns None, as ``ForeignReasoningPlugin`` does, so every plugin after it
+still runs; what it keeps is kept by invocation, and let go of as the run
+ends (two runs of one type share their runner, and this plugin). It sits
 before ``SubAgentOutcomePlugin``, which then reads an answer whose calls were
 dropped as the run's final one. The root's calls (no active run) and a run
 without a control are left alone.
@@ -46,10 +52,16 @@ from agentic_cli.workflow.usage import adk_tokens
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
+    from google.adk.agents.invocation_context import InvocationContext
     from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
 
     from agentic_cli.workflow.agents.control import RunControl
+
+#: How much later than a steered message the run's next events are stamped,
+#: at least: past what a durable store keeps of a time (``DatabaseSessionService``
+#: keeps microseconds), so it reads them back in the order they came.
+_STAMP_STEP = 2e-6
 
 
 class RunControlPlugin(BasePlugin):
@@ -66,6 +78,9 @@ class RunControlPlugin(BasePlugin):
         super().__init__(name="run_control")
         self._control = control
         self._kind = kind
+        # Each invocation's last steered message's time, or the latest of
+        # its events stamped since: its next events come after it.
+        self._stamped: dict[str, float] = {}
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -75,7 +90,9 @@ class RunControlPlugin(BasePlugin):
             return None
         steered = control.take_steering()
         if steered:
-            await _steer(callback_context, llm_request, steered)
+            self._stamped[callback_context.invocation_id] = await _steer(
+                callback_context, llm_request, steered
+            )
         if control.model_call():
             llm_request.contents = with_note(list(llm_request.contents or []), STEP_LIMIT_NOTE)
         return None
@@ -95,19 +112,47 @@ class RunControlPlugin(BasePlugin):
             drop_calls(llm_response)
         return None
 
+    async def on_event_callback(
+        self, *, invocation_context: InvocationContext, event: Event
+    ) -> Optional[Event]:
+        # An event ADK stamped before a message was steered (the answer to
+        # the call it was steered at) is stamped after it.
+        last = self._stamped.get(event.invocation_id)
+        if last is None:
+            return None
+        if event.timestamp < last + _STAMP_STEP:
+            event.timestamp = last + _STAMP_STEP
+        self._stamped[event.invocation_id] = event.timestamp
+        return None
+
+    async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
+        self._stamped.pop(invocation_context.invocation_id, None)
+        return None
+
+    async def on_run_error_callback(
+        self, *, invocation_context: InvocationContext, error: Exception
+    ) -> None:
+        self._stamped.pop(invocation_context.invocation_id, None)
+        return None
+
 
 async def _steer(
     callback_context: CallbackContext, llm_request: LlmRequest, messages: list[str]
-) -> None:
-    """``messages``, as the user's, in the run's child session and after the request's last content."""
+) -> float:
+    """``messages``, as the user's, in the run's child session and after the
+    request's last content; the time the last one is stamped with."""
     service = callback_context.get_invocation_context().session_service
     session = callback_context.session
+    stamped = 0.0
     for message in messages:
         content = types.Content(role="user", parts=[types.Part.from_text(text=message)])
-        await service.append_event(session, Event(
+        event = Event(
             invocation_id=callback_context.invocation_id, author="user", content=content,
-        ))
+        )
+        await service.append_event(session, event)
         llm_request.contents.append(content)
+        stamped = event.timestamp
+    return stamped
 
 
 def with_note(contents: list[types.Content], note: str) -> list[types.Content]:
