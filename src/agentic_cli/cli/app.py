@@ -67,6 +67,7 @@ from agentic_cli.cli.workflow_controller import WorkflowController
 from agentic_cli.config import BaseSettings
 from agentic_cli.logging import Loggers, configure_logging, log_lines_to
 from agentic_cli.workflow.adk.log_filters import install_log_filters
+from agentic_cli.workflow.agents.policy import as_policy
 from agentic_cli.workflow.factory import check_backend, orchestrator_of
 from agentic_cli.workflow.session_readers import reader_backends
 from agentic_cli.workflow.settings import OrchestratorType
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
     from agentic_cli.cli.job_monitor import JobMonitor
     from agentic_cli.settings_persistence import SettingsSaveResult
     from agentic_cli.workflow import GoogleADKWorkflowManager, EventType, WorkflowEvent
+    from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.base_manager import BaseWorkflowManager
     from agentic_cli.workflow.context import CompactResult
     from agentic_cli.workflow.sessions import SessionInfo
@@ -341,6 +343,8 @@ class BaseCLIApp:
         agent_configs: list["AgentConfig"],
         settings: BaseSettings,
         session_id: str | None = None,
+        *,
+        subagents: "SubAgentPolicy | None" = None,
     ) -> None:
         """Initialize the CLI application.
 
@@ -352,11 +356,16 @@ class BaseCLIApp:
                 library use and tests); without it a fresh id is generated.
                 ``main()`` takes ``--continue`` and ``--resume <id>``
                 instead (``session_start``).
+            subagents: How the sub-agents run (a ``SubAgentPolicy``; None is
+                ``SubAgentPolicy()``): every workflow manager the app builds
+                gets it, a new conversation's on another backend included.
 
         Raises:
-            TypeError: The app still defines ``get_styles()``, which
+            TypeError: ``subagents`` is neither a ``SubAgentPolicy`` nor
+                None, or the app still defines ``get_styles()``, which
                 ``get_theme(name)`` replaced.
         """
+        policy = as_policy(subagents)
         if any("get_styles" in vars(cls) for cls in type(self).__mro__ if cls is not object):
             raise TypeError(_GET_STYLES_REMOVED)
 
@@ -394,6 +403,7 @@ class BaseCLIApp:
         self._workflow_controller = WorkflowController(
             agent_configs=agent_configs,
             settings=settings,
+            subagents=policy,
         )
         self._workflow_controller.usage_tracker = self._usage_tracker
         self._message_processor = MessageProcessor()

@@ -140,7 +140,7 @@ class Backends:
         return manager
 
     def create(self, agent_configs, settings, app_name=None, model=None, orchestrator=None,
-               session_store=None):
+               session_store=None, subagents=None):
         backend = orchestrator or settings.orchestrator.value
         manager = self.manager(backend)
         self.built.append(manager)
