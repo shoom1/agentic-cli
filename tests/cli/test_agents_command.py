@@ -3,8 +3,8 @@
 ``/agents`` is a table of the runs, each followed by the runs it started, a
 level deeper: instance, type, status, run, title, tokens in/out, time.
 ``/agents <id>`` shows one instance or run: its type, parent and title, then
-each run's status and time, the first lines of its result, its error and its
-tokens by model. The runs are a real manager's records, filled as its event
+each run's status and time, its brief's other fields, the first lines of its
+result, its error and its tokens by model. The runs are a real manager's records, filled as its event
 processors fill them (``AgentRuns.observe`` under the conversation's turn),
 and the tokens its usage ledger's; nothing reaches a provider.
 """
@@ -72,10 +72,11 @@ class Runs:
         self.conversation = conversation
 
     def start(self, agent: str, call_id: str, request: str, *, at: int,
-              parent: RunRef | None = None) -> RunRef:
+              parent: RunRef | None = None, brief: dict[str, str] | None = None) -> RunRef:
         ref = self.manager.agent_runs.run_for(self.conversation, parent, call_id, agent)
+        title = request.splitlines()[0]
         self._observe(WorkflowEvent.agent_run(
-            ref, "started", title=request.splitlines()[0], call_id=call_id
+            ref, "started", title=title, call_id=call_id, brief=brief,
         ), at)
         return ref
 
@@ -223,6 +224,28 @@ class TestOne:
             ("Run #1", "completed (partial) · 40s"),
             ("  Result", "Draft of the summary"),
             ("  Tokens", f"{SONNET}: 800 in / 2k out · 1 call"),
+        ]
+
+    async def test_a_runs_brief_each_field_it_filled(self, manager):
+        runs = Runs(manager, manager.session_ref("s1"))
+        ref = runs.start("researcher", "c1", "Find X", at=0, brief={
+            "title": "Find X", "objective": "Find X in the docs.",
+            "deliverable": "One number.", "done_when": "X is [named].",
+        })
+        runs.end(ref, "completed", at=5, result="X is 42.")
+
+        session = await agents(manager, "researcher-1")
+
+        (panel,) = session.add_rich.call_args.args
+        assert rows_of(panel.renderable) == [
+            ("Type", "researcher"),
+            ("Parent", "root"),
+            ("Title", "Find X"),
+            ("Run #1", "completed · 5s"),
+            ("  Objective", "Find X in the docs."),
+            ("  Deliverable", "One number."),
+            ("  Done when", "X is [named]."),  # data, never markup
+            ("  Result", "X is 42."),
         ]
 
     async def test_a_failed_run_says_why(self, manager):

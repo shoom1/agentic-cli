@@ -44,6 +44,7 @@ ADK_COMPACTION_LOGGER = "google_adk.google.adk.apps.compaction"
 ADK_NODE_LOGGER = "google_adk.google.adk.workflow._node_runner"
 ADK_PLUGIN_LOGGER = "google_adk.google.adk.plugins.plugin_manager"
 ADK_REARRANGER_LOGGER = "google_adk.google.adk.flows.llm_flows.tools._rearranger"
+ADK_ROUTER_LOGGER = "google_adk.google.adk.agents._agent_router"
 
 
 class _LogRecorder:
@@ -73,7 +74,7 @@ def logged(monkeypatch) -> list[dict]:
 
 
 ADK_LOGGERS = (ADK_RUNNER_LOGGER, ADK_CACHE_LOGGER, ADK_COMPACTION_LOGGER, ADK_NODE_LOGGER,
-               ADK_PLUGIN_LOGGER, ADK_REARRANGER_LOGGER)
+               ADK_PLUGIN_LOGGER, ADK_REARRANGER_LOGGER, ADK_ROUTER_LOGGER)
 
 
 @pytest.fixture(autouse=True)
@@ -341,6 +342,38 @@ def test_adks_dropped_call_warning_is_logged_not_printed(logged, caplog):
     (entry,) = [e for e in logged if e["event"] == "adk_dropped_open_calls"]
     assert entry["log_level"] == "debug"
     assert "call-1" in entry["message"]
+
+
+# An inheriting sub-agent run starts on a child session holding copies of its
+# conversation's events, written by agents its runner's tree does not have
+# (the root among them). ADK warns of each such author as it looks for the
+# agent to run, then runs the sub-agent all the same: nothing for the user.
+
+
+def test_adks_unknown_author_warning_is_logged_not_printed(logged, caplog):
+    install_log_filters()
+
+    with caplog.at_level(logging.WARNING, logger=ADK_ROUTER_LOGGER):
+        logging.getLogger(ADK_ROUTER_LOGGER).warning(
+            "Event from an unknown agent: %s, event id: %s", "coordinator", "e-1"
+        )
+
+    assert [r for r in caplog.records if r.name == ADK_ROUTER_LOGGER] == []
+    (entry,) = [e for e in logged if e["event"] == "adk_inherited_unknown_author"]
+    assert entry["log_level"] == "debug"
+    assert "coordinator" in entry["message"]
+
+
+def test_the_routers_other_records_pass(logged, caplog):
+    install_log_filters()
+
+    with caplog.at_level(logging.WARNING, logger=ADK_ROUTER_LOGGER):
+        logging.getLogger(ADK_ROUTER_LOGGER).warning("Something else about %s", "coordinator")
+
+    assert [r.getMessage() for r in caplog.records if r.name == ADK_ROUTER_LOGGER] == [
+        "Something else about coordinator"
+    ]
+    assert logged == []
 
 
 # --- ADK's context-cache failures ----------------------------------------------------

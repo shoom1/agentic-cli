@@ -18,7 +18,13 @@ How a result is cut:
   tool's own flag (it is truthy, as the flag would be). When strings alone
   cannot make it fit (many small values), the result becomes its JSON text,
   cut the same way, under ``result``, with ``success`` and ``error`` kept.
-- A string is cut the same way, with the note appended.
+- A string that holds a JSON object (a framework tool's dict as JSON text: a
+  delegation's envelope, a Deep Agents ``ToolMessage``'s content) is cut as
+  that dict and given back as its JSON text, written with
+  ``ensure_ascii=False`` as it is measured, so what reaches the model is
+  JSON still, its keys kept and the note under ``truncated``. One rule for
+  both backends.
+- Any other string is cut the same way, with the note appended.
 - Anything else is wrapped as ``{"result": value}`` and cut as a dict.
 
 The saved file is meant to be read in pages of lines: a string is saved as it
@@ -100,7 +106,8 @@ def cap_tool_result(
 
     Returns ``result`` itself when its serialized text fits (a string as it
     is, anything else as JSON). Otherwise returns a cut copy; ``result`` is
-    never changed.
+    never changed. A string holding a JSON object comes back as that
+    object's JSON text, cut, or whole when it fits unescaped.
 
     Args:
         result: What the tool returned.
@@ -114,6 +121,14 @@ def cap_tool_result(
     text = _serialize(result)
     if text is None or len(text) <= max_chars:
         return result
+    held = json_object(result) if isinstance(result, str) else None
+    if held is not None:
+        # Sent as the cap measured it, cut or not: the text may be several
+        # times longer than its dict (\uXXXX escapes, indentation).
+        capped = cap_tool_result(
+            held, tool_name=tool_name, max_chars=max_chars, folder=folder, source=source
+        )
+        return json.dumps(capped, ensure_ascii=False, default=str)
 
     name = f"{_safe_name(tool_name)}-{uuid.uuid4().hex[:12]}.txt"
     display = _display(source if source is not None else folder / name)
@@ -147,6 +162,17 @@ def cap_tool_result(
     if isinstance(cut, str):
         return f"{cut}\n\n{note}"
     return {**cut, "truncated": note}
+
+
+def json_object(text: str) -> dict | None:
+    """The dict ``text`` holds as JSON, or None (no object, or no JSON at all)."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def is_saved_output(path: Path, folder: Path) -> bool:

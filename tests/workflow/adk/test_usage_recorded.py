@@ -3,9 +3,10 @@
 The event processor normalizes a call's counts by its model's provider kind
 (the thinking counts in the output: apart from the candidates on Gemini and
 ADK's Claude adapter, inside them on OpenAI's), records it before
-``on_event`` (an app's hook that drops events cannot drop a row), and gives
-a sub-agent run's end what the run used, by model. A processor driven outside
-a manager files under no conversation (None), as ``AgentRuns`` does.
+``on_event`` (an app's hook that drops events cannot drop a row), and a
+sub-agent run's processor records each of the run's calls under the run,
+which the run's end then reads (``agents/delegate.py``). A processor driven
+outside a manager files under no conversation (None), as ``AgentRuns`` does.
 """
 
 from __future__ import annotations
@@ -19,18 +20,16 @@ from google.genai import types  # noqa: E402
 
 from agentic_cli.workflow.usage import UsageLedgers  # noqa: E402
 from tests.workflow.adk.test_run_identity import (  # noqa: E402
-    _delegated,
+    RESEARCHER,
     _process,
     _processor,
-    _results,
 )
 
 
-def _answer(author: str, prompt: int, candidates: int, thoughts: int | None = None,
-            *, branch: str | None = None) -> Event:
+def _answer(author: str, prompt: int, candidates: int, thoughts: int | None = None) -> Event:
     """A model's answer of ``author``'s that reports its usage."""
     return Event(
-        author=author, invocation_id="i1", branch=branch,
+        author=author, invocation_id="i1",
         content=types.Content(role="model", parts=[types.Part.from_text(text="Done.")]),
         usage_metadata=types.GenerateContentResponseUsageMetadata(
             prompt_token_count=prompt, candidates_token_count=candidates,
@@ -67,17 +66,17 @@ class TestTheProcessor:
         assert await _process(processor, _answer("coordinator", 100, 10)) == []
         assert ledgers.ledger(None).totals().calls == 1
 
-    async def test_a_runs_end_carries_what_the_run_used(self):
+    async def test_a_runs_calls_are_recorded_under_it(self):
         ledgers = UsageLedgers()
-        processor = _processor(ledgers=ledgers)
-        await _delegated(processor)
-        await _process(processor, _answer("researcher", 50, 5, branch="researcher@toolu_c1"))
+        processor = _processor(ledgers=ledgers, run=RESEARCHER)
 
-        (_, ended) = await _process(processor, _results(
-            "coordinator", ("researcher", "toolu_c1", {"result": "X is 42."})
-        ))
+        await _process(processor, _answer("researcher", 50, 5))
 
-        assert ended.metadata["usage"] == {"m": {"input": 50, "output": 5}}
+        (row,) = ledgers.ledger(None).rows
+        assert (row.agent, row.run) == ("researcher", "researcher-1#1")
+        assert ledgers.ledger(None).run_usage("researcher-1#1") == {
+            "m": {"input": 50, "output": 5}
+        }
 
 
 class TestTheManagersProcessor:

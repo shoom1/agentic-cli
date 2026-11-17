@@ -1,55 +1,55 @@
-"""A Deep Agents turn's stream as ``WorkflowEvent``s.
+"""A Deep Agents turn's stream as ``WorkflowEvent``s, and a sub-agent run's.
 
-A turn streams ``astream(input, config, stream_mode=["updates", "tasks"],
-subgraphs=True)``. Each item is ``(namespace, mode, payload)``; ``()`` is the
-root agent, and a sub-agent's items arrive under ``("tools:<task-id>",)``,
-the namespace of the coordinator's tools task that runs its ``task`` call.
-The ``tasks`` mode announces that task with its tool call, whose
-``subagent_type`` names the agent; deeper nesting resolves the same way, one
-namespace segment at a time.
+A turn streams the root agent's graph: ``astream(input, config,
+stream_mode=["updates"], subgraphs=True)``, each item ``(namespace, mode,
+payload)``. A sub-agent's graph never streams there: its run is the
+framework's ``task`` call (``agents/delegate.py``), which runs the
+sub-agent's graph apart from its caller's stream
+(``DeepAgentsWorkflowManager._run_agent``), through a processor of its own,
+made for that run (``run=``), whose events reach the turn's live events.
+Only the root namespace's items are the agent's: a graph one of its tools
+runs under the config it inherits streams in a namespace of its own, and
+none of its items is an event.
 
 Each finished node output becomes events, as ADK reports them: one per
-finished message, no tokens. Only the agents' own nodes speak:
+finished message, no tokens. Only the agent's own nodes speak:
 
 - a ``model`` update's ``AIMessage``: ``THINKING`` (its reasoning blocks) and
   ``TEXT`` (its text blocks) in order, one ``TOOL_CALL`` per tool call, and
   ``LLM_USAGE`` on that agent's own model, with its context numbers
   (``context_trigger``, ``window_known``). Only the root replies to the user:
-  a sub-agent's ``TEXT`` is marked ``metadata["subagent"]`` (activity, not
-  the reply) and its usage ``purpose="subagent"``, a fork's included (its
-  prompt holds the conversation, but it is not the main agent's context);
+  a sub-agent run's ``TEXT`` is marked ``metadata["subagent"]`` (activity, not
+  the reply) and its usage ``purpose="subagent"``, an inheriting one's
+  included (its prompt holds the conversation, but it is not the main
+  agent's context);
 - a ``tools`` update's ``ToolMessage``s, including those a ``Command`` carried
-  (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back; and
-  its ``tasks``, when they changed: ``TASK_PROGRESS``, in the same step.
+  (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back, a
+  ``task`` call's shown from its envelope (``agents/runs.py::show_as_delegation``);
+  and, for the root, its ``tasks``, when they changed: ``TASK_PROGRESS``, in
+  the same step (a sub-agent's list is the conversation's, which its run
+  hands back with its result: the root reports it then).
 
 Middleware hooks' updates are not output (``PatchToolCallsMiddleware`` re-adds
 the whole history when it patches it), and a model call inside a tool
 (``generate_simple``) is no node at all, so it cannot leak into the answer.
 Every event carries ``metadata["agent"]`` and its run (``WorkflowEvent.run``):
-the root's own at ``()``, and a sub-agent's under the namespace its ``task``
-call runs at, named by the manager's runs (``AgentRuns.run_for``) from the
-call the ``tasks`` stream announced; a turn's own ``ERROR`` names none. A
-``task`` call to one of the calling agent's own sub-agents is followed by the
-``AGENT_RUN`` that starts its run, and its result by the one that ends it
-(``failed`` for the framework's error result, with its error: the
-sub-agent's answer is never read for success), the result shown as on ADK
-(``agents/runs.py::show_as_delegation``), each recorded as it is made, before
-``on_event``. A ``task`` call to any other type runs no sub-agent (Deep
-Agents answers that it does not exist): it is an ordinary tool call, with no
-run.
+the root's own (``root_run``), or the sub-agent run the processor was made
+for; a turn's own ``ERROR`` names none. The ``AGENT_RUN`` events are the
+framework's (``Delegations``), not the stream's.
 
 What happens inside a node and is no node output (a summary call and the
 summary it made, and with ``raw_llm_logging`` every model call) reaches
-``RunCallback`` instead, the turn's LangChain callback handler, which hands
-it to the turn's ``LiveEvents`` as it happens: a summary that starts is
-reported while the model node still waits on it.
+``RunCallback`` instead, the LangChain callback handler of the turn's run
+and of each sub-agent run, which hands it to the turn's ``LiveEvents`` as it
+happens: a summary that starts is reported while the model node still waits
+on it.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -60,14 +60,8 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from agentic_cli.constants import truncate
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
-from agentic_cli.workflow.agents.outcome import cut_off_warning
-from agentic_cli.workflow.agents.runs import (
-    RUN_STARTED,
-    AgentRuns,
-    run_ended,
-    run_title,
-    show_as_delegation,
-)
+from agentic_cli.workflow.agents.envelope import read_envelope
+from agentic_cli.workflow.agents.runs import show_as_delegation
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
     ContextBudget,
@@ -75,14 +69,10 @@ from agentic_cli.workflow.context import (
     overflow_message,
     usage_fields,
 )
-from agentic_cli.workflow.deepagents.middleware import (
-    answer_latency,
-    answer_outcome,
-    mark_latency,
-)
+from agentic_cli.workflow.deepagents.middleware import answer_latency, mark_latency
 from agentic_cli.workflow.deepagents.summarization import CONTEXT_SUMMARIZED
 from agentic_cli.workflow.events import WorkflowEvent
-from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
+from agentic_cli.workflow.sessions import RunRef, root_run
 from agentic_cli.workflow.usage import UsageLedgers, langchain_tokens, llm_usage_event
 
 if TYPE_CHECKING:
@@ -107,29 +97,24 @@ _MAX_ERROR = 500
 #: LangChain's message types as the roles a provider knows.
 _ROLES = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
 
-Namespace = tuple[str, ...]
-
-
 class DeepAgentsEventProcessor:
-    """Turns one turn's stream items into ``WorkflowEvent``s.
+    """Turns one agent's stream items into ``WorkflowEvent``s: the root's turn, or a sub-agent run.
 
     Args:
-        root: The root agent's name: the agent of namespace ``()``, and of any
-            namespace the stream never announced.
+        root: The root agent's name: the agent of every event, unless the
+            processor is made for a sub-agent run (``run``).
         agent_models: Each agent's resolved model, by name; ``LLM_USAGE`` is
             reported against the agent's own.
         session_id: Put on ``TEXT`` and ``THINKING``, as the other backends do.
         budgets: Each agent's context numbers, by name, which its
             ``LLM_USAGE`` carries; none without.
-        runs: The manager's sub-agent runs, which this processor names and
-            records; its own when not given.
-        sub_agents: Each agent's sub-agents, by name: a ``task`` call starts
-            a run only for one of the caller's own. None takes every
-            ``task`` call's ``subagent_type`` as the caller's.
         ledgers: The manager's usage ledgers: each call's usage is recorded
-            in its conversation's as it is made, before ``on_event``, and a
-            sub-agent run's end carries what the run used, by model
-            (``metadata["usage"]``); its own when not given.
+            in its conversation's as it is made, before ``on_event``; its own
+            when not given.
+        run: The sub-agent run whose graph streams here: every event is
+            that run's and its agent's, its text is activity
+            (``metadata["subagent"]``) and its usage ``purpose="subagent"``.
+            None: the root's turn.
     """
 
     def __init__(
@@ -139,71 +124,48 @@ class DeepAgentsEventProcessor:
         agent_models: Mapping[str, "ResolvedModel"],
         session_id: str | None = None,
         budgets: Mapping[str, ContextBudget] | None = None,
-        runs: AgentRuns | None = None,
-        sub_agents: Mapping[str, Collection[str]] | None = None,
         ledgers: UsageLedgers | None = None,
+        run: RunRef | None = None,
     ) -> None:
         self._root = root
         self._agent_models = agent_models
         self._session_id = session_id
         self._budgets: Mapping[str, ContextBudget] = budgets or {}
-        # Namespace -> the agent whose graph runs there.
-        self._agents: dict[Namespace, str] = {(): root}
-        # (the run that made it, call id) -> tool name: a ToolMessage a
-        # Command carried may have no name of its own.
-        self._call_names: dict[tuple[str | None, str], str] = {}
+        self._run = run if run is not None else root_run(root)
+        self._agent = self._run.agent
+        # Call id -> tool name: a ToolMessage a Command carried may have no
+        # name of its own.
+        self._call_names: dict[str, str] = {}
         self._reported_tasks: list[dict] | None = None
-        # The namespaces whose tasks failed, in order; a delegation that
-        # answered its call takes its own (and those under it) away.
-        self._failures: list[Namespace] = []
-        # (the run that made it, call id) -> the namespace a delegation's
-        # sub-agent runs at, until its result.
-        self._spaces: dict[tuple[str | None, str], Namespace] = {}
-        self._runs = runs if runs is not None else AgentRuns()
-        # Namespace -> the run whose graph runs there; the root's at ().
-        self._refs: dict[Namespace, RunRef] = {(): root_run(root)}
-        # (the run that made it, call id) -> the run a delegation started,
-        # until its result: call ids are only an agent's own (a provider that
-        # numbers them gives a sub-agent's first call its parent's task call's).
-        self._delegated: dict[tuple[str | None, str], RunRef] = {}
-        self._sub_agents: dict[str, frozenset[str]] | None = (
-            None if sub_agents is None
-            else {name: frozenset(own) for name, own in sub_agents.items()}
-        )
-        # A sub-agent run's last answer's outcome (SubAgentOutcomeMiddleware's
-        # mark), by run id, until its task call's result ends the run.
-        self._outcomes: dict[str, str] = {}
         self._ledgers = ledgers if ledgers is not None else UsageLedgers()
 
-    def agent(self, namespace: Iterable[str]) -> str:
-        """The agent whose graph runs at ``namespace``."""
-        return self._agents.get(tuple(namespace), self._root)
-
-    def run(self, namespace: Iterable[str]) -> RunRef:
-        """The run whose graph runs at ``namespace`` (the root's, for one never announced)."""
-        return self._refs.get(tuple(namespace), self._refs[()])
+    @property
+    def run(self) -> RunRef:
+        """The run every event this processor makes is: the root's own, or a sub-agent run."""
+        return self._run
 
     def process(
         self, namespace: Iterable[str], mode: str, payload: Any
     ) -> list[WorkflowEvent]:
-        """The events of one stream item (none for most)."""
-        namespace = tuple(namespace)
-        if mode == "tasks":
-            self._track(namespace, payload)
+        """The events of one stream item (none for most).
+
+        ``namespace`` is the item's place in the stream. Only the agent's own
+        graph's items (the root namespace, ``()``) are its events: a sub-agent
+        runs apart, on a stream of its own, so an item in a namespace of its
+        own is a graph one of its tools ran under the config it inherited,
+        whose model text is no agent's reply.
+        """
+        if tuple(namespace) or mode != "updates" or not isinstance(payload, dict):
             return []
-        if mode != "updates" or not isinstance(payload, dict):
-            return []
-        agent = self.agent(namespace)
-        run = self.run(namespace)
         events: list[WorkflowEvent] = []
         for node, update in payload.items():
             for values in update if isinstance(update, list) else [update]:
                 if not isinstance(values, dict):
                     continue
                 if node == "model":
-                    events += self._model_output(agent, run, values)
+                    events += self._model_output(values)
                 elif node == "tools":
-                    events += self._tools_output(agent, run, values)
+                    events += self._tools_output(values)
         for event in events:
             # Recorded as it is made: an app's on_event cannot drop a row.
             self._ledgers.record(event)
@@ -213,17 +175,12 @@ class DeepAgentsEventProcessor:
         """The one ``ERROR`` that ends a turn whose stream raised ``error``.
 
         ``WorkflowEvent.turn_failed``'s (the base ``process()``'s contract),
-        attributed to the agent whose task failed first, the innermost: a
-        sub-agent's failure that escaped its coordinator's ``task`` call fails
-        that call after it. One the call answered (``Error running
-        sub-agent: …``, ``ToolCallErrorMiddleware``) is no longer the turn's.
-        A context overflow (a provider's, or Deep Agents' own when a summary
-        still does not fit) is told in one sentence naming that agent's
-        model, with ``error_code`` ``CONTEXT_OVERFLOW``, as on ADK.
+        the agent's. A context overflow (a provider's, or Deep Agents' own
+        when a summary still does not fit) is told in one sentence naming the
+        agent's model, with ``error_code`` ``CONTEXT_OVERFLOW``, as on ADK.
         """
-        agent = self.agent(self._failures[0]) if self._failures else self._root
         if is_context_overflow(error):
-            model = self._agent_models.get(agent) or self._agent_models.get(self._root)
+            model = self._agent_models.get(self._agent) or self._agent_models.get(self._root)
             event = WorkflowEvent.turn_failed(
                 error,
                 overflow_message(str(model.ref) if model is not None else "the model"),
@@ -231,47 +188,16 @@ class DeepAgentsEventProcessor:
             )
         else:
             event = WorkflowEvent.turn_failed(error)
-        return self._attributed(event, agent)
-
-    # -- the tasks mode --------------------------------------------------------
-
-    def _track(self, namespace: Namespace, payload: Any) -> None:
-        """Learn which agent runs where, and which tasks failed."""
-        if not isinstance(payload, dict):
-            return
-        if "input" in payload:  # a task starts
-            call = _delegation_call(payload) if payload.get("name") == "tools" else None
-            subagent = call["args"]["subagent_type"] if call is not None else None
-            if subagent is not None and self._delegates_to(self.agent(namespace), subagent):
-                where = (*namespace, f"tools:{payload['id']}")
-                self._agents[where] = subagent
-                if call.get("id"):
-                    caller = self.run(namespace)
-                    self._refs[where] = self._runs.run_for(
-                        get_active_turn(), caller, call["id"], subagent
-                    )
-                    self._spaces[(caller.run, call["id"])] = where
-        elif payload.get("error") is not None:
-            self._failures.append(namespace)
-
-    def _answered(self, message: ToolMessage, run: RunRef) -> None:
-        """``run``'s delegation answered its call: what failed inside it is not the turn's."""
-        where = self._spaces.pop((run.run, message.tool_call_id), None)
-        if where is not None:
-            self._failures = [
-                failed for failed in self._failures if failed[: len(where)] != where
-            ]
+        event.metadata["agent"] = self._agent
+        return event
 
     # -- node outputs ----------------------------------------------------------
 
-    def _model_output(self, agent: str, run: RunRef, values: dict) -> list[WorkflowEvent]:
+    def _model_output(self, values: dict) -> list[WorkflowEvent]:
         events: list[WorkflowEvent] = []
         for message in values.get("messages") or ():
             if not isinstance(message, AIMessage):
                 continue
-            outcome = answer_outcome(message)
-            if outcome is not None and run.run is not None:
-                self._outcomes[run.run] = outcome
             for block in message.content_blocks:
                 if block.get("type") == "reasoning" and block.get("reasoning"):
                     events.append(
@@ -279,122 +205,43 @@ class DeepAgentsEventProcessor:
                     )
                 elif block.get("type") == "text" and block.get("text"):
                     text = WorkflowEvent.text(block["text"], self._session_id)
-                    if agent != self._root:
+                    if not self._run.is_root:
                         # Only the root replies to the user: a sub-agent's
-                        # text is its work, read by its coordinator as the
-                        # task call's result.
+                        # text is its work, read by its parent as the
+                        # result of its ``task`` call.
                         text.metadata["subagent"] = True
                     events.append(text)
             for call in message.tool_calls:
-                self._call_names[(run.run, call["id"])] = call["name"]
+                self._call_names[call["id"]] = call["name"]
                 event = WorkflowEvent.tool_call(call["name"], call["args"])
                 event.metadata["tool_call_id"] = call["id"]
                 events.append(event)
-                started = self._started(call, run)
-                if started is not None:
-                    events.append(started)
             if message.usage_metadata:
-                events.append(
-                    self._usage(agent, message.usage_metadata, answer_latency(message))
-                )
-        return self._all_attributed(events, agent, run)
+                events.append(self._usage(message.usage_metadata, answer_latency(message)))
+        return [self._attributed(event) for event in events]
 
-    def _tools_output(self, agent: str, run: RunRef, values: dict) -> list[WorkflowEvent]:
+    def _tools_output(self, values: dict) -> list[WorkflowEvent]:
         events: list[WorkflowEvent] = []
         for message in values.get("messages") or ():
             if isinstance(message, ToolMessage):
-                self._answered(message, run)
-                ended = self._ended(message, run)
-                result = self._tool_result(message, run, delegation=ended is not None)
-                events.append(result)
-                if ended is not None:
-                    show_as_delegation(result, message.text, ended)
-                    events.append(ended)
-                    # A run cut short is followed by its one warning.
-                    warning = cut_off_warning(ended)
-                    if warning is not None:
-                        events.append(warning)
-        if "tasks" in values:
+                events.append(self._tool_result(message))
+        if "tasks" in values and self._run.is_root:
             events += self._progress(values["tasks"])
-        return self._all_attributed(events, agent, run)
+        return [self._attributed(event) for event in events]
 
-    def _all_attributed(
-        self, events: list[WorkflowEvent], agent: str, run: RunRef
-    ) -> list[WorkflowEvent]:
-        """``events`` as ``agent``'s, in ``run``; one that names a run (an
-        ``AGENT_RUN``, a cut run's warning) is its sub-agent's already."""
-        return [
-            event if event.run is not None else self._attributed(event, agent, run)
-            for event in events
-        ]
-
-    def _delegates_to(self, caller: str, subagent: str) -> bool:
-        """Whether ``subagent`` is one of ``caller``'s own sub-agents."""
-        return self._sub_agents is None or subagent in self._sub_agents.get(caller, ())
-
-    def _started(self, call: dict, parent: RunRef) -> WorkflowEvent | None:
-        """The ``AGENT_RUN`` a ``task`` call of ``parent``'s starts, recorded; else None.
-
-        Only a call to one of ``parent``'s agent's own sub-agents starts one.
-        """
-        args = call.get("args") or {}
-        subagent = args.get("subagent_type")
-        if call.get("name") != TASK_TOOL or not isinstance(subagent, str) or not call.get("id"):
-            return None
-        if not self._delegates_to(parent.agent, subagent):
-            return None
-        child = self._runs.run_for(get_active_turn(), parent, call["id"], subagent)
-        self._delegated[(parent.run, call["id"])] = child
-        description = args.get("description")
-        event = WorkflowEvent.agent_run(
-            child, RUN_STARTED, call_id=call["id"],
-            title=run_title(description if isinstance(description, str) else ""),
-        )
-        self._runs.observe(event)
-        return event
-
-    def _ended(self, message: ToolMessage, run: RunRef) -> WorkflowEvent | None:
-        """The ``AGENT_RUN`` the result of a ``task`` call ``run`` made ends, recorded; else None.
-
-        ``agents/runs.py::run_ended``'s decision, as on ADK: ``failed`` for
-        ``Error running sub-agent: <reason>`` (its ``error`` the reason) or
-        the framework's other error results (an error message: its error),
-        ``refused`` when ``SubAgentOutcomeMiddleware`` marked the run's last
-        answer refused, else ``completed`` (``partial`` when it marked the
-        answer cut). The sub-agent's answer is never read for success
-        (``_delegation_result``).
-        """
-        child = self._delegated.pop((run.run, message.tool_call_id), None)
-        if child is None:
-            return None
-        _, succeeded, error = _delegation_result(message)
-        event = run_ended(
-            child, message.tool_call_id, message.text,
-            failed=not succeeded, error=error,
-            outcome=self._outcomes.pop(child.run or "", None),
-            usage=self._ledgers.ledger(get_active_turn()).run_usage(child.run or ""),
-        )
-        self._runs.observe(event)
-        return event
-
-    def _tool_result(
-        self, message: ToolMessage, run: RunRef, *, delegation: bool = False
-    ) -> WorkflowEvent:
-        """``TOOL_RESULT`` for ``message``; a ``delegation``'s read as ``_delegation_result``."""
-        name = (
-            message.name or self._call_names.get((run.run, message.tool_call_id)) or "unknown"
-        )
-        result, success, error = (_delegation_result if delegation else _result_of)(message)
+    def _tool_result(self, message: ToolMessage) -> WorkflowEvent:
+        """``TOOL_RESULT`` for ``message``; a delegation's shown from its envelope."""
+        name = message.name or self._call_names.get(message.tool_call_id) or "unknown"
+        result, success, error = _result_of(message)
         event = WorkflowEvent.tool_result(name, result, success=success, error=error)
         event.metadata["tool_call_id"] = message.tool_call_id
+        found = read_envelope(result) if name == TASK_TOOL else None
+        if found is not None:
+            show_as_delegation(event, found)
         return event
 
     def _progress(self, tasks: Any) -> list[WorkflowEvent]:
-        """``TASK_PROGRESS`` for a changed task list.
-
-        A sub-agent's list flows back to its coordinator with its result;
-        reporting it again would say nothing new.
-        """
+        """``TASK_PROGRESS`` for a changed task list (the root's)."""
         if not isinstance(tasks, list) or tasks == self._reported_tasks:
             return []
         self._reported_tasks = tasks
@@ -410,24 +257,18 @@ class DeepAgentsEventProcessor:
             )
         ]
 
-    def _usage(
-        self, agent: str, usage: Mapping[str, Any], latency_ms: float | None
-    ) -> WorkflowEvent:
-        model = self._agent_models.get(agent) or self._agent_models.get(self._root)
+    def _usage(self, usage: Mapping[str, Any], latency_ms: float | None) -> WorkflowEvent:
+        model = self._agent_models.get(self._agent) or self._agent_models.get(self._root)
         event = usage_event(model, usage, latency_ms=latency_ms)
-        event.metadata.update(usage_fields(self._budgets.get(agent)))
-        if agent != self._root:
+        event.metadata.update(usage_fields(self._budgets.get(self._agent)))
+        if not self._run.is_root:
             # A sub-agent's prompt is its brief, not the conversation's context.
             event.metadata["purpose"] = "subagent"
         return event
 
-    @staticmethod
-    def _attributed(
-        event: WorkflowEvent, agent: str, run: RunRef | None = None
-    ) -> WorkflowEvent:
-        event.metadata["agent"] = agent
-        if run is not None:
-            event.run = run
+    def _attributed(self, event: WorkflowEvent) -> WorkflowEvent:
+        event.metadata["agent"] = self._agent
+        event.run = self._run
         return event
 
 
@@ -478,36 +319,6 @@ def _result_of(message: ToolMessage) -> tuple[Any, bool, str | None]:
     return result, success, error
 
 
-def _delegation_result(message: ToolMessage) -> tuple[Any, bool, str | None]:
-    """A delegation's result, whether it succeeded, and its error, as on ADK.
-
-    Only the framework's own error result fails: an error message (the
-    gate's denial, ``ToolCallErrorMiddleware``'s ``Error running sub-agent:
-    …``), read as ``_result_of`` reads one. Anything else is the sub-agent's
-    answer, text never read for success (ADK keeps it under ``result``): an
-    answer that is JSON saying it failed completed.
-    """
-    if message.status == "error":
-        return _result_of(message)
-    return message.content, True, None
-
-
-def _delegation_call(payload: dict) -> dict | None:
-    """The ``task`` call a tools task runs, naming its sub-agent; else None.
-
-    Each tool call is its own tools task (``Send``), so its input is a list
-    holding that one call.
-    """
-    calls = payload.get("input")
-    if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
-        return None
-    call = calls[0]
-    if call.get("name") != TASK_TOOL:
-        return None
-    subagent = (call.get("args") or {}).get("subagent_type")
-    return call if isinstance(subagent, str) else None
-
-
 @dataclass
 class _ModelCall:
     """One model call in flight: whose, why, on what, since when."""
@@ -522,12 +333,14 @@ class _ModelCall:
 
 
 class RunCallback(AsyncCallbackHandler):
-    """Reports one turn's events that the stream cannot carry.
+    """Reports the events of a turn's run, or a sub-agent run's, that the stream cannot carry.
 
-    Attached to the turn's run config, LangChain hands it to every model call
-    in the run, sub-agents' and tools' included. Each event goes out through
-    ``live`` as it happens (the manager merges it into the turn's stream), so
-    it shows while the node it happened in still runs.
+    Attached to the run's config (the turn's root agent's, and each
+    sub-agent run's own: ``DeepAgentsWorkflowManager._run_agent``), LangChain
+    hands it to every model call in the run, its tools' included. Each event
+    goes out through ``live``, the turn's, as it happens (the manager merges
+    it into the turn's stream), so it shows while the node it happened in
+    still runs.
 
     - Every model call is timed, from its start to its end, and its answer
       marked with the milliseconds (``middleware.mark_latency``:
@@ -554,7 +367,8 @@ class RunCallback(AsyncCallbackHandler):
         root: The root agent, for a call no agent is named on.
         agent_models: Each agent's resolved model, by name.
         llm_log: Where raw LLM traffic is written; None logs none.
-        live: The turn's live events, which every event goes out through.
+        live: The turn's live events, which every event goes out through
+            (and which give a failed summary's warning once a turn).
         budgets: Each agent's context numbers, by name, which a summary's
             ``LLM_USAGE`` carries; none without.
         ledgers: The manager's usage ledgers: a summary's usage is recorded
@@ -581,8 +395,6 @@ class RunCallback(AsyncCallbackHandler):
         # Every call in flight, by run id: each is timed, and a summary's,
         # and every call when logging, reported as it ends.
         self._calls: dict[UUID, _ModelCall] = {}
-        # The notices given once a turn (this callback is the turn's).
-        self._notified: set[str] = set()
 
     async def on_chat_model_start(
         self,
@@ -658,9 +470,8 @@ class RunCallback(AsyncCallbackHandler):
             return
         agent = data.get("agent") or self._root
         if name == SUMMARY_NOT_WRITTEN:
-            # Once a turn, however often its calls try again.
-            if SUMMARY_FAILED_CODE not in self._notified:
-                self._notified.add(SUMMARY_FAILED_CODE)
+            # Once a turn, however often its calls, and its runs', try again.
+            if self._live.first(SUMMARY_FAILED_CODE):
                 text = SUMMARY_FAILED if agent == self._root else f"{agent}: {SUMMARY_FAILED}"
                 self._emit(WorkflowEvent.error(
                     text, error_code=SUMMARY_FAILED_CODE, recoverable=True

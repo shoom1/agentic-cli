@@ -2,15 +2,16 @@
 
 ADK makes an ``EventActions`` for each model call and hands that object to
 all three of its model callbacks (before, after, on error), so a call is
-timed under its identity, as the fit guard keeps its copy of a request:
-parallel delegations to one sub-agent share their invocation and their
-agent's name, and a clock kept by either timed one call from another's
-request. The clock holds the object, so its id goes to no other call while
-this one is out. A failed call keeps its clock: a plugin after the one that
+timed under its identity, as the fit guard keeps its copy of a request: a
+clock kept by invocation or agent name could time one call from another
+call's request. The clock holds the object, so its id goes to no other call
+while this one is out. A failed call keeps its clock: a plugin after the one that
 reads it may answer the error (the overflow handler), and that answer reaches
-``after_model_callback`` like any response. Each run lets go of what another
-invocation left: an error nobody answered, and a call cancelled mid-request,
-which before google-adk 2.14 fires no callback.
+``after_model_callback`` like any response. As each run ends (ADK's
+``after_run_callback``, a stopped one's too, or ``on_run_error_callback``)
+it lets go of what it left: an error nobody answered, and a call cancelled
+mid-request, which before google-adk 2.14 fires no callback. Only its own:
+two runs of one sub-agent type share their runner's clock at once.
 
 ``CallClock`` is that clock; the raw log (``LLMLoggingPlugin``) keeps one.
 Every app times every call with two plugins sharing another (the manager's
@@ -77,10 +78,10 @@ class CallClock:
         clock = clocks.pop(id(actions), None) if done else clocks.get(id(actions))
         return None if clock is None else (time.perf_counter() - clock.started) * 1000
 
-    def keep_only(self, invocation: str | None) -> None:
-        """Let go of every clock another invocation left (turns run one at a time)."""
+    def forget(self, invocation: str | None) -> None:
+        """Let go of every clock ``invocation`` left; another run's stay."""
         self._clocks = {
-            key: clock for key, clock in self._clocks.items() if clock.invocation == invocation
+            key: clock for key, clock in self._clocks.items() if clock.invocation != invocation
         }
 
     def clear(self) -> None:
@@ -137,10 +138,14 @@ class CallLatencyPlugin(BasePlugin):
         # reaches after_model_callback, timed, and lets it go.
         return None
 
-    async def before_run_callback(
-        self, *, invocation_context: "InvocationContext"
+    async def after_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+        self.clock.forget(invocation_context.invocation_id)
+        return None
+
+    async def on_run_error_callback(
+        self, *, invocation_context: "InvocationContext", error: Exception
     ) -> None:
-        self.clock.keep_only(invocation_context.invocation_id)
+        self.clock.forget(invocation_context.invocation_id)
         return None
 
 

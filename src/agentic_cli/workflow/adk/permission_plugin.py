@@ -13,9 +13,9 @@ Adapter check order (mirrors LangGraph wrapper for consistency):
    own text, as Deep Agents' gate does.
 1. Resolve the definition bound to this exact object. Framework-issued tools —
    registered callables, service-bound factory variants, and the native ADK
-   tool objects the framework constructs (skill tools, and the delegation tool
-   ADK builds for each sub-agent the framework built, ``adk/delegation.py``) —
-   are bound at their construction site.
+   tool objects the framework constructs (skill tools, and a delegating
+   agent's ``task``, ``adk/task_tool.py::TaskTool``) — are bound at their
+   construction site.
 2. Failing that, unwrap ``.func`` only for ADK's own function-tool types
    (:data:`_TRUSTED_FUNCTION_TOOL_TYPES`), whose contract is to invoke exactly
    that callable, and resolve the callable by identity.
@@ -68,7 +68,7 @@ logger = Loggers.workflow()
 
 # ADK auto-injects ``transfer_to_agent`` into an agent that can transfer to
 # another: a native ADK YAML app's (agents built from configs delegate
-# instead, ``adk/delegation.py``). It's an internal routing primitive, not an
+# instead, ``adk/task_tool.py``). It's an internal routing primitive, not an
 # external side effect, so register it with EXEMPT so the plugin lets it
 # through.
 try:
@@ -233,7 +233,10 @@ class PermissionPlugin(BasePlugin):
         open_calls: The manager's record of its calls, marked while a call
             waits at its prompt: a cancel there means it was not run.
         marks: The manager's record of each conversation's mark.
-        root: The root agent's name, whose session state carries the mark.
+        root: The root agent's name, whose session state carries the mark;
+            None in a sub-agent type's chain, where no model call writes it
+            (a run's mark reaches the conversation's state with its result,
+            ``adk/task_tool.py``).
         reply_agents: The agents that reply to the user besides the root (a
             chat-mode agent it transfers to holds the conversation): their
             model calls write the mark into the session state too.

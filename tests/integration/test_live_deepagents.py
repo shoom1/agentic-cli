@@ -104,7 +104,7 @@ async def test_delegation_and_its_answer(listed, tmp_path):
 
     assert_no_errors(events)
     (delegation, *_) = find_tool_calls(events, "task")
-    assert delegation.metadata["tool_args"]["subagent_type"] == "calculator"
+    assert delegation.metadata["tool_args"]["agent_type"] == "calculator"
     assert find_tool_results(events, "task"), "the task call got no result"
     assert {e.metadata["agent"] for e in events} == {"coordinator", "calculator"}
     assert "42" in _text(events)

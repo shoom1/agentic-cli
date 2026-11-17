@@ -1,10 +1,12 @@
 """The declaration of ``task``, the tool a coordinator delegates with.
 
-On the Deep Agents backend, a coordinator delegates to its sub-agents through a
-``task`` tool that Deep Agents' ``SubAgentMiddleware`` builds. It has no
-backend-neutral implementation, so only its contract is declared here: the
-name, the description and the permission declaration. The backend binds the
-object it builds to this declaration (``bind_tool_identity``), which is how the
+On both backends a coordinator delegates to its sub-agents through the
+framework's ``task`` tool (``workflow/agents/delegate.py``), which each backend
+builds in its own form: ADK's ``workflow/adk/task_tool.py::TaskTool``, Deep
+Agents' ``workflow/deepagents/task_tool.py::build_task_tool``. It has no
+backend-neutral callable, so only its contract is declared here: the name, the
+description and the permission declaration. Each backend binds the object it
+builds to this declaration (``bind_tool_identity``), which is how the
 permission gate knows it.
 
 Delegation itself needs no permission: each tool the sub-agent calls is gated

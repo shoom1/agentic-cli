@@ -1,8 +1,9 @@
 """The Deep Agents orchestrator (``orchestrator = "deepagents"``).
 
 Each ``AgentConfig`` becomes one LangChain ``create_agent`` graph, and a
-coordinator delegates to its sub-agents through the ``task`` tool of Deep
-Agents' ``SubAgentMiddleware``. Our own middleware gates every tool call and
+coordinator delegates to its sub-agents through the framework's ``task`` tool
+(``task_tool.py``), each run's graph running apart from its coordinator's.
+Our own middleware gates every tool call and
 turns a raising tool into an error result, so the framework's permission
 engine, tools and models are the same as on the other backends.
 

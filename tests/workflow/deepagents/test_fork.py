@@ -1,13 +1,11 @@
-"""A sub-agent's context on Deep Agents: a fresh brief, or a fork of the conversation.
+"""A sub-agent's context on Deep Agents: its task message alone, or the conversation first.
 
-A sub-agent with ``inherit_context`` False (the default) is Deep Agents'
-isolated ``CompiledSubAgent``: its first request holds the brief alone. One
-with ``inherit_context=True`` is a fork (``mode="fork"``): it gets the coordinator's effective
-conversation (after any summary), without the message that called ``task``,
-then Deep Agents' preamble and the brief. It keeps its own prompt, tools and
-model. Deep Agents marks forks beta with a ``LangChainBetaWarning`` that
-LangChain would print over the UI; that one warning is filtered and logged at
-debug instead. A fork never sends the coordinator's reasoning on (signed
+A sub-agent with ``inherit_context`` False (the default) is sent its task
+message alone (``agents/brief.py::task_message``). One with
+``inherit_context=True`` gets the coordinator's effective conversation (after
+any summary), without the message that called ``task``, then its task
+message, which ends with ``INHERITED_CONTEXT_NOTE``. It keeps its own prompt,
+tools and model. It never sends the coordinator's reasoning on (signed
 reasoning from one model may be refused by another), while its own goes back
 to it in its tool loop; the coordinator's state keeps all of it.
 
@@ -24,18 +22,15 @@ import pytest
 
 pytest.importorskip("deepagents")
 
-from deepagents import CompiledSubAgent, SubAgentMiddleware  # noqa: E402
-from langchain.agents import create_agent  # noqa: E402
 from langchain.agents.middleware import ModelRequest  # noqa: E402
-from langchain_core._api import LangChainBetaWarning  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 
 from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens  # noqa: E402
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ProviderKind  # noqa: E402
+from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import context_budget  # noqa: E402
-from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import ForeignReasoningMiddleware  # noqa: E402
@@ -45,21 +40,11 @@ from tests.workflow.deepagents.fakes import USAGE, ScriptedChat, ScriptedModels,
 
 BRIEF = "Find X. Report the number."
 TURNS = ["My name is Ada and the secret code is 7.", "Have the researcher find X."]
-#: How Deep Agents opens a fork's task message.
-PREAMBLE = "[The messages above are a prior conversation you are continuing as the subagent"
 
 
-class _Recorder:
-    """Stands in for a module's structlog logger."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict]] = []
-
-    def __getattr__(self, level: str):
-        def log(event: str, **fields) -> None:
-            self.calls.append((level, event, fields))
-
-        return log
+def task_of(inherit: bool = False) -> str:
+    """The researcher's task message for ``BRIEF``."""
+    return task_message(Brief(title=BRIEF, objective=BRIEF), inherit=inherit)
 
 
 @pytest.fixture
@@ -135,19 +120,19 @@ class TestWhatTheSubAgentSees:
         # The coordinator's conversation, without the message that delegated ...
         assert sent[:3] == [("human", TURNS[0]), ("ai", "Noted, Ada."), ("human", TURNS[1])]
         assert not any("Delegating." in text for _, text in sent)
-        # ... then Deep Agents' preamble and the brief.
-        (kind, last), = sent[3:]
-        assert kind == "human" and last.startswith(PREAMBLE) and last.endswith(BRIEF)
+        # ... then its task message, which ends with the note.
+        assert sent[3:] == [("human", task_of(inherit=True))]
+        assert sent[3][1].endswith(INHERITED_CONTEXT_NOTE)
         # Its own prompt, not the coordinator's.
         assert researcher.system_prompt(0).startswith("You research.")
         assert [e.content for e in events[1] if e.type is EventType.TEXT][-1] == (
             "The researcher says X is 42."
         )
 
-    async def test_a_fresh_one_sees_only_the_brief(self, hermetic, monkeypatch):
+    async def test_a_fresh_one_sees_only_its_task_message(self, hermetic, monkeypatch):
         models, _ = await two_turns(monkeypatch, team(False), delegating())
 
-        assert shape(models.chats["researcher"].conversation(0)) == [("human", BRIEF)]
+        assert shape(models.chats["researcher"].conversation(0)) == [("human", task_of())]
 
 
 class TestUsagePerAgent:
@@ -222,43 +207,6 @@ class TestUsagePerAgent:
             f"ctx 4k{of} ({round(400_000 / trigger)}%)",  # the researcher's call
             f"ctx 4.2k{of} ({round(420_000 / trigger)}%)",
         ]
-
-
-class TestTheBetaWarning:
-    def test_deep_agents_warns_of_a_fork(self):
-        # What the builder quiets: if Deep Agents stops warning, or words it
-        # otherwise, this fails and the filter is to be revisited.
-        runnable = create_agent(model=ScriptedChat(), tools=[], name="researcher")
-        fork = CompiledSubAgent(
-            name="researcher", description="Finds facts.", runnable=runnable, mode="fork"
-        )
-        with pytest.warns(LangChainBetaWarning, match="The feature `forked subagents` is in beta"):
-            SubAgentMiddleware(backend=None, subagents=[fork])
-
-    async def test_building_a_fork_logs_it_instead(self, hermetic, monkeypatch, recwarn):
-        recorder = _Recorder()
-        monkeypatch.setattr(agent_builder, "logger", recorder)
-        scripted(monkeypatch, **delegating())
-        manager = manager_for(team(True))
-        try:
-            await manager.initialize_services()
-        finally:
-            await manager.cleanup()
-
-        assert [w for w in recwarn if issubclass(w.category, LangChainBetaWarning)] == []
-        assert ("debug", "deepagents_fork_beta", {"agents": ["researcher"]}) in recorder.calls
-
-    async def test_no_fork_logs_nothing(self, hermetic, monkeypatch):
-        recorder = _Recorder()
-        monkeypatch.setattr(agent_builder, "logger", recorder)
-        scripted(monkeypatch, **delegating())
-        manager = manager_for(team(False))
-        try:
-            await manager.initialize_services()
-        finally:
-            await manager.cleanup()
-
-        assert [event for _, event, _ in recorder.calls if event == "deepagents_fork_beta"] == []
 
 
 # --- reasoning -------------------------------------------------------------------------

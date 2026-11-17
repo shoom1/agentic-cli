@@ -71,12 +71,20 @@ the start of the entry's title.
 - A `filesystem.*`, `http.*` or `shell.*` capability needs `target_arg=` or
   `target=`, and `task` is a reserved tool name. (Changed: **A resource
   capability…**; Added: **`task` is a reserved…**)
-- In an ADK app built from configs, a sub-agent is called as a tool and
-  returns (no `transfer_to_agent`), seeing only its request unless
+- In an ADK app built from configs, a sub-agent is called through `task` and
+  returns (no `transfer_to_agent`), seeing only its task unless
   `inherit_context=True`; a synchronous tool must be safe in a worker thread
   beside other calls; a prompt's `{name}` is not filled from session state.
   (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
   ADK, an agent's prompt…**)
+- On both backends a coordinator delegates with `task(agent_type=, title=,
+  objective=, ...)` and reads the run's envelope, a JSON object, as the
+  call's result: a prompt that names a sub-agent's own tool
+  (`researcher(request=...)`) or Deep Agents' `description` and
+  `subagent_type` should name `task` and the brief's fields, and code that
+  read a delegation's `TOOL_RESULT` as text reads `metadata["result"]["result"]`.
+  (Changed: **One `task` tool on both backends…**, **A delegation's result
+  is the run's envelope…**)
 - A native ADK YAML app (`adk_config_path`) needs an `LlmAgent` root, agent
   names unique across its tree and no task-mode agent; agent configs passed
   with it are ignored, so name its tools in the YAML; a YAML ADK cannot load
@@ -591,7 +599,10 @@ the start of the entry's title.
   is a key that is no limit). `validate_agent_graph` raises
   `AgentGraphError` for a `brief_required` that is not a tuple or list of
   those names, a `limits` that is not an `AgentLimits`, and either set on
-  the root, which is never delegated to.
+  the root, which is never delegated to. A delegation's brief is read
+  against it: a `task` call that leaves a required field empty starts no
+  run, and its caller reads which ("The brief for 'researcher' is missing:
+  deliverable.").
 - **`subagents=`: the sub-agent policy, given to the app, a manager or the
   factory.** `BaseCLIApp`, `BaseWorkflowManager` (the ADK, Deep Agents and
   LangGraph managers pass it on) and `create_workflow_manager_from_settings`
@@ -627,8 +638,8 @@ the start of the entry's title.
   run, title, tokens in/out (from the usage ledger, so a run still going
   shows what it has used so far) and time. `/agents <id>` shows one instance
   (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
-  then each run's status and time, the first lines of its result, its error
-  and its tokens by model. The runs are the manager's records, kept in
+  then each run's status and time, the other fields of its brief, the first
+  lines of its result, its error and its tokens by model. The runs are the manager's records, kept in
   memory with it: a conversation resumed from an earlier run of the app, or
   after a backend switch, lists none. During a turn each line of the events
   box names the sub-agent run at work (`researcher-2 › Calling: web_fetch`),
@@ -673,24 +684,25 @@ the start of the entry's title.
   sub-agent, and a run two levels down, are told apart. ADK's `TOOL_CALL`
   and `TOOL_RESULT` carry `tool_call_id`, as Deep Agents' did. A sub-agent
   run's start and end are an event of their own, `EventType.AGENT_RUN`
-  (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its title,
-  the first line of its request, then `completed` (`partial` for an answer
-  cut at its output limit), `refused`, `failed` or `interrupted`, with the
-  first 200 characters of its result; a run fails
-  on `Error running sub-agent: …` or the framework's own error result, an
-  error `ToolMessage` on Deep Agents, the error dict of a raised or denied
-  call on ADK, and the sub-agent's answer is never read for success, so an
-  answer that is JSON saying it failed completes), and each
+  (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its
+  brief's title, the brief's filled fields (`brief`), who started it
+  (`started_by`: `agent:<instance>`, `agent:root` for the main agent) and
+  how it runs (`mode`: `blocking`, its caller waiting for it), then
+  `completed` (`partial` for an answer cut at its output limit), `refused`,
+  `failed` or `interrupted`, with the first 200 characters of its result; a
+  run fails when it cannot finish (a model call of its fails, its request no
+  longer fits its model's window, or its model gives no answer), and the
+  sub-agent's answer is never read for success, so an answer that is JSON
+  saying it failed completes), the same on both backends: the framework
+  starts and ends every run (`workflow/agents/delegate.py`), each at its own
+  end, so of two parallel delegations the faster ends first. Each
   manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
-  provisional: `records(ref)`, `record(ref, id)`); a run a stopped or failed
-  turn leaves open is recorded `interrupted`. On ADK a delegation that
-  finished beside a slower one in the same model step ends with the slower
-  one's (ADK hands a step's parallel function responses back in one event,
-  after the last), where Deep Agents ends each at its own result; a turn
-  stopped or failed before then ends it from the record, with its result,
-  not `interrupted`. `get_active_run()` (exported
+  provisional: `records(ref)`, `record(ref, id)`; a record has the brief,
+  `started_by`, `mode` and, for a cancelled run, `cancelled_by`); a run a
+  stopped or failed turn leaves open is recorded `interrupted`.
+  `get_active_run()` (exported
   from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
-  run whose call is in progress, None in the root's own: a sub-agent's
+  run at work, None in the root's own: a sub-agent's
   tools, permission checks and questions see it. A consumer that does not
   know `AGENT_RUN` ignores it; the CLI ignores it.
 
@@ -970,15 +982,15 @@ the start of the entry's title.
   `ImportError` with that install hint. MCP tools, raw LLM logging, Agent
   Skills and job resume run on it too (the entries below), and
   `examples/hello_deepagents.py` is the hello example on it.
-  - **Delegation.** A coordinator delegates through Deep Agents' `task` tool
-    (`description`, the brief; `subagent_type`, the sub-agent's name), which
-    lists each sub-agent as `- name: description`; one without a
-    description is offered as "The <name> agent." with a warning. A
-    sub-agent sees the brief and the coordinator's `plan` and `tasks`, and
-    one with `inherit_context=True` the conversation too (see
-    `AgentConfig.inherit_context`); its last text is the call's result, and
-    its own text shows as activity, not as the reply. Two sub-agents may run
-    at once.
+  - **Delegation.** A coordinator delegates through the framework's `task`
+    tool, as on ADK (see Changed: **One `task` tool on both backends…**):
+    each sub-agent's graph is built on its own and runs apart from its
+    coordinator's stream, in a task of its own, from the task message, the
+    coordinator's `plan` and `tasks`, and for one with
+    `inherit_context=True` the conversation too (see
+    `AgentConfig.inherit_context`); its last text is the envelope's result,
+    and its own text shows as activity, not as the reply. Two sub-agents may
+    run at once.
   - **Tools.** Every tool call, in every agent, passes the permission gate,
     which identifies the tool by the object the registry issued and asks
     through the input callback, sub-agents' calls included. A tool that
@@ -1034,10 +1046,9 @@ the start of the entry's title.
     conversation that still does not fit ends the turn with one `ERROR`,
     `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
     <model>'s context window. Use /compact or /new." (a sub-agent's fails
-    only its `task` call: its parent reads the error and its run fails,
-    where ADK answers it with text and its run completes; the user's
-    warning is ADK's, "<agent>: the request no longer fits <model>'s
-    context window.", `CONTEXT_OVERFLOW`). The checkpoint
+    only its run, as on ADK: the user is warned "<agent>: the request no
+    longer fits <model>'s context window.", `CONTEXT_OVERFLOW`, and its
+    parent reads those words as the run's error). The checkpoint
     keeps every message. Each summary is a `CONTEXT_TRIMMED` event
     (`source="summarization"`) with the summary call's own `LLM_USAGE`
     (`purpose="summarization"`), which the status bar adds to the totals
@@ -1051,9 +1062,9 @@ the start of the entry's title.
   Sessions saved by the LangGraph backend do not carry over: they stay in
   `{workspace}/checkpoints.db`, untouched, and switching the orchestrator
   starts a new conversation, as it always has.
-- **`task` is a reserved tool name**: the framework declares it for Deep
-  Agents' delegation tool, so registering another tool named `task` raises,
-  whichever backend runs.
+- **`task` is a reserved tool name**: the framework declares it for its
+  delegation tool, on both backends, so registering another tool named
+  `task` raises, whichever backend runs.
 - **MCP servers' tools on Deep Agents** (`AgentConfig.mcp_servers`, the same
   `MCPServerConfig` as on ADK). Each agent's servers open when the workflow
   initializes, one session per agent and server, and a model switch reopens
@@ -1185,8 +1196,8 @@ the start of the entry's title.
   window. While the summary is written the CLI shows "Summarizing the
   earlier conversation…", and the summary's usage and a `CONTEXT_TRIMMED`
   (`source="summarization"`) follow.
-  Only the main agent's conversation is summarized: a sub-agent past its own
-  trigger leaves the shared session alone. ADK's own pass after each turn is
+  Only the main agent's conversation is summarized: a sub-agent's run, on a
+  child session of its own, is trimmed by the fit guard instead. ADK's own pass after each turn is
   switched off (`NoAfterTurnCompactionRunner`), so the prompt never waits
   for a summary after the answer. A summary that fails is one warning a
   turn, "Could not summarize the earlier conversation; the agent goes on
@@ -1243,8 +1254,10 @@ the start of the entry's title.
   result is still cut, its note says the full output could not be saved,
   and the log warns once per folder. Reading a saved output back cuts it
   again without a second file. Every result is covered: registered, MCP and
-  skill tools, `job_result`, and a sub-agent's answer (Deep Agents' `task`,
-  and on ADK the tool named after the sub-agent). ADK's
+  skill tools, `job_result`, and a sub-agent run's envelope (`task`'s
+  result, on both backends). A string that holds a JSON object (the
+  envelope, a framework tool's dict in a Deep Agents `ToolMessage`) is cut
+  as that dict and given back as JSON, so its parent reads JSON still. ADK's
   `ToolResultCapPlugin` caps every agent but one with `after_tool_callback`s
   of its own (a native ADK YAML app's), which ADK would skip once it cut;
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
@@ -1252,32 +1265,26 @@ the start of the entry's title.
   tool's own limits stay; this is the net beneath them. ADK's Claude and
   OpenAI Responses adapters send a model only a result's `content`, or else
   its `result`, so on ADK the note is put there as well.
-- **`AgentConfig.inherit_context`: a sub-agent sees the request alone, or its
+- **`AgentConfig.inherit_context`: a sub-agent sees its task alone, or its
   parent's conversation too**, set per agent on ADK and Deep Agents
   (`inherit_context:` in the framework's agent YAML too). False, the default,
-  sees only the request its parent gives it; True also sees the parent's
+  sees only the task its parent gives it; True also sees the parent's
   conversation as it stands, after any summary and without the parent's
-  reasoning. On ADK an inheriting sub-agent is built with
-  `include_contents="default"`, which ADK keeps for a `single_turn` agent
-  only when it is set, and sees its parent's turns as quoted context; ADK
-  sends it the user's turns as plain user messages, so its instruction ends
-  with a note (`delegation.INHERITED_CONTEXT_NOTE`) that the conversation is
-  its parent's and its task the request after it, as Deep Agents' preamble
-  frames a fork's: without it, Claude at times answered the user's request
-  to the coordinator instead of its own. On
-  Deep Agents it is a fork (`mode="fork"`, beta in Deep Agents, whose
-  `LangChainBetaWarning` is logged at debug, `deepagents_fork_beta`, rather
-  than printed): the coordinator's conversation without the message that
-  called `task`, then Deep Agents' preamble and the brief; its own
-  summarization compacts an inherited conversation too large for its
-  model, and `ForeignReasoningMiddleware` leaves out the reasoning of AI
-  messages another agent wrote, so a fork is never sent its coordinator's.
+  reasoning, the same way on both backends: the run starts from that
+  conversation, less the message that called `task`, then its task message,
+  which ends with a note (`agents/brief.py::INHERITED_CONTEXT_NOTE`) that the
+  conversation is its parent's and its task the message the note ends:
+  without it, Claude at times answered the user's request to the
+  coordinator instead of its own. On ADK the conversation's events are
+  copied into the run's child session; on Deep Agents they are the run's
+  input messages, which its own summarization compacts when they are too
+  large for its model, and `ForeignReasoningMiddleware` leaves out the
+  reasoning of AI messages another agent wrote, so the run is never sent its
+  coordinator's.
   `validate_agent_graph` raises `AgentGraphError` for `inherit_context=True`
-  on the root, on an agent with sub-agents of its own (in 0.7.0: Deep
-  Agents tells a fork that delegating "will be refused", which a
-  coordinator would believe) or on an agent below another sub-agent (it is
-  for the main agent's own sub-agents), and for a value that is not True or
-  False.
+  on the root, on an agent with sub-agents of its own or on an
+  agent below another sub-agent (it is for the main agent's own
+  sub-agents), and for a value that is not True or False.
 - **`BaseWorkflowManager.context_budget(agent_name=None)` and
   `root_agent_name`**: an agent's context numbers as its backend summarizes
   and trims by them, the root agent's by default. A frozen `ContextBudget`
@@ -1533,6 +1540,49 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **One `task` tool on both backends, which takes a brief.** **Breaking:**
+  ADK offered one tool per sub-agent (`researcher(request=...)`) and Deep
+  Agents its own `task(description=, subagent_type=)`; now every agent
+  with sub-agents is offered the framework's `task`, the same on both
+  (`workflow/agents/brief.py`): `agent_type`, one of its own sub-agents,
+  each listed in the tool's description with what it does and the brief
+  fields it requires, then the brief, `title` and `objective` (required),
+  `deliverable`, `constraints`, `known` and `done_when`. The run's first
+  message is the task message, `# Task: <title>` and a section per filled
+  field (`## Objective`, `## Deliverable`, `## Constraints`, `## What is
+  already known`, `## Done when`). A call whose brief misses a field its
+  type requires, or names a type that is not the caller's, starts no run:
+  its result is `{"success": false, "error": ...}` naming what to fix. A
+  run starts from the conversation's `plan` and `tasks`, and the changes it
+  makes to them reach its caller's state when it returns (the status bar's
+  task list moves then). On ADK each sub-agent type runs on a runner of its
+  own over the manager's session service, on a child session of the run
+  (app `<app_name>--agents`, id `<conversation id>/<instance>`), which no
+  conversation list shows, and, an agent of its own there, its system
+  instruction gets ADK's identity line after its prompt as the root's does
+  (`You are an agent. Your internal name is "<name>".`, then its
+  description); on Deep Agents each type's graph runs apart from
+  its caller's stream, in a task of its own (Deep Agents'
+  `SubAgentMiddleware` and its fork are no longer used).
+- **A delegation's result is the run's envelope, JSON, rather than bare
+  text, on both backends.** The parent reads `{"success": <completed>,
+  "agent": "<instance>", "run": "<run id>", "status": "<status>",
+  "partial": <bool>, "result": "<its last text>", "error": <null or one
+  line>}`: a failed run's `error` is the provider's reason (where ADK said
+  "Dynamic node <agent> failed"), a refused run's `a model refused the
+  request` with the refusal notice as its `result`, an interrupted run's
+  `interrupted before it finished`. No delegation is an error result any
+  more ("Error running sub-agent: …" is gone): the envelope says how the
+  run ended. A run's result is its last text, a reply that also called a
+  tool included, so an empty final answer after it leaves that text; a run
+  that wrote none completes with an empty result, shown `No answer` (an
+  inheriting run's result is only what it wrote, never a reply from the
+  conversation it read). The envelope is written unescaped
+  (`ensure_ascii=False`), and one over `tool_result_max_chars` is cut as a
+  dict, its `result` shortened and the note under `truncated`, so it stays
+  JSON. The delegation's `TOOL_RESULT` carries the envelope as
+  `metadata["result"]`.
 
 - **Every `LLM_USAGE` counts the same way on both backends.** `prompt_tokens`
   is every input token, cache reads and writes included, and
@@ -1939,9 +1989,9 @@ the start of the entry's title.
   cache), and sent uncached. If that fails too, the main agent's turn ends with one
   `ERROR`, `error_code` `CONTEXT_OVERFLOW`: "This conversation no longer fits
   <model>'s context window. Use /compact or /new.", as on Deep Agents, and
-  no reply is stored; a sub-agent tells its coordinator it could not do the
-  task, and the user gets one warning, "<agent>: the request no longer fits
-  <model>'s context window.". Any other model error, and one that fails
+  no reply is stored; a sub-agent's run fails, with one warning, "<agent>:
+  the request no longer fits <model>'s context window.", whose words its
+  coordinator reads as the run's error. Any other model error, and one that fails
   the retry, is the turn's one `ERROR`, the provider's own. The
   tracebacks ADK logs for a failed summary, model call or retry are logged
   at debug by the CLI, since the user is told otherwise: on ADK's
@@ -1950,31 +2000,29 @@ the start of the entry's title.
   (`adk_overflow_plugin_failed`) loggers. Until now every failed model call
   printed one over the terminal.
 - **ADK sub-agents are delegated to and return, as on Deep Agents.**
-  **Breaking:** an agent built from a config that is not the root runs in
-  ADK's `single_turn` mode, with transfers to its parent and peers off. Its
-  parent calls it through a tool named after it, `<agent>(request=...)`,
-  and reads its last text as the call's result, `{"result": ...}`, in the
-  same turn; the root answers the user, and the next turn starts at the
-  root. No agent built from a config is offered `transfer_to_agent` any
-  more, so a sub-agent no longer takes over the conversation on later
-  turns. Sub-agents see only the request, where they saw the whole
-  conversation (set `inherit_context=True` for that).
+  **Breaking:** an agent built from a config is no ADK sub-agent of its
+  parent: each is built on its own, and its parent calls it through the
+  framework's `task` tool (see **One `task` tool on both backends…**) and
+  reads its run's envelope as the call's result, in the same turn; the root
+  answers the user, and the next turn starts at the root. No agent built
+  from a config is offered `transfer_to_agent` any more, so a sub-agent no
+  longer takes over the conversation on later turns. Sub-agents see only
+  their task, where they saw the whole conversation (set
+  `inherit_context=True` for that).
   `inherit_context` is for the main agent's own sub-agents in 0.7.0:
   `validate_agent_graph` refuses it below another sub-agent, on every
-  backend, since ADK would show such an agent the main agent's whole
-  conversation rather than its parent's. A prompt
+  backend. A prompt
   that names `transfer_to_agent` should say to delegate to the agent
   instead, as the research demo's coordinator now does; an app that relied
   on a specialist keeping the conversation routes follow-ups through the
-  main agent. The tool is ADK's private `_SingleTurnAgentTool`, which calls
-  no function the permission plugin can verify, so the framework binds each
-  one ADK builds for a sub-agent the framework built to the exempt `task`
-  declaration; an application's `AgentTool`, a subclass or a look-alike of
-  the same name is denied, and the sub-agent's own tool calls are gated as
-  before. A sub-agent named like one of its parent's tools fails to start
-  with `AgentGraphError`, since ADK's tool would shadow the parent's, and
-  one without a description is offered as "The <name> agent.", with a
-  warning (`adk_subagent_without_description`), as on Deep Agents. A
+  main agent. The tool is the framework's (`adk/task_tool.py::TaskTool`),
+  bound to the exempt `task` declaration where it is made; an application's
+  `AgentTool`, a subclass or a look-alike of the same name is denied, and
+  the sub-agent's own tool calls are gated as before. A delegating agent
+  whose own tools include one named `task` fails to start with
+  `AgentGraphError`, as on Deep Agents, and a sub-agent without a
+  description is offered as "The <name> agent.", with a warning
+  (`subagent_without_description`). A
   sub-agent's long-running tools are not wrapped as ADK's
   `LongRunningFunctionTool`: ADK pauses the whole invocation on a pending
   long-running call, inside a delegation too, which left the turn without a
@@ -1996,17 +2044,15 @@ the start of the entry's title.
   (`recent_messages`) reads only the user's and the main agent's text, not
   a job notice. A
   sub-agent whose model call or run fails does not end the turn, on either
-  backend: its coordinator is handed "Error running sub-agent: …" as the
-  call's error result (ADK's delegation tool's words; on ADK its reason is
-  ADK's own, "Dynamic node <agent> failed"), and the user gets
-  a recoverable `ERROR`, `<agent> failed: <the provider's reason>`, with its
-  error code, while the coordinator answers. Only the main agent's own
-  failure ends the turn; cancelling still stops it all. A sub-agent's
-  request still too long for its model is warned of in the same words on
-  both backends, `<agent>: the request no longer fits <model>'s context
-  window.`, `error_code` `CONTEXT_OVERFLOW`; on ADK its call is answered
-  with text ("I could not do this task: …") and its run completes, on Deep
-  Agents its parent reads the error and the run fails.
+  backend: its run fails, its coordinator reads the provider's reason in
+  the run's envelope, and the user gets a recoverable `ERROR`,
+  `<instance> failed: <the provider's reason>` (`researcher-1 failed: …`),
+  with its error code, while the coordinator answers. Only the main
+  agent's own failure ends the turn; cancelling still stops it all. A
+  sub-agent's request still too long for its model fails its run on both
+  backends, with one warning, `<agent>: the request no longer fits
+  <model>'s context window.`, `error_code` `CONTEXT_OVERFLOW`, the words
+  its coordinator reads as the run's error.
 - **Models are named by reference or role, and resolved once, at startup.**
   `default_model`, `AgentConfig.model`, `Manager(model=...)` and
   `reinitialize(model=...)` take a `provider:model` reference or a bare model
@@ -2906,10 +2952,10 @@ step; each entry says what to use instead.
   sub-agent's answer as "Result: 1 items" (its delegation tool hands back
   `{"result": text}`) and Deep Agents as up to 200 characters of the whole
   answer. Both now show its first line
-  (`tool_summaries.delegation_summary`), and a sub-agent that failed as a
-  failed result, `Failed: <reason>` (on ADK too, where it was a success
-  holding "Error running sub-agent: …"). `metadata["result"]` is unchanged.
-  The tool's name still differs: ADK's is the sub-agent's.
+  (`tool_summaries.delegation_summary`), and a run that failed or was
+  refused as a failed result (`Failed: <reason>` for a failure; on ADK it
+  was a success holding "Error running sub-agent: …"), as the run's
+  envelope says (`metadata["result"]`, a dict).
 - **The raw LLM log times each model call on its own, and names its run.**
   On ADK, a call's `latency_ms` was measured from a clock kept by
   invocation, which every call of a turn shares: with parallel delegations
@@ -2930,7 +2976,7 @@ step; each entry says what to use instead.
   `completed` and `partial`, and one recoverable warning names it
   ("researcher-1's answer was cut off at the output limit"). Both backends
   judge by `workflow/agents/outcome.py`. On ADK, `SubAgentOutcomePlugin` (in
-  the chain of a tree that delegates) reads the answer's `finish_reason`
+  each sub-agent's runner's chain) reads the answer's `finish_reason`
   (Claude's `refusal` and a Chat Completions `content_filter` arrive as
   `SAFETY`, Gemini's blocks as themselves), the `error_code` ADK gives an
   answer with no content (a Gemini prompt's block reason), the reason an
@@ -2956,11 +3002,13 @@ step; each entry says what to use instead.
   id alone) and dropped from the next request, and a call that had finished
   beside it lost its result. The record of a turn's calls (`OpenCalls`) now
   keeps each call under the run that made it (`run=`, by default
-  `get_active_run()`). On ADK a stopped turn answers, as it ends, the calls
-  ADK's seals missed, from that record, and the framework's answer to calls
-  left open pairs a result with a call on its own branch. The stopped
-  delegation is answered "Interrupted by the user before it finished", at
-  any depth, and a call that finished beside it keeps its result.
+  `get_active_run()`). On ADK a sub-agent's calls are on its run's own
+  child session, which its runner seals as it stops; a stopped turn
+  answers, as it ends, the calls ADK's seals missed, from that record, and
+  the framework's answer to calls left open pairs a result with a call on
+  its own branch. The stopped delegation is answered "Interrupted by the
+  user before it finished", at any depth, and a call that finished beside
+  it keeps its result.
 - **A `/settings` model picker offers the model it shows.** A picker showed
   its role's model even when that model was not among its choices (in 0.6, a
   `default_model` the model list did not include; now one the list leaves

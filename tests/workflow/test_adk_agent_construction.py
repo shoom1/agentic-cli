@@ -48,14 +48,24 @@ async def test_explicit_description_is_preserved():
 
 
 async def test_coordinator_with_sub_agents_builds():
-    """A coordinator + leaf pair (README example) constructs end to end."""
-    root = await _root_agent([
-        AgentConfig(name="coordinator", prompt="Route.", sub_agents=["worker"]),
-        AgentConfig(name="worker", prompt="Work."),
-    ])
+    """A coordinator + leaf pair (README example) constructs end to end: each
+    agent on its own, the coordinator delegating through ``task``."""
+    from agentic_cli.workflow.adk.task_tool import TaskTool
+
+    with MockContext(google_api_key="test-key", session_store="memory") as ctx:
+        mgr = GoogleADKWorkflowManager(agent_configs=[
+            AgentConfig(name="coordinator", prompt="Route.", sub_agents=["worker"]),
+            AgentConfig(name="worker", prompt="Work."),
+        ], settings=ctx.settings)
+        await mgr.initialize_services()
+        try:
+            root, agents = mgr._root_agent, dict(mgr._agents)
+        finally:
+            await mgr.cleanup()
 
     assert root.name == "coordinator"
-    assert [a.name for a in root.sub_agents] == ["worker"]
+    assert sorted(agents) == ["coordinator", "worker"]
+    assert [type(t) for t in root.tools if isinstance(t, TaskTool)] == [TaskTool]
     assert root.description == ""
 
 

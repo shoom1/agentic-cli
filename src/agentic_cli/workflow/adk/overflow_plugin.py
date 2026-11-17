@@ -13,9 +13,10 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   summary that fails is one warning a turn, as one before a model call is.
   The memory index that opens the request stays first in the retry, with
   the summary, and both are folded into its first user text.
-- **A sub-agent** never summarizes the shared session; nor does the main
-  agent when the summary covers nothing the request holds. The request is
-  then retried with its oldest whole turns left out down to half the budget
+- **A sub-agent** (on its own runner, whose chain has this plugin without a
+  main agent) never summarizes; nor does the main agent when the summary
+  covers nothing the request holds. The request is then retried with its
+  oldest whole turns left out down to half the budget
   (``fit_guard_plugin.drop_turns``).
 - The retry is built from the request as the fit guard saw it
   (``FitGuardPlugin.request_as_seen``, this call's own copy, never a parallel
@@ -39,12 +40,12 @@ and the clear text (``context.overflow_message``), never with model text,
 which ADK would store as its reply; ``ADKEventProcessor`` turns it into the
 turn's one ``ERROR``. Only the main agent summarizes: an agent it transferred
 to is retried without the oldest turns. A
-sub-agent answers its coordinator with text, "I could not do this task: …",
-which is how a coordinator hears from it (its reply lives in its own branch
-and reaches the coordinator as the tool's result), and the user is told
-once, as a recoverable ``ERROR`` reported live; that answer carries no
-``error_code``, which would show the user a second warning. Any other error
-of the retry propagates.
+sub-agent's call is answered with an error response too, ``CONTEXT_OVERFLOW``
+and the sub-agent's warning (``context.subagent_overflow_message``): its
+run's event processor keeps it as the run's failure, the run ends ``failed``
+with it, and its parent reads it in the run's envelope, as on Deep Agents;
+the user is warned once, by the framework's delegation
+(``agents/delegate.py``). Any other error of the retry propagates.
 
 An overflow an OpenAI Responses model reports in its answer (``status:
 failed``) instead of raising reaches ``after_model_callback`` as an error
@@ -109,7 +110,8 @@ class OverflowPlugin(BasePlugin):
     """Answers a context overflow (see the module docstring).
 
     Args:
-        root: The main agent's name.
+        root: The main agent's name; None in a sub-agent type's chain, which
+            has no main agent.
         reply_agents: The agents that reply to the user besides the root (a
             chat-mode agent it transfers to): their overflow is the turn's
             clear error too.
@@ -127,7 +129,7 @@ class OverflowPlugin(BasePlugin):
     def __init__(
         self,
         *,
-        root: str,
+        root: str | None,
         reply_agents: Collection[str] = (),
         budgets: Mapping[str, "ContextBudget"],
         kinds: Mapping[str, "ProviderKind"],
@@ -138,7 +140,7 @@ class OverflowPlugin(BasePlugin):
         super().__init__(name=OVERFLOW_PLUGIN)
         self._root = root
         # The agents whose overflow is the turn's clear error.
-        self._replying = frozenset({root, *reply_agents})
+        self._replying = frozenset({*reply_agents, *([root] if root is not None else [])})
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)
         self._models = dict(models)
@@ -238,22 +240,15 @@ class OverflowPlugin(BasePlugin):
         return llm_request.model_copy(update=update)
 
     def _does_not_fit(self, agent: str) -> LlmResponse:
-        """The answer once nothing more can make the request fit."""
+        """The answer once nothing more can make the request fit: an error
+        response, the turn's clear text for an agent that replies, the
+        sub-agent's warning for any other."""
         model = self._models.get(agent, "the model")
-        if agent in self._replying:
-            return LlmResponse(
-                error_code=OVERFLOW_ERROR_CODE, error_message=overflow_message(model)
-            )
-        warning = WorkflowEvent.error(
-            subagent_overflow_message(agent, model),
-            error_code=OVERFLOW_ERROR_CODE,
-            recoverable=True,
+        message = (
+            overflow_message(model) if agent in self._replying
+            else subagent_overflow_message(agent, model)
         )
-        warning.metadata["agent"] = agent
-        live_events.report(warning)
-        return LlmResponse(content=types.Content(role="model", parts=[types.Part.from_text(
-            text=f"I could not do this task: the request no longer fits {model}'s context window."
-        )]))
+        return LlmResponse(error_code=OVERFLOW_ERROR_CODE, error_message=message)
 
 
 def _with_summary(contents: list[types.Content], summary: str) -> list[types.Content]:

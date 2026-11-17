@@ -13,7 +13,10 @@ switch reopens them. An agent's ``skills`` become the skill tools ADK offers
 (``tools/skills/langchain_tools.py``), with ADK's instruction appended to its
 prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
 (``LLM_REQUEST``/``LLM_RESPONSE``, in the stream and in
-``~/.{app_name}/logs/llm_events.jsonl``). A long-running job that finishes
+``~/.{app_name}/logs/llm_events.jsonl``). A sub-agent runs when its parent's ``task`` call
+delegates to it (``task_tool.build_task_tool``, the framework's
+``Delegations``): its own graph, apart from its parent's stream, in the run's
+own task (``_run_agent``). A long-running job that finishes
 resumes its conversation with a turn of its own, opened by a notification to
 the root agent (``resume_with_job_result``). The root agent's conversation is
 summarized on demand by ``compact`` (``/compact``), with its own summarization
@@ -35,10 +38,12 @@ import asyncio
 import contextlib
 import functools
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables.config import var_child_runnable_config
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import truncate
@@ -59,7 +64,13 @@ from agentic_cli.workflow.config import (
     validate_agent_graph,
 )
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.context import CompactResult
+from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed
+from agentic_cli.workflow.context import (
+    OVERFLOW_ERROR_CODE,
+    CompactResult,
+    is_context_overflow,
+    subagent_overflow_message,
+)
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
@@ -67,6 +78,7 @@ from agentic_cli.workflow.deepagents.event_processor import (
     usage_event,
 )
 from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clashes
+from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.sessions import (
     CheckpointSessions,
     job_notification,
@@ -79,6 +91,7 @@ from agentic_cli.workflow.deepagents.summarization import (
     summary_event,
     write_summary,
 )
+from agentic_cli.workflow.deepagents.task_tool import SHARED_KEYS
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
@@ -110,9 +123,10 @@ def _with_instruction(prompt: str, instruction: str) -> str:
 class DeepAgentsWorkflowManager(BaseWorkflowManager):
     """Workflow manager on LangChain's ``create_agent`` and Deep Agents' middleware.
 
-    A coordinator delegates through Deep Agents' ``task`` tool, giving a
-    sub-agent only a brief; the framework's permission gate and tool-error
-    middleware run in every agent's stack.
+    A coordinator delegates through the framework's ``task`` tool, giving a
+    sub-agent a brief (``agents/brief.py``) and reading back its result
+    envelope; the framework's permission gate and tool-error middleware run
+    in every agent's stack.
 
     Example:
         configs = [
@@ -169,6 +183,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._sessions: CheckpointSessions | None = None
 
         self._root: CompiledStateGraph | None = None
+        # Every agent's graph, by name: what a sub-agent run runs on.
+        self._agent_graphs: dict[str, CompiledStateGraph] = {}
         # The root agent's summarization middleware, which compact() uses.
         self._root_summarization: ReportingSummarizationMiddleware | None = None
 
@@ -258,6 +274,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
         root = self._root_agent_name  # from the graph the base validated
         index_wanted = self._memory_index_wanted(root)
+        graphs: dict[str, CompiledStateGraph] = {}
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -281,8 +298,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             memory_index=self._memory_index_now if index_wanted else None,
             memory_index_cached=self._memory_index_cached if index_wanted else None,
             memory_index_forget=self._forget_memory_index if index_wanted else None,
-            runs=self.agent_runs,
+            delegations=lambda: self._delegations,
+            graphs=graphs,
         )
+        self._agent_graphs = graphs
         self._root_summarization = summarizers.get(root)
 
         logger.info(
@@ -392,6 +411,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         it even if the close is cancelled.
         """
         self._root = None
+        self._agent_graphs = {}
         self._root_summarization = None
         self._pending_notices = []
         sessions, self._mcp = self._mcp, MCPSessions()
@@ -631,8 +651,6 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agent_models=self._resolved_models,
             session_id=ref.session_id,
             budgets=self._budgets,
-            runs=self.agent_runs,
-            sub_agents={config.name: config.sub_agents for config in self.agent_configs},
             ledgers=self._usage_ledgers,
         )
         live = LiveEvents()
@@ -644,10 +662,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             budgets=self._budgets,
             ledgers=self._usage_ledgers,
         )
+        # Each item names its namespace; the processor reads only the root's
+        # (a graph a tool runs under the inherited config streams in its own).
         stream = self._root.astream(
             graph_input,
             run_config(ref, callbacks=[callback]),
-            stream_mode=["updates", "tasks"],
+            stream_mode=["updates"],
             subgraphs=True,
         )
         count = 0
@@ -697,6 +717,86 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         # Every call of the turn has its result in the checkpoint now.
         self._open_calls.clear(ref)
         logger.info("message_processed", event_count=count)
+
+    async def _run_agent(self, run: AgentRun) -> RunAnswer:
+        """Run one sub-agent run on its agent's graph (the base's hook, ``Delegations``'s).
+
+        In the run's own task (``agents/delegate.py``), apart from its
+        caller's stream: the graph is streamed with the run's own config,
+        its callbacks this run's ``RunCallback``, and LangGraph's ambient
+        config cleared in this task (``var_child_runnable_config``), so none
+        of its chunks reach the caller's ``astream`` and the caller's
+        checkpoint namespace is not the run's. The run's events go to the
+        turn's live events as they are made, through a processor made for
+        the run. Its input is the shared state it starts from and its
+        messages: an inheriting run's history, then the task message.
+
+        Returns:
+            Its last non-empty answer, as Deep Agents' own ``task`` read one
+            (Anthropic may end with an empty ``end_turn`` after its final
+            tool call), that answer's outcome mark
+            (``SubAgentOutcomeMiddleware``), and the shared keys it changed.
+            Its answers are the messages after its task message
+            (``_own_messages``): an inheriting run's history is not its own.
+
+        Raises:
+            RunFailed: Its request no longer fits its model's window, still
+                after its summary (``subagent_overflow_message``).
+            Exception: Its model call failed (the provider's error).
+        """
+        graph = self._agent_graphs[run.ref.agent]
+        task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
+        inputs: dict[str, Any] = {**run.state, "messages": [*(run.history or ()), task]}
+        conversation = run.conversation
+        processor = DeepAgentsEventProcessor(
+            root=self._root_agent_name,
+            agent_models=self._resolved_models,
+            session_id=conversation.session_id if conversation is not None else None,
+            budgets=self._budgets,
+            ledgers=self._usage_ledgers,
+            run=run.ref,
+        )
+        callback = RunCallback(
+            root=self._root_agent_name,
+            agent_models=self._resolved_models,
+            llm_log=self._raw_llm_log(),
+            # Run outside a turn there is no one to report to.
+            live=live_events.current() or LiveEvents(),
+            budgets=self._budgets,
+            ledgers=self._usage_ledgers,
+        )
+        final: dict[str, Any] = {}
+        detached = var_child_runnable_config.set(None)
+        try:
+            stream = graph.astream(
+                inputs, {"callbacks": [callback]}, stream_mode=["updates", "values"]
+            )
+            async with contextlib.aclosing(stream) as items:
+                async for mode, payload in items:
+                    if mode == "values":
+                        final = payload
+                        continue
+                    for event in processor.process((), mode, payload):
+                        live_events.report(event)
+        except Exception as error:
+            if is_context_overflow(error):
+                model = self._resolved_models.get(run.ref.agent)
+                raise RunFailed(
+                    subagent_overflow_message(
+                        run.ref.agent, str(model.ref) if model is not None else "the model"
+                    ),
+                    code=OVERFLOW_ERROR_CODE,
+                ) from error
+            raise
+        finally:
+            var_child_runnable_config.reset(detached)
+        own = _own_messages(final.get("messages") or [], task.id)
+        answers = [message for message in own if isinstance(message, AIMessage)]
+        return RunAnswer(
+            text=_last_text(answers),
+            outcome=answer_outcome(answers[-1]) if answers else None,
+            state=_changed(final, inputs),
+        )
 
     def _recording(
         self,
@@ -835,3 +935,47 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         if self._sessions is None:
             return []
         return await self._sessions.recent(self.session_ref(session_id, user_id), limit)
+
+
+def _own_messages(messages: list[Any], task_id: str | None) -> list[Any]:
+    """The messages a run wrote: those after its task message, found by its id.
+
+    An inheriting run's messages start with its caller's conversation, whose
+    replies are not its answers. The task message is found by id, not by
+    position: ``InterruptedCallsMiddleware.before_agent`` may answer calls
+    left open in that conversation, inserting messages before it (the list
+    rewritten, each message keeping its id). Were it missing (no rewrite
+    drops an id), none would be the run's: an empty answer, never its
+    caller's.
+    """
+    for index, message in enumerate(messages):
+        if task_id is not None and getattr(message, "id", None) == task_id:
+            return messages[index + 1:]
+    return []
+
+
+def _last_text(answers: list[AIMessage]) -> str:
+    """The text of the last of ``answers`` that has any, as Deep Agents' ``task`` reads it."""
+    for message in reversed(answers):
+        text = message.text.rstrip() if message.text else ""
+        if text:
+            return text
+    return ""
+
+
+def _changed(final: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+    """The shared keys ``final`` holds that differ from what the run started from.
+
+    Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
+    private, copied): a key returned exactly as it was received is no
+    change; ``is True`` takes an ambiguous comparison (an array's) as one.
+    """
+    changed: dict[str, Any] = {}
+    for key in SHARED_KEYS:
+        if key not in final:
+            continue
+        value = final[key]
+        if key in inputs and (value is inputs[key] or (value == inputs[key]) is True):
+            continue
+        changed[key] = value
+    return changed

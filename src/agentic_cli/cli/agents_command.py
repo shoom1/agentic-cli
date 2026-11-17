@@ -6,8 +6,9 @@ status (``running`` while it runs; a completion cut at its output limit
 ``completed (partial)``), its run, its title, the tokens it used, and how
 long it ran (or has been running). ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent,
-its title, then each run's status, the first lines of its result, its error
-and its tokens by model.
+its title, then each run's status, the fields of its brief its parent filled
+(its objective, deliverable, constraints, what was known, when it is done),
+the first lines of its result, its error and its tokens by model.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``) and the tokens its usage ledger's
@@ -30,6 +31,7 @@ from rich.text import Text
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
 from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_STARTED
+from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
 from agentic_cli.workflow.agents.runs import run_number
 
 if TYPE_CHECKING:
@@ -143,6 +145,9 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
     now = _now()
     for record in records:
         table.add_row(f"Run {_run_number(record)}", f"{_status(record)} · {_duration(record, now)}")
+        for name in BRIEF_FIELDS:
+            if record.brief.get(name):
+                table.add_row(f"  {_label(name)}", Text(record.brief[name]))
         if record.result:
             table.add_row("  Result", Text(_first_lines(record.result)))
         if record.error:
@@ -183,6 +188,11 @@ def _status(record: "RunRecord") -> str:
     if record.status == RUN_COMPLETED and record.partial:
         return "completed (partial)"
     return record.status
+
+
+def _label(field: str) -> str:
+    """A brief field's label: ``done_when`` is ``Done when``."""
+    return field.replace("_", " ").capitalize()
 
 
 def _run_number(record: "RunRecord") -> str:

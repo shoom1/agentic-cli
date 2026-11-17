@@ -393,10 +393,18 @@ def _team(**extra) -> list[AgentConfig]:
     ]
 
 
+def _envelopes_of(events, agent: str) -> list[dict]:
+    """The envelopes of ``agent``'s runs, as its coordinator read them (``task``'s results)."""
+    return [
+        e.metadata["result"] for e in find_tool_results(events, "task")
+        if isinstance(e.metadata.get("result"), dict)
+        and e.metadata["result"].get("agent", "").startswith(f"{agent}-")
+    ]
+
+
 def _answers_of(events, agent: str, backend: str) -> list[str]:
-    """What ``agent`` answered its coordinator (the delegation call's results)."""
-    tool = agent if backend == "adk" else "task"
-    return [str(e.metadata.get("result")) for e in find_tool_results(events, tool)]
+    """What ``agent`` answered its coordinator (its runs' results), the same on ``backend``'s."""
+    return [str(envelope.get("result")) for envelope in _envelopes_of(events, agent)]
 
 
 def _reply(events) -> str:
@@ -635,7 +643,8 @@ async def test_a_sub_agents_real_overflow_is_one_warning_and_the_coordinator_ans
         (True, "reader")
     ], [e.content for e in errors]
     assert "no longer fits" in errors[0].content
-    assert "I could not do this task" in " ".join(_answers_of(events, "reader", "adk"))
+    (envelope,) = _envelopes_of(events, "reader")
+    assert (envelope["status"], envelope["error"]) == ("failed", errors[0].content)
     assert _reply(events).strip(), "the coordinator did not answer"
 
 

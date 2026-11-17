@@ -1,11 +1,14 @@
-"""The agent tree (``workflow/deepagents/agent_builder.py``).
+"""The agents (``workflow/deepagents/agent_builder.py``).
 
 Every ``AgentConfig`` becomes one ``create_agent`` graph on its own chat
-model, built bottom-up so a coordinator is built after its sub-agents. A
-coordinator delegates through Deep Agents' ``task`` tool, which lists each
-sub-agent by its description and is bound to the framework's declaration. A
-sub-agent sees only the brief, shares ``plan`` and ``tasks``, and answers with
-its last text. Only the root has the checkpointer. Every stack has the
+model, each built on its own. A coordinator delegates through the
+framework's ``task`` tool (``task_tool.build_task_tool``), which lists each
+sub-agent by its description, takes the brief's fields and is bound to the
+framework's declaration; its calls go to the manager's delegations, which
+run the sub-agent on its own graph (here ``fakes.tree_delegations``, as the
+manager's hook does). A sub-agent sees only its task message, shares
+``plan`` and ``tasks``, and its last text is the result its parent reads in
+the envelope. Only the root has the checkpointer. Every stack has the
 permission gate and, inside it, the tool-error middleware.
 
 The models are scripted (``fakes.ScriptedChat``); nothing reaches a provider.
@@ -20,7 +23,6 @@ import pytest
 
 pytest.importorskip("deepagents")
 
-from deepagents import SubAgentMiddleware  # noqa: E402
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
@@ -37,6 +39,8 @@ from agentic_cli.tools.registry import (  # noqa: E402
     identify_tool,
     register_tool,
 )
+from agentic_cli.workflow.agents import brief as brief_module  # noqa: E402
+from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
@@ -50,7 +54,12 @@ from agentic_cli.workflow.deepagents.state import AgentCliState  # noqa: E402
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.permissions.capabilities import Capability  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
+from tests.workflow.deepagents.fakes import (  # noqa: E402
+    ScriptedChat,
+    ai,
+    task,
+    tree_delegations,
+)
 
 
 @register_tool(capabilities=EXEMPT)
@@ -86,7 +95,8 @@ def created(monkeypatch) -> dict[str, dict]:
     return calls
 
 
-def _tree(configs, models, tools=None, checkpointer=None):
+def _tree(configs, models, tools=None, checkpointer=None, **options):
+    graphs: dict = {}
     return build_agent_tree(
         configs,
         chat_models=models,
@@ -95,7 +105,21 @@ def _tree(configs, models, tools=None, checkpointer=None):
         prompts={config.name: f"You are {config.name}." for config in configs},
         settings=None,
         checkpointer=checkpointer,
+        delegations=tree_delegations(configs, graphs),
+        graphs=graphs,
+        **options,
     )
+
+
+def _task_tool(created: dict, agent: str) -> StructuredTool:
+    """The ``task`` tool the builder gave ``agent``."""
+    (found,) = [tool for tool in created[agent]["tools"] if tool.name == "task"]
+    return found
+
+
+def _read(message: ToolMessage) -> dict:
+    """The envelope a ``task`` call's answer holds."""
+    return json.loads(message.text)
 
 
 async def _turn(root, message: str = "Go.", thread: str = "t") -> dict:
@@ -136,10 +160,11 @@ class TestTheTree:
         )
         state = await _turn(root, "What is X?")
 
-        assert list(created) == ["researcher", "coordinator"]  # bottom-up
+        assert list(created) == ["coordinator", "researcher"]  # each on its own
         assert [type(m) for m in state["messages"]] == [
             HumanMessage, AIMessage, ToolMessage, AIMessage
         ]
+        assert _read(state["messages"][2])["result"] == "X is 42."
         assert state["messages"][-1].text == "X is 42, says the researcher."
 
     async def test_the_root_is_the_agent_nobody_delegates_to(self, created):
@@ -220,15 +245,13 @@ class TestDelegation:
 
         _tree([coordinator, RESEARCHER, writer], models)
 
-        (delegation,) = [
-            m for m in created["coordinator"]["middleware"] if isinstance(m, SubAgentMiddleware)
-        ]
-        (task_tool,) = delegation.tools
+        task_tool = _task_tool(created, "coordinator")
         lines = task_tool.description.splitlines()
         assert "- researcher: Finds facts." in lines
         assert "- writer: Writes drafts." in lines
         assert not any(line.startswith("- general-purpose") for line in lines)
-        assert delegation.subagent_names == {"researcher", "writer"}
+        assert task_tool.args["agent_type"]["enum"] == ["researcher", "writer"]
+        assert not any(tool.name == "task" for tool in created["writer"]["tools"])
 
     async def test_the_coordinator_is_offered_task_and_nothing_of_deep_agents_else(self):
         coordinator = ScriptedChat(script=[ai("Hi.")])
@@ -243,23 +266,24 @@ class TestDelegation:
 
         assert sorted(coordinator.tool_names()) == ["save_plan", "task"]
         schema = coordinator.tool_schema("task")
-        assert set(schema["parameters"]["properties"]) == {"description", "subagent_type"}
+        assert set(schema["parameters"]["properties"]) == {
+            "agent_type", "title", "objective", "deliverable", "constraints", "known",
+            "done_when",
+        }
+        assert schema["parameters"]["required"] == ["agent_type", "title", "objective"]
 
     def test_an_empty_description_falls_back_and_warns(self, created, monkeypatch):
         log = _Recorder()
-        monkeypatch.setattr(agent_builder, "logger", log)
+        monkeypatch.setattr(brief_module, "logger", log)
         coordinator = AgentConfig(name="coordinator", prompt="p", sub_agents=["helper"])
         helper = AgentConfig(name="helper", prompt="p", description="  ")
 
         _tree([coordinator, helper], {"coordinator": ScriptedChat(), "helper": ScriptedChat()})
 
-        (delegation,) = [
-            m for m in created["coordinator"]["middleware"] if isinstance(m, SubAgentMiddleware)
-        ]
-        assert "- helper: The helper agent." in delegation.tools[0].description.splitlines()
-        assert (
-            "warning", "deepagents_subagent_without_description", {"agent": "helper"}
-        ) in log.calls
+        assert "- helper: The helper agent." in (
+            _task_tool(created, "coordinator").description.splitlines()
+        )
+        assert ("warning", "subagent_without_description", {"agent": "helper"}) in log.calls
 
     def test_the_task_tool_is_bound_to_its_declaration(self, created):
         _tree(
@@ -267,10 +291,29 @@ class TestDelegation:
             {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
         )
 
-        (delegation,) = [
-            m for m in created["coordinator"]["middleware"] if isinstance(m, SubAgentMiddleware)
-        ]
-        assert identify_tool(delegation.tools[0]) is get_registry().get("task")
+        assert identify_tool(_task_tool(created, "coordinator")) is get_registry().get("task")
+
+    def test_without_the_delegations_no_agent_delegates(self, created):
+        build_agent_tree(
+            [COORDINATOR, RESEARCHER],
+            chat_models={"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+            resolved={}, tools={}, prompts={"coordinator": "c", "researcher": "r"},
+            settings=None, checkpointer=None,
+        )
+
+        assert created["coordinator"]["tools"] == []
+
+    def test_every_agents_graph_is_kept_by_name(self):
+        graphs: dict = {}
+        root = build_agent_tree(
+            [COORDINATOR, RESEARCHER],
+            chat_models={"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+            resolved={}, tools={}, prompts={"coordinator": "c", "researcher": "r"},
+            settings=None, checkpointer=None, graphs=graphs,
+        )
+
+        assert sorted(graphs) == ["coordinator", "researcher"]
+        assert graphs["coordinator"] is root
 
     def test_a_coordinator_tool_named_task_is_refused(self):
         def task(description: str) -> dict:  # noqa: F811 - the point of the test
@@ -303,10 +346,14 @@ class TestDelegation:
         root = _tree(configs, models, checkpointer=InMemorySaver())
         state = await _turn(root)
 
-        assert list(created) == ["worker", "lead", "coordinator"]
-        assert _tool_message(state["messages"], "c1").text == "Lead done."
-        assert _tool_message(models["lead"].conversation(1), "l1").text == "Worker done."
-        assert _shape(models["worker"].conversation(0)) == [("human", "Do it.")]
+        assert list(created) == ["coordinator", "lead", "worker"]
+        assert _read(_tool_message(state["messages"], "c1"))["result"] == "Lead done."
+        assert _read(_tool_message(models["lead"].conversation(1), "l1"))["result"] == (
+            "Worker done."
+        )
+        assert _shape(models["worker"].conversation(0)) == [
+            ("human", task_message(Brief(title="Do it.", objective="Do it.")))
+        ]
         assert state["messages"][-1].text == "All done."
 
 
@@ -336,16 +383,18 @@ class TestWhatASubAgentSees:
         )
         state = await _turn(root, "A long conversation the researcher must not see.")
 
-        # Its input is exactly one HumanMessage: the brief.
-        assert _shape(researcher.conversation(0)) == [("human", "Find X. Report the number.")]
+        # Its input is exactly one HumanMessage: the task message.
+        assert _shape(researcher.conversation(0)) == [("human", task_message(Brief(
+            title="Find X. Report the number.", objective="Find X. Report the number."
+        )))]
         # It saw the coordinator's plan ...
         plan = json.loads(_tool_message(researcher.conversation(1), "r1").text)
         assert plan == {"success": True, "content": "- [ ] find X"}
         # ... and its task list flowed back to the coordinator.
         assert [t["description"] for t in state["tasks"]] == ["find X"]
         assert state["plan"] == "- [ ] find X"
-        # Its last non-empty text is the coordinator's tool result.
-        assert _tool_message(state["messages"], "c1").text == "X is 42."
+        # Its last non-empty text is the result in the coordinator's envelope.
+        assert _read(_tool_message(state["messages"], "c1"))["result"] == "X is 42."
         # Its intermediate messages stay out of the coordinator's conversation.
         assert not any("Looking." in m.text for m in state["messages"])
 
@@ -375,8 +424,8 @@ class TestWhatASubAgentSees:
         root = _tree(configs, models, tools=tools, checkpointer=InMemorySaver())
         state = await _turn(root)
 
-        assert _tool_message(state["messages"], "ca").text == "a done."
-        assert _tool_message(state["messages"], "cb").text == "b done."
+        assert _read(_tool_message(state["messages"], "ca"))["result"] == "a done."
+        assert _read(_tool_message(state["messages"], "cb"))["result"] == "b done."
         assert [t["description"] for t in state["tasks"]] in (["a"], ["b"])
         assert state["messages"][-1].text == "Both done."
 
@@ -391,14 +440,13 @@ class TestEveryStack:
 
         _tree(configs, {config.name: ScriptedChat() for config in configs})
 
-        delegating = [
-            PatchToolCallsMiddleware, SubAgentMiddleware,
-            PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
+        assert [type(m) for m in created["coordinator"]["middleware"]] == [
+            PatchToolCallsMiddleware, PermissionMiddleware, ToolCallErrorMiddleware,
+            ActiveToolCallMiddleware,
         ]
-        assert [type(m) for m in created["coordinator"]["middleware"]] == delegating
         # A sub-agent's model side has SubAgentOutcomeMiddleware; the root's not.
         assert [type(m) for m in created["lead"]["middleware"]] == [
-            PatchToolCallsMiddleware, SubAgentMiddleware, SubAgentOutcomeMiddleware,
+            PatchToolCallsMiddleware, SubAgentOutcomeMiddleware,
             PermissionMiddleware, ToolCallErrorMiddleware, ActiveToolCallMiddleware,
         ]
         assert [type(m) for m in created["worker"]["middleware"]] == [
@@ -433,13 +481,10 @@ class TestEveryStack:
         coordinator = ScriptedChat(label="coordinator", script=[
             ai(calls=[task("researcher", "Ask.", "c1")]), ai("Done."),
         ])
-        root = build_agent_tree(
+        root = _tree(
             [COORDINATOR, RESEARCHER],
-            chat_models={"coordinator": coordinator, "researcher": researcher},
-            resolved={},
+            {"coordinator": coordinator, "researcher": researcher},
             tools={"researcher": [remote]},
-            prompts={"coordinator": "c", "researcher": "r"},
-            settings=None,
             checkpointer=InMemorySaver(),
             bound=bound,
         )
@@ -494,4 +539,4 @@ class TestEveryStack:
             "success": False,
             "error": "builder_flaky failed: RuntimeError: flaky broke",
         }
-        assert _tool_message(state["messages"], "c1").text == "Could not."
+        assert _read(_tool_message(state["messages"], "c1"))["result"] == "Could not."

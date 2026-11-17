@@ -2,19 +2,18 @@
 
 Each run is named readably within its conversation: its instance
 ``<agent>-<n>`` (``researcher-2``, numbered per agent) and its run
-``<instance>#<n>`` (each instance runs once: ``#1``). Both backends find a
-run where its events come from (ADK's invocation branch, Deep Agents'
-stream namespace) and ask ``run_for`` for its name, keyed by (conversation,
-parent run, the parent's call id): the same key names the same run until it
-has ended, and a new one after (a provider that numbers its call ids repeats
-them every turn).
+``<instance>#<n>`` (each instance runs once: ``#1``). The framework names a
+run as it starts it (``agents/delegate.py::Delegations``) with ``run_for``,
+keyed by (conversation, parent run, the parent's call id): the same key
+names the same run until it has ended, and a new one after (a provider that
+numbers its call ids repeats them every turn).
 
 The records are written from the runs' own events (``AGENT_RUN``: started,
-then one end status), which the event processors hand to ``observe`` as they
-make them, under the turn they are reported in. The one other writer is
+then one end status), which ``Delegations`` hands to ``observe`` as it makes
+them, under the turn they are reported in. The one other writer is
 ``interrupt_open``, for the runs a turn leaves open when it is stopped or
 fails, when no event can reach its consumer any more. A conversation is a
-``SessionRef``, or None for a processor driven outside a manager. All of it
+``SessionRef``, or None for runs started outside a manager's turn. All of it
 is in memory, for as long as its manager lives: a backend switch builds a
 new manager, and the runs recorded before it do not follow (as with its
 usage ledgers).
@@ -22,12 +21,11 @@ usage ledgers).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, SessionRef, get_active_turn
 from agentic_cli.workflow.tool_summaries import delegation_summary
@@ -43,17 +41,18 @@ RUN_END_STATUSES = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_REFUSED, RUN_CANCELLED, RUN_INTERRUPTED}
 )
 
-#: The longest title a run gets: the first line of the request its parent wrote.
+#: The longest title a run gets: the first line of its brief's title.
 TITLE_MAX = 80
 #: How much of its result a run's end event, and its record, keep.
 RESULT_MAX = 200
-#: How a parent is told its sub-agent failed: ADK's delegation tool's words
-#: (``_SingleTurnAgentTool``), which Deep Agents' delegation gives too.
+#: How ADK's own delegation tool told a parent its sub-agent failed. Kept
+#: for callers that read it; the framework's delegation answers with the
+#: result envelope (``agents/envelope.py``), its ``error`` the reason.
 SUBAGENT_ERROR_PREFIX = "Error running sub-agent: "
 
 
 def run_title(request: str) -> str:
-    """A run's title: the first non-blank line of its request, cut to ``TITLE_MAX`` characters."""
+    """A run's title: the first non-blank line of ``request``, cut to ``TITLE_MAX`` characters."""
     line = next((line.strip() for line in request.splitlines() if line.strip()), "")
     return line[:TITLE_MAX]
 
@@ -75,86 +74,30 @@ def run_label(ref: RunRef | None) -> str | None:
     return f"{ref.instance} ({ref.agent}, run {run_number(ref.run)})"
 
 
-def run_ended(
-    ref: RunRef,
-    call_id: str | None,
-    answer: str,
-    *,
-    failed: bool = False,
-    error: str | None = None,
-    outcome: str | None = None,
-    usage: dict[str, dict[str, int]] | None = None,
-    sealed: bool = False,
-) -> WorkflowEvent:
-    """The ``AGENT_RUN`` that ends ``ref``'s run, decided as on every backend.
+def show_as_delegation(result: WorkflowEvent, envelope: Mapping[str, Any]) -> None:
+    """Show a delegation's ``TOOL_RESULT`` from its envelope, the same on every backend.
 
-    ``answer`` is the delegation's result as its parent read it; ``failed``
-    says it is the framework's own error result (``error``: its error), and
-    ``outcome`` is the mark the backend's hook put on the run's last answer
-    (``agents/outcome.py``). The run ends:
-
-    - ``interrupted`` for the seal of a call a stopped turn left open
-      (``sealed``), with its result;
-    - ``failed`` for ``Error running sub-agent: <reason>`` (its error the
-      reason), or for the framework's error result (its error, else the
-      answer);
-    - ``refused`` when the outcome is ``REFUSED``;
-    - else ``completed``, ``partial`` when the outcome is ``CUT``.
-
-    The sub-agent's answer is never read for success: each backend tells
-    ``failed`` from its own error result alone, so an answer that looks
-    like a failed result completed.
+    ``envelope`` is the run's result envelope (``agents/envelope.py``), as the
+    parent read it. The content becomes ``tool_summaries.delegation_summary``'s:
+    the result's first line for a run that completed or was refused (the
+    refusal notice says why), else ``Failed: <error>``. The result succeeds
+    as the envelope does (``success``), its ``error`` the envelope's when it
+    does not, and ``metadata["result"]`` is the envelope.
     """
-    if sealed:
-        return WorkflowEvent.agent_run(
-            ref, RUN_INTERRUPTED, call_id=call_id, result=result_head(answer), usage=usage,
-        )
-    if answer.startswith(SUBAGENT_ERROR_PREFIX):
-        return WorkflowEvent.agent_run(
-            ref, RUN_FAILED, call_id=call_id, result="",
-            error=answer.removeprefix(SUBAGENT_ERROR_PREFIX), usage=usage,
-        )
-    if failed:
-        return WorkflowEvent.agent_run(
-            ref, RUN_FAILED, call_id=call_id, result="", error=error or answer, usage=usage,
-        )
-    if outcome == REFUSED:
-        return WorkflowEvent.agent_run(
-            ref, RUN_REFUSED, call_id=call_id, result=result_head(answer),
-            error=REFUSAL_ERROR, usage=usage,
-        )
-    return WorkflowEvent.agent_run(
-        ref, RUN_COMPLETED, call_id=call_id, result=result_head(answer),
-        partial=outcome == CUT, usage=usage,
-    )
-
-
-def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
-    """Show a delegation's ``TOOL_RESULT`` as every backend shows it.
-
-    ``ended`` is the ``AGENT_RUN`` the result ends the run with, and
-    ``answer`` what the sub-agent answered, as its parent read it. The
-    content becomes ``tool_summaries.delegation_summary``'s: the answer's
-    first line, or, for a sub-agent that failed, ``Failed: <reason>``, the
-    result failing too (``success`` false; its ``error`` the text the parent
-    read, as Deep Agents' error result has it). ``metadata["result"]`` stays
-    as the backend gave it.
-
-    A result that ends its run ``interrupted`` (ADK's seal of a call a
-    stopped turn left open) is left as the tool result made it. No turn
-    shows one: ADK writes its seals as the stopped run closes, after the
-    turn has stopped reading its events, so only a processor handed a seal
-    directly meets the case.
-    """
-    status = ended.metadata.get("status")
-    if status == RUN_INTERRUPTED:
-        return
-    if status == RUN_FAILED:
-        result.content = delegation_summary(answer, error=ended.metadata.get("error") or "")
-        result.metadata["success"] = False
-        result.metadata["error"] = result.metadata.get("error") or answer
-        return
-    result.content = delegation_summary(answer)
+    text = envelope.get("result")
+    text = text if isinstance(text, str) else ""
+    succeeded = envelope.get("success") is True
+    error = envelope.get("error")
+    if succeeded or envelope.get("status") == RUN_REFUSED:
+        result.content = delegation_summary(text)
+    else:
+        result.content = delegation_summary(text, error=error if isinstance(error, str) else "")
+    result.metadata["success"] = succeeded
+    if succeeded:
+        result.metadata.pop("error", None)
+    elif isinstance(error, str):
+        result.metadata["error"] = error
+    result.metadata["result"] = dict(envelope)
 
 
 @dataclass
@@ -164,7 +107,7 @@ class RunRecord:
     Attributes:
         ref: The run.
         call_id: The parent's call that started it.
-        title: The first line of its request.
+        title: Its brief's title.
         status: ``started`` while it runs, then its end status.
         started: When it started.
         ended: When it ended; None while it runs.
@@ -172,6 +115,11 @@ class RunRecord:
         error: Why it ended without completing.
         partial: Whether its result was cut short.
         usage: Its token totals by model (``{"input": ..., "output": ...}``).
+        brief: Its brief's filled fields, the title first.
+        started_by: Who started it: ``agent:<instance>`` (``agent:root``
+            for the root).
+        mode: How it runs: ``blocking`` (its parent waits for it).
+        cancelled_by: Who cancelled it, for a cancelled run.
     """
 
     ref: RunRef
@@ -184,6 +132,10 @@ class RunRecord:
     error: str | None = None
     partial: bool = False
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    brief: dict[str, str] = field(default_factory=dict)
+    started_by: str | None = None
+    mode: str = "blocking"
+    cancelled_by: str | None = None
 
 
 def _run_id(instance: str, number: int) -> str:
@@ -252,10 +204,11 @@ class AgentRuns:
     def observe(self, event: WorkflowEvent) -> None:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.
 
-        A start makes the run's record; an end gives it its status, time,
-        result, error, whether it is partial and what it used (an end whose
-        start was not seen makes the record too). Any other event changes
-        nothing.
+        A start makes the run's record (its call, title, brief, who started
+        it and its mode); an end gives it its status, time, result, error,
+        whether it is partial, what it used and who cancelled it (an end
+        whose start was not seen makes the record too). Any other event
+        changes nothing.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
@@ -270,6 +223,9 @@ class AgentRuns:
                 title=metadata.get("title") or "",
                 status=RUN_STARTED,
                 started=event.timestamp,
+                brief=dict(metadata.get("brief") or {}),
+                started_by=metadata.get("started_by"),
+                mode=metadata.get("mode") or "blocking",
             )
             return
         if status not in RUN_END_STATUSES:
@@ -289,6 +245,7 @@ class AgentRuns:
         record.error = metadata.get("error")
         record.partial = bool(metadata.get("partial"))
         record.usage = dict(metadata.get("usage") or {})
+        record.cancelled_by = metadata.get("cancelled_by")
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""

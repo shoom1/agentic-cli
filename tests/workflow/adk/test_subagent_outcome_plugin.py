@@ -38,7 +38,7 @@ from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_r
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_adk_delegation import (  # noqa: E402,F401
     Team,
-    calls,
+    delegation,
     manager_for,
     project,
     says,
@@ -211,7 +211,7 @@ class TestTheRawLog:
         answer = anthropic_message(*blocks)
         answer.update(content=blocks, stop_reason=stop)
         answers = Team(
-            coordinator=[calls("researcher", "toolu_c1", request="Find X."), says("Done.")],
+            coordinator=[delegation("toolu_c1", "Find X."), says("Done.")],
             researcher=[answer],
         )
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
@@ -233,7 +233,7 @@ class TestTheRawLog:
         )
         (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
                      and e.metadata.get("tool_call_id") == "toolu_c1"]
-        assert result.metadata["result"] == {"result": read}
+        assert result.metadata["result"]["result"] == read
 
 
 class TestTheADKItRestsOn:

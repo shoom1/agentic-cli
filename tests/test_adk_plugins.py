@@ -538,8 +538,8 @@ class TestLLMLoggingPlugin:
 
 def _call_context(agent: str = "researcher", invocation_id: str = "inv-1") -> SimpleNamespace:
     """A model call's callback context: ADK makes an ``EventActions`` for each
-    call and hands it to all three of the call's callbacks, while two parallel
-    calls of one sub-agent share their invocation and their agent's name."""
+    call and hands it to all three of the call's callbacks, so a call is told
+    apart by it, whatever its invocation and its agent's name."""
     return SimpleNamespace(invocation_id=invocation_id, agent_name=agent, actions=object())
 
 
@@ -563,8 +563,8 @@ class TestEachModelCall:
         return times
 
     async def test_parallel_calls_of_one_agent_each_time_their_own(self, plugin, clock):
-        # Two delegations to one sub-agent: their requests go out at 0 s and
-        # 10 s, their answers come back at 20 s and 30 s.
+        # Two calls of one agent out at once: their requests go out at 0 s
+        # and 10 s, their answers come back at 20 s and 30 s.
         clock.extend([0.0, 10.0, 20.0, 30.0])
         first, second = _call_context(), _call_context()
 
@@ -608,9 +608,9 @@ class TestEachModelCall:
         assert latencies == [5_000.0]
         assert len(plugin.clock) == 0
 
-    async def test_an_unanswered_errors_clock_goes_at_the_next_run(self, plugin):
+    async def test_an_unanswered_errors_clock_goes_as_its_run_ends(self, plugin):
         # Nothing answers the error, so no response comes: the clock waits
-        # for an answer until the next run lets it go.
+        # for an answer until its run lets it go, failing.
         call = _call_context(invocation_id="inv-1")
         await plugin.before_model_callback(
             callback_context=call, llm_request=_make_mock_llm_request()
@@ -620,19 +620,33 @@ class TestEachModelCall:
         )
         assert len(plugin.clock) == 1
 
-        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
+        await plugin.on_run_error_callback(
+            invocation_context=SimpleNamespace(invocation_id="inv-1"), error=RuntimeError("529")
+        )
 
         assert len(plugin.clock) == 0
 
-    async def test_a_run_lets_go_of_what_another_left(self, plugin):
-        # Before google-adk 2.14 a call cancelled mid-request fires neither callback.
+    async def test_a_run_lets_go_of_what_it_left_as_it_ends(self, plugin, clock):
+        # Before google-adk 2.14 a call cancelled mid-request fires neither
+        # callback: its run's end lets it go, and another run's stays.
+        clock.extend([0.0, 10.0, 30.0])
         left = _call_context(invocation_id="inv-1")
-        await plugin.before_model_callback(
-            callback_context=left, llm_request=_make_mock_llm_request()
+        other = _call_context(invocation_id="inv-2")
+        for context in (left, other):
+            await plugin.before_model_callback(
+                callback_context=context, llm_request=_make_mock_llm_request()
+            )
+
+        await plugin.after_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-1"))
+
+        # inv-2's call is still out: its answer is timed, from 10 s to 30 s.
+        await plugin.after_model_callback(
+            callback_context=other, llm_response=_make_mock_llm_response(usage_metadata=_usage())
         )
-
-        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
-
+        latencies = [
+            r["metadata"].get("latency_ms") for r in _logged(plugin) if r["type"] == "llm_usage"
+        ]
+        assert latencies == [20_000.0]
         assert len(plugin.clock) == 0
 
     async def test_a_sub_agents_records_name_it_and_its_run(self, plugin):

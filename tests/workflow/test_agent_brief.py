@@ -118,12 +118,6 @@ class TestTheTaskMessage:
 
 
 class TestTheInheritedNote:
-    def test_adk_delegation_uses_this_one(self):
-        pytest.importorskip("google.adk")
-        from agentic_cli.workflow.adk import delegation
-
-        assert delegation.INHERITED_CONTEXT_NOTE is INHERITED_CONTEXT_NOTE
-
     def test_its_text(self):
         assert INHERITED_CONTEXT_NOTE.startswith(
             "You are a sub-agent: another agent has handed you a task. The conversation "

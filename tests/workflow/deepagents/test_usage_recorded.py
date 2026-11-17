@@ -1,10 +1,11 @@
 """Deep Agents records each call's usage in its conversation's ledger as it reports it.
 
 The event processor records an agent's step as it makes its ``LLM_USAGE``,
-before ``on_event`` (an app's hook that drops events cannot drop a row), and
-a sub-agent run's end carries what the run used, by model; the run callback
-records a summary's. A processor driven outside a manager files under no
-conversation (None), as ``AgentRuns`` does.
+before ``on_event`` (an app's hook that drops events cannot drop a row), a
+sub-agent run's processor records each of the run's calls under the run,
+which the run's end then reads (``agents/delegate.py``), and the run
+callback records a summary's. A processor driven outside a manager files
+under no conversation (None), as ``AgentRuns`` does.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import pytest
 
 pytest.importorskip("deepagents")
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 from langchain_core.outputs import ChatGeneration, LLMResult  # noqa: E402
 
 from agentic_cli.workflow.deepagents.event_processor import RunCallback  # noqa: E402
@@ -23,13 +24,10 @@ from agentic_cli.workflow.live_events import LiveEvents  # noqa: E402
 from agentic_cli.workflow.usage import UsageLedgers  # noqa: E402
 from tests.workflow.deepagents.test_event_processor import (  # noqa: E402
     MODELS,
-    SUB,
-    _call,
-    _delegated,
     _model_update,
     _processor,
     _reported,
-    _tools_update,
+    _run_processor,
 )
 
 
@@ -53,20 +51,16 @@ class TestTheProcessor:
             "coordinator", None, None, 100, 10, 60
         )
 
-    def test_a_runs_end_carries_what_the_run_used(self):
+    def test_a_runs_calls_are_recorded_under_it(self):
         ledgers = UsageLedgers()
-        processor = _processor(ledgers=ledgers)
-        processor.process((), "updates", _model_update(AIMessage("", tool_calls=[
-            _call("task", {"description": "Find X.", "subagent_type": "researcher"}, "c-" + SUB),
-        ])))
-        _delegated(processor, (), SUB, "researcher")
-        processor.process((SUB,), "updates", _model_update(_answer("X is 42.", 50, 5)))
 
-        _, ended = processor.process((), "updates", _tools_update(
-            ToolMessage("X is 42.", tool_call_id="c-" + SUB, name="task")
-        ))
+        _run_processor(ledgers=ledgers).process(
+            (), "updates", _model_update(_answer("X is 42.", 50, 5))
+        )
 
-        assert ended.metadata["usage"] == {"google:gemini-2.5-flash": {"input": 50, "output": 5}}
+        assert ledgers.ledger(None).run_usage("researcher-1#1") == {
+            "google:gemini-2.5-flash": {"input": 50, "output": 5}
+        }
         assert ledgers.ledger(None).totals(run="researcher-1#1").calls == 1
 
 

@@ -25,6 +25,7 @@ pytest.importorskip("deepagents")
 from agentic_cli.config import BaseSettings, get_settings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow import factory  # noqa: E402
+from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
@@ -164,7 +165,9 @@ class TestInitialization:
             "writer": "google:gemini-2.5-pro",
         }
         assert dict(manager.agent_models) == {r.agent: r for r in models.built}
-        assert models.chats["writer"].conversation(0)[0].text == "Write it."
+        assert models.chats["writer"].conversation(0)[0].text == task_message(
+            Brief(title="Write it.", objective="Write it.")
+        )
         assert [e.metadata["model"] for e in of(events, EventType.LLM_USAGE)] == [
             "google:gemini-2.5-flash", "google:gemini-2.5-pro", "google:gemini-2.5-flash"
         ]

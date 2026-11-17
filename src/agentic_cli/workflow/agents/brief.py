@@ -71,9 +71,8 @@ _HEADINGS = {
 #: What an inheriting sub-agent is told of the conversation it reads: whose it
 #: is, and which message is its task (Deep Agents' ``_FORK_TASK_PREAMBLE``,
 #: told the way ADK shows that conversation). ``task_message`` ends an
-#: inheriting type's task message with it, and ADK's delegation ends an
-#: inheriting sub-agent's instruction with it (``adk/delegation.py``), sent as
-#: written, as the whole prompt is (``manager._as_written``).
+#: inheriting type's task message with it, on both backends: the run reads
+#: its parent's conversation before that message.
 INHERITED_CONTEXT_NOTE = (
     "You are a sub-agent: another agent has handed you a task. The conversation "
     "before the task is that agent's, shown so you know what has been established: "

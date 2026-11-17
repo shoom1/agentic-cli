@@ -190,8 +190,9 @@ class TestASmallerSubAgent:
             return message
 
         delegate = says("")
-        delegate["content"] = [{"type": "tool_use", "id": "toolu_c1", "name": "researcher",
-                                "input": {"request": "Find X."}}]
+        delegate["content"] = [{"type": "tool_use", "id": "toolu_c1", "name": "task",
+                                "input": {"agent_type": "researcher", "title": "Find X.",
+                                          "objective": "Find X."}}]
         delegate["stop_reason"] = "tool_use"
         coordinator = [says("Noted."), says("Noted again."), delegate, says("X is 42.")]
         claude = FakeAPI(lambda request: coordinator.pop(0))
@@ -225,7 +226,7 @@ class TestASmallerSubAgent:
         assert sent[0].startswith(FIT_NOTE)
         assert not any(text.startswith("One:") for text in sent)
         assert any("Two:" in text for text in sent)
-        assert sent[-1].startswith("Find X.")
+        assert sent[-1].startswith("# Task: Find X.")
         (trimmed,) = trims(events)
         assert trimmed.metadata["agent"] == "researcher"
         # The coordinator's own requests went whole, and nothing was summarized.

@@ -124,7 +124,24 @@ class _Runner:
 
 class TestRunnerClose:
     """The runner is closed on every release: dropped unclosed, each agent's
-    MCP toolset stayed open (``tests/workflow/test_adk_mcp_lifecycle.py``)."""
+    MCP toolset stayed open (``tests/workflow/test_adk_mcp_lifecycle.py``).
+    So is each sub-agent type's runner, before the session service."""
+
+    async def test_each_sub_agent_types_runner_is_closed_too(self):
+        order: list[str] = []
+
+        class Service:
+            async def close(self) -> None:
+                order.append("session_service")
+
+        mgr = _manager(Service())
+        mgr._runner = _Runner(order)
+        mgr._agent_runners = {"researcher": _Runner(order)}
+
+        await mgr.cleanup()
+
+        assert order == ["runner", "runner", "session_service"]
+        assert dict(mgr._agent_runners) == {}
 
     async def test_cleanup_closes_it_before_the_session_service(self):
         order: list[str] = []

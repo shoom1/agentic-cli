@@ -44,8 +44,9 @@ class LLMLoggingPlugin(BasePlugin):
     Each record names the model of the agent that made the call (``models``),
     else the request's own model or ``model_name``; that agent
     (``metadata["agent"]``); and, for a sub-agent's call, its run
-    (``WorkflowEvent.run``, the active run its ``MainAgentPlugin`` set,
-    which the log writes as ``run``), as Deep Agents' records do. A usage
+    (``WorkflowEvent.run``, the active run the framework's delegation set
+    for the run's task, ``agents/delegate.py``, which the log writes as
+    ``run``), as Deep Agents' records do. A usage
     record counts as the stream's ``LLM_USAGE`` does
     (``workflow/usage.py``'s ``adk_usage_event``, by the agent's model's
     provider kind, ``kinds``: the thinking in the output, a cache write in
@@ -59,7 +60,11 @@ class LLMLoggingPlugin(BasePlugin):
     (``on_model_error_callback``): a plugin after this one may answer the
     error (the overflow handler), and that answer reaches
     ``after_model_callback`` like any response, timed. Each run lets go of
-    what another invocation left.
+    what it left as it ends, its own only.
+
+    One instance serves the conversation's runner and every sub-agent
+    type's (``GoogleADKWorkflowManager._agent_plugin_chain``): the manager
+    drains its buffer as a turn's events and a sub-agent run's go out.
 
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
@@ -252,16 +257,21 @@ class LLMLoggingPlugin(BasePlugin):
         The overflow handler answers a call refused as too long, and ADK
         hands its answer to every plugin's ``after_model_callback`` with the
         call's ``EventActions``, so the answer is timed and lets the clock
-        go. An error nobody answers leaves its clock to the next run's
-        ``before_run_callback``.
+        go. An error nobody answers leaves its clock until its run ends
+        (``after_run_callback``, ``on_run_error_callback``).
         """
         return None
 
-    async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
-        # What another invocation left (turns run one at a time): a call
-        # whose error nobody answered, and one cancelled mid-request, which
-        # before google-adk 2.14 fired no callback.
-        self.clock.keep_only(invocation_context.invocation_id)
+    async def after_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+        # What the run left: a call whose error nobody answered, and one
+        # cancelled mid-request, which before google-adk 2.14 fired no callback.
+        self.clock.forget(invocation_context.invocation_id)
+        return None
+
+    async def on_run_error_callback(
+        self, *, invocation_context: "InvocationContext", error: Exception
+    ) -> None:
+        self.clock.forget(invocation_context.invocation_id)
         return None
 
     # ------------------------------------------------------------------

@@ -12,22 +12,15 @@ from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 
+from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools._core.tasks import task_progress_data
-from agentic_cli.workflow.adk.branches import branch_run
 from agentic_cli.workflow.adk.call_clock import call_latency
-from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
 from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY
-from agentic_cli.workflow.agents.outcome import cut_off_warning
-from agentic_cli.workflow.agents.runs import (
-    RUN_STARTED,
-    AgentRuns,
-    run_ended,
-    run_title,
-    show_as_delegation,
-)
+from agentic_cli.workflow.agents.envelope import read_envelope
+from agentic_cli.workflow.agents.runs import show_as_delegation
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE, ContextBudget, usage_fields
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.sessions import RunRef, get_active_turn, root_run
+from agentic_cli.workflow.sessions import RunRef, root_run
 from agentic_cli.workflow.usage import UsageLedgers, adk_usage_event
 from agentic_cli.logging import Loggers
 
@@ -49,6 +42,9 @@ NO_ANSWER_CODES = (
 _NORMAL_FINISH = frozenset(
     {types.FinishReason.STOP.value, types.FinishReason.FINISH_REASON_UNSPECIFIED.value}
 )
+#: ADK's code for a reply with nothing in it: no parts, or only thoughts or
+#: blank text (``apply_empty_response_policy``).
+_NO_CONTENT = "MODEL_RETURNED_NO_CONTENT"
 
 
 class ADKEventProcessor:
@@ -56,24 +52,18 @@ class ADKEventProcessor:
 
     Owns an optional on_event callback for event transformation/filtering.
 
+    One processor reads the conversation's own runner (the manager's, one
+    per initialization); one made for a sub-agent run (``run=``) reads that
+    run's, on its child session (``GoogleADKWorkflowManager._run_agent``).
+
     Only the agents that reply to the user write the reply
     (``reply_agents``): the root, and every chat-mode agent it can transfer
     to, which takes the conversation (a native ADK YAML app's). An event
-    another agent wrote (a sub-agent its parent delegated to,
-    ``workflow/adk/delegation.py``) is its work: its text is marked
+    another agent wrote is its work: its text is marked
     ``metadata["agent"]``/``["subagent"]`` (the CLI shows it as activity, not
     as the reply), and its call's usage is ``purpose="subagent"``, since that
-    prompt is the sub-agent's brief, not the conversation's context. A
-    sub-agent's failed model call does not end the turn on ADK: ADK's
-    delegation tool hands its parent "Error running sub-agent: …" and the
-    parent carries on. ADK records the provider's reason on the sub-agent's
-    error event, which becomes a recoverable ``ERROR``, "<agent> failed:
-    <reason>", so the user is told why. The parent does not read that
-    reason, unlike on Deep Agents: ADK's private delegation tool
-    (``_SingleTurnAgentTool``) catches the wrapper error its node runner
-    raises, so the parent reads "Error running sub-agent: Dynamic node
-    <agent> failed". With neither a root nor reply agents, nothing is
-    marked.
+    prompt is the sub-agent's brief, not the conversation's context. With
+    neither a root nor reply agents, nothing is marked.
 
     A call's ``LLM_USAGE`` is credited to the agent that made it, the event's
     author: ``metadata["agent"]``, that agent's own model (``models``; the
@@ -87,19 +77,24 @@ class ADKEventProcessor:
     read as an unknown kind's), and it is recorded in the conversation's
     ledger (``ledgers``) as it is made, before ``on_event``, with how long
     the call took (``latency_ms``: the mark ``CallLatencyPlugin`` puts on
-    the answer, ``workflow/adk/call_clock.py``). A sub-agent run's end
-    carries what the run used, by model (``metadata["usage"]``).
+    the answer, ``workflow/adk/call_clock.py``).
 
     A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
-    its error in ``metadata["error"]``, as on Deep Agents.
+    its error in ``metadata["error"]``, as on Deep Agents. A ``task`` call's
+    result is the JSON text of what the delegation returned
+    (``adk/task_tool.py``), read back as its dict, as Deep Agents reads its
+    ``ToolMessage``; an envelope is shown as every backend shows one
+    (``agents/runs.py::show_as_delegation``).
 
     A tool that wrote the session's task list (``save_tasks``: ``tasks`` in
     the event's state delta) is followed by ``TASK_PROGRESS``, after its
     result, when the list differs from the one this turn last reported
     (``start_turn`` forgets it), as on Deep Agents: a call that changed
     nothing reports nothing, and a list whose tasks are all done stays in the
-    session for ``get_tasks``.
+    session for ``get_tasks``. A sub-agent run's list is the conversation's,
+    which its ``task`` call writes back as it returns: the conversation's
+    processor reports it then.
 
     A conversation the model of an agent that replies no longer takes ends
     its turn with an error response from the overflow handler
@@ -117,37 +112,24 @@ class ADKEventProcessor:
     is mapped: ADK records one for an exception that then leaves the run,
     which the manager reports as the turn's one ``ERROR``.
 
-    Every event an agent wrote names its run (``WorkflowEvent.run``): the run
-    of the delegation its branch names (``workflow/adk/branches.py``), else
-    the agent's own at depth 0 (``root_run`` for the root; an agent the root
-    transfers to is ``RunRef(<name>, <name>, None, None, 0)``); the user's
-    message names none, nor does the turn's own ``ERROR``. A tool's call and
-    result name the call (``tool_call_id``), as on Deep Agents. A call that
-    delegates to one of the calling agent's own single-turn sub-agents
-    (``delegates``, by the caller, the event's author: ADK names the tool
-    after the sub-agent) is followed by the ``AGENT_RUN`` that starts the
-    sub-agent's run, and its result by the one that ends it, as on Deep
-    Agents (``agents/runs.py::run_ended``): ``failed`` for ADK's answer for
-    a sub-agent that failed (``Error running sub-agent: …``) or the
-    framework's error result (a dict that says ``success`` false: the tool
-    raised, the gate denied it), with its error, ``interrupted`` for the
-    seal of a stopped turn, ``refused`` when ``SubAgentOutcomePlugin``
-    marked the run's last answer refused, else ``completed`` (``partial``,
-    and followed by one warning, ``cut_off_warning``, when it marked the
-    answer cut). The sub-agent's answer, which ADK keeps under ``result``,
-    is never read for success. The result itself is shown as on Deep Agents
-    (``agents/runs.py::show_as_delegation``: the answer's first line, a
-    failed one as a failed result). Any other call is an ordinary tool call,
-    with no run: a name the caller has no such sub-agent for runs none (ADK
-    answers an unknown tool). Each ``AGENT_RUN`` is recorded in ``runs`` as
-    it is made, before ``on_event``.
+    Every event an agent wrote names its run (``WorkflowEvent.run``): the
+    sub-agent run the processor was made for, else the agent's own at depth
+    0 (``root_run`` for the root; an agent the root transfers to is
+    ``RunRef(<name>, <name>, None, None, 0)``); the user's message names
+    none, nor does the turn's own ``ERROR``. A tool's call and result name
+    the call (``tool_call_id``), as on Deep Agents. The ``AGENT_RUN`` events
+    are the framework's (``agents/delegate.py``), not this processor's.
 
-    A delegation that finished beside a slower one in the same model step
-    ends later than on Deep Agents, which ends each run at its own result:
-    ADK hands a step's parallel function responses back in one event, after
-    the last one returns, so the finished run ends with the slower one's. A
-    turn stopped or failed before then ends it from the record
-    (``end_returned_run``), with its result, as that event would have.
+    A sub-agent run's processor reports no ``ERROR``: it keeps what ends the
+    run for its manager to end it with (``Delegations`` warns the user
+    once). Its last answer with text (``answer``: the last of its replies
+    that has any, one that also calls tools included, as Deep Agents' own
+    ``task`` reads a run: an empty reply after it passed over), that
+    answer's outcome mark
+    (``outcome``: ``SubAgentOutcomePlugin``'s), and why it failed
+    (``failure``: the overflow handler's answer, ``CONTEXT_OVERFLOW``, or a
+    reply that is no answer but an empty one, which is no failure: the run
+    ends with the answer it has).
 
     Args:
         model: The default model, which usage names for an agent ``models``
@@ -159,17 +141,14 @@ class ADKEventProcessor:
         budgets: Each agent's context numbers, by name.
         reply_agents: The agents that reply to the user, the root among them
             (``workflow/adk/build.py::reply_agents``); None for the root alone.
-        runs: The manager's sub-agent runs, which this processor names and
-            records; its own when not given.
-        delegates: Each agent's single-turn sub-agents, which it delegates
-            to through a tool named after each, by the agent's name
-            (``build.delegated_agents``); a collection of names alone is the
-            root's.
         kinds: Each agent's model's provider kind (``ProviderKind``'s value), by name.
         ledgers: The manager's usage ledgers, which this processor records
             each call's usage in; its own when not given.
+        run: The sub-agent run whose runner this processor reads; None for
+            the conversation's own.
 
-    The manager builds one at each initialization, from the app it built.
+    The manager builds one at each initialization, from the app it built,
+    and one for each sub-agent run.
     """
 
     def __init__(
@@ -180,10 +159,10 @@ class ADKEventProcessor:
         models: Mapping[str, str] | None = None,
         budgets: Mapping[str, ContextBudget] | None = None,
         reply_agents: Collection[str] | None = None,
-        runs: AgentRuns | None = None,
-        delegates: Mapping[str, Collection[str]] | Collection[str] = (),
         kinds: Mapping[str, str] | None = None,
         ledgers: UsageLedgers | None = None,
+        *,
+        run: RunRef | None = None,
     ) -> None:
         self._model = model
         self._on_event = on_event
@@ -195,17 +174,15 @@ class ADKEventProcessor:
         self.budgets: Mapping[str, ContextBudget] = budgets or {}
         # The task list this turn last reported, None before any.
         self._reported_tasks: list | None = None
-        self.runs = runs if runs is not None else AgentRuns()
-        if isinstance(delegates, Mapping):
-            by_agent = {name: frozenset(own) for name, own in delegates.items()}
-        else:
-            by_agent = {root: frozenset(delegates)} if root is not None and delegates else {}
-        self.delegates: dict[str, frozenset[str]] = by_agent
-        # A sub-agent run's last answer's outcome (SubAgentOutcomePlugin's
-        # mark), by run id, until its delegation's result ends the run.
-        self._outcomes: dict[str, str] = {}
         self.kinds: Mapping[str, str] = kinds or {}
         self.ledgers = ledgers if ledgers is not None else UsageLedgers()
+        self.run = run
+        #: A sub-agent run's last answer with text ("" before one).
+        self.answer = ""
+        #: That run's last answer's outcome mark, None for none.
+        self.outcome: str | None = None
+        #: Why that run failed: ``(error, code)``, None while it has not.
+        self.failure: tuple[str, str] | None = None
 
     @property
     def model(self) -> str:
@@ -224,10 +201,8 @@ class ADKEventProcessor:
         self._on_event = value
 
     def start_turn(self) -> None:
-        """Forget the task list reported (a turn reports the first one it
-        sees), and the outcomes of runs a stopped turn left open."""
+        """Forget the task list reported: a turn reports the first one it sees."""
         self._reported_tasks = None
-        self._outcomes.clear()
 
     async def process_event(
         self,
@@ -245,25 +220,10 @@ class ADKEventProcessor:
         """
         subagent = self._subagent(adk_event)
         run = self._run_ref(adk_event)
-        outcome = (getattr(adk_event, "custom_metadata", None) or {}).get(OUTCOME_KEY)
-        if outcome and run is not None and run.run is not None:
-            self._outcomes[run.run] = outcome
-
         error_code = getattr(adk_event, "error_code", None)
-        if subagent is not None and error_code:
-            # The root's own failure leaves the run, which the manager
-            # reports as the turn's ERROR; this one never does.
-            error = WorkflowEvent.error(
-                f"{subagent} failed: {adk_event.error_message or error_code}",
-                error_code=error_code,
-                recoverable=True,
-            )
-            error.metadata["agent"] = subagent
-            error.run = run
-            error = self._apply_hook(error)
-            if error:
-                yield error
-        elif error_code == OVERFLOW_ERROR_CODE:
+        if self.run is not None:
+            self._keep_run_end(adk_event)
+        elif subagent is None and error_code == OVERFLOW_ERROR_CODE:
             # The turn's one ERROR (the base process()'s contract), though
             # no exception ended it: the overflow handler answered the call.
             error = self._apply_hook(WorkflowEvent.turn_failed(
@@ -273,12 +233,8 @@ class ADKEventProcessor:
             if error:
                 yield error
         elif subagent is None and (code := _no_answer(adk_event)) is not None:
-            model = self.models.get(self._agent(adk_event), self._model)
-            message = adk_event.error_message
-            # ADK's own message for an empty reply says no more than the code.
-            said = f": {message}" if message and code != "MODEL_RETURNED_NO_CONTENT" else ""
             error = self._apply_hook(WorkflowEvent.turn_failed(
-                message=f"{model} returned no answer{said}", error_code=code
+                message=self._no_answer_text(adk_event, code), error_code=code
             ))
             if error:
                 yield error
@@ -310,40 +266,53 @@ class ADKEventProcessor:
 
         parts = adk_event.content.parts if adk_event.content else None
         for part in parts or ():
-            # Made before the part's own event, which a delegation's end shows.
-            run_event = self._delegation_run(part, run, sealed=error_code == ABORTED)
             workflow_event = self.process_part(part, session_id)
             if workflow_event:
                 workflow_event.run = run
                 if subagent is not None and workflow_event.type is EventType.TEXT:
                     workflow_event.metadata.update(agent=subagent, subagent=True)
-                if run_event is not None and workflow_event.type is EventType.TOOL_RESULT:
-                    show_as_delegation(
-                        workflow_event, _result_text(part.function_response.response), run_event
-                    )
                 workflow_event = self._apply_hook(workflow_event)
                 if workflow_event:
                     yield workflow_event
-            if run_event is not None:
-                # A run cut short is followed by its one warning.
-                for event in (run_event, cut_off_warning(run_event)):
-                    event = self._apply_hook(event) if event is not None else None
-                    if event:
-                        yield event
 
-        progress = self._progress(adk_event)
+        progress = self._progress(adk_event) if self.run is None else None
         if progress is not None:
             progress.run = run
             progress = self._apply_hook(progress)
             if progress:
                 yield progress
 
-    def _progress(self, adk_event: Any) -> WorkflowEvent | None:
-        """``TASK_PROGRESS`` for a task list ``adk_event`` wrote, when it changed.
+    def _keep_run_end(self, adk_event: Any) -> None:
+        """Keep what ``adk_event`` says of the run's end: its answer, its outcome, its failure."""
+        if self._agent(adk_event) is None or getattr(adk_event, "partial", False):
+            return
+        outcome = (getattr(adk_event, "custom_metadata", None) or {}).get(OUTCOME_KEY)
+        if outcome:
+            self.outcome = outcome
+        error_code = getattr(adk_event, "error_code", None)
+        if error_code == OVERFLOW_ERROR_CODE:
+            self.failure = (adk_event.error_message or error_code, OVERFLOW_ERROR_CODE)
+            return
+        code = _no_answer(adk_event)
+        if code is not None and code != _NO_CONTENT:
+            self.failure = (self._no_answer_text(adk_event, code), code)
+            return
+        content = getattr(adk_event, "content", None)
+        parts = (content.parts if content is not None else None) or []
+        text = "".join(part.text for part in parts if part.text and not part.thought)
+        if text.strip():
+            self.answer = text.rstrip()
 
-        A sub-agent's list is the session's too: the coordinator reads it,
-        and reporting it again would say nothing new.
-        """
+    def _no_answer_text(self, adk_event: Any, code: str) -> str:
+        """What a reply that is no answer is told as: ``<model> returned no answer[: <message>]``."""
+        model = self.models.get(self._agent(adk_event), self._model)
+        message = adk_event.error_message
+        # ADK's own message for an empty reply says no more than the code.
+        said = f": {message}" if message and code != _NO_CONTENT else ""
+        return f"{model} returned no answer{said}"
+
+    def _progress(self, adk_event: Any) -> WorkflowEvent | None:
+        """``TASK_PROGRESS`` for a task list ``adk_event`` wrote, when it changed."""
         delta = getattr(getattr(adk_event, "actions", None), "state_delta", None) or {}
         tasks = delta.get("tasks")
         if not isinstance(tasks, list) or tasks == self._reported_tasks:
@@ -363,10 +332,14 @@ class ADKEventProcessor:
         """The sub-agent that wrote ``adk_event``, or None (an agent that
         replies, the user)."""
         agent = self._agent(adk_event)
+        if agent is None:
+            return None
+        if self.run is not None:
+            return agent
         replying = self.reply_agents
         if replying is None:
             replying = () if self.root is None else (self.root,)
-        if agent is None or not replying or agent in replying:
+        if not replying or agent in replying:
             return None
         return agent
 
@@ -377,89 +350,16 @@ class ADKEventProcessor:
         return author if author and author != "user" else None
 
     def _run_ref(self, adk_event: Any) -> RunRef | None:
-        """The run that wrote ``adk_event``: its delegation branch's, else the
-        agent's own at depth 0; None for the user's own."""
+        """The run that wrote ``adk_event``: the processor's sub-agent run, else
+        the agent's own at depth 0; None for the user's own."""
         agent = self._agent(adk_event)
         if agent is None:
             return None
-        run = branch_run(self.runs, get_active_turn(), getattr(adk_event, "branch", None))
-        if run is not None:
-            return run
+        if self.run is not None:
+            return self.run
         if self.root is None or agent == self.root:
             return root_run(agent)
         return RunRef(agent=agent, instance=agent, run=None, parent_run=None, depth=0)
-
-    def _run_usage(self, run: RunRef) -> dict[str, dict[str, int]]:
-        """What ``run`` used, by model, from its conversation's ledger."""
-        return self.ledgers.ledger(get_active_turn()).run_usage(run.run or "")
-
-    def _delegation_run(
-        self, part: Any, parent: RunRef | None, *, sealed: bool
-    ) -> WorkflowEvent | None:
-        """The ``AGENT_RUN`` a delegation ``part`` starts or ends, recorded; else None.
-
-        A delegation is a call of one of ``parent``'s agent's own single-turn
-        sub-agents (``delegates``); any other part is none.
-
-        Args:
-            part: A part of an event of ``parent``'s.
-            parent: The run that made the call (or got its result).
-            sealed: Whether the event seals a stopped turn's calls (ADK's
-                ``INVOCATION_ABORTED``).
-        """
-        call = getattr(part, "function_call", None)
-        response = getattr(part, "function_response", None)
-        own = self.delegates.get(parent.agent, frozenset()) if parent is not None else frozenset()
-        if call is not None and call.name in own and call.id:
-            child = self.runs.run_for(get_active_turn(), parent, call.id, call.name)
-            request = (call.args or {}).get("request")
-            event = WorkflowEvent.agent_run(
-                child, RUN_STARTED, call_id=call.id,
-                title=run_title(request if isinstance(request, str) else ""),
-            )
-        elif response is not None and response.name in own and response.id:
-            child = self.runs.run_for(get_active_turn(), parent, response.id, response.name)
-            event = self._ended(child, response.id, response.response, sealed=sealed)
-        else:
-            return None
-        self.runs.observe(event)
-        return event
-
-    def end_returned_run(self, ref: RunRef, call_id: str, response: Any) -> WorkflowEvent:
-        """End ``ref``'s run with what its delegation returned, which no event brought; recorded.
-
-        ADK hands a model step's parallel function responses back in one
-        event, after the last one returns, so a delegation that finished
-        beside a slower one has no result event until then. A turn stopped
-        or failed before it ends that run from the record with this
-        (``GoogleADKWorkflowManager``): as its result would have ended it,
-        refused or partial from its outcome mark.
-
-        Args:
-            ref: The run.
-            call_id: Its parent's call that started it.
-            response: What the call returned, as ADK stores it (text under
-                ``result``).
-        """
-        event = self._ended(ref, call_id, response, sealed=False)
-        self.runs.observe(event)
-        return event
-
-    def _ended(self, child: RunRef, call_id: str, response: Any, *, sealed: bool) -> WorkflowEvent:
-        """The ``AGENT_RUN`` that ``response``, a delegation's result, ends ``child``'s run with.
-
-        ``agents/runs.py::run_ended``'s decision: the framework's error
-        result (a dict that says it failed: the tool raised, the gate denied
-        it) fails it, never the sub-agent's answer, which ADK keeps under
-        ``result``.
-        """
-        succeeded, error = _outcome(response)
-        return run_ended(
-            child, call_id, _result_text(response),
-            failed=not succeeded, error=error,
-            outcome=self._outcomes.pop(child.run or "", None),
-            usage=self._run_usage(child), sealed=sealed,
-        )
 
     def process_part(self, part: Any, session_id: str) -> WorkflowEvent | None:
         """Process a single part from the agent response.
@@ -490,6 +390,8 @@ class ADKEventProcessor:
         if hasattr(part, "function_response") and part.function_response:
             tool_name = part.function_response.name
             response = part.function_response.response
+            if tool_name == TASK_TOOL:
+                response = _delegated(response)
             success, error = _outcome(response)
 
             logger.debug("tool_result", tool_name=tool_name, success=success)
@@ -503,6 +405,9 @@ class ADKEventProcessor:
             if _is_mcp_error(response):
                 # Shown as any failed result is ("Failed: <error>").
                 event.content = f"Failed: {error}"
+            found = read_envelope(response) if tool_name == TASK_TOOL else None
+            if found is not None:
+                show_as_delegation(event, found)
             return _with_call_id(event, getattr(part.function_response, "id", None))
 
         if part.code_execution_result:
@@ -579,12 +484,17 @@ def _with_call_id(event: WorkflowEvent, call_id: Any) -> WorkflowEvent:
     return event
 
 
-def _result_text(response: Any) -> str:
-    """A delegation's result as text: ADK keeps a text result under ``result``."""
-    if isinstance(response, dict):
-        result = response.get("result")
-        return result if isinstance(result, str) else json.dumps(response, default=str)
-    return "" if response is None else str(response)
+def _delegated(response: Any) -> Any:
+    """A ``task`` call's result as its delegation returned it: the dict whose JSON text
+    ADK stores under ``result`` (``adk/task_tool.py``); anything else as it is."""
+    if isinstance(response, dict) and set(response) == {"result"}:
+        try:
+            parsed = json.loads(response["result"])
+        except (TypeError, ValueError):
+            return response
+        if isinstance(parsed, dict):
+            return parsed
+    return response
 
 
 def _no_answer(adk_event: Any) -> str | None:

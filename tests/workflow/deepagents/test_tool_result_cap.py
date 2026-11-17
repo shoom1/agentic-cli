@@ -155,11 +155,12 @@ class TestTurns:
         events = await turn(manager)
 
         message = models.chats["lead"].conversation(1)[-1]
-        body, _, note = message.content.rpartition("\n\n")
-        assert CUT.search(body)
-        assert SAVED_NOTE.match(note)["name"].startswith("task-")
-        # Deep Agents strips the sub-agent's answer.
-        assert saved_path(note).read_text() == REPORT.rstrip()
+        sent = json.loads(message.content)  # the run's envelope, cut as a dict
+        assert (sent["status"], sent["agent"]) == ("completed", "helper-1")
+        assert CUT.search(sent["result"])
+        assert SAVED_NOTE.match(sent["truncated"])["name"].startswith("task-")
+        # The run's last text, as Deep Agents' own task read it: stripped.
+        assert REPORT.rstrip() in saved_path(sent["truncated"]).read_text()
         assert texts(events)[-1] == "Done."
 
     async def test_an_error_result_passes(self, ctx, monkeypatch, cleanup):

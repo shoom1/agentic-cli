@@ -8,8 +8,7 @@ gets these; sub-agents are gated as strictly as the root.
 - :class:`ToolResultCapMiddleware`, inside the gate, cuts a tool result too
   big for the context, as ADK's ``ToolResultCapPlugin`` does.
 - :class:`ToolCallErrorMiddleware`, inside the cap, gives a tool that raised
-  the error result ADK's ``ToolErrorPlugin`` gives, and a failed delegation
-  the one ADK's delegation tool gives, so the turn goes on.
+  the error result ADK's ``ToolErrorPlugin`` gives, so the turn goes on.
 - :class:`ActiveToolCallMiddleware`, innermost, runs each tool as the active
   tool call, which links a job the tool starts to its call.
 - :class:`ForeignReasoningMiddleware`, on the model side, sends no model
@@ -39,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-from collections.abc import Awaitable, Callable, Collection, Mapping
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -65,26 +64,17 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
 from agentic_cli.paths import resolve_path
-from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
-from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.outcome import (
     REFUSED,
     cut_off,
     outcome_of,
     refusal_notice,
 )
-from agentic_cli.workflow.agents.runs import SUBAGENT_ERROR_PREFIX, AgentRuns
-from agentic_cli.workflow.context import (
-    OVERFLOW_ERROR_CODE,
-    is_context_overflow,
-    subagent_overflow_message,
-)
-from agentic_cli.workflow.events import WorkflowEvent
+from agentic_cli.workflow.context import is_context_overflow
 from agentic_cli.workflow.interrupts import MARKER, OpenCalls
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
@@ -92,18 +82,11 @@ from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
-    get_active_run,
     get_active_turn,
-    reset_active_run,
     reset_active_tool_call,
-    set_active_run,
     set_active_tool_call,
 )
-from agentic_cli.workflow.tool_errors import (
-    MAX_TOOL_ERROR,
-    tool_error_result,
-    unknown_tool_result,
-)
+from agentic_cli.workflow.tool_errors import tool_error_result, unknown_tool_result
 from agentic_cli.workflow.tool_output import cap_tool_result, is_saved_output
 
 logger = Loggers.workflow()
@@ -315,9 +298,10 @@ class ToolResultCapMiddleware(AgentMiddleware):
 
     What it reads of a result:
 
-    - A ``ToolMessage`` whose content is a string: a JSON object (a framework
-      tool's dict) is cut as a dict and serialized again; other text is cut
-      as a string.
+    - A ``ToolMessage`` whose content is a string: cut as the cap cuts a
+      string, so a JSON object (a framework tool's dict, a delegation's
+      envelope) is cut as a dict and given back as JSON, as on ADK; other
+      text is cut as a string.
     - Content that is a list: its text blocks are joined into one, cut as a
       string, which stands where the first was, with its other keys; other
       blocks (images) are kept in their order, so one that sat between two
@@ -399,14 +383,8 @@ class ToolResultCapMiddleware(AgentMiddleware):
         return message.model_copy(update={"content": capped})
 
     def _text(self, text: str, name: str, source: Path | None) -> str:
-        if len(text) <= self.max_chars:
-            return text
-        result = _json_object(text)
-        if result is None:
-            return self._cap(text, name, source)
-        # Sent as the cap measured it, cut or not: the tool's own JSON may be
-        # several times longer (\uXXXX escapes, indentation).
-        return json.dumps(self._cap(result, name, source), ensure_ascii=False)
+        # The cap's own rule: a JSON object is cut as a dict, given back as JSON.
+        return self._cap(text, name, source)
 
     def _blocks(self, blocks: list, name: str, source: Path | None) -> list:
         texts = [text for text in map(_block_text, blocks) if text is not None]
@@ -435,17 +413,6 @@ class ToolResultCapMiddleware(AgentMiddleware):
         )
 
 
-def _json_object(text: str) -> dict | None:
-    """The dict ``text`` holds as JSON, or None."""
-    if not text.lstrip().startswith("{"):
-        return None
-    try:
-        value = json.loads(text)
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
-
-
 def _block_text(block: Any) -> str | None:
     """A content block's text, or None when it is not a text block."""
     if isinstance(block, str):
@@ -460,25 +427,6 @@ def _error_message(call: ToolCall, error: Exception) -> ToolMessage:
     return error_tool_message(tool_error_result(call["name"], error), call)
 
 
-def _is_delegation(tool: BaseTool | None) -> bool:
-    """Whether ``tool`` is the framework's ``task`` tool (by identity)."""
-    declaration = get_registry().get(TASK_TOOL)
-    return declaration is not None and identify_tool(tool) is declaration
-
-
-def _own_sub_agent(call: ToolCall, sub_agents: frozenset[str] | None) -> str | None:
-    """The sub-agent a ``task`` call runs, when it is one of the caller's own; else None.
-
-    Only such a call is a run: a call to any other type runs no sub-agent
-    (Deep Agents answers that it does not exist). ``sub_agents`` None takes
-    every call's ``subagent_type`` as the caller's own.
-    """
-    subagent = (call.get("args") or {}).get("subagent_type")
-    if not isinstance(subagent, str):
-        return None
-    return subagent if sub_agents is None or subagent in sub_agents else None
-
-
 class ToolCallErrorMiddleware(AgentMiddleware):
     """A tool that raises fails its call, not the turn.
 
@@ -486,43 +434,10 @@ class ToolCallErrorMiddleware(AgentMiddleware):
     the exception type and message, cut to 500 characters, logged as
     ``tool_raised``). Only ``Exception`` is caught: cancelling (Ctrl+C) still
     cancels, and LangGraph's control flow (``GraphBubbleUp``: interrupts,
-    parent commands) passes through.
-
-    A failed delegation is not a tool error. The sub-agent's own stack already
-    turned its tools' exceptions into results, so what escapes ``task`` is the
-    sub-agent's model or run failing (a summary it could not write among
-    them). The call is answered as ADK's delegation tool answers it,
-    ``Error running sub-agent: <reason>`` (``status="error"``), and the user
-    is told at once, as ADK's event processor tells a sub-agent's failed
-    model call: one recoverable ``ERROR``, ``<agent> failed: <reason>``,
-    through the turn's live events, the sub-agent's run's (given the
-    manager's runs). The coordinator reads why and carries on; the turn ends
-    only when the root's own model or run fails. A request too long for the
-    sub-agent's model, still after its summary, is warned of in ADK's words,
-    ``<agent>: the request no longer fits <model>'s context window.``, with
-    ``error_code`` ``CONTEXT_OVERFLOW``.
-
-    Args:
-        runs: The manager's sub-agent runs, which name the run a failed
-            delegation's ``ERROR`` belongs to; none without.
-        sub_agents: The agent's own sub-agents: only a ``task`` call to one
-            of them is a run, as ``ActiveToolCallMiddleware`` has it; None
-            takes every call's ``subagent_type`` as the agent's own.
-        models: Each sub-agent's model reference, as the user is told it, by
-            name, for an overflow's warning ("the model" for one not named).
+    parent commands) passes through. A delegation never raises for its
+    sub-agent: the framework's ``task`` answers a failed run with its
+    envelope (``agents/delegate.py``).
     """
-
-    def __init__(
-        self,
-        runs: AgentRuns | None = None,
-        *,
-        sub_agents: Collection[str] | None = None,
-        models: Mapping[str, str] | None = None,
-    ) -> None:
-        super().__init__()
-        self._runs = runs
-        self._sub_agents = None if sub_agents is None else frozenset(sub_agents)
-        self._models = dict(models or {})
 
     async def awrap_tool_call(
         self,
@@ -534,55 +449,7 @@ class ToolCallErrorMiddleware(AgentMiddleware):
         except GraphBubbleUp:
             raise
         except Exception as error:
-            if _is_delegation(request.tool):
-                return self._failed_delegation(request.tool_call, error)
             return _error_message(request.tool_call, error)
-
-    def _failed_delegation(self, call: ToolCall, error: Exception) -> ToolMessage:
-        """The ``task`` call's answer for a sub-agent that failed with ``error``; warns the user.
-
-        The reason is the error's text, else its type's name. The ``ERROR``
-        is the report: the log is for diagnosis, at info, its traceback at
-        debug, so nothing is said twice over the CLI's prompt.
-        """
-        reason = str(error) or type(error).__name__
-        subagent = (call.get("args") or {}).get("subagent_type")
-        agent = subagent if isinstance(subagent, str) else call["name"]
-        logger.info(
-            "subagent_failed",
-            agent=agent,
-            error_type=type(error).__name__,
-            error=truncate(reason, MAX_TOOL_ERROR),
-        )
-        logger.debug("subagent_failed", exc_info=error)
-        if is_context_overflow(error):
-            # ADK's overflow handler's warning. What differs: ADK answers
-            # the sub-agent's model call with text ("I could not do this
-            # task: ..."), so its run completes; here the parent reads the
-            # error, and the run fails.
-            warning = WorkflowEvent.error(
-                subagent_overflow_message(agent, self._models.get(agent, "the model")),
-                error_code=OVERFLOW_ERROR_CODE,
-                recoverable=True,
-            )
-        else:
-            warning = WorkflowEvent.error(
-                f"{agent} failed: {reason}", error_code=type(error).__name__, recoverable=True
-            )
-        warning.metadata["agent"] = agent
-        own = _own_sub_agent(call, self._sub_agents)
-        if self._runs is not None and own is not None:
-            # The run the task call started (still open: its result is this).
-            warning.run = self._runs.run_for(
-                get_active_turn(), get_active_run(), call["id"], own
-            )
-        live_events.report(warning)
-        return ToolMessage(
-            content=f"{SUBAGENT_ERROR_PREFIX}{reason}",
-            tool_call_id=call["id"],
-            name=call["name"],
-            status="error",
-        )
 
 
 class InterruptedCallsMiddleware(AgentMiddleware):
@@ -599,9 +466,9 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     On the main agent, a turn the user stopped before any reply leaves
     ``MARKER`` as its reply, so the next turn answers only the new message.
     Each call is recorded and answered as the run's that made it
-    (``OpenCalls``, by the active run: a sub-agent's whole stack runs inside
-    its coordinator's ``task`` call), so a sub-agent's call never answers its
-    parent's delegation of the same id.
+    (``OpenCalls``, by the active run: a sub-agent's run is the active one in
+    the task it runs in, ``agents/delegate.py``), so a sub-agent's call never
+    answers its parent's delegation of the same id.
 
     Args:
         open_calls: The manager's record of its calls.
@@ -706,43 +573,20 @@ class ActiveToolCallMiddleware(AgentMiddleware):
     ``JobManager.submit`` reads it, so a job a long-running tool starts is
     linked to that call even when the tool, written for ADK, reads its call
     id from a ``tool_context`` that is None here. Each call runs in its own
-    task, so parallel calls never see each other's; a sub-agent's call runs
-    inside its coordinator's ``task`` call and restores it when done.
-
-    Given the manager's runs, a ``task`` call to one of the agent's own
-    ``sub_agents`` is also the run of the sub-agent it starts
-    (``workflow.sessions.set_active_run``, named by ``AgentRuns.run_for``
-    under the run it is made in): the whole sub-agent runs inside the call,
-    so its model calls, tool calls, permission checks and questions see it.
-    A ``task`` call to any other type runs no sub-agent (Deep Agents answers
-    that it does not exist), so it is no run. ``sub_agents`` None takes every
-    ``task`` call's ``subagent_type`` as the agent's own.
+    task, so parallel calls never see each other's. A sub-agent's run, which
+    a ``task`` call starts, runs in a task of its own with no tool call
+    active (``agents/delegate.py``): its own calls set theirs.
     """
-
-    def __init__(
-        self, runs: AgentRuns | None = None, *, sub_agents: Collection[str] | None = None
-    ) -> None:
-        super().__init__()
-        self._runs = runs
-        self._sub_agents = None if sub_agents is None else frozenset(sub_agents)
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
     ) -> _ToolResult:
-        call = request.tool_call
-        token = set_active_tool_call(_call_ref(call))
-        run_token = None
-        subagent = _own_sub_agent(call, self._sub_agents)
-        if self._runs is not None and call["name"] == TASK_TOOL and subagent is not None:
-            run = self._runs.run_for(get_active_turn(), get_active_run(), call["id"], subagent)
-            run_token = set_active_run(run)
+        token = set_active_tool_call(_call_ref(request.tool_call))
         try:
             return await handler(request)
         finally:
-            if run_token is not None:
-                reset_active_run(run_token)
             reset_active_tool_call(token)
 
 

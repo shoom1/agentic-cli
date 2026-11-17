@@ -32,7 +32,6 @@ import pytest
 pytest.importorskip("google.adk")
 
 from google.adk import Runner  # noqa: E402
-from google.adk import __version__ as _adk_version  # noqa: E402
 from google.adk.agents import LlmAgent  # noqa: E402
 from google.adk.apps import App  # noqa: E402
 from google.adk.models.base_llm import BaseLlm  # noqa: E402
@@ -51,6 +50,7 @@ from agentic_cli.workflow.context import (  # noqa: E402
     OVERFLOW_ERROR_CODE,
     SUMMARY_FAILED,
     overflow_message,
+    subagent_overflow_message,
 )
 from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
@@ -639,10 +639,15 @@ def team(inherit_context: bool) -> list[AgentConfig]:
     ]
 
 
+def task_call(call_id: str, objective: str) -> dict:
+    """A ``task`` call's block, delegating ``objective`` to the researcher."""
+    return {"type": "tool_use", "id": call_id, "name": "task",
+            "input": {"agent_type": "researcher", "title": objective, "objective": objective}}
+
+
 def delegate() -> dict:
     message = claude_says("")
-    message["content"] = [{"type": "tool_use", "id": "toolu_c1", "name": "researcher",
-                           "input": {"request": "Find X."}}]
+    message["content"] = [task_call("toolu_c1", "Find X.")]
     message["stop_reason"] = "tool_use"
     return message
 
@@ -666,7 +671,7 @@ class TestAnAgentThatReplies:
     """An agent the root transfers to (a native ADK YAML app's chat-mode agent)
     holds the conversation and answers the user: a conversation it no longer
     fits ends the turn with the clear error, as the main agent's does, never
-    with a sub-agent's "I could not do this task" as its reply."""
+    with a sub-agent's warning, which ends only that sub-agent's run."""
 
     @staticmethod
     def plugin() -> "OverflowPlugin":
@@ -703,14 +708,14 @@ class TestAnAgentThatReplies:
 
         assert helper.error_code == OVERFLOW_ERROR_CODE
         assert helper.error_message == overflow_message("anthropic:claude-sonnet-4-6")
-        assert worker.error_code is None
-        assert worker.content.parts[0].text.startswith("I could not do this task")
+        assert worker.error_code == OVERFLOW_ERROR_CODE
+        assert worker.error_message == subagent_overflow_message(
+            "worker", "anthropic:claude-sonnet-4-6"
+        )
 
 
 class TestASubAgentsOverflow:
-    async def test_it_answers_that_it_could_not_and_the_user_is_warned_once(
-        self, project, monkeypatch
-    ):
+    async def test_its_run_fails_and_the_user_is_warned_once(self, project, monkeypatch):
         _, status, body = SHAPES["claude-400"]
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         api = Team(coordinator=[delegate(), claude_says("The researcher could not.")],
@@ -727,15 +732,16 @@ class TestASubAgentsOverflow:
             await manager.cleanup()
 
         model = "anthropic:claude-sonnet-4-6"
-        # Its brief alone is the request: nothing to leave out, no retry.
+        warned = f"researcher: the request no longer fits {model}'s context window."
+        # Its task message alone is the request: nothing to leave out, no retry.
         assert api.asked == ["You coordinate.", "You research.", "You coordinate."]
         (error,) = errors(events)
-        assert error.content == f"researcher: the request no longer fits {model}'s context window."
+        assert error.content == warned
         assert error.metadata == {"recoverable": True, "error_code": OVERFLOW_ERROR_CODE,
                                   "agent": "researcher"}
         result = json.loads(api.requests[2].content)["messages"][-1]["content"][0]
-        assert f"I could not do this task: the request no longer fits {model}'s context window." \
-            in json.dumps(result)
+        read = json.loads(result["content"])
+        assert (read["status"], read["error"], read["success"]) == ("failed", warned, False)
         assert texts(events)[-1] == "The researcher could not."
 
     async def test_an_inheriting_one_is_retried_without_the_oldest_turns(
@@ -1014,18 +1020,14 @@ async def test_a_parallel_delegations_retry_carries_its_own_task(project, monkey
     _, status, refusal = SHAPES["claude-400"]
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     coordinator = [claude_says("Noted."), claude_says(""), claude_says("Both done.")]
-    coordinator[1]["content"] = [
-        {"type": "tool_use", "id": "toolu_c1", "name": "researcher",
-         "input": {"request": "Task A."}},
-        {"type": "tool_use", "id": "toolu_c2", "name": "researcher",
-         "input": {"request": "Task B."}},
-    ]
+    coordinator[1]["content"] = [task_call("toolu_c1", "Task A."), task_call("toolu_c2", "Task B.")]
     coordinator[1]["stop_reason"] = "tool_use"
     b_started, retried = asyncio.Event(), asyncio.Event()
     retries: list[str] = []
 
     async def researcher(body: dict):
-        task = _last_text(body)
+        # Its task message: "# Task: Task A." ... and the note.
+        task = _last_text(body).removeprefix("# Task: ").partition("\n")[0]
         if FIT_NOTE in json.dumps(body["messages"]):  # a retry
             retries.append(task)
             retried.set()
@@ -1056,7 +1058,7 @@ async def test_a_parallel_delegations_retry_carries_its_own_task(project, monkey
     finally:
         await manager.cleanup()
 
-    # Both requests quote both calls; a call's own task is its brief, last.
+    # Both requests quote both calls; a call's own task is its task message, last.
     assert retries == ["Task A."]
     final = json.loads(api.requests[-1].content)["messages"][-1]["content"]
     results = {block["tool_use_id"]: json.dumps(block["content"]) for block in final
@@ -1064,9 +1066,6 @@ async def test_a_parallel_delegations_retry_carries_its_own_task(project, monkey
     assert "Did Task A." in results["toolu_c1"] and "Did Task B." in results["toolu_c2"]
     assert errors(events) == []
     assert texts(events)[-1] == "Both done."
-
-
-_ADK_VERSION = tuple(int(part) for part in _adk_version.split(".")[:2])
 
 
 async def test_a_cancelled_call_leaves_no_copy_past_the_next_turn(project, monkeypatch):
@@ -1097,7 +1096,7 @@ async def test_a_cancelled_call_leaves_no_copy_past_the_next_turn(project, monke
 
     assert texts(events) == ["Again."]
     # From google-adk 2.14 a cancelled model call runs on_model_error_callback
-    # with the CancelledError, which releases the copy at once; before it, the
-    # copy stays until the next turn starts.
-    assert left_by_the_cancel == (0 if _ADK_VERSION >= (2, 14) else 1)
+    # with the CancelledError, which releases the copy at once; before it,
+    # the stopped run's end does (after_run_callback, as its abort closes it).
+    assert left_by_the_cancel == 0
     assert after_the_next_turn == 0

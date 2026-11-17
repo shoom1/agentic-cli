@@ -33,12 +33,13 @@ model's adapter may rewrite the request in place (Gemini's context cache moves
 the system instruction, the tools and the cached contents out of it). A copy
 belongs to one model call: it is kept under the identity of the call's
 ``EventActions`` (``callback_context.actions``), which ADK makes for each
-call and hands to all three of its callbacks, while two parallel calls of one
-sub-agent share their invocation and agent name. It is released when the
+call and hands to all three of its callbacks. It is released when the
 call ends (``after_model_callback``, ``on_model_error_callback``). Before
 google-adk 2.14 a call cancelled mid-request fires neither (2.14 runs the
-error callback with the ``CancelledError``), so each run first drops the
-copies any other invocation left (turns run one at a time).
+error callback with the ``CancelledError``), so as each run ends
+(``after_run_callback``, also for a stopped one; ``on_run_error_callback``
+for one that fails) the copies it left are dropped, its own only: two runs
+of one sub-agent type share their runner, and this plugin, at once.
 """
 
 from __future__ import annotations
@@ -135,13 +136,22 @@ class FitGuardPlugin(BasePlugin):
         self._release(callback_context)
         return None
 
-    async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+    async def after_run_callback(self, *, invocation_context: "InvocationContext") -> None:
         # What a cancelled call left: before google-adk 2.14 it fired neither release.
-        invocation = invocation_context.invocation_id
-        self._seen = {
-            key: held for key, held in self._seen.items() if held.invocation == invocation
-        }
+        self._forget(invocation_context.invocation_id)
         return None
+
+    async def on_run_error_callback(
+        self, *, invocation_context: "InvocationContext", error: Exception
+    ) -> None:
+        self._forget(invocation_context.invocation_id)
+        return None
+
+    def _forget(self, invocation: str) -> None:
+        """Drop the copies ``invocation`` left; another run's stay."""
+        self._seen = {
+            key: held for key, held in self._seen.items() if held.invocation != invocation
+        }
 
     def request_as_seen(self, callback_context: "CallbackContext") -> Seen | None:
         """The request of this model call as it came in, before any plugin

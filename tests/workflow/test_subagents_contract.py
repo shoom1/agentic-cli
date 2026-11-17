@@ -4,11 +4,12 @@ Each scenario runs a scripted turn on ADK (Claude, through ``FakeAPI``) and on
 Deep Agents (``ScriptedChat``) and expects the same events, run records and
 results: the two backends behave alike. A scenario's model answers are
 written once, in backend-neutral steps (``says``; ``calls`` with ``delegate``
-and ``use``), which the harness turns into each backend's: on ADK a
-delegation is a call of the tool named after the sub-agent (``request``), on
-Deep Agents a ``task`` call (``description``, ``subagent_type``). Each
-agent's prompt is ``You are <name>.``, by which ADK's fake API tells the
-agents apart.
+and ``use``), which the harness turns into each backend's. A delegation is a
+``task`` call on both (``task_arguments``: ``agent_type``, the brief's
+``title`` and ``objective``, and any other field of the brief), answered
+with the run's envelope as JSON (``agents/envelope.py``; ``envelope_read``
+reads it back). Each agent's prompt is ``You are <name>.``, by which ADK's
+fake API tells the agents apart.
 
 Offline: no provider is reached and no catalog lists (``tests/conftest.py``).
 """
@@ -40,7 +41,9 @@ from agentic_cli.workflow.agents import (
     RUN_REFUSED,
     RUN_STARTED,
     RunRecord,
+    SubAgentPolicy,
 )
+from agentic_cli.workflow.agents.envelope import read_envelope
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import (
     EventType,
@@ -57,6 +60,7 @@ from agentic_cli.workflow.sessions import (
     SessionRef,
     get_active_run,
     get_active_tool_call,
+    get_active_turn,
     reset_active_turn,
     root_run,
     set_active_turn,
@@ -75,6 +79,7 @@ from agentic_cli.workflow.usage import (
     UsageTotals,
     side_call,
 )
+from tests.loop_guard import no_blocking_calls
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message
 from tests.workflow.compacting import compact_now
 from tests.workflow.test_manager_models import route
@@ -98,7 +103,11 @@ SUMMARY_MARKER = "<messages>"
 
 @dataclass(frozen=True)
 class Call:
-    """One call a model answer makes: a delegation to ``agent``, or a call of ``tool``."""
+    """One call a model answer makes: a delegation to ``agent``, or a call of ``tool``.
+
+    A delegation's ``args`` are its brief's fields besides the objective
+    (``brief``): ``title`` and any other, as ``task`` names them.
+    """
 
     call_id: str
     agent: str | None = None
@@ -107,9 +116,26 @@ class Call:
     args: dict[str, Any] = field(default_factory=dict)
 
 
-def delegate(agent: str, brief: str, call_id: str) -> Call:
-    """A delegation of ``brief`` to the sub-agent ``agent``."""
-    return Call(call_id=call_id, agent=agent, brief=brief)
+def delegate(agent: str, brief: str, call_id: str, **fields: Any) -> Call:
+    """A ``task`` call that delegates to ``agent``: ``brief`` its objective, its
+    title ``brief``'s first line unless ``fields`` name one, and ``fields``
+    the brief's other fields (or any argument, as a model may write it)."""
+    return Call(call_id=call_id, agent=agent, brief=brief, args=dict(fields))
+
+
+def task_arguments(call: Call) -> dict[str, Any]:
+    """A delegation's ``task`` arguments, as both backends' models write them."""
+    title = next((line.strip() for line in call.brief.splitlines() if line.strip()), "")
+    arguments: dict[str, Any] = {"agent_type": call.agent, "title": title, "objective": call.brief}
+    arguments.update(call.args)
+    return arguments
+
+
+def envelope_read(text: str) -> dict[str, Any]:
+    """The envelope a parent read for a delegation, from the result's text."""
+    found = json.loads(text)
+    assert isinstance(found, dict) and "status" in found, text
+    return found
 
 
 def use(tool: str, call_id: str, **args: Any) -> Call:
@@ -163,14 +189,15 @@ def agent(
     tools: tuple[Any, ...] = (),
     **fields: Any,
 ) -> AgentConfig:
-    """An agent of a scenario's team, without state tools (its requests hold only its own)."""
+    """An agent of a scenario's team, without state tools unless ``fields`` ask
+    for them (its requests hold only its own)."""
     return AgentConfig(
         name=name,
         prompt=prompt_of(name),
         sub_agents=list(sub_agents),
         tools=list(tools),
         description=fields.pop("description", f"The {name}."),
-        include_state_tools=False,
+        include_state_tools=fields.pop("include_state_tools", False),
         **fields,
     )
 
@@ -189,8 +216,8 @@ def _claude_answer(step: Step) -> dict[str, Any] | httpx.Response:
         blocks.append({"type": "text", "text": step.text})
     for call in step.calls:
         if call.agent is not None:
-            blocks.append({"type": "tool_use", "id": call.call_id, "name": call.agent,
-                           "input": {"request": call.brief}})
+            blocks.append({"type": "tool_use", "id": call.call_id, "name": "task",
+                           "input": task_arguments(call)})
         else:
             blocks.append({"type": "tool_use", "id": call.call_id, "name": call.tool,
                            "input": dict(call.args)})
@@ -205,7 +232,7 @@ def _claude_answer(step: Step) -> dict[str, Any] | httpx.Response:
 def _scripted_answer(step: Step) -> Any:
     """``step`` as a ``ScriptedChat`` answers, for Deep Agents: its stop
     reason in ``response_metadata``, where ChatAnthropic reports Claude's."""
-    from tests.workflow.deepagents.fakes import ai, task
+    from tests.workflow.deepagents.fakes import ai
 
     if step.fails is not None:
         # What the Anthropic client raises for that 400.
@@ -216,7 +243,7 @@ def _scripted_answer(step: Step) -> Any:
         )
 
     made = [
-        task(call.agent, call.brief, call.call_id) if call.agent is not None
+        ("task", task_arguments(call), call.call_id) if call.agent is not None
         else (call.tool, dict(call.args), call.call_id)
         for call in step.calls
     ]
@@ -325,6 +352,9 @@ class Crew:
     _answers: Callable[[str, str], Awaitable[list[str]]] | None = None
     _last_message: Callable[[str, int], str] | None = None
     _bodies: Callable[[str], list[str]] | None = None
+    _tool_names: Callable[[str, int], list[str]] | None = None
+    _message_count: Callable[[str, int], int] | None = None
+    _state: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -381,12 +411,29 @@ class Crew:
         assert self._bodies is not None
         return self._bodies(agent)
 
+    def tool_names(self, agent: str, call: int = 0) -> list[str]:
+        """The tools ``agent``'s model request ``call`` offered, by name, in order."""
+        assert self._tool_names is not None
+        return self._tool_names(agent, call)
+
+    def message_count(self, agent: str, call: int = 0) -> int:
+        """How many messages ``agent``'s model request ``call`` held, its system prompt aside."""
+        assert self._message_count is not None
+        return self._message_count(agent, call)
+
+    async def state(self) -> dict[str, Any]:
+        """The conversation's shared state as the root holds it: its plan and tasks."""
+        assert self._state is not None
+        return await self._state()
+
     async def answers(self, agent: str, call_id: str) -> list[str]:
         """The answers ``agent``'s call ``call_id`` has after a stopped turn,
         one per answer, as text: a call answered twice is there twice.
 
-        ADK keeps every agent's conversation, so these are the answers its
-        session holds. Deep Agents keeps only the root's (a sub-agent is
+        ADK keeps every agent's conversation, the root's in the
+        conversation's session and each sub-agent run's in its child session
+        (``adk/sessions.py::child_app``), so these are the answers those
+        sessions hold. Deep Agents keeps only the root's (a sub-agent is
         compiled without a checkpointer), so a call's answer there is the
         one its stack gives it from the record (``OpenCalls``, under the run
         of ``agent``); read it before the next turn ends, which clears it.
@@ -408,12 +455,18 @@ def _settings() -> BaseSettings:
     return BaseSettings(session_store="memory", default_model="claude-sonnet-4-6")
 
 
-def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch) -> Crew:
+def _adk_crew(
+    team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
+    subagents: SubAgentPolicy | None = None,
+) -> Crew:
     from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
+    from agentic_cli.workflow.adk.sessions import child_app
 
     claude = _ClaudeTeam(scripts)
     route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(claude))
-    manager = GoogleADKWorkflowManager(agent_configs=team, settings=_settings())
+    manager = GoogleADKWorkflowManager(
+        agent_configs=team, settings=_settings(), subagents=subagents
+    )
 
     def results_read(name: str, call: int) -> dict[str, str]:
         return _claude_results([body for sent, body in claude.sent if sent == name][call])
@@ -425,12 +478,17 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
         return _claude_result_ids([body for sent, body in claude.sent if sent == name][call])
 
     async def answers(name: str, call_id: str) -> list[str]:
-        session = await manager._session_service.get_session(
-            app_name=manager.session_ref(SESSION, USER).app_name,
-            user_id=USER, session_id=SESSION,
-        )
+        service = manager._session_service
+        app = manager.session_ref(SESSION, USER).app_name
+        sessions = [await service.get_session(app_name=app, user_id=USER, session_id=SESSION)]
+        listed = await service.list_sessions(app_name=child_app(app), user_id=USER)
+        for child in listed.sessions:
+            sessions.append(await service.get_session(
+                app_name=child_app(app), user_id=USER, session_id=child.id,
+            ))
         return [
             json.dumps(response.response)
+            for session in sessions if session is not None
             for event in session.events if event.author == name
             for response in event.get_function_responses() if response.id == call_id
         ]
@@ -445,13 +503,30 @@ def _adk_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypat
     def bodies(name: str) -> list[str]:
         return [json.dumps(body) for sent, body in claude.sent if sent == name]
 
+    def tool_names(name: str, call: int) -> list[str]:
+        body = [body for sent, body in claude.sent if sent == name][call]
+        return [tool["name"] for tool in body.get("tools", [])]
+
+    def message_count(name: str, call: int) -> int:
+        return len([body for sent, body in claude.sent if sent == name][call]["messages"])
+
+    async def state() -> dict[str, Any]:
+        session = await manager._session_service.get_session(
+            app_name=manager.session_ref(SESSION, USER).app_name,
+            user_id=USER, session_id=SESSION,
+        )
+        return {key: session.state[key] for key in ("plan", "tasks") if key in session.state}
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
-        answers, last_message, bodies,
+        answers, last_message, bodies, tool_names, message_count, state,
     )
 
 
-def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch) -> Crew:
+def _deepagents_crew(
+    team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
+    subagents: SubAgentPolicy | None = None,
+) -> Crew:
     from langchain_core.messages import ToolMessage
 
     from agentic_cli.workflow.deepagents import manager as deepagents_manager
@@ -470,7 +545,9 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
                 label=chat.label, script=chat.script, summaries=summaries
             )
     monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
-    manager = deepagents_manager.DeepAgentsWorkflowManager(agent_configs=team, settings=_settings())
+    manager = deepagents_manager.DeepAgentsWorkflowManager(
+        agent_configs=team, settings=_settings(), subagents=subagents
+    )
 
     def results_read(name: str, call: int) -> dict[str, str]:
         return {
@@ -511,9 +588,23 @@ def _deepagents_crew(team: list[AgentConfig], scripts: dict[str, list[Step]], mo
             for request in models.chats[name].requests
         ]
 
+    def tool_names(name: str, call: int) -> list[str]:
+        return models.chats[name].tool_names(call)
+
+    def message_count(name: str, call: int) -> int:
+        return len(models.chats[name].conversation(call))
+
+    async def state() -> dict[str, Any]:
+        from agentic_cli.workflow.deepagents.sessions import run_config
+
+        values = (await manager._root.aget_state(
+            run_config(manager.session_ref(SESSION, USER))
+        )).values
+        return {key: values[key] for key in ("plan", "tasks") if key in values}
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
-        result_ids, answers, last_message, bodies,
+        result_ids, answers, last_message, bodies, tool_names, message_count, state,
     )
 
 
@@ -540,7 +631,8 @@ def runs_of(events: list[WorkflowEvent], status: str | None = None) -> list[Work
 
 #: What each ``contract_whoami`` call saw: the active run, and its own call id.
 SEEN: list[tuple[RunRef | None, str | None]] = []
-#: ``BLOCKING["started"]`` is set when a ``contract_block`` call starts (made per test).
+#: ``BLOCKING["started"]`` is set when a ``contract_block`` call starts (made per
+#: test); ``BLOCKING["stopped"]`` is made by each call and set as it stops.
 BLOCKING: dict[str, asyncio.Event] = {}
 
 
@@ -567,9 +659,13 @@ async def contract_summarize(text: str = "") -> dict:
 
 @register_tool(capabilities=EXEMPT, description="Wait until stopped (a contract-test tool).")
 async def contract_block() -> dict:
-    """Wait, as a slow tool does, until the turn is stopped."""
+    """Wait, as a slow tool does, until the turn is stopped; say so as it stops."""
+    stopped = BLOCKING["stopped"] = asyncio.Event()
     BLOCKING["started"].set()
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        stopped.set()
     return {"success": True}
 
 
@@ -662,19 +758,23 @@ def project(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 async def make_crew(backend, project, monkeypatch):
-    """``make_crew(team, **scripts)``: ``team``'s manager on ``backend``, each
-    agent answering from its script (an agent without one has none); every
-    manager made is cleaned up after the test."""
+    """``make_crew(team, *, subagents=None, **scripts)``: ``team``'s manager on
+    ``backend``, with the sub-agent policy ``subagents``, each agent answering
+    from its script (an agent without one has none); every manager made is
+    cleaned up after the test."""
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
     made: list[Crew] = []
 
-    def make(team: list[AgentConfig], **scripts: list[Step]) -> Crew:
+    def make(
+        team: list[AgentConfig], *, subagents: SubAgentPolicy | None = None,
+        **scripts: list[Step],
+    ) -> Crew:
         complete = {config.name: list(scripts.get(config.name, ())) for config in team}
         complete[SIDE_CALLS] = list(scripts.get(SIDE_CALLS, ()))
         complete[SUMMARIES] = list(scripts.get(SUMMARIES, ()))
         build = _adk_crew if backend == "adk" else _deepagents_crew
-        crew = build(team, complete, monkeypatch)
+        crew = build(team, complete, monkeypatch, subagents)
         made.append(crew)
         return crew
 
@@ -719,6 +819,8 @@ class TestRunIdentity:
         assert started.metadata == {
             "status": RUN_STARTED, "agent": "researcher", "partial": False,
             "call_id": "c1", "title": "Find X.",
+            "brief": {"title": "Find X.", "objective": "Find X.\nUse what you know."},
+            "started_by": "agent:root", "mode": "blocking",
         }
         assert (ended.metadata["status"], ended.metadata["call_id"], ended.metadata["result"]) == (
             RUN_COMPLETED, "c1", "X is 42.",
@@ -727,11 +829,19 @@ class TestRunIdentity:
                     if e.type is EventType.TOOL_CALL and e.metadata.get("tool_call_id") == "c1")
         result = next(i for i, e in enumerate(events)
                       if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1")
-        assert events.index(started) == call + 1
-        assert events.index(ended) == result + 1
+        # The run starts after its call (and the step's usage), before any
+        # event of its own, and ends as it ends: before its parent's result,
+        # which comes when the parent's step is done.
+        own = [i for i, e in enumerate(events) if e.run == RESEARCHER and e not in (started, ended)]
+        assert call < events.index(started) < own[0]
+        assert own[-1] < events.index(ended) < result
         (record,) = crew.records()
         assert (record.ref, record.call_id, record.title, record.status, record.result) == (
             RESEARCHER, "c1", "Find X.", RUN_COMPLETED, "X is 42.",
+        )
+        assert (record.brief, record.started_by, record.mode) == (
+            {"title": "Find X.", "objective": "Find X.\nUse what you know."},
+            "agent:root", "blocking",
         )
         assert record.ended is not None and record.ended >= record.started
 
@@ -884,6 +994,8 @@ class TestRunIdentity:
             # lock, and the fixture's cleanup would wait for it forever.
             await crew.stop(turn)
 
+        # The run's tool in flight stopped before the stop returned.
+        assert BLOCKING["stopped"].is_set()
         (record,) = crew.records()
         assert (record.ref, record.status) == (RESEARCHER, RUN_INTERRUPTED)
         assert record.ended is not None
@@ -912,8 +1024,8 @@ class TestACallIsItsOwnRuns:
         assert results[0].metadata["tool_name"] == "contract_lookup"
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert (ended.run, ended.metadata["result"]) == (RESEARCHER, "X is 42.")
-        assert events.index(ended) == events.index(results[1]) + 1
-        assert crew.results_read("coordinator")["c1"] == "X is 42."
+        assert events.index(results[0]) < events.index(ended) < events.index(results[1])
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
 
     async def test_after_ctrl_c_a_delegation_is_answered_as_interrupted(self, make_crew):
         crew = make_crew(
@@ -1063,7 +1175,7 @@ class TestACallIsItsOwnRuns:
         ]
         assert sorted(crew.result_ids("coordinator")) == ["c1", "c2"]
         answered = crew.results_read("coordinator")
-        assert answered["c1"] == "X is 42."
+        assert envelope_read(answered["c1"])["result"] == "X is 42."
         assert INTERRUPTED_BY_USER in answered["c2"]
 
 
@@ -1090,7 +1202,11 @@ class TestRefusalAndCutOff:
 
         events = await crew.turn()
 
-        assert crew.results_read("coordinator")["c1"] == REFUSAL
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_REFUSED, "partial": False, "result": REFUSAL,
+            "error": "a model refused the request",
+        }
         (ended,) = runs_of(events, RUN_REFUSED)
         assert ended.run == RESEARCHER
         assert (ended.metadata["result"], ended.metadata["error"], ended.metadata["partial"]) == (
@@ -1111,7 +1227,10 @@ class TestRefusalAndCutOff:
 
         events = await crew.turn()
 
-        assert crew.results_read("coordinator")["c1"] == CUT_OFF
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": CUT_OFF, "error": None,
+        }
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert (ended.run, ended.metadata["result"], ended.metadata["partial"]) == (
             RESEARCHER, CUT_OFF, True,
@@ -1140,7 +1259,10 @@ class TestRefusalAndCutOff:
 
         events = await crew.turn()
 
-        read = crew.results_read("coordinator")
+        read = {
+            call: envelope_read(text)["result"]
+            for call, text in crew.results_read("coordinator").items()
+        }
         assert sorted(read[call] for call in ("c1", "c2")) == sorted([REFUSAL, "B is 7."])
         ended = {
             e.metadata["call_id"]: (e.metadata["status"], e.metadata["result"])
@@ -1161,7 +1283,7 @@ class TestRefusalAndCutOff:
 
         events = await crew.turn()
 
-        assert crew.results_read("coordinator")["c1"] == "X is 42."
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert ended.metadata["partial"] is False
         assert [e for e in events if e.type is EventType.ERROR] == []
@@ -1200,21 +1322,18 @@ class TestASubAgentsFailure:
         events = await crew.turn()
 
         (warning,) = [e for e in events if e.type is EventType.ERROR]
-        assert warning.content.startswith("researcher failed: ")
+        assert warning.content.startswith("researcher-1 failed: ")
         assert "max_tokens: 100000 > 64000" in warning.content
         assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
             True, "researcher", RESEARCHER,
         )
-        read = crew.results_read("coordinator")["c1"]
-        assert read.startswith("Error running sub-agent: ")
+        # The parent reads the provider's reason, on both backends.
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["success"], read["status"], read["result"]) == (False, RUN_FAILED, "")
+        assert "max_tokens: 100000 > 64000" in read["error"]
         (ended,) = runs_of(events, RUN_FAILED)
         assert (ended.run, ended.metadata["result"]) == (RESEARCHER, "")
-        assert ended.metadata["error"] == read.removeprefix("Error running sub-agent: ")
-        if crew.backend == "deepagents":
-            # A named difference: ADK's private delegation tool words its
-            # reason "Dynamic node researcher failed" (the provider's reason
-            # reaches the user in the warning above).
-            assert "max_tokens: 100000 > 64000" in read
+        assert ended.metadata["error"] == read["error"]
         assert [r.status for r in crew.records()] == [RUN_FAILED]
         assert [e.content for e in events
                 if e.type is EventType.TEXT and e.run == COORDINATOR] == [
@@ -1261,17 +1380,13 @@ class TestASubAgentsFailure:
                 warning.metadata["agent"], warning.run) == (
             True, "CONTEXT_OVERFLOW", "researcher", RESEARCHER,
         )
-        read = crew.results_read("coordinator")["c1"]
+        # The run fails with the overflow's words, on both backends.
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["error"]) == (RUN_FAILED, warning.content)
         (ended,) = [e for e in runs_of(events) if e.metadata["status"] != RUN_STARTED]
-        if crew.backend == "adk":
-            # A named difference: ADK's overflow handler answers the
-            # sub-agent's model call with text, so its run completes; on
-            # Deep Agents the parent reads the error, and the run fails.
-            assert read.startswith("I could not do this task: the request no longer fits ")
-            assert ended.metadata["status"] == RUN_COMPLETED
-        else:
-            assert read.startswith("Error running sub-agent: ")
-            assert ended.metadata["status"] == RUN_FAILED
+        assert (ended.metadata["status"], ended.metadata["error"]) == (
+            RUN_FAILED, warning.content
+        )
         assert [e.content for e in events
                 if e.type is EventType.TEXT and e.run == COORDINATOR] == [
             "The researcher could not do it."
@@ -1301,16 +1416,21 @@ class TestASubAgentsFailure:
         leaf = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1",
                       parent_run="middle-1#1", depth=2)
         (warning,) = [e for e in events if e.type is EventType.ERROR]
-        assert warning.content.startswith("leaf failed: ")
+        assert warning.content.startswith("leaf-1 failed: ")
         assert "overloaded" in warning.content
         assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
             True, "leaf", leaf,
         )
-        assert crew.results_read("middle")["m1"].startswith("Error running sub-agent: ")
+        # The middle reads why its leaf failed: the provider's reason.
+        read = envelope_read(crew.results_read("middle")["m1"])
+        assert read["status"] == RUN_FAILED
+        assert "overloaded" in read["error"]
         assert [(e.run, e.metadata["status"]) for e in runs_of(events)] == [
             (middle, RUN_STARTED), (leaf, RUN_STARTED), (leaf, RUN_FAILED), (middle, RUN_COMPLETED),
         ]
-        assert crew.results_read("coordinator")["c1"] == "The leaf could not look X up."
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == (
+            "The leaf could not look X up."
+        )
         assert [e.content for e in events
                 if e.type is EventType.TEXT and e.run == COORDINATOR] == [
             "Planned without the leaf."
@@ -1352,10 +1472,11 @@ class TestDelegationResult:
             e for e in events
             if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
         ]
-        # The notice is one line, longer than a summary: it is cut.
+        # The notice is one line, longer than a summary: it is cut. A refused
+        # run did not complete: its result fails, as its envelope says.
         assert "\n" not in REFUSAL and len(REFUSAL) > TOOL_SUMMARY_MAX_LENGTH
-        assert (result.content, result.metadata["success"]) == (
-            REFUSAL[:TOOL_SUMMARY_MAX_LENGTH] + "...", True,
+        assert (result.content, result.metadata["success"], result.metadata["error"]) == (
+            REFUSAL[:TOOL_SUMMARY_MAX_LENGTH] + "...", False, "a model refused the request",
         )
 
     async def test_a_cut_delegation_shows_the_kept_texts_first_line(self, make_crew):
@@ -1371,7 +1492,7 @@ class TestDelegationResult:
             e for e in events
             if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
         ]
-        assert crew.results_read("coordinator")["c1"] == CUT_OFF
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == CUT_OFF
         assert (result.content, result.metadata["success"]) == ("X is", True)
 
     async def test_a_failed_delegation_shows_why(self, make_crew):
@@ -1387,17 +1508,11 @@ class TestDelegationResult:
             e for e in events
             if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
         ]
-        read = crew.results_read("coordinator")["c1"]
-        reason = read.removeprefix("Error running sub-agent: ")
+        reason = envelope_read(crew.results_read("coordinator")["c1"])["error"]
         first = truncate(reason.strip().splitlines()[0], TOOL_SUMMARY_MAX_LENGTH)
         assert result.content == f"Failed: {first}"
-        assert (result.metadata["success"], result.metadata["error"]) == (False, read)
-        if crew.backend == "adk":
-            # A named difference: ADK's private delegation tool words the
-            # parent's reason itself.
-            assert result.content == "Failed: Dynamic node researcher failed"
-        else:
-            assert "overloaded" in reason
+        assert (result.metadata["success"], result.metadata["error"]) == (False, reason)
+        assert "overloaded" in reason  # the provider's own reason, on both backends
 
     async def test_an_answer_that_looks_like_a_failed_result_is_an_answer(self, make_crew):
         """A sub-agent's answer is text, never read for success: JSON that
@@ -1416,7 +1531,7 @@ class TestDelegationResult:
             if e.type is EventType.TOOL_RESULT and e.metadata.get("tool_call_id") == "c1"
         ]
         (ended,) = runs_of(events, RUN_COMPLETED)
-        assert crew.results_read("coordinator")["c1"] == answer
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == answer
         assert (ended.run, ended.metadata["result"]) == (RESEARCHER, answer)
         assert "error" not in ended.metadata
         assert (result.content, result.metadata["success"]) == (answer, True)
@@ -1873,3 +1988,346 @@ class TestDialogsNameTheRun:
         }
         assert "Permission denied: no rule + user denied" in read["r2"]
         assert "Permission denied" not in read["r1"]
+
+
+# -- the framework's task: the brief in, the envelope out, the same on both backends ------
+
+
+@register_tool(capabilities=EXEMPT, description="Echo a value (a contract-test tool).")
+def contract_echo(q: str = "") -> dict:
+    """Echo ``q`` back, marked: what a run reads of its own call."""
+    return {"success": True, "echo": f"echo-{q}"}
+
+
+#: ``contract_echo_together``'s calls: ``TOGETHER["open"]`` in flight now,
+#: ``TOGETHER["most"]`` the most at once (made per test).
+TOGETHER: dict[str, int] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Echo once two calls are in (a contract-test tool).")
+async def contract_echo_together(q: str = "") -> dict:
+    """Echo ``q`` back, marked, once two calls are in flight at once: a
+    barrier, so two runs' calls are open together before either answers."""
+    TOGETHER["open"] += 1
+    TOGETHER["most"] = max(TOGETHER["most"], TOGETHER["open"])
+    try:
+        await until(lambda: TOGETHER["most"] >= 2, within=10)
+    finally:
+        TOGETHER["open"] -= 1
+    return {"success": True, "echo": f"echo-{q}"}
+
+
+@register_tool(capabilities=EXEMPT, description="Wait for a run to end (a contract-test tool).")
+async def contract_await_a_finished_run() -> dict:
+    """Wait until a run of this conversation has completed, as a slow tool would."""
+    runs = get_service(WORKFLOW).agent_runs
+    conversation = get_active_turn()
+    for _ in range(500):
+        if any(record.status == RUN_COMPLETED for record in runs.records(conversation)):
+            return {"success": True}
+        await asyncio.sleep(0.01)
+    return {"success": False, "error": "no run completed"}
+
+
+class TestTheTaskTool:
+    async def test_the_delegation_tool_is_task_on_both(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("coordinator") == ["contract_whoami", "task"]
+        assert "task" not in crew.tool_names("researcher")
+
+    async def test_a_sub_agents_first_request_is_its_task_message(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate(
+                "researcher", "Find X.", "c1", title="Find X", deliverable="One number.",
+                constraints="Use the handbook.", known="It is not 41.", done_when="X is named.",
+            )), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.message_count("researcher", 0) == 1
+        assert crew.last_message("researcher", 0) == (
+            "# Task: Find X\n\n## Objective\nFind X.\n\n## Deliverable\nOne number.\n\n"
+            "## Constraints\nUse the handbook.\n\n## What is already known\nIt is not 41.\n\n"
+            "## Done when\nX is named."
+        )
+        (started,) = runs_of(events, RUN_STARTED)
+        assert started.metadata["brief"] == {
+            "title": "Find X", "objective": "Find X.", "deliverable": "One number.",
+            "constraints": "Use the handbook.", "known": "It is not 41.",
+            "done_when": "X is named.",
+        }
+
+    async def test_a_brief_that_misses_a_required_field_starts_no_run(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", brief_required=("objective", "deliverable"))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("I will brief it again.")],
+            researcher=[says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "error": "The brief for 'researcher' is missing: deliverable.",
+        }
+        assert runs_of(events) == []
+        assert crew.records() == []
+        assert crew.requests("researcher") == 0
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT]
+        assert result.metadata["success"] is False
+
+    async def test_the_envelope_of_a_completed_run(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT]
+        assert result.metadata["result"] == envelope_read(crew.results_read("coordinator")["c1"])
+
+
+class TestEachRunEndsAtItsOwnEnd:
+    async def test_of_two_parallel_delegations_the_fast_ones_run_ends_first(self, make_crew):
+        """The slow run waits until the fast one has ended: its end comes
+        while the slow one still works, not with its sibling's."""
+        crew = make_crew(
+            [
+                agent("coordinator", sub_agents=("researcher", "waiter")),
+                agent("researcher"),
+                agent("waiter", tools=(contract_await_a_finished_run,)),
+            ],
+            coordinator=[calls(delegate("researcher", "Fast.", "c1"),
+                               delegate("waiter", "Slow.", "c2")),
+                         says("Both.")],
+            researcher=[says("Fast done.")],
+            waiter=[calls(use("contract_await_a_finished_run", "w1")), says("Slow done.")],
+        )
+
+        events = await crew.turn()
+
+        ends = [(e.run.instance, events.index(e)) for e in runs_of(events, RUN_COMPLETED)]
+        assert [instance for instance, _ in ends] == ["researcher-1", "waiter-1"]
+        (waited,) = [i for i, e in enumerate(events)
+                     if e.type is EventType.TOOL_RESULT and e.metadata["tool_call_id"] == "w1"]
+        assert ends[0][1] < waited < ends[1][1]
+        assert json.loads(crew.results_read("waiter", 1)["w1"]) == {"success": True}
+
+
+class TestSharedState:
+    async def test_the_plan_reaches_a_run_and_its_tasks_come_back(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
+             agent("researcher", include_state_tools=True)],
+            coordinator=[calls(use("save_plan", "c0", content="- [ ] find X")),
+                         calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("get_plan", "r1")),
+                        calls(use("save_tasks", "r2", tasks=[
+                            {"description": "find X", "status": "completed"},
+                        ])),
+                        says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert "find X" in crew.results_read("researcher", 1)["r1"]
+        state = await crew.state()
+        assert state["plan"] == "- [ ] find X"
+        assert [task["description"] for task in state["tasks"]] == ["find X"]
+
+
+class TestAnInheritingRun:
+    async def test_it_reads_the_conversation_and_its_task_message_ends_with_the_note(
+        self, make_crew
+    ):
+        from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
+
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", inherit_context=True)],
+            coordinator=[says("Noted, Ada."),
+                         calls(delegate("researcher", "Find the code.", "c1")), says("Done.")],
+            researcher=[says("The code is 7.")],
+        )
+
+        await crew.turn("My name is Ada and the code is 7.")
+        await crew.turn("Have the researcher find the code.")
+
+        (first,) = crew.bodies("researcher")
+        assert "My name is Ada and the code is 7." in first
+        assert "Noted, Ada." in first
+        last = crew.last_message("researcher", 0)
+        assert last == task_message(
+            Brief(title="Find the code.", objective="Find the code."), inherit=True
+        )
+        assert last.endswith(INHERITED_CONTEXT_NOTE)
+
+    async def test_one_that_writes_no_text_answers_nothing_of_its_parents(self, make_crew):
+        """Its result is what it wrote: none of the conversation it read,
+        the parent's earlier reply included, is its answer."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", inherit_context=True)],
+            coordinator=[says("Noted, Ada. The code is 7."),
+                         calls(delegate("researcher", "Find the code.", "c1")), says("Done.")],
+            researcher=[says("")],
+        )
+
+        await crew.turn("My name is Ada and the code is 7.")
+        events = await crew.turn("Have the researcher find the code.")
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"]) == (RUN_COMPLETED, "")
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                     and e.metadata.get("tool_call_id") == "c1"]
+        assert result.content == "No answer"
+        assert [r.result for r in crew.records()] == [""]
+
+
+class TestRunsOfOneTypeWithTheSameCallIds:
+    """Two instances of one type at once, on a provider that numbers its call
+    ids alike in both (``call_0``): each run reads its own call's result,
+    never the other's."""
+
+    async def test_each_run_keeps_its_own_results(self, make_crew):
+        TOGETHER.update(open=0, most=0)
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_echo_together,))],
+            coordinator=[calls(delegate("researcher", "Find A.", "c1"),
+                               delegate("researcher", "Find B.", "c2")),
+                         says("Both.")],
+            researcher=[calls(use("contract_echo_together", "call_0", q="A")),
+                        calls(use("contract_echo_together", "call_0", q="B")),
+                        says("One done."), says("The other done.")],
+        )
+
+        events = await crew.turn()
+
+        # Both calls named call_0 were open at once (the barrier held each
+        # until the other came in), yet each run read its own result.
+        assert TOGETHER["most"] == 2
+
+        echoed = [
+            {value for value in ("echo-A", "echo-B") if value in body}
+            for body in crew.bodies("researcher")
+        ]
+        assert sorted(map(sorted, filter(None, echoed))) == [["echo-A"], ["echo-B"]]
+        assert sorted(r.status for r in crew.records()) == [RUN_COMPLETED, RUN_COMPLETED]
+        read = crew.results_read("coordinator")
+        assert sorted(envelope_read(read[call])["run"] for call in ("c1", "c2")) == [
+            "researcher-1#1", "researcher-2#1",
+        ]
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+
+class TestAnEmptyLastAnswer:
+    """A run's result is its last non-empty text on both backends (Anthropic
+    may end with an empty ``end_turn`` after a final tool call), and a run
+    with no text at all completes with an empty result, shown as
+    ``No answer``."""
+
+    async def test_a_trailing_empty_answer_leaves_the_last_text(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1"), text="X is 42."), says("")],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert ended.metadata["result"] == "X is 42."
+
+    async def test_no_text_at_all_is_an_empty_result_shown_as_no_answer(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["success"], read["result"]) == (RUN_COMPLETED, True, "")
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                     and e.metadata.get("tool_call_id") == "c1"]
+        assert (result.content, result.metadata["success"]) == ("No answer", True)
+        assert [r.status for r in crew.records()] == [RUN_COMPLETED]
+
+
+class TestALongResult:
+    """A run's envelope passes the tool result cap as a dict on both backends:
+    the parent reads JSON still, the cut and the note in it."""
+
+    async def test_an_envelope_over_the_cap_is_still_the_envelope(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42. " * 500)],
+        )
+        crew.manager.settings.tool_result_max_chars = 2_000
+
+        events = await crew.turn()
+
+        sent = crew.results_read("coordinator")["c1"]
+        read = read_envelope(sent)
+        assert read is not None, sent[:300]
+        assert len(sent) <= 2_000
+        assert (read["success"], read["agent"], read["status"]) == (
+            True, "researcher-1", RUN_COMPLETED,
+        )
+        assert read["result"].startswith("X is 42.") and "characters cut]" in read["result"]
+        assert read["truncated"].startswith("Cut: ") and "tool-output/task-" in read["truncated"]
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                     and e.metadata.get("tool_call_id") == "c1"]
+        assert result.metadata["result"] == read
+        assert result.metadata["success"] is True
+        assert result.content.startswith("X is 42.")
+
+    async def test_its_text_is_sent_as_written(self, make_crew):
+        """Not as JSON escapes, which make a non-Latin answer six times as long."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("答案是四十二。")],
+        )
+
+        await crew.turn()
+
+        sent = crew.results_read("coordinator")["c1"]
+        assert "答案是四十二。" in sent
+        assert envelope_read(sent)["result"] == "答案是四十二。"
+
+
+class TestOffTheLoop:
+    async def test_a_delegation_blocks_no_event_loop(self, make_crew):
+        """A delegation, on both backends, runs once under the loop guard."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X")), says("X is 42.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]

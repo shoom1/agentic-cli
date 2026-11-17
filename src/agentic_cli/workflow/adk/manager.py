@@ -5,6 +5,11 @@ agent orchestration, session management, and event streaming using Google ADK.
 
 Domain applications define agents using AgentConfig and pass them to GoogleADKWorkflowManager.
 
+Each agent built from a config is built on its own. The root runs on the
+conversation's runner; a delegating agent has the framework's ``task`` tool
+(``adk/task_tool.py``), and each sub-agent type runs on a runner of its own,
+each run on a child session of the conversation's (``_run_agent``).
+
 Deep Agents is the other backend (``workflow/deepagents/manager.py``;
 LangGraph, deprecated, goes in 0.8.0). Each builds on
 ``base_manager.BaseWorkflowManager``, which holds the lifecycle and the turn,
@@ -17,6 +22,7 @@ import asyncio
 import contextlib
 import functools
 import time
+from types import MappingProxyType
 from typing import TYPE_CHECKING, AsyncGenerator, Any, Callable
 
 from google.genai import types
@@ -35,8 +41,12 @@ from agentic_cli.workflow import live_events
 from agentic_cli.workflow.base_manager import BaseWorkflowManager, Closer
 from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import WorkflowEvent, EventType
-from agentic_cli.workflow.config import AgentConfig, AgentGraph, validate_agent_graph
-from agentic_cli.workflow.adk import delegation
+from agentic_cli.workflow.config import (
+    AgentConfig,
+    AgentGraph,
+    AgentGraphError,
+    validate_agent_graph,
+)
 from agentic_cli.workflow.adk.call_clock import CallClock, CallLatencyPlugin, CallSentPlugin
 from agentic_cli.workflow.adk.compaction import (
     SUMMARY_MAX_TOKENS,
@@ -51,7 +61,6 @@ from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.interrupted_calls_plugin import (
     InterruptedCallsPlugin,
     left_open,
-    returned,
     unsealed,
 )
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
@@ -60,11 +69,16 @@ from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.sessions import (
     ServiceSessions,
+    child_app,
+    child_session_id,
     make_session_service,
     turn_state,
 )
+from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
-from agentic_cli.workflow.agents.runs import RUN_STARTED
+from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed
+from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
+from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.workflow.outside_content import (
     BEFORE_0_7_0,
     JOB_RESULT,
@@ -202,6 +216,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     #: The reply set of the build ``_build_app`` is making, or made last, for
     #: the parts it builds through hooks (the gate, ``_init_plugins``).
     _reply_agents: frozenset[str] | None = None
+    #: Every agent built from a config, by name, and each sub-agent type's
+    #: runner: what a sub-agent run runs on (``_run_agent``). Empty while there
+    #: is no app; class defaults, as above (read-only: each build sets its own).
+    _agents: "Mapping[str, LlmAgent]" = MappingProxyType({})
+    _agent_runners: "Mapping[str, Runner]" = MappingProxyType({})
 
     def __init__(
         self,
@@ -312,14 +331,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return text
 
     def _detach_backend(self) -> list[Closer]:
-        """The runner and the agent tree, and the LLM logging plugin.
+        """The runners and the agents, and the LLM logging plugin.
 
-        The runner closes the agents' toolsets (an MCP server stops with its
-        toolset) and plugins; the session service it only flushes, so one a
-        model switch keeps stays open. It closes before the session service
-        (the base runs the backend's closers before the store's).
+        The conversation's runner and each sub-agent type's: a runner closes
+        its agent's toolsets (an MCP server stops with its toolset) and
+        plugins; the session service it only flushes, so one a model switch
+        keeps stays open. They close before the session service (the base
+        runs the backend's closers before the store's).
         """
         runner, self._runner = self._runner, None
+        runners, self._agent_runners = self._agent_runners, MappingProxyType({})
+        self._agents = MappingProxyType({})
         self._root_agent = None
         self._build = None
         self._reply_agents = None
@@ -329,7 +351,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if self._llm_logging_plugin:
             self._llm_logging_plugin.clear()
             self._llm_logging_plugin = None
-        return [("runner", functools.partial(self._aclose_owned, runner, "runner"))]
+        return [
+            ("runner", functools.partial(self._aclose_owned, runner, "runner")),
+            *(
+                (f"runner {name}", functools.partial(self._aclose_owned, owned, f"runner {name}"))
+                for name, owned in runners.items()
+            ),
+        ]
 
     def _detach_store(self) -> list[Closer]:
         """The session service.
@@ -414,8 +442,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``PermissionPlugin``, which resolves the same identity.
 
         Only the root agent's tools are wrapped (``_build_agent``): ADK pauses
-        the whole invocation on a pending long-running call, inside a
-        delegation too, so a sub-agent's starter stays an ordinary call that
+        the whole invocation on a pending long-running call, and a sub-agent
+        run is an invocation of its own runner that its parent's ``task``
+        call waits for, so a sub-agent's starter stays an ordinary call that
         returns the job's id, and its finished job is told to the root
         (``resume_with_job_result``).
         """
@@ -440,73 +469,64 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self,
         config: "AgentConfig",
         service_map: dict,
-        sub_agents: list[Agent] | None = None,
         *,
         root: bool,
+        types: "Mapping[str, AgentConfig] | None" = None,
     ) -> Agent:
-        """Construct one ``LlmAgent`` from a config (with resolved sub-agents).
+        """Construct one ``LlmAgent`` from a config, on its own.
 
         Its model, generation settings and thinking come from the model
         initialization resolved for it, built by the model factory.
 
-        Every agent but the root is a sub-agent its parent delegates to and
-        gets back in the same turn (``single_turn``, no transfers; its
-        ``inherit_context`` decides what it sees; a placeholder description
-        when it has none), and ADK offers each of ``sub_agents`` to this agent
-        as a tool named after it; those tools are bound to the delegation
-        declaration as soon as this agent exists. Only the root's
+        No agent has ADK ``sub_agents``, so ADK offers none of them
+        ``transfer_to_agent``. An agent that delegates (``types``: its
+        sub-agents, by name) gets the framework's ``task`` tool
+        (``adk/task_tool.py::TaskTool``), whose calls run each sub-agent on
+        that sub-agent type's own runner (``_run_agent``). Only the root's
         long-running tools are wrapped: a pending one would pause a
-        delegation for good. See ``workflow/adk/delegation.py``. The root
-        stays in chat mode.
+        sub-agent's run for good.
 
         Raises:
-            AgentGraphError: A sub-agent is named like one of this agent's
-                own tools (its MCP tools, known only once they connect,
-                excepted).
+            AgentGraphError: A delegating agent's own tools include one named
+                ``task``, its delegation tool's name (its MCP tools, known
+                only once they connect, excepted).
         """
-        children = sub_agents or []
         built = build_adk_model(
             self._resolved_models[config.name], settings=self._settings, app_name=self.app_name
         )
         tools = self._assemble_agent_tools(config, service_map)
         if root:
             tools = self._wrap_long_running(tools)
-        delegation.check_delegation_names(config, tools)
-        fields = {"description": config.description}
+        if types:
+            if TASK_TOOL in _tool_names(tools):
+                raise AgentGraphError(
+                    f"Agent {config.name!r} delegates to sub-agents through a tool named "
+                    f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
+                )
+            tools = [*tools, TaskTool(config.name, types, lambda: self._delegations)]
         instruction = config.get_prompt(self._settings)
-        if not root:
-            fields.update(delegation.subagent_fields(config))
-            instruction = delegation.subagent_instruction(config, instruction)
-        agent = LlmAgent(
+        return LlmAgent(
             name=config.name,
             model=built.model,
             # None at all for no prompt: ADK adds an instruction only when
             # there is one, and a provider always looks like one.
             instruction=_as_written(instruction) if instruction else "",
             tools=tools,
-            sub_agents=children,
             planner=built.planner,
             generate_content_config=built.generate_content_config,
-            **fields,
+            description=config.description,
         )
-        delegation.bind_delegation_tools(agent, children)
-        return agent
 
     def _create_agents(self) -> Agent:
-        """Create the agent hierarchy from configs, in dependency order.
+        """Create every agent from its config, each on its own; the root.
 
         The graph is the one this initialization validated before anything
         was allocated (``_validate_agent_graph``), so duplicate names,
         dangling ``sub_agents`` references, self-references, cycles and
-        shapes ADK cannot represent failed there with the offending agent
-        named, instead of silently producing a coordinator with missing
-        children. Called outside an initialization, it validates the graph
-        itself.
-
-        Construction then follows a topological order, so an agent is always
-        built after the agents it delegates to — the previous leaves-then-
-        coordinators split silently dropped a sub-agent that was itself a
-        coordinator.
+        shapes the framework refuses failed there with the offending agent
+        named. Called outside an initialization, it validates the graph
+        itself. Every agent is kept by name (``_agents``): each sub-agent
+        type gets a runner of its own (``_do_initialize``).
 
         Prompt factories are called under this manager's settings context (see
         ``AgentConfig.get_prompt``), so a prompt that reads settings sees the
@@ -524,7 +544,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if graph is None:
             graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
 
-        agent_map: dict[str, Agent] = {}
+        agents: dict[str, LlmAgent] = {}
         service_map = self._get_service_tool_map()
 
         from agentic_cli.config import SettingsContext
@@ -533,19 +553,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         with SettingsContext(self._settings):
             for name in graph.build_order:
                 config = graph.config_map[name]
-                sub_agents = [agent_map[sub] for sub in config.sub_agents]
-                agent_map[name] = self._build_agent(
-                    config, service_map, sub_agents, root=name == graph.root_name
+                types = {sub: graph.config_map[sub] for sub in config.sub_agents}
+                agents[name] = self._build_agent(
+                    config, service_map, root=name == graph.root_name, types=types
                 )
                 logger.debug(
                     "agent_created",
                     name=name,
-                    type="coordinator" if sub_agents else "leaf",
-                    sub_agents=[a.name for a in sub_agents],
+                    type="coordinator" if types else "leaf",
+                    sub_agents=list(types),
                 )
 
-        root_agent = agent_map[graph.root_name]
-        logger.info("agents_created", root=root_agent.name, total=len(agent_map))
+        self._agents = agents
+        root_agent = agents[graph.root_name]
+        logger.info("agents_created", root=root_agent.name, total=len(agents))
         return root_agent
 
     def _init_plugins(self) -> list:
@@ -614,16 +635,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         app's) run after every plugin, and only when none answered. So:
 
         - ``MainAgentPlugin`` first: it records the running agent, which the
-          summarizer reads, and makes its sub-agent run the active run.
+          summarizer reads.
         - ``CallLatencyPlugin``: each model call's answer marked with how
           long the call took (``workflow/adk/call_clock.py``), before any
           plugin could replace the answer; it returns nothing.
         - ``_init_plugins``: the permission gate (a denial is the call's
           answer), the tool-error answer, the raw log as the model answers.
-        - ``SubAgentOutcomePlugin``, when the tree delegates: a sub-agent's
-          final answer that a model refused or cut is said so (and marked) as
-          its parent reads it; after the raw log, which records the answer as
-          given, and it returns nothing, so every plugin after it still runs.
         - ``ForeignReasoningPlugin``: a model switch keeps the session, and no
           model is sent the thoughts another provider wrote (which it would
           refuse), before the request is measured.
@@ -648,23 +665,82 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         - ``CallSentPlugin`` last: each call's clock starts as its request
           goes out, after every plugin that edits it.
 
+        A sub-agent type's runner has a chain of its own, in the same order
+        (``_agent_plugin_chain``).
+
         Args:
             replies: The agents that reply to the user (``build.reply_agents``).
             cache: The app's context cache, or None.
         """
-        from agentic_cli.workflow.adk.build import delegated_agents, own_after_tool_agents
-        from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
+        from agentic_cli.workflow.adk.build import own_after_tool_agents
 
         root = self._root_agent
+        return self._chain(
+            head=self._init_plugins(),
+            root=root.name,
+            replies=replies,
+            cache=cache,
+            skip_agents=own_after_tool_agents(root),
+            memory_index=self._memory_index_wanted(root.name),
+        )
+
+    def _agent_plugin_chain(self, agent: LlmAgent) -> list:
+        """The plugin chain of a sub-agent type's runner: the app's, made for a sub-agent.
+
+        Its own instances, in the app's order, but for what a sub-agent is:
+
+        - the permission gate writes no outside-content mark at a model
+          call (a run's mark reaches the conversation with its result,
+          ``adk/task_tool.py``), and the raw log is the app's own instance
+          (one buffer, which the manager drains, ``_report_raw_log``);
+        - ``SubAgentOutcomePlugin`` after the raw log: the run's final
+          answer that a model refused or cut is said so, and marked, as its
+          parent reads it;
+        - no memory index, and an overflow handler with no main agent: a
+          sub-agent's overflow, trimmed and retried once, then answers its
+          call with an error response (``CONTEXT_OVERFLOW``) that ends the
+          run failed.
+
+        Every plugin's per-call state is kept by call or by invocation, and
+        each lets go of only what its own run left: two runs of one type
+        run on this one chain at once, and a provider may number their call
+        ids alike.
+        """
+        from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
+        from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
+
+        head: list = [
+            PermissionPlugin(self._open_calls, marks=self._outside_marks),
+            ToolErrorPlugin(self._open_calls),
+        ]
+        if self._llm_logging_plugin is not None:
+            head.append(self._llm_logging_plugin)
+        head.append(SubAgentOutcomePlugin())
+        return self._chain(
+            head=head,
+            root=None,
+            replies=frozenset(),
+            cache=self._build.cache if self._build is not None else None,
+            skip_agents=frozenset(),
+            memory_index=False,
+        )
+
+    def _chain(
+        self,
+        *,
+        head: list,
+        root: str | None,
+        replies: frozenset[str],
+        cache: ContextCacheConfig | None,
+        skip_agents: frozenset[str],
+        memory_index: bool,
+    ) -> list:
+        """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on."""
+        from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
+
         kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
         clock = CallClock()
-        plugins: list = [
-            MainAgentPlugin(self.agent_runs), CallLatencyPlugin(clock), *self._init_plugins()
-        ]
-        if delegated_agents(root):
-            from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
-
-            plugins.append(SubAgentOutcomePlugin())
+        plugins: list = [MainAgentPlugin(), CallLatencyPlugin(clock), *head]
         plugins.append(ForeignReasoningPlugin({name: kind.value for name, kind in kinds.items()}))
         if cache is not None:
             from agentic_cli.workflow.adk.context_cache_plugin import ContextCachePlugin
@@ -673,17 +749,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         cap = ToolResultCapPlugin(
             self._settings.tool_result_max_chars,
             tool_output_dir(self._settings.app_name),
-            skip_agents=own_after_tool_agents(root),
+            skip_agents=skip_agents,
         )
-        plugins.append(InterruptedCallsPlugin(self._open_calls, cap, runs=self.agent_runs))
+        plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
         plugins.append(cap)
-        if self._memory_index_wanted(root.name):
+        if memory_index and root is not None:
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
 
-            plugins.append(MemoryIndexPlugin(root=root.name, index_for=self._memory_index_now))
+            plugins.append(MemoryIndexPlugin(root=root, index_for=self._memory_index_now))
         fit_guard = FitGuardPlugin(self._budgets, kinds)
         plugins.append(OverflowPlugin(
-            root=root.name,
+            root=root,
             reply_agents=replies,
             budgets=self._budgets,
             kinds=kinds,
@@ -741,8 +817,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         (``NoAfterTurnCompactionRunner``), and an event processor that knows
         which agents reply.
         """
-        from agentic_cli.workflow.adk.build import delegated_agents
-
         logger.info("initializing_services", app_name=self.app_name)
 
         # Create the session service (durable DatabaseSessionService by
@@ -769,6 +843,23 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             events_compaction_config=build.compaction,
         )
         self._runner = NoAfterTurnCompactionRunner(app=app, session_service=self._session_service)
+        # Each sub-agent type's runner, on child sessions of the same
+        # service: its own app (never listed as a conversation) and chain,
+        # the app's context cache, no summary (the fit guard trims it).
+        self._agent_runners = {
+            name: NoAfterTurnCompactionRunner(
+                app=App(
+                    name=child_app(self.app_name),
+                    root_agent=agent,
+                    plugins=self._agent_plugin_chain(agent),
+                    context_cache_config=build.cache,
+                    events_compaction_config=None,
+                ),
+                session_service=self._session_service,
+            )
+            for name, agent in self._agents.items()
+            if name != build.root.name
+        }
         # A call's usage names its agent's own model and context numbers (the
         # default model stands in for an agent without one); only the agents
         # that reply write the reply, another's text is a sub-agent's work.
@@ -779,8 +870,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             models=build.models,
             budgets=self._budgets,
             reply_agents=build.reply_agents,
-            runs=self.agent_runs,
-            delegates=delegated_agents(build.root),
             kinds=self._agent_kinds(),
             ledgers=self._usage_ledgers,
         )
@@ -1139,11 +1228,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """Answer, from the record, the calls a stopped turn's seals missed; then clear it.
 
         ADK seals a stopped invocation's open calls pairing a result with a
-        call by id alone, so a call whose id a sub-agent's result used is
+        call by id alone, so a call whose id another branch's result used is
         left open (``interrupted_calls_plugin.unsealed``): answered here, a
-        finished one keeps its result and one at its prompt was not run.
-        Then each open run whose delegation returned ends with its result
-        (``_end_returned_runs``), before the record is cleared. Run
+        finished one keeps its result and one at its prompt was not run. Run
         shielded, so a second Ctrl+C neither loses the answers nor clears
         the record before they are read. Answers that cannot be written are
         given at the next turn (``left_open``), from no record.
@@ -1152,10 +1239,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             session = await self._session_service.get_session(
                 app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
             )
-            answers = (
-                unsealed(session.events, self._open_calls, self.agent_runs)
-                if session is not None else []
-            )
+            answers = unsealed(session.events, self._open_calls) if session is not None else []
             for event in answers:
                 await self._session_service.append_event(session, event)
             if answers:
@@ -1167,27 +1251,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 "unsealed_calls_not_answered", error_type=type(error).__name__, exc_info=error,
             )
         finally:
-            self._end_returned_runs(ref)
             self._open_calls.clear(ref)
-
-    def _end_returned_runs(self, ref: SessionRef) -> None:
-        """End each open run whose delegation returned, from the record, before it is cleared.
-
-        ADK hands a model step's parallel function responses back in one
-        event, after the last one returns, so a delegation that finished
-        beside a slower one has no result event when the turn is stopped or
-        fails first. Its result is in the record, under its parent's run:
-        its run ends as that result says (``end_returned_run``: refused or
-        partial from its outcome mark), and not ``interrupted`` with the
-        runs the turn leaves open (the base's ``_turn``). Called after
-        ``unsealed``, which names each branch's run while it is open.
-        """
-        for record in self.agent_runs.records(ref):
-            if record.status != RUN_STARTED or not record.call_id:
-                continue
-            response = returned(self._open_calls, record.call_id, record.ref.parent_run)
-            if response is not None:
-                self._event_processor.end_returned_run(record.ref, record.call_id, response)
 
     def _seed_outside_content(self, ref: SessionRef, session: Session) -> dict[str, Any]:
         """Seed the marks from the session's state; the state delta a turn writes.
@@ -1343,8 +1407,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # id alone): it is answered here, from the record, before the
                 # record is cleared. One a failure left open is answered at
                 # the next turn (left_open) as interrupted: the state it
-                # changed, which ADK stores with its result, is gone. Either
-                # way a delegation that returned ends its run with its result.
+                # changed, which ADK stores with its result, is gone.
                 ref = self.session_ref(session_id, user_id)
                 if aborted.is_set():
                     # Should those answers not be written, left_open gives
@@ -1352,7 +1415,6 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     self._open_calls.cancelled(ref)
                     await asyncio.shield(self._answer_unsealed(ref))
                 else:
-                    self._end_returned_runs(ref)
                     self._open_calls.clear(ref)
 
         # Drain any remaining LLM events after processing completes
@@ -1393,6 +1455,118 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         async for workflow_event in self._event_processor.process_event(adk_event, session_id):
             yield workflow_event
+
+    async def _run_agent(self, run: AgentRun) -> RunAnswer:
+        """Run one sub-agent run on its type's runner, on a child session (the base's hook).
+
+        In the run's own task (``agents/delegate.py``): the child session
+        (``child_app``, ``child_session_id``: the conversation's id and the
+        run's instance) is made with the shared state the run starts from
+        and, for an inheriting run, the conversation's events
+        (``task_tool.inherited_events``), then the runner runs the task
+        message on it as one invocation. Its events go to the turn's live
+        events as they are made, through a processor made for the run, and
+        so do the raw log's records of its calls. As a turn's runner is, it
+        is stopped with its abort signal set first, so ADK seals the calls
+        it leaves open, in its child session, before the cancel goes on.
+
+        Returns:
+            Its last answer with text, that answer's outcome mark, the shared
+            keys it changed (read back from its child session's state); or,
+            for a reply that is no answer, the error it is.
+
+        Raises:
+            RunFailed: Its request no longer fits its model's window
+                (the overflow handler's answer).
+            ValueError: Its child session's id is longer than ADK stores.
+            Exception: Its model call failed: the provider's error, out of
+                ADK's plugin wrapper (``_plugin_cause``).
+        """
+        conversation = run.conversation
+        if conversation is None:
+            raise RuntimeError("A sub-agent run runs in a conversation's turn.")
+        app = child_app(self.app_name)
+        session_id = child_session_id(conversation.session_id, run.ref.instance)
+        await self._child_session(app, conversation.user_id, session_id, run)
+        build = self._build
+        processor = ADKEventProcessor(
+            model=self.model,
+            root=build.root.name,
+            models=build.models,
+            budgets=self._budgets,
+            reply_agents=build.reply_agents,
+            kinds=self._agent_kinds(),
+            ledgers=self._usage_ledgers,
+            run=run.ref,
+        )
+        aborted = asyncio.Event()
+        stream = self._agent_runners[run.ref.agent].run_async(
+            user_id=conversation.user_id,
+            session_id=session_id,
+            new_message=types.Content(role="user", parts=[types.Part.from_text(text=run.message)]),
+            run_config=self._run_config(),
+            abort_signal=aborted,
+        )
+        try:
+            merging = live_events.merged(stream, live_events.LiveEvents(), on_stop=aborted.set)
+            async with contextlib.aclosing(merging) as items:
+                async for item in items:
+                    self._report_raw_log()
+                    async for event in processor.process_event(item, conversation.session_id):
+                        live_events.report(event)
+        except RuntimeError as error:
+            cause = _plugin_cause(error)
+            if cause is error:
+                raise
+            raise cause from None
+        finally:
+            self._report_raw_log()
+        if processor.failure is not None:
+            error, code = processor.failure
+            if code == OVERFLOW_ERROR_CODE:
+                raise RunFailed(error, code=code)
+            return RunAnswer(text=processor.answer, error=error)
+        ended = await self._session_service.get_session(
+            app_name=app, user_id=conversation.user_id, session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        state = ended.state if ended is not None else {}
+        return RunAnswer(
+            text=processor.answer, outcome=processor.outcome, state=_changed(state, run.state)
+        )
+
+    async def _child_session(
+        self, app: str, user_id: str, session_id: str, run: AgentRun
+    ) -> None:
+        """Make ``run``'s child session: the state it starts from, and an inheriting run's history.
+
+        An instance's session left by an earlier process (instances are
+        numbered per manager, so a new one numbers ``researcher-1`` again)
+        is replaced: nothing reads it.
+        """
+        service = self._session_service
+        stale = await service.get_session(
+            app_name=app, user_id=user_id, session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        if stale is not None:
+            await service.delete_session(app_name=app, user_id=user_id, session_id=session_id)
+        session = await service.create_session(
+            app_name=app, user_id=user_id, session_id=session_id, state=dict(run.state)
+        )
+        for event in run.history or ():
+            await service.append_event(session, event)
+
+    def _report_raw_log(self) -> None:
+        """Report what the raw LLM log holds (a sub-agent run's calls) to the turn's live events.
+
+        One log serves every runner, so its records go out as a sub-agent
+        run's events do, while the conversation's runner waits on the run.
+        """
+        if self._llm_logging_plugin is None:
+            return
+        for record in self._llm_logging_plugin.drain_events():
+            live_events.report(record)
 
     async def _conversation_exists(self, ref: SessionRef) -> bool:
         """Whether ``ref``'s ADK session is stored, with events or none.
@@ -1656,3 +1830,39 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     {"role": "user" if role == "user" else "assistant", "content": text}
                 )
         return out[-limit:]
+
+
+def _tool_names(tools: list[Any]) -> set[str]:
+    """The names an agent's assembled tools are offered by: a function tool's
+    ``__name__``, an ADK tool's ``name``, a skill toolset's tools' names."""
+    from google.adk.tools import BaseTool
+    from google.adk.tools.skill_toolset import SkillToolset
+
+    names: set[str] = set()
+    for tool in tools:
+        if isinstance(tool, SkillToolset):
+            names.update(skill_tool.name for skill_tool in tool._tools)
+        elif isinstance(tool, BaseTool):
+            names.add(tool.name)
+        elif callable(tool):
+            names.add(getattr(tool, "__name__", ""))
+    return names
+
+
+def _changed(state: "Mapping[str, Any]", start: "Mapping[str, Any]") -> dict[str, Any]:
+    """The shared keys ``state`` holds that differ from what a run started from.
+
+    Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
+    private, copied, as the Deep Agents manager's ``_changed`` copies it): a
+    key returned exactly as it was received is no change; ``is True`` takes
+    an ambiguous comparison (an array's) as one.
+    """
+    changed: dict[str, Any] = {}
+    for key in SHARED_KEYS:
+        if key not in state:
+            continue
+        value = state[key]
+        if key in start and (value is start[key] or (value == start[key]) is True):
+            continue
+        changed[key] = value
+    return changed

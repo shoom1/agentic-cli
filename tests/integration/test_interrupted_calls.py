@@ -482,12 +482,9 @@ async def test_a_cancel_during_the_model_call_leaves_a_note(hermetic, monkeypatc
 async def test_a_delegation_cut_off_in_its_sub_agent_is_answered_as_interrupted(
     hermetic, monkeypatch, backend
 ):
-    delegation = "researcher" if backend == "adk" else "task"
-    brief = {"request": "Look."} if backend == "adk" else {
-        "description": "Look.", "subagent_type": "researcher",
-    }
+    brief = {"agent_type": "researcher", "title": "Look", "objective": "Look."}
     claude = serve(monkeypatch, Claude(
-        Coordinate=[calls((delegation, brief, "toolu_d")), say("Back again.")],
+        Coordinate=[calls(("task", brief, "toolu_d")), say("Back again.")],
         Research=[calls(("ic_wait", {}, "toolu_w"))],
     ), backend)
     manager = manager_for(backend, [
@@ -677,15 +674,13 @@ async def saved_tasks(manager, backend: str, session_id: str = "s") -> list:
 
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_a_failed_delegation_keeps_its_siblings_results(hermetic, monkeypatch, backend):
-    """The sub-agent's model fails beside a save_tasks that returned: on Deep
-    Agents the turn fails (on ADK the coordinator is told and goes on). The
-    next turn sends save_tasks' own result, and its tasks are saved."""
+    """The sub-agent's model fails beside a save_tasks that returned: the
+    coordinator is told and goes on, on both backends. The next turn sends
+    save_tasks' own result, and its tasks are saved."""
     tasks = [{"description": "Brew tea", "status": "in_progress"}]
-    delegation = ("researcher", {"request": "Look."}) if backend == "adk" else (
-        "task", {"description": "Look.", "subagent_type": "researcher"})
-    coordinate = [calls(("save_tasks", {"tasks": tasks}, "toolu_t"), (*delegation, "toolu_d"))]
-    if backend == "adk":
-        coordinate.append(say("The research failed."))
+    delegation = ("task", {"agent_type": "researcher", "title": "Look", "objective": "Look."})
+    coordinate = [calls(("save_tasks", {"tasks": tasks}, "toolu_t"), (*delegation, "toolu_d")),
+                  say("The research failed.")]
     claude = serve(monkeypatch, Claude(
         Coordinate=[*coordinate, say("Back again.")],
         Research=[bad_request("The worker's model failed.")],

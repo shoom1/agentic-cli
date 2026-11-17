@@ -24,6 +24,13 @@ manager's (``session_exists``, ``list_sessions``, ``session_info``,
 ``delete_session``) and its reader's alike: ``open_sessions`` opens the
 service of a store from the settings, without the manager, for
 ``workflow/session_readers.py``.
+
+A sub-agent instance's transcript is a child session in the same session
+service: app ``child_app(app_name)`` (``<app>--agents``), session
+``child_session_id(conversation, instance)`` (``<conversation>/<instance>``),
+the conversation's user. Under its own app name it never lists as a
+conversation. ADK keys a session by at most ``MAX_KEY`` characters, so a
+longer id is refused before anything is stored.
 """
 
 from __future__ import annotations
@@ -48,6 +55,31 @@ logger = Loggers.workflow()
 TITLE_KEY = "agentic_cli.title"
 #: How many turns the user ran in it.
 TURNS_KEY = "agentic_cli.turns"
+
+#: What a child session's app name adds to the conversation's app name.
+CHILD_APP_SUFFIX = "--agents"
+#: The longest app name or session id ADK stores (``sessions/schemas/shared.py``).
+MAX_KEY = 128
+
+
+def child_app(app_name: str) -> str:
+    """The app the sub-agent instances of ``app_name``'s conversations are stored under."""
+    return f"{app_name}{CHILD_APP_SUFFIX}"
+
+
+def child_session_id(conversation: str, instance: str) -> str:
+    """The session that holds ``instance``'s transcript in the conversation ``conversation``.
+
+    Raises:
+        ValueError: The id is longer than ADK stores (``MAX_KEY``).
+    """
+    session_id = f"{conversation}/{instance}"
+    if len(session_id) > MAX_KEY:
+        raise ValueError(
+            f"The session of sub-agent {instance} would be {len(session_id)} characters long; "
+            f"ADK stores at most {MAX_KEY}."
+        )
+    return session_id
 
 
 def typed_prompts(events: list["Event"]) -> list[str]:
