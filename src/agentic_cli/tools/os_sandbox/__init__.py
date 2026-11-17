@@ -11,11 +11,15 @@ Usage:
     sandbox = get_os_sandbox()
     policy = OSSandboxPolicy(writable_paths=["/tmp"])
     result = sandbox.wrap_shell_command("echo hello", Path.cwd(), policy)
+    if not result.success:  # result.command is then the bare command
+        raise RuntimeError(result.error)
     # result.command is now "sandbox-exec -p '...' /bin/bash -c 'echo hello'"
-    subprocess.run(result.command, shell=True, timeout=60)
+    proc = subprocess.run(result.command, shell=True, timeout=60)
     # It ended on its own: release what the wrap holds for the run. Not after
-    # a timeout (TimeoutExpired skips this line): see OSSandboxResult.release.
-    result.release()
+    # a timeout (TimeoutExpired skips this line), nor when a signal ended it
+    # (see OSSandboxResult.release).
+    if 0 <= proc.returncode < 128:
+        result.release()
 """
 
 from __future__ import annotations

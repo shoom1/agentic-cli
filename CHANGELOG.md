@@ -2806,11 +2806,13 @@ step; each entry says what to use instead.
   folder bound read-only, which the wrap makes and removes once the last run
   holding it is over (`OSSandboxResult.release`, which the executor calls):
   bwrap would have left an empty file there, and an empty `.git` file breaks
-  git ("invalid gitfile format"). The code runs as the sandbox's pid 1
+  git ("invalid gitfile format"). A run never removes a folder it did not
+  make: a protected folder that is there and empty (an empty `.git`) is bound
+  read-only and left as it was. The code runs as the sandbox's pid 1
   (`--as-pid-1`), so a run that returned has left no process behind; one that
-  timed out is not released, and its placeholder stays, empty and protected,
-  for later runs to hold. A placeholder that cannot be made where the code
-  could still create the path fails the wrap.
+  timed out, or that a signal ended, is not released, and its placeholder
+  stays, empty and protected, for later runs to hold. A placeholder that
+  cannot be made where the code could still create the path fails the wrap.
 
 - **A model call a tool makes reports its usage.** `generate_simple`
   (web_fetch's and the knowledge base's summaries, the memory proposals)
