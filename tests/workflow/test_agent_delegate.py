@@ -10,6 +10,7 @@ answer says, with its envelope.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
@@ -23,7 +24,9 @@ from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_QUEUED,
     RUN_REFUSED,
+    RUN_RUNNING,
     RUN_STARTED,
     AgentLimits,
     AgentRuns,
@@ -1161,3 +1164,317 @@ class TestTheRunsOfATurn:
         await delegated(made, request(call_id="c2"))
 
         assert len(asked) == 2
+
+
+# -- working slots: at most max_active runs of a conversation work at once ----------------
+
+MIDDLE = {"agent_type": "middle", "title": "Plan", "objective": "Plan X."}
+LEAF = {"agent_type": "leaf", "title": "Look", "objective": "Look X up."}
+
+
+async def until(condition: Callable[[], bool], *, within: float = 5.0) -> None:
+    """Wait until ``condition()`` holds, letting the other tasks run."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while not condition():
+        if loop.time() > deadline:
+            raise AssertionError(f"not within {within} s")
+        await asyncio.sleep(0)
+
+
+class Turn:
+    """``work()`` in one turn of ``CONVERSATION`` (its span open), in a task of
+    its own, to stop it as Ctrl+C does: what it returned, and every event
+    reported meanwhile."""
+
+    def __init__(self, work: Callable[[], Awaitable[Any]]) -> None:
+        self.events: list[WorkflowEvent] = []
+        self.result: Any = None
+        self.task = asyncio.create_task(self._run(work))
+
+    async def _run(self, work: Callable[[], Awaitable[Any]]) -> None:
+        live = LiveEvents()
+
+        async def source():
+            token = set_active_turn(CONVERSATION)
+            scope = open_turn_scope()
+            try:
+                with live_events.reporting(live):
+                    self.result = await work()
+            finally:
+                close_turn_scope(scope)
+                reset_active_turn(token)
+            if False:  # pragma: no cover - a source that yields nothing itself
+                yield
+
+        async for event in merged(source(), live):
+            self.events.append(event)
+
+    def of(self, instance: str) -> list[str]:
+        """The statuses ``instance``'s run reported, in order."""
+        return [
+            event.metadata["status"] for event in self.events
+            if event.type is EventType.AGENT_RUN and event.run.instance == instance
+        ]
+
+    def order(self, *wanted: str) -> list[tuple[str, str]]:
+        """Each run's ``wanted`` statuses as reported, in order: (instance, status)."""
+        return [
+            (event.run.instance, event.metadata["status"]) for event in self.events
+            if event.type is EventType.AGENT_RUN and event.metadata["status"] in wanted
+        ]
+
+
+class Holding:
+    """A hook whose runs each work until let go (``go[instance].set()``);
+    ``working`` names the runs whose hook ran, in order."""
+
+    def __init__(self) -> None:
+        self.working: list[str] = []
+        self.go: dict[str, asyncio.Event] = collections.defaultdict(asyncio.Event)
+
+    async def __call__(self, run: AgentRun) -> RunAnswer:
+        self.working.append(run.ref.instance)
+        await self.go[run.ref.instance].wait()
+        return RunAnswer(text=f"{run.ref.instance} done.")
+
+
+def fanning_out(made: Callable[[], Delegations], worked: list[str]) -> Hook:
+    """A hook whose ``middle`` runs each delegate two ``leaf`` runs at once and
+    answer with their results; any other run answers at once. ``worked``
+    gets each run's work in the order it was done, each with its slot: a
+    leaf's answer, a middle's after its leaves (``middle-1 back``)."""
+
+    async def hook(run: AgentRun) -> RunAnswer:
+        if run.ref.agent != "middle":
+            worked.append(run.ref.instance)
+            return RunAnswer(text=f"{run.ref.instance} found it.")
+        found = await asyncio.gather(*(
+            made().delegate(request(
+                LEAF, caller=run.ref, caller_agent="middle", call_id=f"{run.ref.instance}/{n}",
+            ))
+            for n in (1, 2)
+        ))
+        worked.append(f"{run.ref.instance} back")
+        return RunAnswer(text=" ".join(one.result["result"] for one in found))
+
+    return hook
+
+
+class TestWorkingSlots:
+    async def test_a_run_past_the_slots_waits_queued_then_runs(self):
+        hook = Holding()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_active=2))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            *(made.delegate(request(call_id=call)) for call in ("c1", "c2", "c3"))
+        ))
+        await until(lambda: len(hook.working) == 2 and pool.waiting == 1)
+        assert hook.working == ["researcher-1", "researcher-2"]
+        assert runs.record(CONVERSATION, "researcher-3").status == RUN_QUEUED
+        hook.go["researcher-1"].set()
+        await until(lambda: "researcher-3" in hook.working)
+        assert runs.record(CONVERSATION, "researcher-3").status == RUN_RUNNING
+        hook.go["researcher-2"].set()
+        hook.go["researcher-3"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-3") == [RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED]
+        assert turn.of("researcher-1") == [RUN_STARTED, RUN_COMPLETED]
+        assert [one.result["result"] for one in turn.result] == [
+            "researcher-1 done.", "researcher-2 done.", "researcher-3 done.",
+        ]
+        assert (pool.free, pool.waiting) == (2, 0)
+
+    async def test_a_run_holds_a_slot_while_it_works_and_the_root_none(self):
+        seen: list[int] = []
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            seen.append(made.slots(CONVERSATION).free)
+            return RunAnswer(text="Done.")
+
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(turn.task, 5)
+
+        assert seen == [0]  # its own; the root's work took none
+        assert turn.of("researcher-1") == [RUN_STARTED, RUN_COMPLETED]
+        assert made.slots(CONVERSATION).free == 1
+
+    async def test_each_conversation_has_its_own_slots(self):
+        hook, _ = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_active=3))
+
+        one, other = made.slots(CONVERSATION), made.slots(SessionRef("app", "u", "other"))
+
+        assert one is made.slots(CONVERSATION) and one is not other
+        assert (one.size, other.size) == (3, 3)
+
+    async def test_nested_fan_out_with_one_slot_completes(self):
+        """Spec 13: a parent lends its slot while it waits on its children, so
+        two runs that each delegate two at once finish with one slot."""
+        made = delegations(fanning_out(lambda: made, []), policy=SubAgentPolicy(max_active=1))
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(MIDDLE, call_id="c1")),
+            made.delegate(request(MIDDLE, call_id="c2")),
+        ))
+        await asyncio.wait_for(turn.task, 5)
+
+        assert [one.result["result"] for one in turn.result] == [
+            "leaf-1 found it. leaf-2 found it.", "leaf-3 found it. leaf-4 found it.",
+        ]
+        pool = made.slots(CONVERSATION)
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_parent_whose_children_are_done_goes_ahead_of_runs_that_have_not_started(
+        self,
+    ):
+        """middle-1's last leaf hands its slot back to middle-1 while leaf-3
+        and leaf-4 wait: middle-1 does its work before they start."""
+        worked: list[str] = []
+        made = delegations(fanning_out(lambda: made, worked), policy=SubAgentPolicy(max_active=1))
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(MIDDLE, call_id="c1")),
+            made.delegate(request(MIDDLE, call_id="c2")),
+        ))
+        await asyncio.wait_for(turn.task, 5)
+
+        # middle-2 takes middle-1's slot, lent while middle-1 waits on its
+        # leaves; leaf-1 takes middle-2's; each queued run says when it runs.
+        assert turn.order(RUN_RUNNING) == [
+            ("middle-2", RUN_RUNNING), ("leaf-1", RUN_RUNNING), ("leaf-2", RUN_RUNNING),
+            ("leaf-3", RUN_RUNNING), ("leaf-4", RUN_RUNNING),
+        ]
+        # Taking its slot back is no new status: the work shows it.
+        assert worked == [
+            "leaf-1", "leaf-2", "middle-1 back", "leaf-3", "leaf-4", "middle-2 back",
+        ]
+
+    async def test_time_spent_queued_is_not_counted_against_the_timeout(self):
+        hook = Holding()
+        types = {
+            **TYPES,
+            "researcher": AgentConfig(name="researcher", prompt="p", description="Finds.",
+                                      limits=AgentLimits(timeout=0.2)),
+        }
+        made = delegations(hook, types=types, policy=SubAgentPolicy(max_active=1))
+        hook.go["researcher-1"].set()  # answers as soon as it has a slot
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(MIDDLE, call_id="c1")),
+            made.delegate(request(call_id="c2")),
+        ))
+        await until(lambda: made.slots(CONVERSATION).waiting == 1)
+        await asyncio.sleep(0.3)  # past the researcher's time limit, queued
+        hook.go["middle-1"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-1") == [RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED]
+
+    async def test_queued_runs_block_no_event_loop(self):
+        hook = Holding()
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        hook.go["researcher-2"].set()
+
+        with no_blocking_calls():
+            turn = Turn(lambda: asyncio.gather(
+                made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+            ))
+            await until(lambda: made.slots(CONVERSATION).waiting == 1)
+            hook.go["researcher-1"].set()
+            await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-2") == [RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED]
+
+
+class TestACancelWhileQueued:
+    async def test_the_turns_leaves_the_heap_and_the_run_never_starts(self):
+        hook = Holding()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await until(lambda: hook.working == ["researcher-1"] and pool.waiting == 1)
+        turn.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn.task
+
+        assert hook.working == ["researcher-1"]
+        assert [(r.ref.instance, r.status) for r in runs.records(CONVERSATION)] == [
+            ("researcher-1", RUN_INTERRUPTED), ("researcher-2", RUN_INTERRUPTED),
+        ]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_its_controls_ends_it_cancelled_with_nothing_and_the_rest_go_on(self):
+        hook = Holding()
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await until(lambda: hook.working == ["researcher-1"] and pool.waiting == 1)
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.cancel("researcher-2#1", by="parent", error="no longer needed") is True
+        finally:
+            reset_active_turn(token)
+        await until(lambda: pool.waiting == 0)
+        hook.go["researcher-1"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        first, second = turn.result
+        assert first.result["status"] == RUN_COMPLETED
+        assert (second.result["status"], second.result["cancelled_by"], second.result["result"],
+                second.result["partial"]) == (RUN_CANCELLED, "parent", "", False)
+        assert turn.of("researcher-2") == [RUN_STARTED, RUN_QUEUED, RUN_CANCELLED]
+        assert hook.working == ["researcher-1"]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_ctrl_c_with_a_run_queued_and_another_lending_leaves_no_waiter(self):
+        """middle-1 lends its slot to researcher-1 while leaf-1
+        waits for one; Ctrl+C stops all three, leaf-1 never starts, and the next
+        turn's delegation gets a slot at once."""
+        hook = Holding()
+        runs = AgentRuns()
+        made: Delegations
+
+        async def runs_or_delegates(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                await made.delegate(request(
+                    LEAF, caller=run.ref, caller_agent="middle", call_id="m1",
+                ))
+            return await hook(run)
+
+        made = delegations(runs_or_delegates, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(MIDDLE, call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await until(lambda: "researcher-1" in hook.working and pool.waiting == 1)
+        assert runs.record(CONVERSATION, "leaf-1").status == RUN_QUEUED
+        turn.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn.task
+
+        assert "leaf-1" not in hook.working
+        assert {r.ref.instance: r.status for r in runs.records(CONVERSATION)} == {
+            "middle-1": RUN_INTERRUPTED, "researcher-1": RUN_INTERRUPTED,
+            "leaf-1": RUN_INTERRUPTED,
+        }
+        assert (pool.free, pool.waiting) == (1, 0)
+
+        hook.go["researcher-2"].set()
+        after = Turn(lambda: made.delegate(request(call_id="c3")))
+        await asyncio.wait_for(after.task, 5)
+
+        assert after.of("researcher-2") == [RUN_STARTED, RUN_COMPLETED]

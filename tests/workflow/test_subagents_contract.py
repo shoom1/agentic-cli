@@ -39,6 +39,7 @@ from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
+    RUN_QUEUED,
     RUN_REFUSED,
     RUN_RUNNING,
     RUN_STARTED,
@@ -47,6 +48,7 @@ from agentic_cli.workflow.agents import (
     SubAgentPolicy,
 )
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
+from agentic_cli.workflow.agents.slots import SlotPool
 from agentic_cli.workflow.agents.envelope import (
     STEP_LIMIT_ERROR,
     TIME_LIMIT_ERROR,
@@ -467,6 +469,10 @@ class Crew:
             return self.manager._delegations.control(ref)
         finally:
             reset_active_turn(token)
+
+    def slots(self) -> SlotPool:
+        """The conversation's working slots (``Delegations.slots``)."""
+        return self.manager._delegations.slots(self.conversation)
 
     def recorded(self, call_id: str, run: str | None = None) -> bool:
         """Whether the record holds ``call_id`` of ``run`` (None: the root's
@@ -2825,3 +2831,159 @@ class TestSteering:
         last = crew.bodies("researcher")[1]
         assert last.index("Be brief.") < last.index(STEP_LIMIT_NOTE)
         assert crew.last_message("researcher", 1).endswith(STEP_LIMIT_NOTE)
+
+
+# -- working slots: at most max_active runs work at once, a waiting parent lending its slot -----
+
+
+def working(events: list[WorkflowEvent], *statuses: str) -> list[tuple[str, str]]:
+    """The turn's ``AGENT_RUN`` events of ``statuses``, in order: (instance, status)."""
+    return [
+        (event.run.instance, event.metadata["status"])
+        for event in runs_of(events) if event.metadata["status"] in statuses
+    ]
+
+
+def fanning_out(make_crew) -> Crew:
+    """With one slot: a coordinator delegating to two middles in one response,
+    each delegating to two leaves in one response. Each leaf, and each
+    middle after its leaves, says who it is (``SEEN``) before it answers:
+    the order the runs worked in."""
+    return make_crew(
+        [agent("coordinator", sub_agents=("middle",)),
+         agent("middle", sub_agents=("leaf",), tools=(contract_whoami,)),
+         agent("leaf", tools=(contract_whoami,))],
+        subagents=SubAgentPolicy(max_active=1),
+        coordinator=[calls(delegate("middle", "Do A.", "c1"), delegate("middle", "Do B.", "c2")),
+                     says("Both planned.")],
+        middle=[calls(delegate("leaf", "Look A1 up.", "m1"), delegate("leaf", "Look A2 up.", "m2")),
+                calls(delegate("leaf", "Look B1 up.", "m3"), delegate("leaf", "Look B2 up.", "m4")),
+                calls(use("contract_whoami", "w1")), says("A planned."),
+                calls(use("contract_whoami", "w2")), says("B planned.")],
+        leaf=[calls(use("contract_whoami", "l1")), says("A1 found."),
+              calls(use("contract_whoami", "l2")), says("A2 found."),
+              calls(use("contract_whoami", "l3")), says("B1 found."),
+              calls(use("contract_whoami", "l4")), says("B2 found.")],
+    )
+
+
+class TestWorkingSlots:
+    """Spec 5.5 and 13: a conversation's runs work in at most ``max_active``
+    slots, at any depth; a run past them waits ``queued``, and a run that
+    waits on its children lends its slot and takes it back ahead of the
+    runs that have not started."""
+
+    async def test_a_third_parallel_call_waits_queued_then_runs(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_hold,))],
+            subagents=SubAgentPolicy(max_active=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("researcher", "Find Y.", "c2"),
+                               delegate("researcher", "Find Z.", "c3")),
+                         says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), calls(use("contract_hold", "r2")),
+                        says("Found."), says("Found."), says("Found.")],
+        )
+
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                await until(
+                    lambda: crew.requests("researcher") == 2 and crew.slots().waiting == 1
+                )
+                assert [r.status for r in crew.records()] == [
+                    RUN_RUNNING, RUN_RUNNING, RUN_QUEUED,
+                ]
+            finally:
+                HELD["go"].set()  # never a turn left holding: the cleanup would wait on it
+            events = await asyncio.wait_for(turn, 10)
+
+        assert working(events, RUN_QUEUED, RUN_RUNNING) == [
+            ("researcher-3", RUN_QUEUED), ("researcher-3", RUN_RUNNING),
+        ]
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[c])["status"] for c in ("c1", "c2", "c3")] == [RUN_COMPLETED] * 3
+        assert (crew.slots().free, crew.slots().waiting) == (2, 0)
+
+    async def test_nested_fan_out_with_one_slot_completes(self, make_crew):
+        crew = fanning_out(make_crew)
+
+        events = await asyncio.wait_for(crew.turn(), 20)
+
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[c])["result"] for c in ("c1", "c2")] == [
+            "A planned.", "B planned.",
+        ]
+        first = crew.results_read("middle", 2)  # middle-1's request after its leaves
+        assert [envelope_read(first[c])["result"] for c in ("m1", "m2")] == [
+            "A1 found.", "A2 found.",
+        ]
+        assert {r.ref.instance: r.status for r in crew.records()} == {
+            name: RUN_COMPLETED
+            for name in ("middle-1", "middle-2", "leaf-1", "leaf-2", "leaf-3", "leaf-4")
+        }
+        assert [e for e in events if e.type is EventType.ERROR] == []
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+    async def test_a_parent_whose_children_are_done_goes_ahead_of_new_runs(self, make_crew):
+        """middle-1's last leaf hands its slot back to middle-1 while leaf-3
+        and leaf-4 wait for one: middle-1 works before they start."""
+        crew = fanning_out(make_crew)
+
+        events = await asyncio.wait_for(crew.turn(), 20)
+
+        # middle-2 runs in middle-1's slot, lent while middle-1 waits on its
+        # leaves, and leaf-1 in middle-2's; every leaf waited for a slot.
+        assert working(events, RUN_RUNNING) == [
+            ("middle-2", RUN_RUNNING), ("leaf-1", RUN_RUNNING), ("leaf-2", RUN_RUNNING),
+            ("leaf-3", RUN_RUNNING), ("leaf-4", RUN_RUNNING),
+        ]
+        # Taking its slot back is no new status; the order the runs worked
+        # in shows it.
+        assert [(run.instance, call) for run, call in SEEN] == [
+            ("leaf-1", "l1"), ("leaf-2", "l2"), ("middle-1", "w1"),
+            ("leaf-3", "l3"), ("leaf-4", "l4"), ("middle-2", "w2"),
+        ]
+
+    async def test_ctrl_c_with_a_run_queued_and_another_lending_leaves_no_waiter(
+        self, make_crew
+    ):
+        """middle-1 lends its slot to researcher-1 while its
+        leaf waits for one; Ctrl+C stops the turn, the leaf never starts,
+        nothing waits in the pool, and the next turn's run starts at once."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("middle", "researcher")),
+             agent("middle", sub_agents=("leaf",)),
+             agent("leaf"),
+             agent("researcher", tools=(contract_block,))],
+            subagents=SubAgentPolicy(max_active=1),
+            coordinator=[calls(delegate("middle", "Plan X.", "c1"),
+                               delegate("researcher", "Find X.", "c2")),
+                         calls(delegate("researcher", "Find Y.", "c3")), says("Y is 7.")],
+            middle=[calls(delegate("leaf", "Look X up.", "m1"))],
+            leaf=[says("[never asked]")],
+            researcher=[calls(use("contract_block", "r1")), says("Y is 7.")],
+        )
+
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+                await until(lambda: crew.slots().waiting == 1)
+            finally:
+                await crew.stop(turn)
+
+        assert crew.requests("leaf") == 0
+        assert {r.ref.instance: r.status for r in crew.records()} == {
+            "middle-1": RUN_INTERRUPTED, "researcher-1": RUN_INTERRUPTED,
+            "leaf-1": RUN_INTERRUPTED,
+        }
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+        events = await asyncio.wait_for(crew.turn("Now Y."), 10)
+
+        assert working(events, RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED) == [
+            ("researcher-2", RUN_STARTED), ("researcher-2", RUN_COMPLETED),
+        ]
+        assert envelope_read(crew.results_read("coordinator")["c3"])["result"] == "Y is 7."

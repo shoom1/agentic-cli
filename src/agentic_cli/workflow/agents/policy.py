@@ -95,7 +95,8 @@ class SubAgentPolicy:
 
     Attributes:
         max_active: How many sub-agent runs may work at once in a
-            conversation, at any depth.
+            conversation, at any depth; the others wait for a free
+            working slot (``agents/slots.py``).
         max_runs_per_turn: How many sub-agent runs one turn may start.
         limits: Every run's limits (``AgentLimits``), which an agent type's
             own lie over. A policy's own replace ``DEFAULT_LIMITS`` whole:
