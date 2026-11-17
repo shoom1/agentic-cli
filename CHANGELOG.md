@@ -600,12 +600,15 @@ the start of the entry's title.
   starts, is cancelled (`"status": "cancelled"`, `"cancelled_by":
   "limit"`, `"error": "time limit reached"`), the text it wrote so far its
   partial result, and a question or permission prompt it waited at is
-  withdrawn; a model call that takes a run past its `max_tokens` is its
-  last, its calls dropped, and the run is cancelled likewise (`"token
-  limit reached"`), that answer's text its result. Construction refuses,
-  with a `ValueError` naming the field, a limit that is not a positive int
-  (a timeout: a positive, finite number; `True` and `False` are no numbers
-  here) and a policy whose `limits` is not an `AgentLimits`.
+  withdrawn; a model call that takes a run past its `max_tokens` and asks
+  for tools is its last, its calls dropped, and the run is cancelled
+  likewise (`"token limit reached"`), that answer's text its result, while
+  one that asks for none ends the run as it would, completed, its result
+  whole (a model that reports no usage is not limited by tokens).
+  Construction refuses, with a `ValueError` naming the field, a limit that
+  is not a positive int (a timeout: a positive, finite number; `True` and
+  `False` are no numbers here) and a policy whose `limits` is not an
+  `AgentLimits`.
 - **`AgentConfig.brief_required` and `AgentConfig.limits`.**
   `brief_required` (default `("objective",)`) names the brief fields the
   agent asks a delegation to fill: `objective`, `deliverable`,
