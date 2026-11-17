@@ -693,7 +693,10 @@ class MessageProcessor:
         asking for input, with nothing left to answer it. The boxes the
         request's processing opened end with it, out of the transcript, and
         the cancel is re-raised; the request (``process`` /
-        ``process_resume``) says ``CANCELLED_LINE`` once.
+        ``process_resume``) says ``CANCELLED_LINE`` once. A question whose
+        asking task alone is cancelled (a sub-agent run stopped by its limit
+        or its parent while its prompt is on screen) has its dialog
+        withdrawn, and the turn goes on with its events box back.
 
         Errors reported as ``EventType.ERROR`` are rendered as they arrive. A
         recoverable one is a warning and the stream decides the outcome; a
@@ -761,9 +764,17 @@ class MessageProcessor:
                 # leave a panel on screen that nothing downstream will ever
                 # finish. The placement is read now: /settings may have
                 # changed it since the session started with its own.
-                response = await self._prompt_user_input(
-                    request, ui, settings.dialog_placement
-                )
+                try:
+                    response = await self._prompt_user_input(
+                        request, ui, settings.dialog_placement
+                    )
+                except asyncio.CancelledError:
+                    # The asking task alone was stopped (a sub-agent run's
+                    # limit, its parent), not the turn: the dialog is
+                    # withdrawn and the turn goes on, so its box comes back.
+                    if proc_task is not None and not proc_task.cancelling():
+                        _open_events_box()
+                    raise
                 _open_events_box()
                 return response
 

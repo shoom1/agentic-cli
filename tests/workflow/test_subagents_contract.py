@@ -2542,3 +2542,59 @@ class TestTheTimeLimit:
             RUN_CANCELLED, "limit", TIME_LIMIT_ERROR
         )
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_CANCELLED]
+
+
+class TestALimitAtAPrompt:
+    """Review Focus 2: a limit that fires while the run waits at a permission
+    prompt (the user slow to answer): the prompt is withdrawn, the call is
+    answered as not run, the run ends cancelled by its limit, the turn goes
+    on with its envelope, and the prompts after it still reach the user."""
+
+    async def test_the_prompt_is_withdrawn_and_the_turn_goes_on(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=(contract_ask,)),
+             agent("researcher", tools=("write_file",), limits=AgentLimits(timeout=1.0))],
+            coordinator=[calls(delegate("researcher", "Write a note.", "c1")),
+                         calls(use("contract_ask", "c2")), says("Done."),
+                         calls(use("contract_ask", "c3")), says("Fine.")],
+            researcher=[calls(use("write_file", "r1", path="note.txt", content="hi"))],
+        )
+        withdrawn: list[str] = []
+        asked: list[str] = []
+        answered: list[list[str]] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            if request.run is not None:  # the researcher's permission prompt
+                try:
+                    await asyncio.Event().wait()  # the user is slow to answer
+                except asyncio.CancelledError:
+                    withdrawn.append(request.run.instance)
+                    raise
+            asked.append(request.tool_name)
+            # Read while the turn runs: Deep Agents keeps a run's answers in
+            # the record, which the turn's end clears.
+            answered.append(await crew.answers("researcher", "r1"))
+            return "B"
+
+        crew.answer_with(answer)
+        with no_blocking_calls():
+            events = await asyncio.wait_for(crew.turn(), 20)
+
+        assert withdrawn == ["researcher-1"]
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by, record.error) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR
+        )
+        read = envelope_read(crew.results_read("coordinator", 1)["c1"])
+        assert (read["status"], read["cancelled_by"], read["error"], read["result"]) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR, ""
+        )
+        (not_run,) = answered[0]
+        assert NOT_RUN in not_run
+        assert asked == ["contract_ask"]
+        assert '"B"' in crew.results_read("coordinator", 2)["c2"]
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+        await asyncio.wait_for(crew.turn("Ask me again."), 20)
+
+        assert asked == ["contract_ask", "contract_ask"]
