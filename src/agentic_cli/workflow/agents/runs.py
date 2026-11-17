@@ -43,7 +43,7 @@ RUN_END_STATUSES = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_REFUSED, RUN_CANCELLED, RUN_INTERRUPTED}
 )
 
-#: The longest title a run gets: the first line of the request its parent wrote.
+#: The longest title a run gets: the first line of its brief's title.
 TITLE_MAX = 80
 #: How much of its result a run's end event, and its record, keep.
 RESULT_MAX = 200
@@ -53,7 +53,7 @@ SUBAGENT_ERROR_PREFIX = "Error running sub-agent: "
 
 
 def run_title(request: str) -> str:
-    """A run's title: the first non-blank line of its request, cut to ``TITLE_MAX`` characters."""
+    """A run's title: the first non-blank line of ``request``, cut to ``TITLE_MAX`` characters."""
     line = next((line.strip() for line in request.splitlines() if line.strip()), "")
     return line[:TITLE_MAX]
 
@@ -164,7 +164,7 @@ class RunRecord:
     Attributes:
         ref: The run.
         call_id: The parent's call that started it.
-        title: The first line of its request.
+        title: Its brief's title.
         status: ``started`` while it runs, then its end status.
         started: When it started.
         ended: When it ended; None while it runs.
@@ -172,6 +172,11 @@ class RunRecord:
         error: Why it ended without completing.
         partial: Whether its result was cut short.
         usage: Its token totals by model (``{"input": ..., "output": ...}``).
+        brief: Its brief's filled fields, the title first.
+        started_by: Who started it: ``agent:<instance>`` (``agent:root``
+            for the root).
+        mode: How it runs: ``blocking`` (its parent waits for it).
+        cancelled_by: Who cancelled it, for a cancelled run.
     """
 
     ref: RunRef
@@ -184,6 +189,10 @@ class RunRecord:
     error: str | None = None
     partial: bool = False
     usage: dict[str, dict[str, int]] = field(default_factory=dict)
+    brief: dict[str, str] = field(default_factory=dict)
+    started_by: str | None = None
+    mode: str = "blocking"
+    cancelled_by: str | None = None
 
 
 def _run_id(instance: str, number: int) -> str:
@@ -252,10 +261,11 @@ class AgentRuns:
     def observe(self, event: WorkflowEvent) -> None:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.
 
-        A start makes the run's record; an end gives it its status, time,
-        result, error, whether it is partial and what it used (an end whose
-        start was not seen makes the record too). Any other event changes
-        nothing.
+        A start makes the run's record (its call, title, brief, who started
+        it and its mode); an end gives it its status, time, result, error,
+        whether it is partial, what it used and who cancelled it (an end
+        whose start was not seen makes the record too). Any other event
+        changes nothing.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
@@ -270,6 +280,9 @@ class AgentRuns:
                 title=metadata.get("title") or "",
                 status=RUN_STARTED,
                 started=event.timestamp,
+                brief=dict(metadata.get("brief") or {}),
+                started_by=metadata.get("started_by"),
+                mode=metadata.get("mode") or "blocking",
             )
             return
         if status not in RUN_END_STATUSES:
@@ -289,6 +302,7 @@ class AgentRuns:
         record.error = metadata.get("error")
         record.partial = bool(metadata.get("partial"))
         record.usage = dict(metadata.get("usage") or {})
+        record.cancelled_by = metadata.get("cancelled_by")
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""

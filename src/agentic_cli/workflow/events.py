@@ -201,26 +201,38 @@ class WorkflowEvent:
         error: str | None = None,
         partial: bool = False,
         usage: dict[str, dict[str, int]] | None = None,
+        brief: dict[str, str] | None = None,
+        started_by: str | None = None,
+        mode: str | None = None,
+        cancelled_by: str | None = None,
     ) -> "WorkflowEvent":
         """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
 
         ``run`` is the sub-agent's run, and ``metadata["status"]`` says which:
-        ``started`` (with its ``title``), then one end status (``completed``,
+        ``started`` (with its ``title``, its ``brief``, who it was
+        ``started_by`` and its ``mode``), then one end status (``completed``,
         ``failed``, ``refused``, ``cancelled``, ``interrupted``: the constants
         of ``workflow/agents/runs.py``) with the first of its ``result``, its
-        ``error``, whether the result is ``partial`` and the tokens the run
-        used (``usage``). ``metadata["agent"]`` is the sub-agent, as on every
-        event an agent wrote.
+        ``error``, whether the result is ``partial``, the tokens the run
+        used (``usage``) and, for a cancelled run, who cancelled it.
+        ``metadata["agent"]`` is the sub-agent, as on every event an agent
+        wrote.
 
         Args:
             ref: The sub-agent's run.
             status: ``started`` or an end status.
-            title: A start's title: the first line of the request.
+            title: A start's title: the brief's.
             call_id: The parent's call that started the run.
             result: An end's result, its first characters.
             error: Why a run that did not complete ended.
             partial: Whether the result is cut short (a reply at its output limit).
             usage: An end's tokens, by model: ``{model: {"input": ..., "output": ...}}``.
+            brief: A start's brief: its filled fields, the title first
+                (``agents/brief.py::Brief.fields``).
+            started_by: Who started the run: ``agent:<instance>`` (``agent:root``
+                for the root).
+            mode: How it runs: ``blocking`` (its parent waits for it).
+            cancelled_by: A cancelled run's canceller: ``parent``, ``user`` or ``limit``.
         """
         metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
         if title is not None:
@@ -233,6 +245,14 @@ class WorkflowEvent:
             metadata["error"] = error
         if usage is not None:
             metadata["usage"] = usage
+        if brief is not None:
+            metadata["brief"] = dict(brief)
+        if started_by is not None:
+            metadata["started_by"] = started_by
+        if mode is not None:
+            metadata["mode"] = mode
+        if cancelled_by is not None:
+            metadata["cancelled_by"] = cancelled_by
         return cls(
             type=EventType.AGENT_RUN,
             content=f"{ref.instance} {status}",

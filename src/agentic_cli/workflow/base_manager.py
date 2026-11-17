@@ -49,6 +49,7 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.agents.delegate import AgentRun, Delegations, RunAnswer
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.usage import (
@@ -577,6 +578,43 @@ class BaseWorkflowManager(ABC):
         if ledgers is None:
             ledgers = self.__dict__["_usage_ledgers"] = UsageLedgers()
         return ledgers
+
+    @property
+    def _delegations(self) -> Delegations:
+        """This manager's delegations (``workflow/agents/delegate.py``), made on first use.
+
+        From the agent configs, the policy (``subagent_policy``) and the
+        backend's hook (``_run_agent``): each ``task`` call of a delegating
+        agent hands its brief to ``delegate``, which names, runs, ends and
+        records the run.
+        """
+        delegations = self.__dict__.get("_delegations_made")
+        if delegations is None:
+            delegations = self.__dict__["_delegations_made"] = Delegations(
+                runs=self.agent_runs,
+                policy=self.subagent_policy,
+                types={config.name: config for config in self._agent_configs},
+                hook=self._run_agent,
+                ledgers=self._usage_ledgers,
+            )
+        return delegations
+
+    async def _run_agent(self, run: AgentRun) -> RunAnswer:
+        """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).
+
+        Called in the run's own task, where the run is the active run and no
+        tool call is (``agents/delegate.py``). It runs ``run.config``'s agent
+        on ``run.message`` (after ``run.history`` for an inheriting one),
+        from the shared state ``run.state``, reports the run's events to the
+        turn's live events as they are made, and returns its last answer,
+        its outcome and the shared state it changed. A failure raises (the
+        provider's error, or ``RunFailed``); a cancel stops the run and
+        raises.
+
+        Raises:
+            NotImplementedError: This backend runs no sub-agent.
+        """
+        raise NotImplementedError(f"{type(self).__name__} runs no sub-agent")
 
     @property
     def settings(self) -> "BaseSettings":
