@@ -36,12 +36,21 @@ def _check_seconds(owner: str, name: str, value: object) -> None:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
-        or not math.isfinite(value)
+        or not _is_finite(value)
         or value <= 0
     ):
         raise ValueError(
             f"{owner}.{name} must be a positive number of seconds or None, not {value!r}."
         )
+
+
+def _is_finite(value: int | float) -> bool:
+    """Whether ``value`` is finite as a float: an int too large for a float is not
+    (``math.isfinite`` raises ``OverflowError`` for it)."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 @dataclass(frozen=True)

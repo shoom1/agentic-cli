@@ -56,6 +56,14 @@ class TestAgentLimits:
         message = str(exc.value)
         assert "AgentLimits.timeout" in message and "positive number" in message
 
+    def test_an_int_too_large_for_a_float_is_no_timeout(self):
+        # Refused as inf is, naming the field: no float holds it, so no
+        # clock can wait for it.
+        with pytest.raises(ValueError) as exc:
+            AgentLimits(timeout=10**400)
+        message = str(exc.value)
+        assert "AgentLimits.timeout" in message and "positive number of seconds" in message
+
     def test_over_takes_its_own_fields_where_set_and_the_base_elsewhere(self):
         base = AgentLimits(max_model_calls=100, timeout=60)
         mine = AgentLimits(timeout=600, max_tokens=50_000)
