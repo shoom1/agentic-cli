@@ -918,3 +918,104 @@ class TestTheLimitsAtModelCalls:
             RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR, "Found it.", True
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
+
+
+# -- the runs one turn may start ------------------------------------------------------
+
+
+async def in_a_turn(made: Delegations, *asked: DelegationRequest) -> list[Any]:
+    """Each of ``asked`` delegated in order, in one turn of ``CONVERSATION``
+    (its span open, as a manager's turn has it); their results."""
+    live = LiveEvents()
+    results: list[Any] = []
+
+    async def source():
+        token = set_active_turn(CONVERSATION)
+        scope = open_turn_scope()
+        try:
+            with live_events.reporting(live):
+                for one in asked:
+                    results.append(await made.delegate(one))
+        finally:
+            close_turn_scope(scope)
+            reset_active_turn(token)
+        if False:  # pragma: no cover
+            yield
+
+    async for _ in merged(source(), live):
+        pass
+    return results
+
+
+class TestTheRunsOfATurn:
+    async def test_a_call_past_the_limit_starts_no_run(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_runs_per_turn=2))
+
+        *ran, refused = await in_a_turn(
+            made, request(call_id="c1"), request(call_id="c2"), request(call_id="c3")
+        )
+
+        assert [r.result["status"] for r in ran] == [RUN_COMPLETED, RUN_COMPLETED]
+        assert refused.result == {
+            "success": False,
+            "error": "This turn has already started 2 sub-agent runs, the most one turn may "
+                     "start. Answer with what you have.",
+        }
+        assert (refused.run, refused.state) == (None, {})
+        assert len(asked) == 2
+        assert [r.ref.instance for r in runs.records(CONVERSATION)] == [
+            "researcher-1", "researcher-2",
+        ]
+
+    async def test_a_brief_that_cannot_start_a_run_counts_nothing(self):
+        hook, asked = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+
+        bad, good = await in_a_turn(
+            made, request({"agent_type": "researcher", "title": "Find X"}), request()
+        )
+
+        assert bad.run is None and "missing: objective" in bad.result["error"]
+        assert good.result["status"] == RUN_COMPLETED
+
+    async def test_each_turn_starts_its_own(self):
+        hook, asked = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+
+        (first,) = await in_a_turn(made, request(call_id="c1"))
+        (second,) = await in_a_turn(made, request(call_id="c2"))
+
+        assert [first.result["status"], second.result["status"]] == [RUN_COMPLETED] * 2
+
+    async def test_a_run_started_by_a_run_counts_too(self):
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                await made.delegate(request(
+                    {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                    caller=run.ref, caller_agent="middle", call_id="m1",
+                ))
+            return RunAnswer(text="Done.")
+
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=2))
+
+        middle, refused = await in_a_turn(
+            made,
+            request({"agent_type": "middle", "title": "Plan", "objective": "Plan X."}),
+            request(call_id="c2"),
+        )
+
+        assert middle.result["status"] == RUN_COMPLETED
+        assert refused.run is None and "already started 2 sub-agent runs" in refused.result["error"]
+
+    async def test_outside_a_turn_nothing_is_counted(self):
+        hook, asked = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+
+        await delegated(made, request(call_id="c1"))
+        await delegated(made, request(call_id="c2"))
+
+        assert len(asked) == 2

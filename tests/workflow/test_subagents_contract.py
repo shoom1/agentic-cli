@@ -2413,3 +2413,35 @@ class TestARunsTranscriptIsNoConversation:
         assert await manager.recent_messages(SESSION, user_id=USER) == [
             {"role": "user", "content": "Go."}, {"role": "assistant", "content": "Done."},
         ]
+
+
+# -- per-run control: the runs of a turn, cancelling one run, the limits, steering ------------
+
+
+class TestTheRunsOfATurn:
+    async def test_a_task_call_past_the_limit_reads_why_and_starts_no_run(self, make_crew):
+        crew = make_crew(
+            team(),
+            subagents=SubAgentPolicy(max_runs_per_turn=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")),
+                         says("X only."),
+                         calls(delegate("researcher", "Find Y.", "c3")),
+                         says("Y too.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator", 2)["c2"]) == {
+            "success": False,
+            "error": "This turn has already started 1 sub-agent runs, the most one turn may "
+                     "start. Answer with what you have.",
+        }
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+        assert crew.requests("researcher") == 1
+
+        await crew.turn("Now Y.")  # a new turn starts its own count
+
+        assert envelope_read(crew.results_read("coordinator", 4)["c3"])["result"] == "Y is 7."
+        assert [r.ref.instance for r in crew.records()] == ["researcher-1", "researcher-2"]

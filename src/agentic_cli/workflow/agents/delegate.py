@@ -8,6 +8,9 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 - reads the brief against the caller's own sub-agents (``brief.read_brief``):
   a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
+- counts the run against its turn's (``SubAgentPolicy.max_runs_per_turn``,
+  runs at any depth: ``sessions.runs_this_turn``): a call past it is the
+  error result ``RUNS_PER_TURN_ERROR`` says, and nothing else happens;
 - names the run (``AgentRuns.run_for``: its instance ``<type>-<n>`` and its run
   ``<instance>#1``, under the caller's run; a turn's first run is numbered
   past the instances its conversation's store keeps, which ``stored`` says
@@ -87,8 +90,10 @@ from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
+    count_run_this_turn,
     current_turn_scope,
     get_active_turn,
+    runs_this_turn,
     set_active_run,
     set_active_tool_call,
 )
@@ -104,6 +109,12 @@ logger = Loggers.workflow()
 BLOCKING = "blocking"
 #: The longest error text a failed run's log line carries.
 _MAX_LOGGED_ERROR = 500
+#: A ``task`` call's error result once its turn has started the most runs it
+#: may (``SubAgentPolicy.max_runs_per_turn``, the number).
+RUNS_PER_TURN_ERROR = (
+    "This turn has already started {limit} sub-agent runs, the most one turn may start. "
+    "Answer with what you have."
+)
 
 
 def started_by(caller: RunRef | None) -> str:
@@ -277,14 +288,24 @@ class Delegations:
     async def delegate(self, request: DelegationRequest) -> Delegated:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
-        A brief that cannot start a run is the error result, and nothing
-        else happens. A cancel of the caller's task (the turn's) ends the run
-        ``interrupted`` once it has stopped, and goes on.
+        A brief that cannot start a run, or a call past the runs its turn
+        may start, is the error result, and nothing else happens. A cancel
+        of the caller's task (the turn's) ends the run ``interrupted`` once
+        it has stopped, and goes on.
         """
         try:
             config, brief = read_brief(request.arguments, self.sub_agents(request.caller_agent))
         except BriefError as error:
             return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
+        started = runs_this_turn()
+        limit = self.policy.max_runs_per_turn
+        if started is not None and started >= limit:
+            logger.info("subagent_runs_per_turn_reached", agent=config.name, limit=limit)
+            return Delegated(
+                result={"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=limit)},
+                state={}, run=None,
+            )
+        count_run_this_turn()
         conversation = get_active_turn()
         await self._number_past_stored(conversation)
         ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
