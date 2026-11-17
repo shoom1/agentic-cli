@@ -10,9 +10,10 @@ session service (``adk/sessions.py``): app ``child_app(app)``, session
   ``SessionReader``'s leave none behind, on every store; their events go
   with them.
 - A manager numbers a conversation's instances past the ones its store
-  keeps (``_stored_instances``, asked once per conversation), so a new
-  manager (a restart) never makes a second ``researcher-1``, and a stored
-  transcript is never replaced: a run whose instance is stored fails.
+  keeps (``_stored_instances``, asked once per conversation per turn), so
+  neither a new manager (a restart) nor one whose turns another process's
+  came between makes a second ``researcher-1``, and a stored transcript is
+  never replaced: a run whose instance is stored fails.
 - A model switch between turns rebuilds the runners and keeps the
   transcripts, the records and the numbering.
 - No child session lists, or is found, as a conversation.
@@ -261,10 +262,11 @@ class TestStoredInstances:
 
 
 class TestNumberedPastTheStored:
-    """Instances are numbered per manager: a new one (a restart, a switch of
-    backend or store) numbers past the instances the conversation's store
-    keeps (``_stored_instances``), so a stored transcript is never another
-    run's."""
+    """Instances are numbered per manager: each turn numbers past the
+    instances the conversation's store keeps (``_stored_instances``), which
+    another manager may have run (before a restart or a switch of backend
+    or store, or in another process between two turns), so a stored
+    transcript is never another run's."""
 
     async def test_a_restart_numbers_past_them_and_keeps_their_transcripts(
         self, project, monkeypatch
@@ -323,6 +325,33 @@ class TestNumberedPastTheStored:
         assert runs == ["researcher-2#1", "researcher-3#1"]
         assert stored == ["s/researcher-1", "s/researcher-2", "s/researcher-3"]
         assert asked == [second.session_ref("s", "u")]
+
+    async def test_turns_another_manager_ran_in_between_are_numbered_past(
+        self, project, monkeypatch
+    ):
+        """Two processes take turns on one conversation (each holds it while
+        it runs a turn: ``ConversationLock``): each turn's first run is
+        numbered past what the other stored in between."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[delegation("toolu_c1"), says("Done.")] * 3,
+            researcher=[says("X is 42."), says("Y is 7."), says("Z is 3.")],
+        )))
+        one, two = manager_on("sqlite"), manager_on("sqlite")
+        try:
+            await say(one, "Find X.")
+            await say(two, "Find Y.")
+            await say(one, "Find Z.")
+            runs = {"one": instances(one), "two": instances(two)}
+            last = await child(one, "researcher-3")
+        finally:
+            await one.cleanup()
+            await two.cleanup()
+
+        assert runs == {
+            "one": [("researcher-1#1", "completed"), ("researcher-3#1", "completed")],
+            "two": [("researcher-2#1", "completed")],
+        }
+        assert texts_of(last)[1:] == ["Z is 3."]
 
     async def test_a_stored_transcript_is_never_replaced(self, project, monkeypatch):
         """A run whose instance the store already keeps (here: a store that

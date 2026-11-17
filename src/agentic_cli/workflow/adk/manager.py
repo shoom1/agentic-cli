@@ -1558,9 +1558,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def _stored_instances(self, conversation: SessionRef) -> dict[str, int]:
         """The highest instance number of each type ``conversation``'s child sessions keep.
 
-        The base's hook (``Delegations`` asks it once per conversation): an
-        earlier manager's runs (a restart, a switch of backend or store) are
-        in the store, and this one numbers past them.
+        The base's hook (``Delegations`` asks it once per conversation per
+        turn): another manager's runs (before a restart or a switch of
+        backend or store, or another process's between two turns) are in
+        the store, and this one numbers past them.
         """
         if self._session_service is None:
             return {}

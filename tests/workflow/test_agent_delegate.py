@@ -10,7 +10,8 @@ answer says, with its envelope.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
@@ -44,8 +45,10 @@ from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
     ToolCallRef,
+    close_turn_scope,
     get_active_run,
     get_active_tool_call,
+    open_turn_scope,
     reset_active_tool_call,
     reset_active_turn,
     set_active_tool_call,
@@ -471,14 +474,24 @@ def storing(*answers: Any) -> tuple[Callable[[SessionRef], Awaitable[dict[str, i
     return stored, asked
 
 
-async def in_turn(made: Delegations, *asked: DelegationRequest) -> list[Any]:
-    """Each of ``asked`` delegated at once in a turn of ``CONVERSATION``; their results."""
+@contextlib.contextmanager
+def a_turn() -> Iterator[None]:
+    """A turn of ``CONVERSATION``, as a manager's has it: the active turn,
+    its span open, its live events reported."""
     token = set_active_turn(CONVERSATION)
+    span = open_turn_scope()
     try:
         with live_events.reporting(LiveEvents()):
-            return list(await asyncio.gather(*(made.delegate(one) for one in asked)))
+            yield
     finally:
+        close_turn_scope(span)
         reset_active_turn(token)
+
+
+async def in_turn(made: Delegations, *asked: DelegationRequest) -> list[Any]:
+    """Each of ``asked`` delegated at once in a turn of ``CONVERSATION``; their results."""
+    with a_turn():
+        return list(await asyncio.gather(*(made.delegate(one) for one in asked)))
 
 
 @pytest.fixture
@@ -498,9 +511,11 @@ def logged(monkeypatch) -> list[dict]:
 
 
 class TestNumberedPastTheStored:
-    """A conversation's store may keep instances an earlier manager ran (a
-    restart, a switch of backend or store): ``stored`` says how many of each
-    type, asked once per conversation, before its first run is named."""
+    """A conversation's store may keep instances another manager ran (a
+    restart, a switch of backend or store, another process that had the
+    conversation between turns): ``stored`` says how many of each type,
+    asked once per conversation per turn, before the turn's first run is
+    named."""
 
     async def test_the_first_run_is_numbered_past_them(self):
         hook, _ = answering()
@@ -511,16 +526,21 @@ class TestNumberedPastTheStored:
         assert (result.result["agent"], result.run.run) == ("researcher-3", "researcher-3#1")
         assert asked == [CONVERSATION]
 
-    async def test_it_is_asked_once_per_conversation(self):
+    async def test_it_is_asked_once_per_conversation_per_turn(self):
+        """A turn's runs ask once; the next turn asks again, since another
+        process may have run the conversation in between."""
         hook, _ = answering()
-        stored, asked = storing({"researcher": 2})
+        stored, asked = storing({"researcher": 2}, {"researcher": 7})
         made = delegations(hook, stored=stored)
 
-        first = await in_turn(made, request(call_id="c1"))
-        second = await in_turn(made, request(call_id="c2"))
+        with a_turn():
+            first = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
+        later = await in_turn(made, request(call_id="c3"))
 
-        assert [r.result["agent"] for r in first + second] == ["researcher-3", "researcher-4"]
-        assert asked == [CONVERSATION]
+        assert [r.result["agent"] for r in first + later] == [
+            "researcher-3", "researcher-4", "researcher-8",
+        ]
+        assert asked == [CONVERSATION, CONVERSATION]
 
     async def test_parallel_first_runs_ask_once_and_both_are_numbered_past_them(self):
         hook, _ = answering()
@@ -548,10 +568,10 @@ class TestNumberedPastTheStored:
         stored, asked = storing(RuntimeError("database is locked"), {"researcher": 5})
         made = delegations(hook, stored=stored)
 
-        first = await in_turn(made, request(call_id="c1"))
-        second = await in_turn(made, request(call_id="c2"))
+        with a_turn():
+            results = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
 
-        assert [r.result["agent"] for r in first + second] == ["researcher-1", "researcher-6"]
+        assert [r.result["agent"] for r in results] == ["researcher-1", "researcher-6"]
         assert asked == [CONVERSATION, CONVERSATION]
 
     async def test_a_store_that_cannot_be_read_is_warned_of_in_the_log(self, logged):
@@ -578,18 +598,36 @@ class TestNumberedPastTheStored:
         runs = AgentRuns()
         made = delegations(hook, runs=runs, stored=stored)
 
-        stopped = asyncio.create_task(in_turn(made, request(call_id="c1")))
-        while not asked:
-            await asyncio.sleep(0)
-        stopped.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await stopped
-        (result,) = await in_turn(made, request(call_id="c2"))
+        with a_turn():
+            stopped = asyncio.create_task(made.delegate(request(call_id="c1")))
+            while not asked:
+                await asyncio.sleep(0)
+            stopped.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stopped
+            result = await made.delegate(request(call_id="c2"))
 
         assert result.result["agent"] == "researcher-2"
         assert asked == [CONVERSATION, CONVERSATION]
         assert [run.ref.run for run in ran] == ["researcher-2#1"]
         assert [record.ref.run for record in runs.records(CONVERSATION)] == ["researcher-2#1"]
+
+    async def test_without_a_turns_span_every_run_asks(self):
+        """A conversation active with no turn's span open (a caller that set
+        the active turn alone) has no turn to remember the ask for."""
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2}, {"researcher": 2})
+        made = delegations(hook, stored=stored)
+
+        token = set_active_turn(CONVERSATION)
+        try:
+            with live_events.reporting(LiveEvents()):
+                results = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
+        finally:
+            reset_active_turn(token)
+
+        assert [r.result["agent"] for r in results] == ["researcher-3", "researcher-4"]
+        assert asked == [CONVERSATION, CONVERSATION]
 
     async def test_the_managers_delegations_ask_its_stored_instances(self):
         """``BaseWorkflowManager._stored_instances``: the base keeps none; a

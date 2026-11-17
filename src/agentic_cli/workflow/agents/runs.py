@@ -206,8 +206,9 @@ class AgentRuns:
         """Number ``conversation``'s next instances of each agent past ``counts``.
 
         ``counts[agent]`` is the highest instance number of ``agent`` the
-        conversation's store already keeps (an earlier manager's: a restart,
-        a switch of backend or store), so ``run_for``'s next instance of it
+        conversation's store already keeps (another manager's: before a
+        restart or a switch of backend or store, or another process's between
+        two turns), so ``run_for``'s next instance of it
         is ``<agent>-<counts[agent] + 1>`` at the earliest. A count is never
         lowered: an instance this manager numbered already stays numbered,
         and an open run keeps its name.

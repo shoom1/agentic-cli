@@ -9,10 +9,11 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
   a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
 - names the run (``AgentRuns.run_for``: its instance ``<type>-<n>`` and its run
-  ``<instance>#1``, under the caller's run; a conversation's first run is
-  numbered past the instances its store keeps, which ``stored`` says once
-  per conversation) and reports its ``AGENT_RUN`` ``started``: the title,
-  the call, the brief, who started it, ``blocking``;
+  ``<instance>#1``, under the caller's run; a turn's first run is numbered
+  past the instances its conversation's store keeps, which ``stored`` says
+  once per conversation per turn) and reports its ``AGENT_RUN``
+  ``started``: the title, the call, the brief, who started it,
+  ``blocking``;
 - runs it through the backend's hook (``BaseWorkflowManager._run_agent``) in
   an asyncio task of its own, in which the run is the active run
   (``get_active_run``) and no tool call is (``get_active_tool_call``): the
@@ -67,6 +68,7 @@ from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
+    current_turn_scope,
     get_active_turn,
     set_active_run,
     set_active_tool_call,
@@ -208,8 +210,9 @@ class Delegations:
             used, by model. None: an end carries no usage.
         stored: How many instances of each type a conversation's store
             already keeps (``BaseWorkflowManager._stored_instances``), asked
-            once per conversation, before its first run is named, so a
-            conversation an earlier manager ran is numbered past them. None:
+            once per conversation per turn, before the turn's first run is
+            named, so what another manager ran there (before a restart, or
+            in another process between two turns) is numbered past. None:
             every conversation is numbered from 1.
     """
 
@@ -229,9 +232,11 @@ class Delegations:
         self._hook = hook
         self._ledgers = ledgers
         self._stored = stored
-        # The conversations whose stored instances were read, and the lock a
-        # conversation's parallel first runs wait at while one reads them.
-        self._numbered: set[SessionRef] = set()
+        # Each conversation's turn its stored instances were last read in
+        # (its span, ``current_turn_scope``: held here, so no later turn's
+        # can be the same object), and the lock a turn's parallel first runs
+        # wait at while one reads them.
+        self._numbered: dict[SessionRef, object] = {}
         self._numbering = asyncio.Lock()
 
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
@@ -302,17 +307,24 @@ class Delegations:
     async def _number_past_stored(self, conversation: SessionRef | None) -> None:
         """Number ``conversation``'s instances past the ones its store keeps.
 
-        Asked once per conversation (``stored``), before its first run is
-        named; its parallel first runs wait for that one ask. A store that
-        cannot be read is warned of in the log and asked again at the next
-        run, and this one is numbered from what the manager knows (a stored
-        instance it meets is its backend's to refuse); a cancel leaves it to
-        be asked again too.
+        Asked once per conversation per turn (``stored``), before the turn's
+        first run is named; the turn's parallel first runs wait for that one
+        ask. Each turn asks again: between two turns another process may
+        have run the conversation (it holds it while its turn runs:
+        ``ConversationLock``), and ``AgentRuns.number_from`` never lowers a
+        count. A store that cannot be read is warned of in the log and asked
+        again at the next run, and this one is numbered from what the
+        manager knows (a stored instance it meets is its backend's to
+        refuse); a cancel leaves it to be asked again too. With no turn's
+        span open (``current_turn_scope``), every run asks.
         """
-        if self._stored is None or conversation is None or conversation in self._numbered:
+        if self._stored is None or conversation is None:
+            return
+        turn = current_turn_scope()
+        if turn is not None and self._numbered.get(conversation) is turn:
             return
         async with self._numbering:
-            if conversation in self._numbered:
+            if turn is not None and self._numbered.get(conversation) is turn:
                 return
             try:
                 counts = await self._stored(conversation)
@@ -322,7 +334,8 @@ class Delegations:
                 logger.debug("subagent_instances_unread", exc_info=error)
                 return
             self._runs.number_from(conversation, counts)
-            self._numbered.add(conversation)
+            if turn is not None:
+                self._numbered[conversation] = turn
 
     async def _in_run(
         self,

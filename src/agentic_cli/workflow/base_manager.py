@@ -604,9 +604,10 @@ class BaseWorkflowManager(ABC):
         """How many instances of each agent type ``conversation``'s store keeps (a backend hook).
 
         The highest stored instance number of each type, by type: what a
-        store holds of an earlier manager's runs (a restart, a switch of
-        backend or store), which this manager's numbering goes past
-        (``Delegations``, once per conversation). The base keeps no
+        store holds of another manager's runs (before a restart or a switch
+        of backend or store, or another process's between two turns), which
+        this manager's numbering goes past (``Delegations``, once per
+        conversation per turn). The base keeps no
         sub-agent transcript, and so keeps none (Deep Agents: a sub-agent is
         compiled without a checkpointer).
         """

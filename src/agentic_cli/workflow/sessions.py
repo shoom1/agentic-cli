@@ -195,6 +195,18 @@ def turn_has_ended() -> bool:
     return scope is not None and scope.ended
 
 
+def current_turn_scope() -> object | None:
+    """This context's turn span, as an identity; None outside any.
+
+    One object for the whole turn, in every context copied from inside it
+    (the tasks it starts, at any depth), and a new one for the next turn:
+    what is remembered for one turn only is kept with it and compared by
+    ``is`` (``Delegations`` reads a conversation's stored instances once per
+    turn).
+    """
+    return _turn_scope.get()
+
+
 @dataclass(frozen=True, slots=True)
 class ToolCallRef:
     """One tool call of a turn, as the model made it.

@@ -32,8 +32,8 @@ the conversation's user. Under its own app name it never lists as a
 conversation. ADK keys a session by at most ``MAX_KEY`` characters, so a
 longer id is refused before anything is stored. A conversation's children
 are deleted with it (``delete_children``: ``ServiceSessions.delete``, the
-manager's and its reader's), and a new manager numbers its instances past
-the ones they keep (``stored_instances``), so none is ever another run's.
+manager's and its reader's), and each turn numbers its instances past the
+ones they keep (``stored_instances``), so none is ever another run's.
 """
 
 from __future__ import annotations
@@ -137,8 +137,9 @@ async def stored_instances(
     """The highest instance number of each agent type ``conversation``'s child sessions keep.
 
     Read from their ids (``<conversation>/<type>-<n>``, ``AgentRuns``'
-    instance ids): what an earlier manager ran there, which a new one
-    numbers past. An id that names no such instance is left out.
+    instance ids): what another manager ran there (before a restart, or in
+    another process between two turns), which this one numbers past. An id
+    that names no such instance is left out.
 
     Args:
         service: The session service the conversation is in.
