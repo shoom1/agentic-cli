@@ -729,7 +729,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         checkpoint namespace is not the run's. The run's events go to the
         turn's live events as they are made, through a processor made for
         the run. Its input is the shared state it starts from and its
-        messages: an inheriting run's history, then the task message.
+        messages: an inheriting run's history, then the task message. A
+        cancel of the run alone (its control's: a limit, its parent) closes
+        its stream, which stops its graph, and it returns what it has: the
+        last text it wrote and the shared keys it changed, as of its last
+        finished step; ``Delegations`` ends it cancelled.
 
         Returns:
             Its last non-empty answer, as Deep Agents' own ``task`` read one
@@ -778,6 +782,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                         continue
                     for event in processor.process((), mode, payload):
                         live_events.report(event)
+        except asyncio.CancelledError:
+            # The run's own cancel has stopped it; any other (its turn's)
+            # goes on.
+            if not run.control.own_cancel():
+                raise
         except Exception as error:
             if is_context_overflow(error):
                 model = self._resolved_models.get(run.ref.agent)

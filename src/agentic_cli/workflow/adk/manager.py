@@ -1470,6 +1470,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         so do the raw log's records of its calls. As a turn's runner is, it
         is stopped with its abort signal set first, so ADK seals the calls
         it leaves open, in its child session, before the cancel goes on.
+        A cancel of the run alone (its control's: a limit, its parent) stops
+        it so too, and it returns what it has: the last text it wrote and the
+        shared keys it changed; ``Delegations`` ends it cancelled.
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
@@ -1517,6 +1520,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     self._report_raw_log()
                     async for event in processor.process_event(item, conversation.session_id):
                         live_events.report(event)
+        except asyncio.CancelledError:
+            # The run's own cancel has stopped it as above; any other (its
+            # turn's) goes on.
+            if not run.control.own_cancel():
+                raise
         except RuntimeError as error:
             cause = _plugin_cause(error)
             if cause is error:
@@ -1524,7 +1532,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise cause from None
         finally:
             self._report_raw_log()
-        if processor.failure is not None:
+        if processor.failure is not None and run.control.cancelled is None:
             error, code = processor.failure
             if code == OVERFLOW_ERROR_CODE:
                 raise RunFailed(error, code=code)
