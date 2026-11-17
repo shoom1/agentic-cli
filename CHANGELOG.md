@@ -1543,8 +1543,8 @@ the start of the entry's title.
 
 ### Changed
 
-- **On ADK, a conversation's sub-agent transcripts are deleted with it, and a
-  new manager never reuses one.** Each sub-agent run's transcript is a child
+- **On ADK, a conversation's sub-agent transcripts are deleted with it, and no
+  run reuses one.** Each sub-agent run's transcript is a child
   session of its conversation (app `<app_name>--agents`, id `<conversation
   id>/<instance>`), which no conversation list, `/resume` picker or
   `--continue` shows. Deleting the conversation deletes them, events and
@@ -1552,12 +1552,14 @@ the start of the entry's title.
   (`/sessions --delete` on another backend's conversation), `/new` on the
   memory store, and a conversation already gone leaves none behind
   (`adk/sessions.py::delete_children`). Instances are numbered per manager,
-  so the first run in a conversation a new manager opens (after a restart,
-  a switch of backend or store) is numbered past the instances its store
-  keeps (`BaseWorkflowManager._stored_instances`, `AgentRuns.number_from`):
-  `researcher-2` after a stored `researcher-1`, whose transcript stays as it
-  was. A run whose instance the store keeps all the same fails rather than
-  replace it.
+  so each turn's first run is numbered past the instances the
+  conversation's store keeps (`BaseWorkflowManager._stored_instances`,
+  asked once per conversation per turn; `AgentRuns.number_from`), whoever
+  ran them: a manager before a restart or a switch of backend or store, or
+  another process that had the conversation between two turns.
+  `researcher-2` follows a stored `researcher-1`, whose transcript stays as
+  it was. A run whose instance the store keeps all the same fails rather
+  than replace it.
 - **One `task` tool on both backends, which takes a brief.** **Breaking:**
   ADK offered one tool per sub-agent (`researcher(request=...)`) and Deep
   Agents its own `task(description=, subagent_type=)`; now every agent
