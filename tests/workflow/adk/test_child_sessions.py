@@ -205,3 +205,215 @@ class TestDeletingTheConversation:
             await manager.cleanup()
 
         assert (deleted, after) == (True, [])
+
+
+def texts_of(session) -> list[str]:
+    """The texts a session's events hold, in order."""
+    return [
+        part.text for event in session.events if event.content is not None
+        for part in event.content.parts or () if part.text
+    ]
+
+
+async def child(manager, instance: str, conversation: str = "s"):
+    return await manager._session_service.get_session(
+        app_name=child_app(manager.app_name), user_id="u", session_id=f"{conversation}/{instance}"
+    )
+
+
+def instances(manager, conversation: str = "s") -> list[tuple[str, str]]:
+    """The conversation's runs this manager recorded: (run, status), in start order."""
+    return [
+        (record.ref.run, record.status)
+        for record in manager.agent_runs.records(manager.session_ref(conversation, "u"))
+    ]
+
+
+def both(*answers: dict) -> dict:
+    """One answer that makes every call ``answers`` make."""
+    return {**answers[0], "content": [block for answer in answers for block in answer["content"]]}
+
+
+class TestStoredInstances:
+    async def test_the_highest_stored_number_of_each_type(self, service):
+        for session_id in [
+            "s/researcher-1", "s/researcher-3", "s/writer-2",
+            "t/researcher-7",            # another conversation's
+            "s/x/researcher-9",          # the conversation "s/x"'s
+            "s/notes", "s/writer-two",   # no instance of the framework's
+        ]:
+            await service.create_session(
+                app_name=child_app(APP), user_id="u", session_id=session_id
+            )
+
+        counts = await adk_sessions.stored_instances(service, APP, "u", "s")
+
+        assert counts == {"researcher": 3, "writer": 2}
+
+    async def test_none_is_none(self, service):
+        assert await adk_sessions.stored_instances(service, APP, "u", "s") == {}
+
+
+class TestNumberedPastTheStored:
+    """Instances are numbered per manager: a new one (a restart, a switch of
+    backend or store) numbers past the instances the conversation's store
+    keeps (``_stored_instances``), so a stored transcript is never another
+    run's."""
+
+    async def test_a_restart_numbers_past_them_and_keeps_their_transcripts(
+        self, project, monkeypatch
+    ):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        first = manager_on("sqlite")
+        try:
+            await say(first, "Find X.")
+        finally:
+            await first.cleanup()
+
+        second = manager_on("sqlite")
+        try:
+            await say(second, "Find Y.")
+            runs = instances(second)
+            earlier, later = await child(second, "researcher-1"), await child(second, "researcher-2")
+        finally:
+            await second.cleanup()
+
+        assert runs == [("researcher-2#1", "completed")]
+        assert texts_of(earlier)[1:] == ["X is 42."]
+        assert texts_of(later)[1:] == ["Y is 7."]
+
+    async def test_parallel_first_runs_after_a_restart_are_both_numbered_past_them(
+        self, project, monkeypatch
+    ):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[
+                delegation("toolu_c1"), says("Done."),
+                both(delegation("toolu_c1"), delegation("toolu_c2")), says("Both done."),
+            ],
+            researcher=[says("X is 42."), says("Y is 7."), says("Z is 3.")],
+        )))
+        first = manager_on("sqlite")
+        try:
+            await say(first, "Find X.")
+        finally:
+            await first.cleanup()
+
+        second = manager_on("sqlite")
+        asked: list = []
+        looked = second._stored_instances
+
+        async def counted(conversation):
+            asked.append(conversation)
+            return await looked(conversation)
+
+        second._stored_instances = counted
+        try:
+            await say(second, "Find Y and Z.")
+            runs = sorted(run for run, _ in instances(second))
+            stored = await stored_ids(second._session_service, child_app(second.app_name))
+        finally:
+            await second.cleanup()
+
+        assert runs == ["researcher-2#1", "researcher-3#1"]
+        assert stored == ["s/researcher-1", "s/researcher-2", "s/researcher-3"]
+        assert asked == [second.session_ref("s", "u")]
+
+    async def test_a_stored_transcript_is_never_replaced(self, project, monkeypatch):
+        """A run whose instance the store already keeps (here: a store that
+        could not tell what it keeps) fails, and the transcript stays."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        first = manager_on("sqlite")
+        try:
+            await say(first, "Find X.")
+        finally:
+            await first.cleanup()
+
+        second = manager_on("sqlite")
+
+        async def keeps_none(conversation):
+            return {}
+
+        second._stored_instances = keeps_none
+        try:
+            await say(second, "Find Y.")
+            (record,) = second.agent_runs.records(second.session_ref("s", "u"))
+            kept = await child(second, "researcher-1")
+        finally:
+            await second.cleanup()
+
+        assert (record.ref.run, record.status) == ("researcher-1#1", "failed")
+        assert record.error == "Session with id s/researcher-1 already exists."
+        assert texts_of(kept)[1:] == ["X is 42."]
+
+    async def test_the_look_blocks_no_event_loop(self, project, monkeypatch):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        first = manager_on("sqlite")
+        try:
+            await say(first, "Find X.")
+        finally:
+            await first.cleanup()
+
+        second = manager_on("sqlite")
+        try:
+            await second.initialize_services()
+            with no_blocking_calls():
+                counts = await second._stored_instances(second.session_ref("s", "u"))
+        finally:
+            await second.cleanup()
+
+        assert counts == {"researcher": 1}
+
+
+class TestAModelSwitchBetweenTurns:
+    """A model switch between turns: ``/settings`` reinitializes the manager
+    in place (``reinitialize(preserve_sessions=True)``)."""
+
+    async def test_the_runners_are_rebuilt_and_the_transcripts_and_records_stay(
+        self, project, monkeypatch
+    ):
+        answers = two_delegations()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        manager = manager_on("memory")
+        try:
+            await say(manager, "Find X.")
+            before = manager._agent_runners["researcher"]
+            await manager.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
+            after = manager._agent_runners["researcher"]
+            await say(manager, "Find Y.")
+            runs = instances(manager)
+            earlier, later = await child(manager, "researcher-1"), await child(manager, "researcher-2")
+        finally:
+            await manager.cleanup()
+
+        assert after is not before
+        assert [body["model"] for body in answers.bodies("researcher")] == [
+            "claude-sonnet-4-6", "claude-haiku-4-5",
+        ]
+        assert runs == [("researcher-1#1", "completed"), ("researcher-2#1", "completed")]
+        assert texts_of(earlier)[1:] == ["X is 42."]
+        assert texts_of(later)[1:] == ["Y is 7."]
+
+    async def test_a_new_managers_first_run_on_the_new_model_is_numbered_past_the_stored(
+        self, project, monkeypatch
+    ):
+        answers = two_delegations()
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
+        first = manager_on("sqlite")
+        try:
+            await say(first, "Find X.")
+        finally:
+            await first.cleanup()
+
+        second = manager_on("sqlite")
+        try:
+            await second.initialize_services()
+            await second.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
+            await say(second, "Find Y.")
+            runs = instances(second)
+        finally:
+            await second.cleanup()
+
+        assert runs == [("researcher-2#1", "completed")]
+        assert [body["model"] for body in answers.bodies("researcher")] == [
+            "claude-sonnet-4-6", "claude-haiku-4-5",
+        ]

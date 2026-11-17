@@ -32,7 +32,8 @@ the conversation's user. Under its own app name it never lists as a
 conversation. ADK keys a session by at most ``MAX_KEY`` characters, so a
 longer id is refused before anything is stored. A conversation's children
 are deleted with it (``delete_children``: ``ServiceSessions.delete``, the
-manager's and its reader's).
+manager's and its reader's), and a new manager numbers its instances past
+the ones they keep (``stored_instances``), so none is ever another run's.
 """
 
 from __future__ import annotations
@@ -128,6 +129,29 @@ async def delete_children(
             app_name=child_app(app_name), user_id=user_id, session_id=session_id
         )
     return len(children)
+
+
+async def stored_instances(
+    service: "BaseSessionService", app_name: str, user_id: str, conversation: str
+) -> dict[str, int]:
+    """The highest instance number of each agent type ``conversation``'s child sessions keep.
+
+    Read from their ids (``<conversation>/<type>-<n>``, ``AgentRuns``'
+    instance ids): what an earlier manager ran there, which a new one
+    numbers past. An id that names no such instance is left out.
+
+    Args:
+        service: The session service the conversation is in.
+        app_name: The conversation's app (not the child app).
+        user_id: The conversation's user.
+        conversation: The conversation's id.
+    """
+    counts: dict[str, int] = {}
+    for session_id in await _children(service, app_name, user_id, conversation):
+        agent, _, number = session_id.rpartition("/")[2].rpartition("-")
+        if agent and number.isascii() and number.isdigit():
+            counts[agent] = max(counts.get(agent, 0), int(number))
+    return counts
 
 
 def typed_prompts(events: list["Event"]) -> list[str]:

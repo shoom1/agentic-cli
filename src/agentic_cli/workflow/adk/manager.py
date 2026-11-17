@@ -72,6 +72,7 @@ from agentic_cli.workflow.adk.sessions import (
     child_app,
     child_session_id,
     make_session_service,
+    stored_instances,
     turn_state,
 )
 from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool
@@ -1479,6 +1480,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window
                 (the overflow handler's answer).
             ValueError: Its child session's id is longer than ADK stores.
+            AlreadyExistsError: The store keeps its instance already (a
+                stored transcript is never replaced).
             Exception: Its model call failed: the provider's error, out of
                 ADK's plugin wrapper (``_plugin_cause``).
         """
@@ -1540,22 +1543,31 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> None:
         """Make ``run``'s child session: the state it starts from, and an inheriting run's history.
 
-        An instance's session left by an earlier process (instances are
-        numbered per manager, so a new one numbers ``researcher-1`` again)
-        is replaced: nothing reads it.
+        Its instance is new to the conversation's store: instances are
+        numbered past the ones it keeps (``_stored_instances``). One it
+        keeps all the same is never replaced: ADK refuses to make it
+        (``AlreadyExistsError``), and the run fails with that.
         """
         service = self._session_service
-        stale = await service.get_session(
-            app_name=app, user_id=user_id, session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        if stale is not None:
-            await service.delete_session(app_name=app, user_id=user_id, session_id=session_id)
         session = await service.create_session(
             app_name=app, user_id=user_id, session_id=session_id, state=dict(run.state)
         )
         for event in run.history or ():
             await service.append_event(session, event)
+
+    async def _stored_instances(self, conversation: SessionRef) -> dict[str, int]:
+        """The highest instance number of each type ``conversation``'s child sessions keep.
+
+        The base's hook (``Delegations`` asks it once per conversation): an
+        earlier manager's runs (a restart, a switch of backend or store) are
+        in the store, and this one numbers past them.
+        """
+        if self._session_service is None:
+            return {}
+        return await stored_instances(
+            self._session_service, conversation.app_name, conversation.user_id,
+            conversation.session_id,
+        )
 
     def _report_raw_log(self) -> None:
         """Report what the raw LLM log holds (a sub-agent run's calls) to the turn's live events.
