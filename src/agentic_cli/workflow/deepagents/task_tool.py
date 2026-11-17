@@ -7,8 +7,8 @@ arguments, as the model wrote them, to the manager's ``Delegations``
 (``agents/delegate.py``): it reads the brief, runs the sub-agent
 (``DeepAgentsWorkflowManager._run_agent``, apart from this agent's stream)
 and returns the result envelope. The call is answered with the envelope as
-JSON, one ``ToolMessage``, and the shared state the run changed in the same
-``Command``.
+JSON (unescaped, as ADK's), one ``ToolMessage``, and the shared state the run
+changed in the same ``Command``.
 
 The shared state is the conversation's plan, tasks and outside-content mark
 (``SHARED_KEYS``): a run starts from its caller's, and what it changes comes
@@ -72,7 +72,9 @@ def build_task_tool(
             history=lambda: inherited_messages(state),
         ))
         answer = ToolMessage(
-            json.dumps(delegated.result), tool_call_id=runtime.tool_call_id, name=TASK_TOOL
+            json.dumps(delegated.result, ensure_ascii=False),
+            tool_call_id=runtime.tool_call_id,
+            name=TASK_TOOL,
         )
         return Command(update={**delegated.state, "messages": [answer]})
 

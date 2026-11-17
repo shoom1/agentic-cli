@@ -43,6 +43,7 @@ from agentic_cli.workflow.agents import (
     RunRecord,
     SubAgentPolicy,
 )
+from agentic_cli.workflow.agents.envelope import read_envelope
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import (
     EventType,
@@ -2238,6 +2239,50 @@ class TestAnEmptyLastAnswer:
                      and e.metadata.get("tool_call_id") == "c1"]
         assert (result.content, result.metadata["success"]) == ("No answer", True)
         assert [r.status for r in crew.records()] == [RUN_COMPLETED]
+
+
+class TestALongResult:
+    """A run's envelope passes the tool result cap as a dict on both backends:
+    the parent reads JSON still, the cut and the note in it."""
+
+    async def test_an_envelope_over_the_cap_is_still_the_envelope(self, make_crew):
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42. " * 500)],
+        )
+        crew.manager.settings.tool_result_max_chars = 2_000
+
+        events = await crew.turn()
+
+        sent = crew.results_read("coordinator")["c1"]
+        read = read_envelope(sent)
+        assert read is not None, sent[:300]
+        assert len(sent) <= 2_000
+        assert (read["success"], read["agent"], read["status"]) == (
+            True, "researcher-1", RUN_COMPLETED,
+        )
+        assert read["result"].startswith("X is 42.") and "characters cut]" in read["result"]
+        assert read["truncated"].startswith("Cut: ") and "tool-output/task-" in read["truncated"]
+        (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                     and e.metadata.get("tool_call_id") == "c1"]
+        assert result.metadata["result"] == read
+        assert result.metadata["success"] is True
+        assert result.content.startswith("X is 42.")
+
+    async def test_its_text_is_sent_as_written(self, make_crew):
+        """Not as JSON escapes, which make a non-Latin answer six times as long."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("答案是四十二。")],
+        )
+
+        await crew.turn()
+
+        sent = crew.results_read("coordinator")["c1"]
+        assert "答案是四十二。" in sent
+        assert envelope_read(sent)["result"] == "答案是四十二。"
 
 
 class TestOffTheLoop:

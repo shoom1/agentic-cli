@@ -12,7 +12,10 @@ The call's result is the envelope as JSON text, which ADK stores as
 ``{"result": <text>}``: every model adapter sends that text whole (ADK's
 OpenAI Responses adapter sends only a dict's ``result``, and would lose the
 rest of an envelope given as a dict), as Deep Agents' ``ToolMessage`` holds
-it.
+it. The text is written unescaped (``ensure_ascii=False``: an escaped
+non-Latin answer is six times as long), and a long one is cut by the tool
+result cap as the dict it holds (``workflow/tool_output.py``), so the parent
+reads JSON still.
 
 The shared state is the conversation's plan, tasks and outside-content mark
 (``SHARED_KEYS``): a run starts from the caller's (``tool_context.state``),
@@ -100,7 +103,7 @@ class TaskTool(BaseTool):
         ))
         for key, value in delegated.state.items():
             state[key] = value
-        return json.dumps(delegated.result)
+        return json.dumps(delegated.result, ensure_ascii=False)
 
 
 def inherited_events(events: Sequence[Event]) -> list[Event]:

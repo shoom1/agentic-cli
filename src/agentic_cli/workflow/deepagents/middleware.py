@@ -298,9 +298,10 @@ class ToolResultCapMiddleware(AgentMiddleware):
 
     What it reads of a result:
 
-    - A ``ToolMessage`` whose content is a string: a JSON object (a framework
-      tool's dict) is cut as a dict and serialized again; other text is cut
-      as a string.
+    - A ``ToolMessage`` whose content is a string: cut as the cap cuts a
+      string, so a JSON object (a framework tool's dict, a delegation's
+      envelope) is cut as a dict and given back as JSON, as on ADK; other
+      text is cut as a string.
     - Content that is a list: its text blocks are joined into one, cut as a
       string, which stands where the first was, with its other keys; other
       blocks (images) are kept in their order, so one that sat between two
@@ -382,14 +383,8 @@ class ToolResultCapMiddleware(AgentMiddleware):
         return message.model_copy(update={"content": capped})
 
     def _text(self, text: str, name: str, source: Path | None) -> str:
-        if len(text) <= self.max_chars:
-            return text
-        result = _json_object(text)
-        if result is None:
-            return self._cap(text, name, source)
-        # Sent as the cap measured it, cut or not: the tool's own JSON may be
-        # several times longer (\uXXXX escapes, indentation).
-        return json.dumps(self._cap(result, name, source), ensure_ascii=False)
+        # The cap's own rule: a JSON object is cut as a dict, given back as JSON.
+        return self._cap(text, name, source)
 
     def _blocks(self, blocks: list, name: str, source: Path | None) -> list:
         texts = [text for text in map(_block_text, blocks) if text is not None]
@@ -416,17 +411,6 @@ class ToolResultCapMiddleware(AgentMiddleware):
         return cap_tool_result(
             result, tool_name=name, max_chars=self.max_chars, folder=self.folder, source=source
         )
-
-
-def _json_object(text: str) -> dict | None:
-    """The dict ``text`` holds as JSON, or None."""
-    if not text.lstrip().startswith("{"):
-        return None
-    try:
-        value = json.loads(text)
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
 
 
 def _block_text(block: Any) -> str | None:

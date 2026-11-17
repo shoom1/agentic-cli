@@ -1254,7 +1254,9 @@ the start of the entry's title.
   and the log warns once per folder. Reading a saved output back cuts it
   again without a second file. Every result is covered: registered, MCP and
   skill tools, `job_result`, and a sub-agent run's envelope (`task`'s
-  result, on both backends). ADK's
+  result, on both backends). A string that holds a JSON object (the
+  envelope, a framework tool's dict in a Deep Agents `ToolMessage`) is cut
+  as that dict and given back as JSON, so its parent reads JSON still. ADK's
   `ToolResultCapPlugin` caps every agent but one with `after_tool_callback`s
   of its own (a native ADK YAML app's), which ADK would skip once it cut;
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
@@ -1570,8 +1572,13 @@ the start of the entry's title.
   more ("Error running sub-agent: …" is gone): the envelope says how the
   run ended. A run's result is its last text, a reply that also called a
   tool included, so an empty final answer after it leaves that text; a run
-  that wrote none completes with an empty result, shown `No answer`. The
-  delegation's `TOOL_RESULT` carries the envelope as `metadata["result"]`.
+  that wrote none completes with an empty result, shown `No answer` (an
+  inheriting run's result is only what it wrote, never a reply from the
+  conversation it read). The envelope is written unescaped
+  (`ensure_ascii=False`), and one over `tool_result_max_chars` is cut as a
+  dict, its `result` shortened and the note under `truncated`, so it stays
+  JSON. The delegation's `TOOL_RESULT` carries the envelope as
+  `metadata["result"]`.
 
 - **Every `LLM_USAGE` counts the same way on both backends.** `prompt_tokens`
   is every input token, cache reads and writes included, and

@@ -119,11 +119,12 @@ class TestAResultThatFits:
         [
             {"success": True, "content": "x" * 100},
             "plain text",
+            '{"success": true, "result": "a JSON object"}',
             ["a", "b"],
             None,
             42,
         ],
-        ids=["dict", "str", "list", "none", "int"],
+        ids=["dict", "str", "json-str", "list", "none", "int"],
     )
     def test_is_returned_as_is(self, folder, result):
         assert cap(result, folder) is result
@@ -299,6 +300,41 @@ class TestOtherShapes:
         assert MARKER.search(capped["result"][0])
         assert capped["result"][1] == "short"
         assert size(capped) <= LIMIT
+
+    def test_a_string_holding_a_json_object_is_cut_as_that_dict_and_stays_json(self, folder):
+        # A delegation's envelope, as ADK's task tool returns it: its keys
+        # stay, its long field is cut, the note goes under "truncated".
+        envelope = {"success": True, "agent": "researcher-1", "status": "completed",
+                    "result": lines(5_000), "error": None}
+
+        capped = cap(json.dumps(envelope), folder, tool_name="task")
+
+        assert isinstance(capped, str) and len(capped) <= LIMIT
+        read = json.loads(capped)
+        assert list(read) == [*envelope, "truncated"]
+        assert (read["success"], read["status"], read["error"]) == (True, "completed", None)
+        head, _, tail = pieces(read["result"])
+        assert envelope["result"].startswith(head) and envelope["result"].endswith(tail)
+        assert SAVED_NOTE.match(read["truncated"])["name"].startswith("task-")
+
+    def test_such_a_string_is_measured_and_sent_unescaped(self, folder):
+        # Escaped, each of these characters takes six: unescaped it fits.
+        envelope = {"status": "completed", "result": "字" * (LIMIT // 2)}
+        text = json.dumps(envelope)
+        assert len(text) > LIMIT
+
+        capped = cap(text, folder)
+
+        assert capped == json.dumps(envelope, ensure_ascii=False)
+        assert not folder.exists()
+
+    def test_a_string_that_holds_no_json_object_is_cut_as_text(self, folder):
+        text = json.dumps(["x" * 60_000])  # JSON, but no object
+
+        capped = cap(text, folder)
+
+        body, _, note = capped.rpartition("\n\n")
+        assert MARKER.search(body) and SAVED_NOTE.match(note)
 
 
 class TestTheSavedOutput:

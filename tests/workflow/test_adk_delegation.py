@@ -83,6 +83,7 @@ from agentic_cli.workflow.agents.brief import (  # noqa: E402
     Brief,
     task_message,
 )
+from agentic_cli.workflow.agents.envelope import read_envelope  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
@@ -478,7 +479,19 @@ class TestDelegation:
 
         result = lines(answers.bodies("coordinator")[1])[-1]
         assert len(result) < 60_000
-        assert "Cut: " in result and "tool-output/task-" in result
+        # The envelope is cut as a dict: its JSON still reads, the note in it.
+        (held,) = [
+            block["content"]
+            for message in answers.bodies("coordinator")[1]["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"] if block["type"] == "tool_result"
+        ]
+        if isinstance(held, list):
+            held = "".join(part.get("text", "") for part in held)
+        read = read_envelope(held)
+        assert read is not None, held[:300]
+        assert (read["status"], read["agent"], read["success"]) == ("completed", "researcher-1", True)
+        assert read["truncated"].startswith("Cut: ") and "tool-output/task-" in read["truncated"]
         (saved,) = (project / ".agentic_cli" / "tool-output").glob("task-*.txt")
         assert saved.read_text().count("word") == 30_000  # all of it, in lines to page
 
