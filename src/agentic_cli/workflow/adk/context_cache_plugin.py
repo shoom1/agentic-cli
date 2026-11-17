@@ -7,6 +7,10 @@ same turn. A turn of tool steps against a cache endpoint that keeps failing,
 or hangs, would pay a failed create (up to its 60-second bound) at every step.
 ``ContextCachePlugin`` ends caching for the rest of an agent's turn once a call
 that could have made a cache ends without one; the next turn tries again.
+Its state is kept by invocation and let go of as that run ends, well
+(``after_run_callback``) or failing (``on_run_error_callback``, after which
+ADK runs no ``after_run_callback``): a sub-agent run is an invocation of its
+type's runner, and two runs of one type share this plugin at once.
 """
 
 from __future__ import annotations
@@ -65,7 +69,15 @@ class ContextCachePlugin(BasePlugin):
         return None
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
-        invocation = invocation_context.invocation_id
+        self._forget(invocation_context.invocation_id)
+
+    async def on_run_error_callback(
+        self, *, invocation_context: InvocationContext, error: Exception
+    ) -> None:
+        self._forget(invocation_context.invocation_id)
+
+    def _forget(self, invocation: str) -> None:
+        """Let go of what ``invocation`` kept; another run's stays."""
         self._spent = {key for key in self._spent if key[0] != invocation}
         self._could_cache = {
             key: value for key, value in self._could_cache.items() if key[0] != invocation
