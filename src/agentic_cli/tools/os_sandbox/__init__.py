@@ -12,6 +12,10 @@ Usage:
     policy = OSSandboxPolicy(writable_paths=["/tmp"])
     result = sandbox.wrap_shell_command("echo hello", Path.cwd(), policy)
     # result.command is now "sandbox-exec -p '...' /bin/bash -c 'echo hello'"
+    subprocess.run(result.command, shell=True, timeout=60)
+    # It ended on its own: release what the wrap holds for the run. Not after
+    # a timeout (TimeoutExpired skips this line): see OSSandboxResult.release.
+    result.release()
 """
 
 from __future__ import annotations

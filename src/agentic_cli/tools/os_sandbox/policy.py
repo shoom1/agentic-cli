@@ -67,6 +67,11 @@ class OSSandboxPolicy:
         enabled: Whether OS sandboxing is active.
         writable_paths: Additional paths the sandboxed process can write to.
             The working directory is always writable regardless of this list.
+            A protected path that does not exist below one of them (a missing
+            ``~/.bash_profile`` when the list holds the home directory) is
+            held by bubblewrap with a placeholder folder while a run lasts,
+            and for good after a run that timed out or was killed: a folder at
+            ``~/.bash_profile`` makes a login bash skip ``~/.profile``.
         deny_write_paths: Paths denied for writing even within writable dirs.
             Defaults to MANDATORY_DENY_WRITE; a caller that passes its own
             list replaces it (the framework never passes one).
