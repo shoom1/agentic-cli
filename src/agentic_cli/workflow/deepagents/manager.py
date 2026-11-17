@@ -662,6 +662,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             budgets=self._budgets,
             ledgers=self._usage_ledgers,
         )
+        # Each item names its namespace; the processor reads only the root's
+        # (a graph a tool runs under the inherited config streams in its own).
         stream = self._root.astream(
             graph_input,
             run_config(ref, callbacks=[callback]),

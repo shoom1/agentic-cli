@@ -34,6 +34,7 @@ from langchain_core.outputs import ChatGeneration, LLMResult  # noqa: E402
 from langgraph.graph.message import REMOVE_ALL_MESSAGES  # noqa: E402
 
 from agentic_cli.models import ModelCatalog, RoleMap, resolve_model  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.tools._core.tasks import task_progress_data  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
@@ -47,6 +48,7 @@ from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
 )
 from agentic_cli.workflow.agents.envelope import envelope  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
 from agentic_cli.workflow.sessions import RunRef  # noqa: E402
 from tests.models.fakes import providers  # noqa: E402
@@ -555,10 +557,17 @@ class TestAttribution:
 
         assert {(e.metadata["agent"], e.run) for e in events} == {("researcher", RESEARCHER)}
 
-    def test_every_item_is_the_processors_own_whatever_its_namespace(self):
-        events = _processor().process(("tools:unseen",), "updates", _model_update(AIMessage("Hi.")))
+    def test_an_item_of_a_nested_graph_is_none_of_its_events(self):
+        """Only its own graph's items (the root namespace) are its events: a
+        graph a tool runs under the config it inherits streams in a
+        namespace of its own, and its model's text is no agent's reply."""
+        processor = _processor()
 
-        assert {e.metadata["agent"] for e in events} == {"coordinator"}
+        assert processor.process(
+            ("tools:unseen",), "updates", _model_update(AIMessage("Hi."))
+        ) == []
+        (said,) = processor.process((), "updates", _model_update(AIMessage("Hi.")))
+        assert (said.type, said.metadata["agent"]) == (EventType.TEXT, "coordinator")
 
     def test_other_nodes_emit_nothing(self):
         """A middleware hook's update (here, a patched history) is not output."""
@@ -669,9 +678,50 @@ class TestRunCallback:
                "tokens_before": 18_000, "tokens_after": 3_100}
 
 
+@register_tool(capabilities=EXEMPT, description="Run a graph of its own (a processor test tool).")
+async def processor_probe_nested_graph() -> dict:
+    """Run a LangGraph graph whose "model" node answers, under the config the
+    tool inherits: its updates reach the turn's stream as a subgraph's."""
+    from langgraph.graph import START, MessagesState, StateGraph
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("model", lambda state: {"messages": [AIMessage("The nested graph's text.")]})
+    graph.add_edge(START, "model")
+    await graph.compile().ainvoke({"messages": [HumanMessage("Go.")]})
+    return {"success": True}
+
+
 class TestARealTurn:
     """A real manager on scripted models: the turn's events end to end, the
     sub-agent's run among them, as its own stream reports them."""
+
+    async def test_a_graph_a_tool_runs_is_none_of_the_turns_text(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.workflow.deepagents import manager as manager_module
+
+        models = ScriptedModels(
+            solo=[ai(calls=[("processor_probe_nested_graph", {}, "c1")]), ai("Done.")]
+        )
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        manager = manager_module.DeepAgentsWorkflowManager(
+            agent_configs=[AgentConfig(name="solo", prompt="p",
+                                       tools=[processor_probe_nested_graph],
+                                       model="anthropic:claude-sonnet-4-5")],
+            settings=BaseSettings(session_store="memory", default_model="anthropic:claude-sonnet-4-5"),
+        )
+        try:
+            events = [e async for e in manager.process("Go.", "u", session_id="s1")]
+        finally:
+            await manager.cleanup()
+
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Done."]
+        assert [e.metadata.get("tool_name") for e in events
+                if e.type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)] == [
+            "processor_probe_nested_graph", "processor_probe_nested_graph",
+        ]
 
     async def test_a_delegating_turn(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

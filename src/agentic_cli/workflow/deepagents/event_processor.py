@@ -7,6 +7,9 @@ framework's ``task`` call (``agents/delegate.py``), which runs the
 sub-agent's graph apart from its caller's stream
 (``DeepAgentsWorkflowManager._run_agent``), through a processor of its own,
 made for that run (``run=``), whose events reach the turn's live events.
+Only the root namespace's items are the agent's: a graph one of its tools
+runs under the config it inherits streams in a namespace of its own, and
+none of its items is an event.
 
 Each finished node output becomes events, as ADK reports them: one per
 finished message, no tokens. Only the agent's own nodes speak:
@@ -146,10 +149,13 @@ class DeepAgentsEventProcessor:
     ) -> list[WorkflowEvent]:
         """The events of one stream item (none for most).
 
-        ``namespace`` is the item's place in the stream: only this agent's
-        own graph streams here, so every item is its own.
+        ``namespace`` is the item's place in the stream. Only the agent's own
+        graph's items (the root namespace, ``()``) are its events: a sub-agent
+        runs apart, on a stream of its own, so an item in a namespace of its
+        own is a graph one of its tools ran under the config it inherited,
+        whose model text is no agent's reply.
         """
-        if mode != "updates" or not isinstance(payload, dict):
+        if tuple(namespace) or mode != "updates" or not isinstance(payload, dict):
             return []
         events: list[WorkflowEvent] = []
         for node, update in payload.items():
