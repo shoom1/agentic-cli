@@ -39,7 +39,6 @@ from google.genai import errors as genai_errors
 
 pytest.importorskip("deepagents")
 
-from deepagents import SubAgentMiddleware  # noqa: E402
 from deepagents.backends.protocol import BackendProtocol  # noqa: E402
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware  # noqa: E402
 from deepagents.middleware.summarization import SummarizationMiddleware  # noqa: E402
@@ -60,6 +59,7 @@ from agentic_cli.models import (  # noqa: E402
     resolve_model,
 )
 from agentic_cli.tools.registry import register_tool  # noqa: E402
+from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
     OVERFLOW_ERROR_CODE,
@@ -385,7 +385,7 @@ class TestTheStack:
 
         lead = created["lead"]["middleware"]
         assert [type(m) for m in lead] == [
-            PatchToolCallsMiddleware, SubAgentMiddleware, ForeignReasoningMiddleware,
+            PatchToolCallsMiddleware, ForeignReasoningMiddleware,
             ReportingSummarizationMiddleware, ContextOverflowMiddleware,
             AnthropicPromptCachingMiddleware,
             PermissionMiddleware, ToolResultCapMiddleware, ToolCallErrorMiddleware,
@@ -393,14 +393,14 @@ class TestTheStack:
         ]
         # The cap is inside the gate (a denial is short) and outside the error
         # middleware (an error result is capped too), on the settings.
-        assert (lead[7].max_chars, lead[7].folder) == (
+        assert (lead[6].max_chars, lead[6].folder) == (
             30_000, tmp_path / ".agentic_cli" / "tool-output"
         )
         assert issubclass(ReportingSummarizationMiddleware, SummarizationMiddleware)
         # Each agent leaves other providers' and other agents' reasoning out.
-        assert (lead[2].kind, lead[2].agent) == (ProviderKind.ANTHROPIC, "lead")
-        assert lead[3].agent == "lead"
-        assert (lead[5].ttl, lead[5].unsupported_model_behavior) == ("5m", "ignore")
+        assert (lead[1].kind, lead[1].agent) == (ProviderKind.ANTHROPIC, "lead")
+        assert lead[2].agent == "lead"
+        assert (lead[4].ttl, lead[4].unsupported_model_behavior) == ("5m", "ignore")
         # A sub-agent's model side starts with SubAgentOutcomeMiddleware.
         assert [type(m) for m in created["helper"]["middleware"]] == [
             PatchToolCallsMiddleware, SubAgentOutcomeMiddleware, ForeignReasoningMiddleware,
@@ -427,7 +427,7 @@ class TestTheStack:
             memory_index_cached=lambda: "",
         )
         lead = [type(m) for m in created["lead"]["middleware"]]
-        assert lead[2:7] == [
+        assert lead[1:6] == [
             ForeignReasoningMiddleware, ReportingSummarizationMiddleware, ContextOverflowMiddleware,
             MemoryIndexMiddleware, AnthropicPromptCachingMiddleware,
         ]
@@ -442,7 +442,7 @@ class TestTheStack:
 
         _build(TEAM, {"lead": claude, "helper": unknown}, settings)
 
-        lead = created["lead"]["middleware"][3]._lc_helper
+        lead = created["lead"]["middleware"][2]._lc_helper
         # A sub-agent's model side starts with SubAgentOutcomeMiddleware.
         helper = created["helper"]["middleware"][3]._lc_helper
         assert (lead.trigger, lead.keep) == thresholds_of(claude, settings)
@@ -792,10 +792,10 @@ class TestSummarizationInATurn:
         assert len(tool_message["content"]) <= 50_000
 
     async def test_a_summary_stays_with_the_agent_that_wrote_it(self, small, monkeypatch):
-        """The coordinator's summary never reaches a sub-agent's brief, and
-        the sub-agent's own summary never reaches the coordinator."""
+        """The coordinator's summary never reaches a sub-agent's task message,
+        and the sub-agent's own summary never reaches the coordinator."""
         lead = [chat_completion(f"Answer {n}.") for n in range(1, 7)] + [
-            _call("task", {"description": "Brief.", "subagent_type": "worker"}, "t1"),
+            _call("task", {"agent_type": "worker", "title": "Brief", "objective": "Brief."}, "t1"),
             chat_completion("Done."),
         ]
         # The worker's second report puts it over its trigger: it summarizes.
@@ -820,10 +820,11 @@ class TestSummarizationInATurn:
         assert [e.metadata["agent"] for t in earlier for e in t
                 if e.type is EventType.CONTEXT_TRIMMED] == ["lead"]
         own = summarized["_summarization_event"]
-        # ...yet the worker's brief is the brief alone,
+        # ...yet the worker's request is its task message alone,
         first, *_, last = server.requests("Work.")
-        assert first == [{"role": "system", "content": "Work."},
-                         {"role": "user", "content": "Brief."}]
+        assert first == [{"role": "system", "content": "Work."}, {"role": "user", "content": (
+            task_message(Brief(title="Brief", objective="Brief."))
+        )}]
         # and the worker's summary, of its brief and first report, stays its own.
         assert last[1]["content"].endswith("A summary of 3 messages.")
         assert state["_summarization_event"]["cutoff_index"] == own["cutoff_index"]

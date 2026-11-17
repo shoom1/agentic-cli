@@ -1,15 +1,14 @@
 """The event stream (``workflow/deepagents/event_processor.py``).
 
-A turn streams ``astream(..., stream_mode=["updates", "tasks"],
-subgraphs=True)``: ``(namespace, mode, payload)`` items, ``()`` being the
-root. ``DeepAgentsEventProcessor`` turns each finished node output into
-``WorkflowEvent``s, one row of the spec's mapping per test class, and
-attributes every event to its agent through the ``tasks`` mode, which maps a
-sub-agent's ``tools:<task-id>`` namespace to the ``task`` call that started
-it.
+A turn streams the root agent's graph, ``astream(..., stream_mode=["updates"],
+subgraphs=True)``: ``(namespace, mode, payload)`` items. A sub-agent's graph
+streams apart, in its run's own task, through a processor made for that run
+(``run=``). ``DeepAgentsEventProcessor`` turns each finished node output into
+``WorkflowEvent``s, one row of the spec's mapping per test class, each the
+processor's agent's and run's: the root's own, or the sub-agent run's.
 
 Most tests feed the processor payloads shaped as the stream sends them; the
-last runs a real agent tree on scripted models and feeds it the real stream.
+last runs a real manager on scripted models and reads its turn's events.
 """
 
 from __future__ import annotations
@@ -32,28 +31,26 @@ from langchain_core.messages import (  # noqa: E402
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, LLMResult  # noqa: E402
-from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.graph.message import REMOVE_ALL_MESSAGES  # noqa: E402
 
 from agentic_cli.models import ModelCatalog, RoleMap, resolve_model  # noqa: E402
 from agentic_cli.tools._core.tasks import task_progress_data  # noqa: E402
-from agentic_cli.tools.langgraph.state_tools import save_plan, save_tasks  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
     OVERFLOW_ERROR_CODE,
     ContextBudget,
     overflow_message,
 )
-from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.event_processor import (  # noqa: E402
     DeepAgentsEventProcessor,
     RunCallback,
 )
-from agentic_cli.workflow.deepagents.tools import to_langchain_tools  # noqa: E402
+from agentic_cli.workflow.agents.envelope import envelope  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, merged  # noqa: E402
+from agentic_cli.workflow.sessions import RunRef  # noqa: E402
 from tests.models.fakes import providers  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedChat, ai, task  # noqa: E402
+from tests.workflow.deepagents.fakes import ScriptedModels, ai, task  # noqa: E402
 
 _PROVIDERS = providers(anthropic="a-test-key", google="g-test-key", openai="o-test-key")
 
@@ -87,27 +84,22 @@ BUDGETS = {
 }
 CONTEXT_KEYS = ("agent", "context_trigger", "window_known")
 
-SUB = "tools:4f2c"  # a sub-agent's namespace segment: its task's id
-NESTED = "tools:9a1e"
+RESEARCHER = RunRef(
+    agent="researcher", instance="researcher-1", run="researcher-1#1", parent_run=None, depth=1
+)
 
 
 def _processor(**kwargs) -> DeepAgentsEventProcessor:
     return DeepAgentsEventProcessor(root="coordinator", agent_models=MODELS, **kwargs)
 
 
-def _task_started(task_id: str, call: dict, name: str = "tools") -> dict:
-    """A ``tasks``-mode start payload: one tool call sent to the tools node."""
-    return {"id": task_id, "name": name, "input": [call], "triggers": ("__pregel_push",)}
+def _run_processor(**kwargs) -> DeepAgentsEventProcessor:
+    """A processor made for the researcher's run, as ``_run_agent`` makes one."""
+    return _processor(run=RESEARCHER, **kwargs)
 
 
 def _call(name: str, args: dict, call_id: str) -> dict:
     return {"name": name, "args": args, "id": call_id, "type": "tool_call"}
-
-
-def _delegated(processor, namespace: tuple, segment: str, subagent: str) -> None:
-    """Tell the processor that ``segment`` under ``namespace`` runs ``subagent``."""
-    call = _call("task", {"description": "brief", "subagent_type": subagent}, "c-" + segment)
-    processor.process(namespace, "tasks", _task_started(segment.removeprefix("tools:"), call))
 
 
 def _model_update(*messages) -> dict:
@@ -156,13 +148,11 @@ class TestText:
     def test_a_sub_agents_text_is_its_activity(self):
         # Only the root replies to the user; a sub-agent's text is its work,
         # and its answer reaches the coordinator as the task call's result.
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-
-        events = processor.process((SUB,), "updates", _model_update(AIMessage("It is 42.")))
+        events = _run_processor().process((), "updates", _model_update(AIMessage("It is 42.")))
 
         (event,) = [e for e in events if e.type is EventType.TEXT]
         assert (event.metadata["agent"], event.metadata["subagent"]) == ("researcher", True)
+        assert event.run == RESEARCHER
 
 
 class TestThinking:
@@ -220,9 +210,8 @@ class TestToolCall:
         assert all(e.metadata["agent"] == "coordinator" for e in calls)
 
     def test_delegation_is_a_task_call(self):
-        message = AIMessage("", tool_calls=[
-            _call("task", {"description": "Find X.", "subagent_type": "researcher"}, "c1"),
-        ])
+        brief = {"agent_type": "researcher", "title": "Find X", "objective": "Find X."}
+        message = AIMessage("", tool_calls=[_call("task", brief, "c1")])
 
         (event,) = [
             e for e in _processor().process((), "updates", _model_update(message))
@@ -230,9 +219,7 @@ class TestToolCall:
         ]
 
         assert event.metadata["tool_name"] == "task"
-        assert event.metadata["tool_args"] == {
-            "description": "Find X.", "subagent_type": "researcher"
-        }
+        assert event.metadata["tool_args"] == brief
 
     def test_a_denied_call_is_a_call_then_a_failed_result(self):
         processor = _processor()
@@ -293,15 +280,14 @@ class TestToolResult:
     def test_a_result_without_a_name_takes_its_calls(self):
         processor = _processor()
         processor.process((), "updates", _model_update(
-            AIMessage("", tool_calls=[_call("task", {"description": "d", "subagent_type": "researcher"}, "c1")])
+            AIMessage("", tool_calls=[_call("lookup", {"q": "x"}, "c1")])
         ))
 
-        event, ended = processor.process(
+        (event,) = processor.process(
             (), "updates", _tools_update(ToolMessage("Done.", tool_call_id="c1"))
         )
 
-        assert event.metadata["tool_name"] == "task"
-        assert ended.type is EventType.AGENT_RUN
+        assert event.metadata["tool_name"] == "lookup"
 
     def test_a_state_tools_command_is_its_tool_message(self):
         """``save_plan`` returns a ``Command``; the update carries its state
@@ -317,15 +303,36 @@ class TestToolResult:
         assert event.metadata["result"] == {"success": True, "message": "Plan saved"}
         assert "Command" not in event.content
 
-    def test_a_task_command_is_the_sub_agents_answer(self):
+    def test_a_task_command_is_the_runs_envelope(self):
         tasks = [{"id": "t1", "description": "find X", "status": "completed"}]
+        found = envelope(RESEARCHER, "completed", result="X is 42.\nIt says so.")
 
         events = _processor().process((), "updates", _tools_update(
-            ToolMessage("X is 42.", tool_call_id="c1", name="task"), tasks=tasks
+            ToolMessage(json.dumps(found), tool_call_id="c1", name="task"), tasks=tasks
         ))
 
         assert _types(events) == [EventType.TOOL_RESULT, EventType.TASK_PROGRESS]
-        assert events[0].metadata["result"] == "X is 42."
+        assert events[0].metadata["result"] == found
+        assert (events[0].content, events[0].metadata["success"]) == ("X is 42.", True)
+
+    def test_a_failed_runs_envelope_is_a_failed_result(self):
+        found = envelope(RESEARCHER, "failed", error="overloaded")
+
+        (event,) = _processor().process((), "updates", _tools_update(
+            ToolMessage(json.dumps(found), tool_call_id="c1", name="task")
+        ))
+
+        assert event.content == "Failed: overloaded"
+        assert (event.metadata["success"], event.metadata["error"]) == (False, "overloaded")
+
+    def test_an_empty_answer_is_shown_as_no_answer(self):
+        found = envelope(RESEARCHER, "completed", result="")
+
+        (event,) = _processor().process((), "updates", _tools_update(
+            ToolMessage(json.dumps(found), tool_call_id="c1", name="task")
+        ))
+
+        assert (event.content, event.metadata["success"]) == ("No answer", True)
 
     def test_a_tool_internal_model_call_is_not_text(self):
         """``generate_simple`` inside a tool is not a graph node: the stream
@@ -358,20 +365,24 @@ class TestTaskProgress:
         assert event.metadata["current_task_description"] == "write it up"
         assert event.metadata["agent"] == "coordinator"
 
-    def test_the_same_list_again_reports_nothing_new(self):
-        """A sub-agent's list flows back with its result: one report, not two."""
+    def test_a_sub_agents_list_is_reported_once_as_it_comes_back(self):
+        """A sub-agent's list is the conversation's, which its run hands back
+        with its result: the root's processor reports it then, once."""
         processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
         message = ToolMessage(json.dumps({"success": True}), tool_call_id="r1", name="save_tasks")
 
-        first = processor.process((SUB,), "updates", _tools_update(message, tasks=self.TASKS))
+        in_the_run = _run_processor().process((), "updates", _tools_update(message, tasks=self.TASKS))
         back = processor.process((), "updates", _tools_update(
             ToolMessage("Done.", tool_call_id="c1", name="task"), tasks=self.TASKS
         ))
+        again = processor.process((), "updates", _tools_update(
+            ToolMessage("Done.", tool_call_id="c2", name="task"), tasks=self.TASKS
+        ))
 
-        assert _types(first) == [EventType.TOOL_RESULT, EventType.TASK_PROGRESS]
-        assert first[1].metadata["agent"] == "researcher"
-        assert _types(back) == [EventType.TOOL_RESULT]
+        assert _types(in_the_run) == [EventType.TOOL_RESULT]
+        assert _types(back) == [EventType.TOOL_RESULT, EventType.TASK_PROGRESS]
+        assert back[1].metadata["agent"] == "coordinator"
+        assert _types(again) == [EventType.TOOL_RESULT]
 
     def test_an_empty_list_reports_nothing(self):
         message = ToolMessage(json.dumps({"success": True}), tool_call_id="c1", name="save_tasks")
@@ -436,14 +447,12 @@ class TestUsage:
         )
 
     def test_a_sub_agents_usage_is_on_its_own_model(self):
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
         message = AIMessage(
             "Found.", usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
         )
 
         (usage,) = [
-            e for e in processor.process((SUB,), "updates", _model_update(message))
+            e for e in _run_processor().process((), "updates", _model_update(message))
             if e.type is EventType.LLM_USAGE
         ]
 
@@ -452,15 +461,13 @@ class TestUsage:
         assert "cached_tokens" not in usage.metadata
 
     def test_a_sub_agents_usage_is_not_the_conversations_context(self):
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
         message = AIMessage(
             "Found.", usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
         )
 
-        (sub,) = [e for e in processor.process((SUB,), "updates", _model_update(message))
+        (sub,) = [e for e in _run_processor().process((), "updates", _model_update(message))
                   if e.type is EventType.LLM_USAGE]
-        (root,) = [e for e in processor.process((), "updates", _model_update(message))
+        (root,) = [e for e in _processor().process((), "updates", _model_update(message))
                    if e.type is EventType.LLM_USAGE]
 
         assert sub.metadata["purpose"] == "subagent"
@@ -472,16 +479,14 @@ class TestUsage:
         assert EventType.LLM_USAGE not in _types(events)
 
     def test_each_agents_usage_carries_its_own_context_trigger(self):
-        processor = _processor(budgets=BUDGETS)
-        _delegated(processor, (), SUB, "researcher")
         message = AIMessage(
             "Found.", usage_metadata={"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
         )
 
-        (sub,) = [e for e in processor.process((SUB,), "updates", _model_update(message))
-                  if e.type is EventType.LLM_USAGE]
-        (root,) = [e for e in processor.process((), "updates", _model_update(message))
-                   if e.type is EventType.LLM_USAGE]
+        (sub,) = [e for e in _run_processor(budgets=BUDGETS).process(
+            (), "updates", _model_update(message)) if e.type is EventType.LLM_USAGE]
+        (root,) = [e for e in _processor(budgets=BUDGETS).process(
+            (), "updates", _model_update(message)) if e.type is EventType.LLM_USAGE]
 
         assert {key: root.metadata.get(key) for key in CONTEXT_KEYS} == {
             "agent": "coordinator", "context_trigger": 154_536, "window_known": True,
@@ -492,49 +497,31 @@ class TestUsage:
 
 
 class TestError:
-    def test_a_failed_turn_is_one_error_from_the_agent_that_failed(self):
-        """A sub-agent's failure that escaped its ``task`` call. In a turn the
-        framework builds none does (``ToolCallErrorMiddleware`` answers the
-        call; only a cancel or LangGraph's control flow escapes it): this
-        branch of the processor is defensive."""
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
+    def test_a_failed_turn_is_one_error_the_agents(self):
         error = RuntimeError("Error code: 400 - bad request")
-        # The sub-agent's model task fails first, then the coordinator's tools task.
-        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
-                                            "interrupts": [], "result": None})
-        processor.process((), "tasks", {"id": SUB.removeprefix("tools:"), "name": "tools",
-                                        "error": error, "interrupts": [], "result": None})
 
-        event = processor.turn_failed(error)
+        event = _processor().turn_failed(error)
 
         assert event.type is EventType.ERROR
         assert event.content == "Error code: 400 - bad request"
         assert event.metadata["error_code"] == "RuntimeError"
         assert event.metadata["recoverable"] is False
-        assert event.metadata["agent"] == "researcher"
+        assert event.metadata["agent"] == "coordinator"
 
-    def test_without_a_failed_task_it_is_the_roots(self):
+    def test_without_a_message_it_is_named_by_its_type(self):
         event = _processor().turn_failed(TimeoutError())
 
         assert event.content == "TimeoutError"
         assert event.metadata["agent"] == "coordinator"
 
-    def test_an_overflow_names_the_failing_agents_model(self):
-        """Deep Agents' own error when a summary still does not fit, escaping
-        a sub-agent's ``task`` call: in a turn the framework builds,
-        ``ToolCallErrorMiddleware`` answers that call instead (a defensive
-        branch; the root's own overflow is the next test's)."""
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
+    def test_an_overflow_names_the_agents_own_model(self):
+        """Deep Agents' own error when a summary still does not fit."""
         error = ContextOverflowError(
             "Context remains above the input budget after compaction; reduce input, "
             "tools, or configured output tokens."
         )
-        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
-                                            "interrupts": [], "result": None})
 
-        event = processor.turn_failed(error)
+        event = _run_processor().turn_failed(error)
 
         assert event.type is EventType.ERROR
         assert event.content == overflow_message("google:gemini-2.5-flash")
@@ -559,105 +546,17 @@ class TestError:
         assert event.metadata["error_code"] == OVERFLOW_ERROR_CODE
         assert event.metadata["agent"] == "coordinator"
 
-    def test_a_failure_its_task_call_answered_is_not_the_turns(self):
-        """A sub-agent whose model failed answers its ``task`` call with the
-        error, and its coordinator goes on: a later failure is the coordinator's."""
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-        processor.process((SUB,), "tasks", {"id": "m1", "name": "model",
-                                            "error": RuntimeError("overloaded"),
-                                            "interrupts": [], "result": None})
-        processor.process((), "updates", _tools_update(ToolMessage(
-            "Error running sub-agent: overloaded", tool_call_id="c-" + SUB, name="task",
-            status="error",
-        )))
-
-        event = processor.turn_failed(TimeoutError())
-
-        assert event.metadata["agent"] == "coordinator"
-
-    def test_a_nested_failure_answered_leaves_its_parents_own(self):
-        """The leaf fails and its task call is answered; then its parent fails,
-        unanswered: the turn's failure is the parent's."""
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-        _delegated(processor, (SUB,), NESTED, "leaf")
-        error = RuntimeError("overloaded")
-        processor.process((SUB, NESTED), "tasks", {"id": "m2", "name": "model", "error": error,
-                                                   "interrupts": [], "result": None})
-        processor.process((SUB,), "updates", _tools_update(ToolMessage(
-            "Error running sub-agent: overloaded", tool_call_id="c-" + NESTED, name="task",
-            status="error",
-        )))
-        processor.process((SUB,), "tasks", {"id": "m1", "name": "model", "error": error,
-                                            "interrupts": [], "result": None})
-
-        event = processor.turn_failed(error)
-
-        assert event.metadata["agent"] == "researcher"
-
-    def test_a_sub_agents_own_call_of_the_same_id_answers_no_delegation(self):
-        """Call ids are only an agent's own (a provider that numbers them
-        gives a sub-agent's first call its parent's ``task`` call's): the
-        sub-agent's own result is not its delegation's, which still answers
-        the failure inside it when its own result comes."""
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-        processor.process((SUB,), "updates", _tools_update(ToolMessage(
-            '{"success": true}', tool_call_id="c-" + SUB, name="contract_lookup",
-        )))
-        processor.process((SUB,), "tasks", {"id": "m1", "name": "model",
-                                            "error": RuntimeError("overloaded"),
-                                            "interrupts": [], "result": None})
-        processor.process((), "updates", _tools_update(ToolMessage(
-            "Error running sub-agent: overloaded", tool_call_id="c-" + SUB, name="task",
-            status="error",
-        )))
-
-        event = processor.turn_failed(TimeoutError())
-
-        assert event.metadata["agent"] == "coordinator"
-
 
 class TestAttribution:
-    def test_a_sub_agents_events_are_its_own(self):
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-
-        events = processor.process(
-            (SUB,), "updates", _model_update(AIMessage("", tool_calls=[_call("grep", {}, "r1")]))
+    def test_a_sub_agents_events_are_its_runs(self):
+        events = _run_processor().process(
+            (), "updates", _model_update(AIMessage("", tool_calls=[_call("grep", {}, "r1")]))
         )
 
-        assert {e.metadata["agent"] for e in events} == {"researcher"}
+        assert {(e.metadata["agent"], e.run) for e in events} == {("researcher", RESEARCHER)}
 
-    def test_nested_namespaces_resolve_through_the_chain(self):
-        processor = _processor()
-        _delegated(processor, (), SUB, "researcher")
-        _delegated(processor, (SUB,), NESTED, "worker")
-
-        message = AIMessage(
-            "Done.", usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
-        )
-
-        events = processor.process((SUB, NESTED), "updates", _model_update(message))
-
-        assert {e.metadata["agent"] for e in events} == {"worker"}
-        assert next(e for e in events if e.type is EventType.LLM_USAGE).metadata["model"] == (
-            "openai:gpt-5"
-        )
-
-    def test_an_unknown_namespace_falls_back_to_the_root(self):
+    def test_every_item_is_the_processors_own_whatever_its_namespace(self):
         events = _processor().process(("tools:unseen",), "updates", _model_update(AIMessage("Hi.")))
-
-        assert {e.metadata["agent"] for e in events} == {"coordinator"}
-
-    def test_a_tools_task_that_is_not_delegation_maps_nothing(self):
-        """Only ``task`` delegates, whatever another tool's arguments say."""
-        processor = _processor()
-        lookalike = _call("assign", {"subagent_type": "researcher"}, "c1")
-        processor.process((), "tasks", _task_started("ab12", lookalike))
-
-        events = processor.process(("tools:ab12",), "updates", _model_update(AIMessage("Hi.")))
 
         assert {e.metadata["agent"] for e in events} == {"coordinator"}
 
@@ -671,6 +570,7 @@ class TestAttribution:
         assert processor.process((), "updates", {"PatchToolCallsMiddleware.before_agent": patched}) == []
         assert processor.process((), "updates", {"PatchToolCallsMiddleware.before_agent": None}) == []
         assert processor.process((), "custom", {"anything": 1}) == []
+        assert processor.process((), "tasks", {"id": "t1", "name": "tools"}) == []
 
 
 async def _reported(live: LiveEvents, act) -> list[WorkflowEvent]:
@@ -769,48 +669,44 @@ class TestRunCallback:
                "tokens_before": 18_000, "tokens_after": 3_100}
 
 
-class TestARealStream:
-    """A real tree on scripted models: the stream's own shapes, end to end."""
+class TestARealTurn:
+    """A real manager on scripted models: the turn's events end to end, the
+    sub-agent's run among them, as its own stream reports them."""
 
-    async def test_a_delegating_turn(self):
-        configs = [
-            AgentConfig(name="coordinator", prompt="p", sub_agents=["researcher"]),
-            AgentConfig(name="researcher", prompt="p", description="Finds facts."),
-        ]
-        models = {
-            "coordinator": ScriptedChat(label="coordinator", script=[
+    async def test_a_delegating_turn(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+        from agentic_cli.config import BaseSettings
+        from agentic_cli.workflow.deepagents import manager as manager_module
+
+        models = ScriptedModels(
+            coordinator=[
                 ai(calls=[("save_plan", {"content": "- [ ] find X"}, "c0")]),
                 ai("Delegating.", calls=[task("researcher", "Find X.", "c1")]),
                 ai("X is 42."),
-            ]),
-            "researcher": ScriptedChat(label="researcher", script=[
+            ],
+            researcher=[
                 ai(calls=[("save_tasks", {"tasks": [
                     {"description": "find X", "status": "in_progress"}
                 ]}, "r1")], reasoning="Plan first."),
                 ai("It is 42."),
-            ]),
-        }
-        root = build_agent_tree(
-            configs,
-            chat_models=models,
-            resolved=MODELS,
-            tools={
-                "coordinator": to_langchain_tools([save_plan]),
-                "researcher": to_langchain_tools([save_tasks]),
-            },
-            prompts={"coordinator": "Coordinate.", "researcher": "Research."},
-            settings=None,
-            checkpointer=InMemorySaver(),
+            ],
         )
-        processor = _processor(session_id="s1")
-        events: list[WorkflowEvent] = []
-        async for namespace, mode, payload in root.astream(
-            {"messages": [HumanMessage("What is X?")]},
-            {"configurable": {"thread_id": "t"}},
-            stream_mode=["updates", "tasks"],
-            subgraphs=True,
-        ):
-            events += processor.process(namespace, mode, payload)
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        manager = manager_module.DeepAgentsWorkflowManager(
+            agent_configs=[
+                AgentConfig(name="coordinator", prompt="p", sub_agents=["researcher"],
+                            model="anthropic:claude-sonnet-4-5"),
+                AgentConfig(name="researcher", prompt="p", description="Finds facts.",
+                            model="anthropic:claude-haiku-4-5"),
+            ],
+            settings=BaseSettings(session_store="memory", default_model="anthropic:claude-sonnet-4-5"),
+        )
+        try:
+            events = [e async for e in manager.process("What is X?", "u", session_id="s1")]
+        finally:
+            await manager.cleanup()
 
         seen = [
             (e.type.value, e.metadata["agent"], e.metadata.get("tool_name") or e.content)
@@ -829,10 +725,10 @@ class TestARealStream:
             ("thinking", "researcher", "Plan first."),
             ("tool_call", "researcher", "save_tasks"),
             ("tool_result", "researcher", "save_tasks"),
-            ("task_progress", "researcher", progress["display"]),
             ("text", "researcher", "It is 42."),
-            ("tool_result", "coordinator", "task"),
             ("agent_run", "researcher", "researcher-1 completed"),
+            ("tool_result", "coordinator", "task"),
+            ("task_progress", "coordinator", progress["display"]),
             ("text", "coordinator", "X is 42."),
         ]
         assert [(e.metadata["agent"], e.metadata.get("subagent")) for e in events
@@ -844,13 +740,13 @@ class TestARealStream:
         assert usage == [
             ("coordinator", "anthropic:claude-sonnet-4-5"),
             ("coordinator", "anthropic:claude-sonnet-4-5"),
-            ("researcher", "google:gemini-2.5-flash"),
-            ("researcher", "google:gemini-2.5-flash"),
+            ("researcher", "anthropic:claude-haiku-4-5"),
+            ("researcher", "anthropic:claude-haiku-4-5"),
             ("coordinator", "anthropic:claude-sonnet-4-5"),
         ]
         task_result = next(
             e for e in events
             if e.type is EventType.TOOL_RESULT and e.metadata["tool_name"] == "task"
         )
-        assert task_result.metadata["result"] == "It is 42."
+        assert task_result.metadata["result"]["result"] == "It is 42."
         assert all("Command(" not in e.content for e in events)

@@ -903,6 +903,8 @@ class TestTheDeepAgentsItRestsOn:
         assert list(inspect.signature(cutoff).parameters) == ["self", "messages"]
 
     def test_an_event_is_applied_as_the_summary_and_the_messages_after_its_cut(self):
+        """An inheriting run reads its parent's conversation through it too
+        (``task_tool.inherited_messages``): a change fails here first."""
         apply = SummarizationMiddleware._apply_event_to_messages
         messages = [HumanMessage("One?", id="h1"), AIMessage("A1", id="a1"),
                     HumanMessage("Two?", id="h2"), AIMessage("A2", id="a2")]

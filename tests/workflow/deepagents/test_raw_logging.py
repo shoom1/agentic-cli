@@ -26,6 +26,7 @@ pytest.importorskip("deepagents")
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
+from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
@@ -135,7 +136,8 @@ def _delegating_server(monkeypatch, turns: int = 1) -> Endpoint:
     """The server for ``turns`` delegating turns, each on a fresh manager."""
     server = Endpoint(**{
         "Lead.": [
-            _call("task", {"description": "Report.", "subagent_type": "worker"}, "t1"),
+            _call("task", {"agent_type": "worker", "title": "Report", "objective": "Report."},
+                  "t1"),
             chat_completion("Done."),
         ] * turns,
         # The second report puts the worker over its trigger: it summarizes.
@@ -235,7 +237,9 @@ class TestEveryCall:
         request, response = logged[2], logged[3]  # the worker's first call
         assert request.metadata["model"] == "small"
         assert request.metadata["system_instruction"] == "Work."
-        assert request.metadata["messages"] == [{"role": "user", "content": "Report."}]
+        assert request.metadata["messages"] == [
+            {"role": "user", "content": task_message(Brief(title="Report", objective="Report."))}
+        ]
         assert request.metadata["tools"] == ["rl_digest", "rl_report"]
         assert request.metadata["config"]["model_name"] == "small"
         assert "tools" not in request.metadata["config"]

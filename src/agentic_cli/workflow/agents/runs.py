@@ -22,7 +22,7 @@ usage ledgers).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -129,22 +129,53 @@ def run_ended(
     )
 
 
-def show_as_delegation(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
-    """Show a delegation's ``TOOL_RESULT`` as every backend shows it.
+def show_as_delegation(
+    result: WorkflowEvent, envelope: Mapping[str, Any], ended: WorkflowEvent | None = None
+) -> None:
+    """Show a delegation's ``TOOL_RESULT`` from its envelope, the same on every backend.
+
+    ``envelope`` is the run's result envelope (``agents/envelope.py``), as the
+    parent read it. The content becomes ``tool_summaries.delegation_summary``'s:
+    the result's first line for a run that completed or was refused (the
+    refusal notice says why), else ``Failed: <error>``. The result succeeds
+    as the envelope does (``success``), its ``error`` the envelope's when it
+    does not, and ``metadata["result"]`` is the envelope.
+
+    ADK's delegation, until it runs the framework's ``task``, passes the
+    sub-agent's answer and the run's end instead (``ended``), shown as
+    ``_show_by_answer`` shows it.
+    """
+    if ended is not None:
+        _show_by_answer(result, str(envelope), ended)
+        return
+    text = envelope.get("result")
+    text = text if isinstance(text, str) else ""
+    succeeded = envelope.get("success") is True
+    error = envelope.get("error")
+    if succeeded or envelope.get("status") == RUN_REFUSED:
+        result.content = delegation_summary(text)
+    else:
+        result.content = delegation_summary(text, error=error if isinstance(error, str) else "")
+    result.metadata["success"] = succeeded
+    if succeeded:
+        result.metadata.pop("error", None)
+    elif isinstance(error, str):
+        result.metadata["error"] = error
+    result.metadata["result"] = dict(envelope)
+
+
+def _show_by_answer(result: WorkflowEvent, answer: str, ended: WorkflowEvent) -> None:
+    """Show ADK's delegation's ``TOOL_RESULT`` by the sub-agent's answer and the run's end.
 
     ``ended`` is the ``AGENT_RUN`` the result ends the run with, and
     ``answer`` what the sub-agent answered, as its parent read it. The
     content becomes ``tool_summaries.delegation_summary``'s: the answer's
     first line, or, for a sub-agent that failed, ``Failed: <reason>``, the
     result failing too (``success`` false; its ``error`` the text the parent
-    read, as Deep Agents' error result has it). ``metadata["result"]`` stays
-    as the backend gave it.
+    read). ``metadata["result"]`` stays as the backend gave it.
 
     A result that ends its run ``interrupted`` (ADK's seal of a call a
-    stopped turn left open) is left as the tool result made it. No turn
-    shows one: ADK writes its seals as the stopped run closes, after the
-    turn has stopped reading its events, so only a processor handed a seal
-    directly meets the case.
+    stopped turn left open) is left as the tool result made it.
     """
     status = ended.metadata.get("status")
     if status == RUN_INTERRUPTED:

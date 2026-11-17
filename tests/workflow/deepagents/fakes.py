@@ -47,9 +47,11 @@ def ai(
     return AIMessage(content=content, tool_calls=tool_calls, usage_metadata=usage or USAGE)
 
 
-def task(subagent: str, brief: str, call_id: str | None = None) -> tuple:
-    """A ``task`` call delegating ``brief`` to ``subagent``."""
-    args = {"description": brief, "subagent_type": subagent}
+def task(subagent: str, brief: str, call_id: str | None = None, **fields: str) -> tuple:
+    """A ``task`` call delegating ``brief`` to ``subagent``: ``brief`` the
+    objective, its first line the title, and the brief's other ``fields``."""
+    title = next((line.strip() for line in brief.splitlines() if line.strip()), "")
+    args = {"agent_type": subagent, "title": title, "objective": brief, **fields}
     return ("task", args, call_id) if call_id else ("task", args)
 
 
@@ -135,3 +137,46 @@ class ScriptedModels:
     def __call__(self, resolved: Any, *, settings: Any, app_name: str) -> ScriptedChat:
         self.built.append(resolved)
         return self.chats[resolved.agent]
+
+
+def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
+    """The delegations of a tree a test builds alone (``build_agent_tree``, no manager).
+
+    Pass the result as ``build_agent_tree(delegations=...)`` and the same dict
+    as ``graphs=``: each run then runs on its type's graph, built by then,
+    from its shared state and its messages (an inheriting run's history,
+    then its task message), apart from its caller's stream, as
+    ``DeepAgentsWorkflowManager._run_agent`` runs one; its answer is its
+    last text, and the plan and tasks it changed flow back. No ledger, no
+    events: a manager-level test reads those.
+    """
+    from langchain_core.messages import HumanMessage
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    from agentic_cli.workflow.agents import AgentRuns, SubAgentPolicy
+    from agentic_cli.workflow.agents.delegate import Delegations, RunAnswer
+
+    async def hook(run: Any) -> RunAnswer:
+        detached = var_child_runnable_config.set(None)
+        try:
+            state = await graphs[run.ref.agent].ainvoke({
+                **run.state,
+                "messages": [*(run.history or ()), HumanMessage(content=run.message)],
+            })
+        finally:
+            var_child_runnable_config.reset(detached)
+        text = next((
+            m.text for m in reversed(state["messages"])
+            if isinstance(m, AIMessage) and m.text.strip()
+        ), "")
+        changed = {
+            key: state[key] for key in ("plan", "tasks")
+            if key in state and state[key] != run.state.get(key)
+        }
+        return RunAnswer(text=text, state=changed)
+
+    made = Delegations(
+        runs=AgentRuns(), policy=SubAgentPolicy(),
+        types={config.name: config for config in configs}, hook=hook,
+    )
+    return lambda: made

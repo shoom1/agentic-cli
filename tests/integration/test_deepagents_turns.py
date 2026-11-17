@@ -191,7 +191,8 @@ def calls(*uses: tuple[str, dict, str]) -> object:
 
 
 def delegate(subagent: str, brief: str, call_id: str) -> tuple[str, dict, str]:
-    return ("task", {"description": brief, "subagent_type": subagent}, call_id)
+    """A ``task`` call delegating ``brief`` to ``subagent``: its title and objective."""
+    return ("task", {"agent_type": subagent, "title": brief, "objective": brief}, call_id)
 
 
 def bad_request(message: str = "The provider refused the request.") -> httpx.Response:
@@ -294,7 +295,7 @@ class TestADelegatingTurn:
         assert {e.metadata["agent"] for e in (allowed, denied, raised)} == {"worker"}
         assert [e.content for e in of(events, EventType.TEXT)] == ["Worker done.", "All done."]
         (delegation,) = results(events, "task")
-        assert (delegation.metadata["agent"], delegation.metadata["result"]) == (
+        assert (delegation.metadata["agent"], delegation.metadata["result"]["result"]) == (
             "lead", "Worker done."
         )
         # The worker read every outcome as a result, the error ones flagged.
@@ -327,7 +328,7 @@ class TestUsageAndCache:
             return {**anthropic_message(block, model="claude-opus-4-7"), "stop_reason": stop,
                     "usage": {"input_tokens": input_tokens, "output_tokens": 10}}
 
-        brief = {"description": "Look it up.", "subagent_type": "worker"}
+        brief = {"agent_type": "worker", "title": "Look it up", "objective": "Look it up."}
         claude = Claude(**{
             "Lead.": [
                 reply(5000, {"type": "tool_use", "id": "t1", "name": "task", "input": brief}),
@@ -645,12 +646,16 @@ async def test_parallel_delegation(hermetic, monkeypatch):
         await manager.cleanup()
 
     assert of(events, EventType.ERROR) == []
-    assert sorted(e.metadata["result"] for e in results(events, "task")) == [
+    # task as Claude is sent it: the brief's schema, as on ADK.
+    (sent,) = [t for t in claude.bodies("Lead.")[0]["tools"] if t["name"] == "task"]
+    assert sent["input_schema"]["required"] == ["agent_type", "title", "objective"]
+    assert sent["input_schema"]["properties"]["agent_type"]["enum"] == ["researcher", "writer"]
+    assert sorted(e.metadata["result"]["result"] for e in results(events, "task")) == [
         "Draft done.", "Research done."
     ]
     assert {e.metadata["agent"] for e in results(events, "task")} == {"lead"}
     lead_answers = claude.bodies("Lead.")[1]["messages"][-1]["content"]
-    assert sorted((b["tool_use_id"], b["content"]) for b in lead_answers
+    assert sorted((b["tool_use_id"], json.loads(b["content"])["result"]) for b in lead_answers
                   if b.get("type") == "tool_result") == [
         ("t1", "Research done."), ("t2", "Draft done.")
     ]
@@ -690,15 +695,19 @@ async def test_subagent_model_error_then_next_turn(hermetic, monkeypatch):
 
     (error,) = of(failed, EventType.ERROR)
     assert (error.metadata["agent"], error.metadata["recoverable"]) == ("worker", True)
-    assert error.content.startswith("worker failed: ")
+    assert error.content.startswith("worker-1 failed: ")
     assert "refused" in error.content
-    # The coordinator read why, as an error result, and answered in the same turn.
+    # The coordinator read why, in the run's envelope, and answered in the same turn.
     assert [e.content for e in of(failed, EventType.TEXT)] == ["Sorry, the worker failed."]
     read = claude.bodies("Lead.")[1]["messages"]
     results_sent = [b for m in read if isinstance(m["content"], list)
                     for b in m["content"] if b.get("type") == "tool_result"]
-    assert [(b["tool_use_id"], b.get("is_error")) for b in results_sent] == [("t1", True)]
-    assert "Error running sub-agent: " in json.dumps(results_sent[0]["content"])
+    assert [b["tool_use_id"] for b in results_sent] == ["t1"]
+    # Not flagged as the tool's error, as on ADK: the envelope says it failed.
+    assert not results_sent[0].get("is_error")
+    sent = json.loads(results_sent[0]["content"])
+    assert (sent["status"], sent["success"]) == ("failed", False)
+    assert "The worker's request was refused." in sent["error"]
     # The checkpoint holds the whole turn.
     assert [m.type for m in state["messages"]] == ["human", "ai", "tool", "ai"]
 

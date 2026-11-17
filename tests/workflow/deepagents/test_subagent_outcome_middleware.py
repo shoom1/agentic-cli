@@ -296,4 +296,4 @@ class TestTheRawLog:
         assert logged.metadata["finish_reason"] == stop
         (result,) = [e for e in events if e.type is EventType.TOOL_RESULT
                      and e.metadata.get("tool_call_id") == "c1"]
-        assert result.metadata["result"] == read
+        assert result.metadata["result"]["result"] == read
