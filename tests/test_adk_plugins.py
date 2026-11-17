@@ -608,9 +608,9 @@ class TestEachModelCall:
         assert latencies == [5_000.0]
         assert len(plugin.clock) == 0
 
-    async def test_an_unanswered_errors_clock_goes_at_the_next_run(self, plugin):
+    async def test_an_unanswered_errors_clock_goes_as_its_run_ends(self, plugin):
         # Nothing answers the error, so no response comes: the clock waits
-        # for an answer until the next run lets it go.
+        # for an answer until its run lets it go, failing.
         call = _call_context(invocation_id="inv-1")
         await plugin.before_model_callback(
             callback_context=call, llm_request=_make_mock_llm_request()
@@ -620,20 +620,25 @@ class TestEachModelCall:
         )
         assert len(plugin.clock) == 1
 
-        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
-
-        assert len(plugin.clock) == 0
-
-    async def test_a_run_lets_go_of_what_another_left(self, plugin):
-        # Before google-adk 2.14 a call cancelled mid-request fires neither callback.
-        left = _call_context(invocation_id="inv-1")
-        await plugin.before_model_callback(
-            callback_context=left, llm_request=_make_mock_llm_request()
+        await plugin.on_run_error_callback(
+            invocation_context=SimpleNamespace(invocation_id="inv-1"), error=RuntimeError("529")
         )
 
-        await plugin.before_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-2"))
-
         assert len(plugin.clock) == 0
+
+    async def test_a_run_lets_go_of_what_it_left_as_it_ends(self, plugin):
+        # Before google-adk 2.14 a call cancelled mid-request fires neither
+        # callback: its run's end lets it go, and another run's stays.
+        left = _call_context(invocation_id="inv-1")
+        other = _call_context(invocation_id="inv-2")
+        for context in (left, other):
+            await plugin.before_model_callback(
+                callback_context=context, llm_request=_make_mock_llm_request()
+            )
+
+        await plugin.after_run_callback(invocation_context=SimpleNamespace(invocation_id="inv-1"))
+
+        assert len(plugin.clock) == 1
 
     async def test_a_sub_agents_records_name_it_and_its_run(self, plugin):
         researcher = RunRef(

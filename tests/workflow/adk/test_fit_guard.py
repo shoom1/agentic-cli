@@ -353,22 +353,28 @@ class TestThePlugin:
                                              llm_request=LlmRequest(), error=ValueError())
         assert plugin.request_as_seen(first) is None
 
-    async def test_a_run_drops_what_another_invocation_left(self):
-        """A call cancelled mid-request fires neither release."""
+    async def test_a_run_drops_what_it_left_as_it_ends(self):
+        """A call cancelled mid-request fires neither release: its run's end
+        drops its copy, never another run's, which may be out at once (two
+        runs of one sub-agent type share a chain)."""
         plugin = FitGuardPlugin({"solo": budget_for([user(LONG), model("A1."), user("A?")])},
                                 {"solo": CLAUDE})
-        cancelled, current = call_context(invocation="i1"), call_context(invocation="i2")
-        for context in (cancelled, current):
+        cancelled, other = call_context(invocation="i1"), call_context(invocation="i2")
+        for context in (cancelled, other):
             await plugin.before_model_callback(callback_context=context,
                                                llm_request=LlmRequest(contents=[user("Hi.")]))
 
-        answer = await plugin.before_run_callback(
-            invocation_context=SimpleNamespace(invocation_id="i2")
+        answer = await plugin.after_run_callback(
+            invocation_context=SimpleNamespace(invocation_id="i1")
         )
 
-        assert answer is None  # the run goes on
+        assert answer is None
         assert plugin.request_as_seen(cancelled) is None
-        assert plugin.request_as_seen(current) is not None
+        assert plugin.request_as_seen(other) is not None
+        await plugin.on_run_error_callback(
+            invocation_context=SimpleNamespace(invocation_id="i2"), error=RuntimeError("x")
+        )
+        assert plugin.request_as_seen(other) is None
 
     async def test_an_agent_it_has_no_budget_for_is_left_alone(self):
         contents = [user(LONG), model("A1."), user(LONG), model("A2."), user("Three?")]

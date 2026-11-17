@@ -133,15 +133,22 @@ class TestTheClock:
         assert second_answer.custom_metadata == {LATENCY_KEY: 2_000.0}
         assert first_answer.custom_metadata == {LATENCY_KEY: 4_000.0}
 
-    async def test_a_run_lets_go_of_what_another_left(self, plugins, ticks):
+    async def test_a_run_lets_go_of_what_it_left_as_it_ends(self, plugins, ticks):
+        """A call cancelled mid-request fires no callback before google-adk
+        2.14: its run's end lets its clock go, never another run's, which
+        may be out at once (two runs of one sub-agent type share a chain)."""
         sent, latency, clock = plugins
-        ticks += [10.0]
+        ticks += [10.0, 11.0]
         await sent.before_model_callback(callback_context=_call("inv-1"), llm_request=None)
+        await sent.before_model_callback(callback_context=_call("inv-2"), llm_request=None)
 
-        await latency.before_run_callback(
-            invocation_context=SimpleNamespace(invocation_id="inv-2")
+        await latency.after_run_callback(
+            invocation_context=SimpleNamespace(invocation_id="inv-1")
         )
-
+        assert len(clock) == 1
+        await latency.on_run_error_callback(
+            invocation_context=SimpleNamespace(invocation_id="inv-2"), error=RuntimeError("x")
+        )
         assert len(clock) == 0
 
     def test_an_events_mark_is_read_as_milliseconds(self):

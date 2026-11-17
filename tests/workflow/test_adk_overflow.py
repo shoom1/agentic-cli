@@ -32,7 +32,6 @@ import pytest
 pytest.importorskip("google.adk")
 
 from google.adk import Runner  # noqa: E402
-from google.adk import __version__ as _adk_version  # noqa: E402
 from google.adk.agents import LlmAgent  # noqa: E402
 from google.adk.apps import App  # noqa: E402
 from google.adk.models.base_llm import BaseLlm  # noqa: E402
@@ -1066,9 +1065,6 @@ async def test_a_parallel_delegations_retry_carries_its_own_task(project, monkey
     assert texts(events)[-1] == "Both done."
 
 
-_ADK_VERSION = tuple(int(part) for part in _adk_version.split(".")[:2])
-
-
 async def test_a_cancelled_call_leaves_no_copy_past_the_next_turn(project, monkeypatch):
     from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 
@@ -1097,7 +1093,7 @@ async def test_a_cancelled_call_leaves_no_copy_past_the_next_turn(project, monke
 
     assert texts(events) == ["Again."]
     # From google-adk 2.14 a cancelled model call runs on_model_error_callback
-    # with the CancelledError, which releases the copy at once; before it, the
-    # copy stays until the next turn starts.
-    assert left_by_the_cancel == (0 if _ADK_VERSION >= (2, 14) else 1)
+    # with the CancelledError, which releases the copy at once; before it,
+    # the stopped run's end does (after_run_callback, as its abort closes it).
+    assert left_by_the_cancel == 0
     assert after_the_next_turn == 0

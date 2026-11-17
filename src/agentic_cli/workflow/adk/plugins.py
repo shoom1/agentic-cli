@@ -59,7 +59,7 @@ class LLMLoggingPlugin(BasePlugin):
     (``on_model_error_callback``): a plugin after this one may answer the
     error (the overflow handler), and that answer reaches
     ``after_model_callback`` like any response, timed. Each run lets go of
-    what another invocation left.
+    what it left as it ends, its own only.
 
     Attributes:
         model_name: Default model name, for an agent ``models`` does not hold
@@ -252,16 +252,21 @@ class LLMLoggingPlugin(BasePlugin):
         The overflow handler answers a call refused as too long, and ADK
         hands its answer to every plugin's ``after_model_callback`` with the
         call's ``EventActions``, so the answer is timed and lets the clock
-        go. An error nobody answers leaves its clock to the next run's
-        ``before_run_callback``.
+        go. An error nobody answers leaves its clock until its run ends
+        (``after_run_callback``, ``on_run_error_callback``).
         """
         return None
 
-    async def before_run_callback(self, *, invocation_context: "InvocationContext") -> None:
-        # What another invocation left (turns run one at a time): a call
-        # whose error nobody answered, and one cancelled mid-request, which
-        # before google-adk 2.14 fired no callback.
-        self.clock.keep_only(invocation_context.invocation_id)
+    async def after_run_callback(self, *, invocation_context: "InvocationContext") -> None:
+        # What the run left: a call whose error nobody answered, and one
+        # cancelled mid-request, which before google-adk 2.14 fired no callback.
+        self.clock.forget(invocation_context.invocation_id)
+        return None
+
+    async def on_run_error_callback(
+        self, *, invocation_context: "InvocationContext", error: Exception
+    ) -> None:
+        self.clock.forget(invocation_context.invocation_id)
         return None
 
     # ------------------------------------------------------------------

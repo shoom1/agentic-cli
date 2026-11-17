@@ -8,6 +8,11 @@ from before the keys is read from its events, for the rows returned, and
 nothing is written back: its place in the list stays. A job's resume adds no
 turn, nor does a delegated request or a summary: nobody typed them.
 
+A sub-agent instance's transcript is a child session of the conversation's
+own store, under an app of its own (``child_app``), so it never lists as a
+conversation: its id is the conversation's and the instance's
+(``child_session_id``), at most the 128 characters ADK stores.
+
 The other hooks a resume reads: ``recent_messages`` is the user's and the
 main agent's text, without its thinking, and deleting a conversation that is
 not stored says so (False).
@@ -33,8 +38,12 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.sessions import (  # noqa: E402
+    CHILD_APP_SUFFIX,
+    MAX_KEY,
     TITLE_KEY,
     TURNS_KEY,
+    child_app,
+    child_session_id,
     typed_prompts,
 )
 from agentic_cli.workflow.sessions import SessionInfo  # noqa: E402
@@ -353,3 +362,20 @@ class TestRecentAndDelete:
             await manager.cleanup()
 
         assert (missing, deleted, listed) == (False, True, [])
+
+
+class TestChildSessions:
+    def test_a_child_session_is_under_the_apps_own_child_app(self):
+        assert (CHILD_APP_SUFFIX, child_app("research_demo")) == (
+            "--agents", "research_demo--agents"
+        )
+
+    def test_its_id_names_the_conversation_and_the_instance(self):
+        assert child_session_id("s1", "researcher-2") == "s1/researcher-2"
+
+    def test_an_id_past_what_adk_stores_is_refused(self):
+        conversation = "c" * (MAX_KEY - len("/researcher-1"))
+        assert len(child_session_id(conversation, "researcher-1")) == MAX_KEY
+
+        with pytest.raises(ValueError, match="ADK stores at most 128"):
+            child_session_id(conversation + "c", "researcher-1")
