@@ -19,6 +19,7 @@ from agentic_cli.workflow.events import (
     WorkflowEvent,
 )
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.agents.policy import AgentLimits, SubAgentPolicy
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.mcp import MCPServerConfig
 from agentic_cli.workflow.factory import create_workflow_manager_from_settings
@@ -82,6 +83,8 @@ __all__ = [
     "translate_adk_yaml",
     # Config
     "AgentConfig",
+    "SubAgentPolicy",
+    "AgentLimits",
     "ModelSettings",
     "ThinkingSettings",
     "MCPServerConfig",
