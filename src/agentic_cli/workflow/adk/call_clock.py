@@ -2,11 +2,10 @@
 
 ADK makes an ``EventActions`` for each model call and hands that object to
 all three of its model callbacks (before, after, on error), so a call is
-timed under its identity, as the fit guard keeps its copy of a request:
-parallel delegations to one sub-agent share their invocation and their
-agent's name, and a clock kept by either timed one call from another's
-request. The clock holds the object, so its id goes to no other call while
-this one is out. A failed call keeps its clock: a plugin after the one that
+timed under its identity, as the fit guard keeps its copy of a request: a
+clock kept by invocation or agent name could time one call from another
+call's request. The clock holds the object, so its id goes to no other call
+while this one is out. A failed call keeps its clock: a plugin after the one that
 reads it may answer the error (the overflow handler), and that answer reaches
 ``after_model_callback`` like any response. As each run ends (ADK's
 ``after_run_callback``, a stopped one's too, or ``on_run_error_callback``)

@@ -690,11 +690,12 @@ the start of the entry's title.
   how it runs (`mode`: `blocking`, its caller waiting for it), then
   `completed` (`partial` for an answer cut at its output limit), `refused`,
   `failed` or `interrupted`, with the first 200 characters of its result; a
-  run fails when its model or its run fails, and the sub-agent's answer is
-  never read for success, so an answer that is JSON saying it failed
-  completes), the same on both backends: the framework starts and ends
-  every run (`workflow/agents/delegate.py`), each at its own end, so of two
-  parallel delegations the faster ends first. Each
+  run fails when it cannot finish (a model call of its fails, its request no
+  longer fits its model's window, or its model gives no answer), and the
+  sub-agent's answer is never read for success, so an answer that is JSON
+  saying it failed completes), the same on both backends: the framework
+  starts and ends every run (`workflow/agents/delegate.py`), each at its own
+  end, so of two parallel delegations the faster ends first. Each
   manager records its runs by conversation (`BaseWorkflowManager.agent_runs`,
   provisional: `records(ref)`, `record(ref, id)`; a record has the brief,
   `started_by`, `mode` and, for a cancelled run, `cancelled_by`); a run a
@@ -1264,7 +1265,7 @@ the start of the entry's title.
   tool's own limits stay; this is the net beneath them. ADK's Claude and
   OpenAI Responses adapters send a model only a result's `content`, or else
   its `result`, so on ADK the note is put there as well.
-- **`AgentConfig.inherit_context`: a sub-agent sees the request alone, or its
+- **`AgentConfig.inherit_context`: a sub-agent sees its task alone, or its
   parent's conversation too**, set per agent on ADK and Deep Agents
   (`inherit_context:` in the framework's agent YAML too). False, the default,
   sees only the task its parent gives it; True also sees the parent's
@@ -1281,7 +1282,7 @@ the start of the entry's title.
   reasoning of AI messages another agent wrote, so the run is never sent its
   coordinator's.
   `validate_agent_graph` raises `AgentGraphError` for `inherit_context=True`
-  on the root, on an agent with sub-agents of its own (in 0.7.0) or on an
+  on the root, on an agent with sub-agents of its own or on an
   agent below another sub-agent (it is for the main agent's own
   sub-agents), and for a value that is not True or False.
 - **`BaseWorkflowManager.context_budget(agent_name=None)` and
@@ -1558,7 +1559,10 @@ the start of the entry's title.
   task list moves then). On ADK each sub-agent type runs on a runner of its
   own over the manager's session service, on a child session of the run
   (app `<app_name>--agents`, id `<conversation id>/<instance>`), which no
-  conversation list shows; on Deep Agents each type's graph runs apart from
+  conversation list shows, and, an agent of its own there, its system
+  instruction gets ADK's identity line after its prompt as the root's does
+  (`You are an agent. Your internal name is "<name>".`, then its
+  description); on Deep Agents each type's graph runs apart from
   its caller's stream, in a task of its own (Deep Agents'
   `SubAgentMiddleware` and its fork are no longer used).
 - **A delegation's result is the run's envelope, JSON, rather than bare

@@ -274,9 +274,9 @@ def root_run(agent: str) -> RunRef:
     return RunRef(agent=agent, instance="root", run=None, parent_run=None, depth=0)
 
 
-# The sub-agent run whose call is in progress in this context: set inside a
-# sub-agent's run (ADK: as the agent starts, from its branch; Deep Agents:
-# around its coordinator's ``task`` call), so its model calls, tool calls,
+# The sub-agent run whose call is in progress in this context: set by the
+# framework's delegation in the run's own task (``agents/delegate.py``,
+# ``Delegations._in_run``), on both backends, so its model calls, tool calls,
 # permission checks and questions see it. None in the root's own calls. A
 # ContextVar for the same reason as the active turn: parallel runs each run
 # in their own context and never see one another's.

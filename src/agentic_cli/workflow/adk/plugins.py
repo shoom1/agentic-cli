@@ -44,8 +44,9 @@ class LLMLoggingPlugin(BasePlugin):
     Each record names the model of the agent that made the call (``models``),
     else the request's own model or ``model_name``; that agent
     (``metadata["agent"]``); and, for a sub-agent's call, its run
-    (``WorkflowEvent.run``, the active run its ``MainAgentPlugin`` set,
-    which the log writes as ``run``), as Deep Agents' records do. A usage
+    (``WorkflowEvent.run``, the active run the framework's delegation set
+    for the run's task, ``agents/delegate.py``, which the log writes as
+    ``run``), as Deep Agents' records do. A usage
     record counts as the stream's ``LLM_USAGE`` does
     (``workflow/usage.py``'s ``adk_usage_event``, by the agent's model's
     provider kind, ``kinds``: the thinking in the output, a cache write in

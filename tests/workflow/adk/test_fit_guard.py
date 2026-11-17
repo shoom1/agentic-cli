@@ -335,8 +335,8 @@ class TestThePlugin:
         assert plugin.request_as_seen(context) is None
 
     async def test_two_calls_of_one_agent_in_one_invocation_keep_their_own(self):
-        """Two parallel delegations to one sub-agent share the invocation and
-        the agent name; each model call has its own ``EventActions``."""
+        """Each model call has its own ``EventActions``, the copy's key: two
+        calls of one agent out at once in one invocation keep their own."""
         plugin = FitGuardPlugin({"solo": budget_for([user(LONG), model("A1."), user("A?")])},
                                 {"solo": CLAUDE})
         first, second = call_context(), call_context()

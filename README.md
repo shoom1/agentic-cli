@@ -1267,7 +1267,9 @@ configs = [coordinator, researcher, analyst]
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
 | `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
-| `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: the request alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
+| `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: its task alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
+| `brief_required` | tuple[str, ...] | The brief fields a delegation to this agent must fill (default `("objective",)`; `title` and `objective` are always required): any of `deliverable`, `constraints`, `known`, `done_when`. A `task` call that leaves one empty starts no run, and its caller reads which. Not on the root |
+| `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field. Configuration: validated and kept with the agent, but no run is stopped by them. Not on the root |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -1464,7 +1466,8 @@ are `AgentConfig`'s, and an unknown one is an error:
 | `model`, `model_settings` | A model reference or role, and `ModelSettings` as a mapping (`temperature`, `max_tokens`, `thinking: {mode: high}`, ...) |
 | `tools` | A list of names: a registered tool's name (`web_search`, or your own), or a dotted path `my_pkg.tools.fn` to a function registered with `@register_tool` |
 | `mcp_servers`, `skills` | As on `AgentConfig`: MCP servers (`name`, `transport`, `command`/`args` or `url`, ...) and skill names |
-| `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (the request alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
+| `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (its task alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
+| `brief_required`, `limits` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written; validated and kept, but no run is stopped by them) |
 | `include_state_tools` | `true` by default: the plan and task tools are added |
 
 - **A tool is a name, resolved when the manager is built.** A bare name is
