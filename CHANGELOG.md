@@ -2795,13 +2795,15 @@ step; each entry says what to use instead.
   in a session of its own, outlived bubblewrap, and on macOS a process the
   code forked outlived `sandbox-exec`. The command now runs in a session of
   its own, and a timeout, a KeyboardInterrupt while it waits (in a caller
-  on the main thread), or the end of the app (an exit, and in the CLI a
-  hangup or SIGTERM) kills its whole process group and, on Linux, each child
-  of it that left the group (bubblewrap's sandbox init, whose death ends
-  every process in the sandbox); a run that ends on its own takes with it
+  on the main thread), or, in the CLI, a hangup or SIGTERM kills its whole
+  process group and, on Linux, each child of it that left the group
+  (bubblewrap's sandbox init, whose death ends every process in the
+  sandbox); a signal the app ignores (under `nohup`) still changes nothing.
+  A normal exit waits for a running call, as before (to its timeout), and
+  then nothing it started is left; a run that ends on its own takes with it
   what it left in its group. Outside a pid namespace (on macOS, and on Linux
-  without the sandbox), code that calls `setsid()` and forks again can still
-  outlive them.
+  without the sandbox), code that calls `setsid()` can outlive them (on
+  Linux the walk only catches a direct child of a live group member).
 
 - **`execute_python` runs inside bubblewrap on Linux.** It never did: every
   call was refused with "it did not start (bubblewrap, exit status 1): bwrap:

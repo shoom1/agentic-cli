@@ -1687,8 +1687,9 @@ and still protected). An `os_sandbox_writable_paths` entry that holds your
 home directory puts such folders at the shell start-up files it lacks
 (`~/.bash_profile`, `~/.zshrc`, …), and a folder at `~/.bash_profile` makes a
 login bash skip `~/.profile`. A timeout stops the code and the processes it
-started (code that calls `setsid()` and forks again can escape outside
-bubblewrap's pid namespace: on macOS, and on Linux without the sandbox).
+started; outside a pid namespace (on macOS, and on Linux without the
+sandbox), code that calls `setsid()` can outlive it (on Linux only a direct
+child of a live group member is caught).
 On a host with no sandbox backend
 (Windows has none), when the sandbox cannot be set up, or when the sandbox tool
 fails as it starts (on Ubuntu 24.04 and later, `bwrap` needs unprivileged user
