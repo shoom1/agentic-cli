@@ -25,6 +25,7 @@ from agentic_cli.workflow.agents import (
     AgentRuns,
     SubAgentPolicy,
 )
+from agentic_cli.workflow.agents import delegate as delegate_module
 from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
 from agentic_cli.workflow.agents.delegate import (
     AgentRun,
@@ -480,6 +481,22 @@ async def in_turn(made: Delegations, *asked: DelegationRequest) -> list[Any]:
         reset_active_turn(token)
 
 
+@pytest.fixture
+def logged(monkeypatch) -> list[dict]:
+    """Every log call of ``agents/delegate.py``, with its level."""
+    events: list[dict] = []
+
+    class Recorder:
+        def __getattr__(self, level: str):
+            def log(event: str, **fields) -> None:
+                events.append({"event": event, "log_level": level, **fields})
+
+            return log
+
+    monkeypatch.setattr(delegate_module, "logger", Recorder())
+    return events
+
+
 class TestNumberedPastTheStored:
     """A conversation's store may keep instances an earlier manager ran (a
     restart, a switch of backend or store): ``stored`` says how many of each
@@ -536,6 +553,23 @@ class TestNumberedPastTheStored:
 
         assert [r.result["agent"] for r in first + second] == ["researcher-1", "researcher-6"]
         assert asked == [CONVERSATION, CONVERSATION]
+
+    async def test_a_store_that_cannot_be_read_is_warned_of_in_the_log(self, logged):
+        hook, _ = answering()
+        failure = RuntimeError("database is locked")
+        stored, _ = storing(failure)
+
+        (result,) = await in_turn(delegations(hook, stored=stored), request())
+
+        assert result.result["status"] == RUN_COMPLETED
+        assert [e for e in logged if e["log_level"] == "warning"] == [{
+            "event": "subagent_instances_unread", "log_level": "warning",
+            "session_id": CONVERSATION.session_id, "error": "database is locked",
+        }]
+        assert [
+            e["exc_info"] for e in logged
+            if (e["event"], e["log_level"]) == ("subagent_instances_unread", "debug")
+        ] == [failure]
 
     async def test_an_ask_a_cancel_stopped_starts_no_run_and_is_asked_again(self):
         hook, ran = answering()

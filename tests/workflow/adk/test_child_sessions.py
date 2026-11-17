@@ -23,6 +23,7 @@ on sqlite.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 
 import anthropic
@@ -122,6 +123,11 @@ class TestDeleteChildren:
 
     async def test_their_events_go_with_them(self, tmp_path):
         database = tmp_path / "sessions.db"
+
+        def events() -> int:
+            with contextlib.closing(sqlite3.connect(database)) as db:
+                return db.execute("select count(*) from events").fetchone()[0]
+
         service = DatabaseSessionService(db_url=f"sqlite+aiosqlite:///{database}")
         try:
             child = await service.create_session(
@@ -131,13 +137,13 @@ class TestDeleteChildren:
                 author="researcher",
                 content=types.Content(role="model", parts=[types.Part(text="X is 42.")]),
             ))
+            before = events()
 
             await adk_sessions.delete_children(service, APP, "u", "s")
         finally:
             await service.close()
 
-        with sqlite3.connect(database) as db:
-            assert db.execute("select count(*) from events").fetchone() == (0,)
+        assert (before, events()) == (1, 0)
 
 
 class TestDeletingTheConversation:
