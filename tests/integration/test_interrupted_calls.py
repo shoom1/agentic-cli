@@ -937,6 +937,81 @@ async def test_on_deep_agents_a_call_left_open_across_a_restart_is_answered(
     assert INTERRUPTED in results(claude.last("Answer"))["toolu_w"]
 
 
+# --- a failed turn ----------------------------------------------------------------------
+
+
+async def test_on_adk_calls_whose_results_the_store_refused_keep_them(hermetic, monkeypatch):
+    """The store refuses the step's results (another process changed the
+    conversation): the turn fails, and the next turn answers each call with
+    the result it returned, not as interrupted."""
+    from google.adk.errors import StaleSessionError
+
+    claude = serve(monkeypatch, Claude(Answer=[
+        say("First."),
+        calls(("ic_fast", {"topic": "X"}, "toolu_a"), ("ic_fast", {"topic": "Y"}, "toolu_b")),
+        say("Back again."),
+    ]), "adk")
+    manager = solo("adk", ic_fast)
+    try:
+        await turn(manager, "Hello.")
+        service = manager._session_service
+        real = service.append_event
+        refused: list = []
+
+        async def stale_once(session, event):
+            if event.get_function_responses() and not refused:
+                refused.append(event)
+                raise StaleSessionError("The session has been modified in storage.")
+            return await real(session, event)
+
+        monkeypatch.setattr(service, "append_event", stale_once)
+        failed = await turn(manager, "Look X and Y up.")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    assert claude.refused == []
+    assert [e.metadata["error_code"] for e in failed if e.type is EventType.ERROR] == [
+        "ConversationChangedError",
+    ]
+    sent = results(claude.last("Answer"))
+    assert sent["toolu_a"] == json.dumps({"success": True, "fact": "X is 42"})
+    assert sent["toolu_b"] == json.dumps({"success": True, "fact": "Y is 42"})
+
+
+async def test_on_adk_a_failed_turns_record_answers_no_later_call(hermetic, monkeypatch):
+    """A failed turn's record answers its own calls left open at the next
+    turn, and nothing after: a later call of the same id (a provider that
+    numbers its call ids repeats them), left running by a stop, is the
+    user's, not the earlier call's result."""
+    from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
+    from agentic_cli.workflow.interrupts import interrupted
+
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_fast", {"topic": "X"}, "call_0")),
+        bad_request("Overloaded."),
+        calls(("ic_wait", {}, "call_0")),
+    ]), "adk")
+    manager = solo("adk", ic_fast, ic_wait)
+    try:
+        failed = await turn(manager, "Look X up.")
+        await cancelled(manager, "Wait for it.")
+        session = await manager._session_service.get_session(
+            app_name=manager.app_name, user_id="u", session_id="s")
+    finally:
+        await manager.cleanup()
+
+    assert claude.refused == []
+    assert [e.metadata["recoverable"] for e in failed if e.type is EventType.ERROR] == [False]
+    stopped = session.events[-1].invocation_id
+    (answer,) = [
+        response.response for event in session.events
+        if event.invocation_id == stopped and event.error_code == ABORTED
+        for response in event.get_function_responses() if response.id == "call_0"
+    ]
+    assert answer == interrupted(INTERRUPTED_BY_USER)
+
+
 # --- the ADK it rests on ----------------------------------------------------------------
 
 

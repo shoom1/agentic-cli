@@ -16,7 +16,11 @@ knows what happened rather than running a side effect again blindly:
   tool results) leaves ``MARKER`` as the main agent's reply, so the next
   turn answers the new message rather than resuming the old one;
 - a call a crash left open (nothing ran on the way out) is answered
-  ``INTERRUPTED`` on the next turn.
+  ``INTERRUPTED`` on the next turn;
+- a turn that fails (its one ``ERROR``) keeps the record of its calls that
+  returned (``OpenCalls.failed``): at the next turn each of them that has no
+  stored result is answered with the result it returned, and any other
+  call left open ``INTERRUPTED``.
 
 Background jobs a long-running tool started are not part of the turn: they
 go on, and their results arrive later. A call whose job was submitted is
@@ -29,9 +33,10 @@ conversation and, within it, by the run that made each call (the root's
 own, or a sub-agent's: ``workflow.sessions.get_active_run``), since a
 provider that numbers its call ids per agent gives a sub-agent's call the
 id of its parent's delegation: the backends answer from it (ADK as the
-cancelled turn stops, through its ``abort_signal``; Deep Agents before the
-first model call of that conversation's next turn, however many turns ran
-in others since).
+cancelled turn stops, through its ``abort_signal``, and a failed turn's
+calls as that conversation's next turn starts; Deep Agents before the first
+model call of that conversation's next turn, however many turns ran in
+others since).
 """
 
 from __future__ import annotations

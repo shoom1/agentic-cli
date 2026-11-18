@@ -3250,3 +3250,63 @@ class TestAfterAFailedTurn:
         read = crew.results_read("coordinator")
         assert json.loads(read["c1"]) == interrupted(INTERRUPTED)
         assert json.loads(read["c2"]) == interrupted(INTERRUPTED)
+
+    async def test_a_call_that_returned_beside_one_that_failed_the_turn_keeps_its_result(
+        self, make_crew, monkeypatch
+    ):
+        """``c2``'s permission check fails the turn once ``c1`` has returned,
+        before either backend stores ``c1``'s result (ADK stores a step's
+        parallel results together, after the last; Deep Agents' graph drops
+        a failed step's writes): the next turn answers it from the record."""
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_lookup, "read_file"))],
+            coordinator=[calls(use("contract_lookup", "c1", q="X"),
+                               use("read_file", "c2", path="notes.txt")),
+                         says("Back again.")],
+        )
+        gate_fails_after(monkeypatch, "read_file", lambda: crew.recorded("c1"))
+
+        events = await crew.turn()
+        await crew.turn("And now?")
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert GATE_FAILURE in error.content
+        assert error.metadata["recoverable"] is False
+        assert crew.result_ids("coordinator") == ["c1", "c2"]
+        read = crew.results_read("coordinator")
+        assert json.loads(read["c1"]) == {"success": True, "value": 42}
+        assert json.loads(read["c2"]) == interrupted(INTERRUPTED)
+
+    async def test_a_delegation_that_returned_beside_one_that_failed_the_turn_keeps_its_answer(
+        self, make_crew, monkeypatch
+    ):
+        """Its run ends completed with its answer, and the next turn's
+        coordinator reads that run's envelope, as its record says; the tasks
+        the run saved reach the conversation's state too."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=("read_file",),
+                   include_state_tools=True),
+             agent("researcher", include_state_tools=True)],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               use("read_file", "c2", path="notes.txt")),
+                         says("Back again.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=[
+                            {"description": "find X", "status": "completed"},
+                        ])),
+                        says("X is 42.")],
+        )
+        gate_fails_after(monkeypatch, "read_file", lambda: crew.recorded("c1"))
+
+        await crew.turn()
+        await crew.turn("And now?")
+
+        assert [(r.ref, r.status, r.result) for r in crew.records()] == [
+            (RESEARCHER, RUN_COMPLETED, "X is 42."),
+        ]
+        assert crew.result_ids("coordinator") == ["c1", "c2"]
+        read = crew.results_read("coordinator")
+        answer = envelope_read(read["c1"])
+        assert (answer["status"], answer["result"]) == (RUN_COMPLETED, "X is 42.")
+        assert json.loads(read["c2"]) == interrupted(INTERRUPTED)
+        state = await crew.state()
+        assert [task["description"] for task in state["tasks"]] == ["find X"]
