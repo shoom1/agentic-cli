@@ -752,9 +752,12 @@ the start of the entry's title.
   limit: `cancelled_by`) or `interrupted`, with the first 200
   characters of its result; a run fails when it cannot finish (a model
   call of its fails, its request no longer fits its model's window, or, on
-  ADK, its model's last reply is blocked or ends for a reason other than
-  stop with nothing in it: `<model> returned no answer`; a run whose model
-  wrote no text at all completes, its result empty), and the
+  ADK, its model's last reply has nothing in it and ends for a reason that
+  is none of stop, a refusal or the output limit, such as a malformed
+  function call: `<model> returned no answer`; a refused or blocked reply
+  ends the run `refused`, an empty one cut at the output limit `completed`
+  and `partial`, and a run whose model wrote no text at all completes, its
+  result empty), and the
   sub-agent's answer is never read for success, so an answer that is JSON
   saying it failed completes), the same on both backends: the framework
   starts and ends every run (`workflow/agents/delegate.py`), each at its own

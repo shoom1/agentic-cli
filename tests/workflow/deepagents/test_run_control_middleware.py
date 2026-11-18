@@ -107,7 +107,7 @@ async def test_an_answer_past_the_token_limit_is_the_last_only_when_it_would_go_
         assert (control.cancelled, kept) == (None, answer)
 
 
-async def test_an_answer_with_no_usage_is_not_limited_by_tokens():
+async def test_an_answer_with_no_usage_counts_none_of_its_own_tokens():
     control = RunControl(REF, AgentLimits(max_tokens=1))
     middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
     answer = AIMessage("Found it.", tool_calls=[CALL])

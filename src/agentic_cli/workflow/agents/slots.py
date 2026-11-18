@@ -181,8 +181,9 @@ class SlotPool:
         question (``request_user_input``) and goes on when the timeout fires
         leaves its run working without a slot (another run may have it, so
         more than ``size`` work at once), and the run says
-        ``input_required`` until it ends. An error is no cancel: the run
-        goes on, with its slot back.
+        ``input_required`` until its next question is answered, when it says
+        ``running`` again, still without a slot, or until it ends. An error
+        is no cancel: the run goes on, with its slot back.
 
         Raises:
             ValueError: ``slot`` is another pool's.

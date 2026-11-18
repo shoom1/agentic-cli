@@ -134,7 +134,7 @@ class TestThePlugin:
         assert (control.cancelled, control.final_call) == (None, False)
         assert answer.content is content
 
-    async def test_an_answer_with_no_usage_is_not_limited_by_tokens(self):
+    async def test_an_answer_with_no_usage_counts_none_of_its_own_tokens(self):
         control = RunControl(REF, AgentLimits(max_tokens=1))
         plugin = RunControlPlugin(lambda: control, "anthropic")
         answer = LlmResponse(content=model(text("Found it."), call("lookup")))

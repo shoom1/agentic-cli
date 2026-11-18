@@ -1384,12 +1384,14 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `max_tokens` too), the runs one turn may start (`max_runs_per_turn`, 20,
   at any depth) and the runs that work at once (`max_active`, 4, at any
   depth: a run past them waits for a free slot, and one waiting on its
-  children or the user lends its slot meanwhile, then waits `queued` to take
-  it back if another run works in it; a tool that puts a timeout around a
+  children or the user lends its slot meanwhile; once the user has answered,
+  it waits `queued` to take its slot back if another run works in it; a
+  tool that puts a timeout around a
   question, `asyncio.wait_for` or `asyncio.timeout` around
   `request_user_input`, and goes on when it fires gives its run's slot up
   for the rest of the run, which works on without one and says
-  `input_required` until it ends); an agent's own
+  `input_required` until its next question is answered, then `running`,
+  still without a slot, or until it ends); an agent's own
   `limits=AgentLimits(...)` lies over the policy's, field by field. A run's
   last allowed model call is told to answer with what it has, and the run
   completes `partial` (`step limit reached`); past its time, or past its
