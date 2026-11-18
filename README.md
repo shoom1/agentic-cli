@@ -1374,16 +1374,19 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
 - **A run's limits.** `subagents=SubAgentPolicy(...)` (given to the app, a
   manager or the factory) sets every run's `limits`
   (`AgentLimits(max_model_calls=100)` by default; a `timeout` in seconds and
-  `max_tokens` too) and the runs one turn may start (`max_runs_per_turn`,
-  20, at any depth); an agent's own `limits=AgentLimits(...)` lies over the
-  policy's, field by field. A run's last allowed model call is told to
-  answer with what it has, and the run completes `partial` (`step limit
-  reached`); past its time, or past its tokens with an answer that asks for
-  tools, it is `cancelled` (`time limit reached`, `token limit reached`)
-  with the text it wrote so far, a prompt it waited at withdrawn (an answer
-  past its tokens that asks for none is its result, and the run completes;
-  a model that reports no usage is not limited by tokens); a `task` call
-  past the runs a turn may start starts no run, and the parent reads why.
+  `max_tokens` too), the runs one turn may start (`max_runs_per_turn`, 20,
+  at any depth) and the runs that work at once (`max_active`, 4, at any
+  depth: a run past them waits for a free slot, and one waiting on its
+  children or the user lends its slot meanwhile); an agent's own
+  `limits=AgentLimits(...)` lies over the policy's, field by field. A run's
+  last allowed model call is told to answer with what it has, and the run
+  completes `partial` (`step limit reached`); past its time, or past its
+  tokens with an answer that asks for tools, it is `cancelled` (`time limit
+  reached`, `token limit reached`) with the text it wrote so far, a prompt
+  it waited at withdrawn (an answer past its tokens that asks for none is
+  its result, and the run completes; a model that reports no usage is not
+  limited by tokens); a `task` call past the runs a turn may start starts
+  no run, and the parent reads why.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
@@ -2383,7 +2386,7 @@ agentic-cli/
 │   │   ├── service_registry.py   # Unified service ContextVar for tools
 │   │   ├── events.py             # WorkflowEvent, EventType
 │   │   ├── config.py             # AgentConfig
-│   │   ├── agents/               # Sub-agents: delegate.py (the framework's task: the brief read, the run started and ended, its envelope), control.py (a run's limits, its cancel alone, steering), brief.py, envelope.py, runs.py, policy.py, outcome.py
+│   │   ├── agents/               # Sub-agents: delegate.py (the framework's task: the brief read, the run started and ended, its envelope), control.py (a run's limits, its cancel alone, steering), slots.py (the working slots: SlotPool), brief.py, envelope.py, runs.py, policy.py, outcome.py
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # is_rate_limit_error: a provider's 429 (the provider clients retry)
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
