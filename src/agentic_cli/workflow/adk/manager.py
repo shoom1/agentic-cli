@@ -1510,9 +1510,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
             keys it changed (read back from its child session's state); or,
-            for a reply that is no answer, the error it is; or, for a model
-            call that failed, the provider's reason (out of ADK's plugin
-            wrapper, ``_plugin_cause``), each with the last text it wrote.
+            for a reply that is no answer, the error it is and its code; or,
+            for a model call that failed, the provider's reason (out of
+            ADK's plugin wrapper, ``_plugin_cause``) and its error's type,
+            each with the last text it wrote.
 
         Raises:
             RunFailed: Its request no longer fits its model's window
@@ -1563,7 +1564,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # wrapper. The run fails with the text it wrote before it.
             failure = _plugin_cause(error) if isinstance(error, RuntimeError) else error
             logger.debug("subagent_failed", run=run.ref.run, exc_info=failure)
-            return RunAnswer(text=processor.answer, error=failure_reason(failure))
+            return RunAnswer(
+                text=processor.answer, error=failure_reason(failure),
+                error_code=type(failure).__name__,
+            )
         finally:
             self._report_raw_log()
         # Its work has ended: a limit or a stop landing during the read of
@@ -1573,7 +1577,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             error, code = processor.failure
             if code == OVERFLOW_ERROR_CODE:
                 raise RunFailed(error, code=code, text=processor.answer)
-            return RunAnswer(text=processor.answer, error=error)
+            return RunAnswer(text=processor.answer, error=error, error_code=code)
         ended = await self._session_service.get_session(
             app_name=app, user_id=conversation.user_id, session_id=session_id,
             config=GetSessionConfig(num_recent_events=0),

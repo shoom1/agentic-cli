@@ -1381,6 +1381,8 @@ class TestASubAgentsFailure:
         assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
             True, "researcher", RESEARCHER,
         )
+        # Its code is the provider error's type, which the CLI shows after it.
+        assert warning.metadata["error_code"] == "BadRequestError"
         # The parent reads the provider's reason, on both backends.
         read = envelope_read(crew.results_read("coordinator")["c1"])
         assert (read["success"], read["status"], read["result"]) == (False, RUN_FAILED, "")
@@ -1418,7 +1420,9 @@ class TestASubAgentsFailure:
         )
         (warning,) = [e for e in events if e.type is EventType.ERROR]
         assert warning.content == f"researcher-1 failed: {read['error']}"
-        assert warning.metadata["recoverable"] is True
+        assert (warning.metadata["recoverable"], warning.metadata["error_code"]) == (
+            True, "BadRequestError"
+        )
         (record,) = crew.records()
         assert (record.status, record.result) == (RUN_FAILED, "X is about 42.")
 

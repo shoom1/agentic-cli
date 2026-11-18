@@ -740,8 +740,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             (Anthropic may end with an empty ``end_turn`` after its final
             tool call), that answer's outcome mark
             (``SubAgentOutcomeMiddleware``), and the shared keys it changed;
-            or, for a model call that failed, the provider's reason with the
-            last text it wrote, as of its last finished step. Its answers
+            or, for a model call that failed, the provider's reason and its
+            error's type, with the last text it wrote, as of its last
+            finished step. Its answers
             are the messages after its task message (``_own_messages``): an
             inheriting run's history is not its own.
 
@@ -803,7 +804,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 ) from error
             # A model call failed: the provider's error.
             logger.debug("subagent_failed", run=run.ref.run, exc_info=error)
-            return RunAnswer(text=wrote, error=failure_reason(error))
+            return RunAnswer(
+                text=wrote, error=failure_reason(error), error_code=type(error).__name__
+            )
         finally:
             var_child_runnable_config.reset(detached)
         # Its work has ended (nothing below waits; as ADK's, which reads its

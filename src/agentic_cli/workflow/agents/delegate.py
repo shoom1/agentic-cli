@@ -218,12 +218,16 @@ class RunAnswer:
         error: Why it failed, when it did (the provider's reason for a
             failed model call, ``failure_reason``); None when it answered.
         state: The shared state keys it changed, with their new values.
+        error_code: The failure's code, the user's warning's ``error_code``:
+            the provider error's type for a failed model call, the reply's
+            code for one that is no answer; None for none.
     """
 
     text: str = ""
     outcome: str | None = None
     error: str | None = None
     state: Mapping[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -335,7 +339,8 @@ class RunFailed(Exception):
     warning's error code, and ``text`` the last text the run wrote before
     it failed (``""`` for none), the envelope's ``result``. A failure in
     the provider's words (a failed model call) a hook answers instead
-    (``RunAnswer.error``, ``failure_reason``, with the run's last text).
+    (``RunAnswer.error``, ``failure_reason``, with the run's last text and
+    the provider error's type as ``RunAnswer.error_code``).
     Any other exception a hook lets out fails the run with its text (its
     type's name, for none), warned of as ``<instance> failed: <reason>``
     with the type's name as its code, and no result.
@@ -545,7 +550,7 @@ class Delegations:
         if answer.error is not None:
             return self._failed(
                 ref, call_id, answer.error, warning=f"{ref.instance} failed: {answer.error}",
-                code=None, text=answer.text, state=answer.state,
+                code=answer.error_code, text=answer.text, state=answer.state,
             )
         if answer.outcome == REFUSED:
             self._end(ref, call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR)

@@ -644,7 +644,8 @@ class BaseWorkflowManager(ABC):
         turn's live events as they are made, and returns its last answer,
         its outcome and the shared state it changed. A failed model call is
         answered (``RunAnswer.error``: the provider's reason,
-        ``failure_reason``) and a failure in the backend's own words raised
+        ``failure_reason``; ``RunAnswer.error_code``: its error's type, the
+        warning's code) and a failure in the backend's own words raised
         (``RunFailed``), each with the last text the run wrote, which its
         envelope carries; any other exception it lets out fails the run with
         no result. A cancel stops the run; the

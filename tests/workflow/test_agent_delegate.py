@@ -305,6 +305,25 @@ class TestAFailedRun:
         )
         assert events[-1].content == "researcher-1 failed: m returned no answer"
 
+    async def test_a_hook_that_answers_an_error_warns_with_its_code(self):
+        hook, _ = answering("Half an answer.", error="Error code: 400 - overloaded",
+                            error_code="BadRequestError")
+
+        result, events = await delegated(delegations(hook), request())
+
+        assert result.result["error"] == "Error code: 400 - overloaded"
+        warning = events[-1]
+        assert (warning.content, warning.metadata["error_code"]) == (
+            "researcher-1 failed: Error code: 400 - overloaded", "BadRequestError"
+        )
+
+    async def test_an_error_answered_without_a_code_warns_with_none(self):
+        hook, _ = answering("Half an answer.", error="m returned no answer")
+
+        _, events = await delegated(delegations(hook), request())
+
+        assert events[-1].metadata.get("error_code") is None
+
     async def test_its_own_words_are_said_as_given(self):
         said = "researcher: the request no longer fits m's context window."
 
