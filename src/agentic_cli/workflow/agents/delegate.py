@@ -46,7 +46,8 @@ counted against its time limit; the time it lends its slot is.
 A run that waits on the user (``waiting_on_user``: a question, a permission
 prompt, ``BaseWorkflowManager.request_user_input`` and the permission
 engine) says ``input_required``, lends its slot for the wait, and says
-``running`` once it has its slot back.
+``running`` once it has its slot back; a prompt no one can be shown (no
+input callback) lends nothing.
 
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
@@ -294,6 +295,11 @@ async def waiting_on_user() -> AsyncIterator[None]:
     then the prompt) count once. A wait a cancel ends takes nothing back:
     the run is being stopped. Nothing in the root's own work, nor outside a
     run.
+
+    Only a wait that can block belongs in it: a lent slot goes to the first
+    run queued for one, which may work its whole run in it before this run
+    takes it back. ``request_user_input`` and the permission engine enter it
+    only when someone can answer (``can_request_user_input``).
     """
     working = _working.get()
     if working is None:

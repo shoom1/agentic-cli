@@ -580,9 +580,11 @@ the start of the entry's title.
   not counted against its `timeout`, and a run that waits on its children
   or on the user (a question, a permission prompt) lends its slot
   meanwhile, taking one back after ahead of the runs that have not
-  started, so nested delegations never deadlock; `task`'s description says
-  "At most 4 sub-agents work at once; more calls in one response wait for
-  a free slot."; provisional: `agentic_cli.workflow.agents.slots.SlotPool`,
+  started, so nested delegations never deadlock (a prompt no one can be
+  shown lends nothing: `BaseWorkflowManager.can_request_user_input()`, an
+  input callback set for the turn, which has not ended); `task`'s
+  description says "At most 4 sub-agents work at once; more calls in one
+  response wait for a free slot."; provisional: `agentic_cli.workflow.agents.slots.SlotPool`,
   the manager's delegations' `slots(conversation)`),
   `max_runs_per_turn` (20: a turn starts at most that many runs, at any
   depth; a `task` call past it starts no run, and its caller reads

@@ -3130,3 +3130,33 @@ class TestWaitingOnTheUser:
         assert working(events, RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED) == [
             ("researcher-2", RUN_STARTED), ("researcher-2", RUN_COMPLETED),
         ]
+
+    async def test_a_prompt_no_one_can_answer_lends_nothing(self, make_crew, project):
+        """Headless (no input callback), a sub-agent run's permission prompt
+        is denied at once: the run keeps its slot and finishes before the
+        run queued for one starts, and never says it waits on the user."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=("write_file", contract_whoami))],
+            subagents=SubAgentPolicy(max_active=1),
+            coordinator=[calls(delegate("researcher", "Write one.", "c1"),
+                               delegate("researcher", "Write two.", "c2")),
+                         says("Neither written.")],
+            researcher=[calls(use("write_file", "r1", path="one.txt", content="1")),
+                        calls(use("contract_whoami", "w1")), says("Not written."),
+                        calls(use("write_file", "r2", path="two.txt", content="2")),
+                        calls(use("contract_whoami", "w2")), says("Not written.")],
+        )
+
+        events = await asyncio.wait_for(crew.turn(), 15)
+
+        assert not (project / "one.txt").exists() and not (project / "two.txt").exists()
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[c])["result"] for c in ("c1", "c2")] == ["Not written."] * 2
+        assert working(events, RUN_QUEUED, RUN_INPUT_REQUIRED, RUN_RUNNING) == [
+            ("researcher-2", RUN_QUEUED), ("researcher-2", RUN_RUNNING),
+        ]
+        assert [(run.instance, call) for run, call in SEEN] == [
+            ("researcher-1", "w1"), ("researcher-2", "w2"),
+        ]
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)

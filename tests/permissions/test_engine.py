@@ -377,6 +377,51 @@ class TestASubAgentRunsWaitForThePrompt:
         ]
         assert (made.slots(CONVERSATION).free, made.slots(CONVERSATION).waiting) == (1, 0)
 
+    @pytest.mark.asyncio
+    async def test_a_prompt_no_one_can_answer_lends_nothing(self, ctx):
+        """Headless (no input callback), a sub-agent run's prompt is denied
+        at once: the run keeps its slot and goes on ahead of the run queued
+        for one, and never says it waits on the user."""
+        import asyncio
+
+        from agentic_cli.workflow.agents import SubAgentPolicy
+        from agentic_cli.workflow.agents.delegate import RunAnswer
+        from tests.test_input_callback import _manager
+        from tests.workflow.test_agent_delegate import CONVERSATION, Turn, delegations, request
+
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_manager(), ctx=ctx)
+        order: list[str] = []
+
+        async def hook(run) -> RunAnswer:
+            me = run.ref.instance
+            order.append(f"{me} starts")
+            await asyncio.sleep(0)  # a model call first: the other run waits for a slot
+            checked = await engine.check(
+                "web_fetch", [Capability("http.read", target_arg="url")],
+                {"url": f"https://{me}.test/"},
+            )
+            order.append(f"{me} goes on")
+            await asyncio.sleep(0)  # more work after the prompt
+            order.append(f"{me} ends")
+            return RunAnswer(text=checked.reason)
+
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await asyncio.wait_for(turn.task, 10)
+
+        assert [one.result["result"] for one in turn.result] == [
+            "no rule + no interactive approver to ask",
+        ] * 2
+        assert order == [
+            "researcher-1 starts", "researcher-1 goes on", "researcher-1 ends",
+            "researcher-2 starts", "researcher-2 goes on", "researcher-2 ends",
+        ]
+        assert turn.of("researcher-1") == ["started", "completed"]
+        assert turn.of("researcher-2") == ["started", "queued", "running", "completed"]
+        assert (made.slots(CONVERSATION).free, made.slots(CONVERSATION).waiting) == (1, 0)
+
 
 class TestResolveListTargetArg:
     def test_list_target_arg_resolves_per_item(self, ctx):
