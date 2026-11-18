@@ -14,16 +14,21 @@ takes what the framework sends.
 
 - Delegation: the provider accepts ``task``'s declaration (the
   ``agent_type`` enum, the brief's fields and their descriptions; on ADK a
-  ``parameters_json_schema``), the run ends ``completed``, and the
-  coordinator reads the envelope's ``success``.
+  ``parameters_json_schema``), the run ends ``completed`` with
+  ``success: true``, and the coordinator is sent the envelope and answers
+  from it.
 - The step limit: a type with ``AgentLimits(max_model_calls=2)`` is given a
   task that needs more calls. Its last allowed call keeps its tools declared
   and ends with ``STEP_LIMIT_NOTE`` (read back from the raw LLM log): the
   provider accepts that request, the run ends ``completed``, partial,
   ``step limit reached``, and the coordinator reads that.
 - The token limit: a type with a small ``AgentLimits(max_tokens=...)`` ends
-  its run by the limit, or completes it when the answer that crosses it
-  makes no tool calls.
+  its run by the limit at its first answer, which asks for a tool. A first
+  answer that makes no tool call completes the run, whole: the case skips,
+  as the limit had nothing to cancel.
+
+None of the checks needs a model to copy a field into its reply: that the
+coordinator was sent each envelope is read from the raw LLM log.
 
 Each test runs with HOME and the working directory in its own temporary
 folder, so the raw LLM log (``raw_llm_logging``) is written there, never
@@ -32,7 +37,15 @@ first start, and caches nothing.
 
 The coordinator is told to make one task call; a model may make more (Qwen
 on OpenRouter splits the lookup by key, and re-delegates after a cancelled
-run until ``max_runs_per_turn`` stops it). The checks read the first run.
+run). ``max_runs_per_turn`` is ``MAX_RUNS`` (3), so a turn starts at most 3
+runs, and the checks read the first run.
+
+Cost: a full run (6 cases per provider: 3 checks on 2 backends) made about
+110 model calls and used about 90k input and 15k output tokens on the
+default models (2026-11-17): Gemini about 11k tokens and Claude about 22k
+(20 calls each), Qwen about 70k (67 calls: it re-delegates). That is a few
+US cents per provider at these models' list prices; well under US$0.25 for
+the whole module.
 
 Override a model with LIVE_SUBAGENTS_GEMINI_MODEL, LIVE_SUBAGENTS_CLAUDE_MODEL,
 LIVE_SUBAGENTS_GPT_MODEL or LIVE_SUBAGENTS_OPENROUTER_MODEL (a
@@ -54,7 +67,12 @@ pytest.importorskip("deepagents")
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.agents import RUN_CANCELLED, RUN_COMPLETED, AgentLimits  # noqa: E402
+from agentic_cli.workflow.agents import (  # noqa: E402
+    RUN_CANCELLED,
+    RUN_COMPLETED,
+    AgentLimits,
+    SubAgentPolicy,
+)
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE  # noqa: E402
 from agentic_cli.workflow.agents.envelope import (  # noqa: E402
     STEP_LIMIT_ERROR,
@@ -81,6 +99,10 @@ USER = "u"
 SESSION = "s"
 #: The most seconds one turn may take: a hung call fails the test, not the run.
 TURN_TIMEOUT = 300
+#: The most sub-agent runs a turn may start: a coordinator that re-delegates
+#: (Qwen does, after a cancelled run) costs at most this many runs. A call past
+#: it is a plain error result, which the checks pass over.
+MAX_RUNS = 3
 
 
 def _provider(case_id: str, model: str, needs: str):
@@ -152,7 +174,10 @@ def _manager(backend: str, model: str, configs: list[AgentConfig], workspace: Pa
         model_providers={"openrouter": openrouter_spec()},
     )
     manager_class = GoogleADKWorkflowManager if backend == "adk" else DeepAgentsWorkflowManager
-    return manager_class(agent_configs=configs, settings=settings, model=model)
+    return manager_class(
+        agent_configs=configs, settings=settings, model=model,
+        subagents=SubAgentPolicy(max_runs_per_turn=MAX_RUNS),
+    )
 
 
 async def _turn(manager, message: str) -> list:
@@ -171,15 +196,30 @@ def _root_text(events: list) -> str:
     )
 
 
-def _envelopes(events: list) -> list[dict]:
-    """The envelope of each ``task`` result the coordinator read, in order."""
-    found = [read_envelope(event.metadata.get("result")) for event in find_tool_results(events, "task")]
-    assert all(envelope is not None for envelope in found), found
-    return found
+def _first_envelope(events: list) -> dict:
+    """The envelope of the first ``task`` result that is one: a run's end.
+
+    A call that started no run (a brief that cannot start one, a call past
+    ``max_runs_per_turn``) has a plain ``{"success": false, "error": ...}``
+    result, no envelope; those are passed over.
+    """
+    results = find_tool_results(events, "task")
+    found = [
+        envelope for envelope in (read_envelope(event.metadata.get("result")) for event in results)
+        if envelope is not None
+    ]
+    assert found, (
+        "no task result is a run's envelope: "
+        f"{[event.metadata.get('result') for event in results]}"
+    )
+    return found[0]
 
 
-def _records(manager) -> list:
-    return manager.agent_runs.records(manager.session_ref(SESSION, USER))
+def _record(manager, envelope: dict):
+    """The run record of ``envelope``'s run."""
+    record = manager.agent_runs.record(manager.session_ref(SESSION, USER), envelope["run"])
+    assert record is not None, f"no record of {envelope['run']}"
+    return record
 
 
 def _calls_of(manager, run: str) -> int:
@@ -201,6 +241,21 @@ def _sent_requests(home: Path, run: str | None, agent: str | None = None) -> lis
     ]
 
 
+def _last_text(message: dict) -> str:
+    """The text of a logged message's last text part (ADK's ``parts``, a
+    LangChain message's ``content`` as a string or blocks), unescaped."""
+    if "parts" in message:
+        texts = [part["text"] for part in message["parts"] if part.get("text")]
+    elif isinstance(message.get("content"), str):
+        texts = [message["content"]]
+    else:
+        texts = [
+            block["text"] for block in message.get("content") or ()
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+        ]
+    return texts[-1] if texts else ""
+
+
 def _parent_was_sent(home: Path, text: str) -> bool:
     """Whether the coordinator's last request held ``text``: the envelope it read."""
     sent = _sent_requests(home, None, "coordinator")
@@ -220,9 +275,8 @@ async def test_a_delegation_through_task_completes_and_its_envelope_is_read(
             name="coordinator",
             prompt=(
                 "You never calculate yourself: hand every calculation to the calculator "
-                "sub-agent with one task call. When the task call returns, reply with one "
-                "line: the product, then the word SUCCESS if the task result's success "
-                "field is true, else the word FAILURE."
+                "sub-agent with one task call. When the task call returns, reply with the "
+                "product."
             ),
             sub_agents=["calculator"],
             include_state_tools=False,
@@ -236,26 +290,26 @@ async def test_a_delegation_through_task_completes_and_its_envelope_is_read(
     ], tmp_path / "workspace")
     try:
         events = await _turn(manager, "What is 6 times 7?")
-        records = _records(manager)
+        assert_no_errors(events)
+        envelope = _first_envelope(events)
+        record = _record(manager, envelope)
     finally:
         await manager.cleanup()
 
-    assert_no_errors(events)
     delegations = find_tool_calls(events, "task")
     assert delegations, "the coordinator did not call task"
     arguments = delegations[0].metadata["tool_args"]
     assert arguments["agent_type"] == "calculator", arguments
     assert arguments.get("title") and arguments.get("objective"), arguments
-    (envelope, *_) = _envelopes(events)
     assert envelope["success"] is True, envelope
     assert (envelope["status"], envelope["partial"], envelope["error"]) == (
         RUN_COMPLETED, False, None,
     ), envelope
     assert "42" in envelope["result"], envelope
-    assert records and records[0].status == RUN_COMPLETED, records
-    reply = _root_text(events)
-    assert "42" in reply and "SUCCESS" in reply.upper(), reply
-    assert "FAILURE" not in reply.upper(), reply
+    assert record.status == RUN_COMPLETED, record
+    # The coordinator was sent the envelope and answers from it.
+    assert _parent_was_sent(isolated, envelope["run"])
+    assert "42" in _root_text(events), _root_text(events)
 
 
 # -- 2. the step limit's last call ---------------------------------------------------
@@ -273,9 +327,7 @@ _COORDINATOR_PROMPT = (
     "You never look anything up yourself: hand the whole lookup to the researcher "
     "sub-agent in exactly one task call whose brief names every key (never one call per "
     "key), and do not call task again whatever it returns. "
-    "When the task call returns, reply with one line copying three fields of the task "
-    "result exactly: status=<its status field> partial=<its partial field> "
-    "error=<its error field>."
+    "When the task call returns, tell the user what it found and how the task ended."
 )
 
 
@@ -311,36 +363,34 @@ async def test_the_step_limits_last_call_is_accepted_and_the_run_completes_parti
                        tmp_path / "workspace")
     try:
         events = await _turn(manager, _ASK)
-        records = _records(manager)
-        (envelope, *_) = _envelopes(events)
+        assert_no_errors(events)
+        envelope = _first_envelope(events)
+        record = _record(manager, envelope)
         calls = _calls_of(manager, envelope["run"])
     finally:
         await manager.cleanup()
 
-    assert_no_errors(events)
     assert (envelope["success"], envelope["status"], envelope["partial"], envelope["error"]) == (
         True, RUN_COMPLETED, True, STEP_LIMIT_ERROR,
     ), envelope
     assert calls == 2, f"the run made {calls} model calls"
     assert LOOKED_UP, "the researcher looked nothing up"
-    assert records[0].status == RUN_COMPLETED and records[0].error == STEP_LIMIT_ERROR, records
+    assert (record.status, record.error) == (RUN_COMPLETED, STEP_LIMIT_ERROR), record
 
     # What the provider accepted: the last allowed request, its tools still
     # declared and its last message ending with the note.
     sent = _sent_requests(isolated, envelope["run"])
     assert len(sent) == 2, [record["metadata"].get("tools") for record in sent]
     first, last = (record["metadata"] for record in sent)
-    assert STEP_LIMIT_NOTE not in json.dumps(first.get("messages"))
-    assert STEP_LIMIT_NOTE in json.dumps(last["messages"][-1]), last["messages"][-1]
+    assert not any(_last_text(message).endswith(STEP_LIMIT_NOTE)
+                   for message in first.get("messages") or ())
+    assert _last_text(last["messages"][-1]).endswith(STEP_LIMIT_NOTE), last["messages"][-1]
     assert "live_subagents_lookup" in (last.get("tools") or []), last.get("tools")
 
     # The parent reads it: its next request holds the envelope, the step
-    # limit's error in it, and its reply says how the run ended. (What it
-    # copies of the error is the model's: Gemini 2.5 Flash once wrote
-    # ``error=None`` for the error it was sent.)
+    # limit's error in it. (What its reply copies of it is the model's:
+    # Gemini 2.5 Flash once wrote ``error=None`` for the error it was sent.)
     assert _parent_was_sent(isolated, STEP_LIMIT_ERROR)
-    reply = _root_text(events).lower()
-    assert "completed" in reply, reply
 
 
 # -- 3. the token limit --------------------------------------------------------------
@@ -351,34 +401,33 @@ _SMALL_TOKEN_LIMIT = 100
 
 @pytest.mark.parametrize("model", PROVIDERS)
 @pytest.mark.parametrize("backend", BACKENDS)
-async def test_the_token_limit_ends_the_run_or_its_last_answer_completes_it(
+async def test_the_token_limit_ends_the_run_at_an_answer_that_calls_tools(
     backend, model, isolated, tmp_path
 ):
     manager = _manager(backend, model, _limited(AgentLimits(max_tokens=_SMALL_TOKEN_LIMIT)),
                        tmp_path / "workspace")
     try:
         events = await _turn(manager, _ASK)
-        records = _records(manager)
-        (envelope, *_) = _envelopes(events)
+        assert_no_errors(events)
+        envelope = _first_envelope(events)
+        record = _record(manager, envelope)
         calls = _calls_of(manager, envelope["run"])
     finally:
         await manager.cleanup()
 
-    assert_no_errors(events)
     # The first answer is past the limit: it ends the run either way.
     assert calls == 1, f"the run made {calls} model calls"
     assert LOOKED_UP == [], f"a call past the limit ran: {LOOKED_UP}"
-    if envelope["status"] == RUN_CANCELLED:
-        assert (envelope["success"], envelope["error"], envelope["cancelled_by"]) == (
-            False, TOKEN_LIMIT_ERROR, "limit",
-        ), envelope
-        assert records[0].cancelled_by == "limit", records
-        assert _parent_was_sent(isolated, TOKEN_LIMIT_ERROR)
-    else:
-        # An answer that made no tool calls: the run's result, whole.
+    if envelope["status"] != RUN_CANCELLED:
+        # An answer that made no tool calls is the run's result, whole: the
+        # limit had nothing to cancel.
         assert (envelope["success"], envelope["status"], envelope["partial"]) == (
             True, RUN_COMPLETED, False,
         ), envelope
         assert envelope["error"] is None, envelope
-    reply = _root_text(events).lower()
-    assert envelope["status"] in reply, reply
+        pytest.skip("answered without tools: nothing for the limit to cancel")
+    assert (envelope["success"], envelope["error"], envelope["cancelled_by"]) == (
+        False, TOKEN_LIMIT_ERROR, "limit",
+    ), envelope
+    assert (record.status, record.cancelled_by) == (RUN_CANCELLED, "limit"), record
+    assert _parent_was_sent(isolated, TOKEN_LIMIT_ERROR)
