@@ -38,6 +38,7 @@ from agentic_cli.workflow.agents import (
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
     RUN_QUEUED,
     RUN_REFUSED,
@@ -2987,3 +2988,145 @@ class TestWorkingSlots:
             ("researcher-2", RUN_STARTED), ("researcher-2", RUN_COMPLETED),
         ]
         assert envelope_read(crew.results_read("coordinator")["c3"])["result"] == "Y is 7."
+
+
+def asking_crew(make_crew, *, holder: Step, **scripts: list[Step]) -> Crew:
+    """With one slot: a coordinator delegating, in one response, to an asker
+    (who asks the user, ``contract_ask``), a holder (whose first answer is
+    ``holder``) and a researcher, in that order."""
+    return make_crew(
+        [agent("coordinator", sub_agents=("asker", "holder", "researcher")),
+         agent("asker", tools=(contract_ask,)),
+         agent("holder", tools=(contract_hold, contract_block)),
+         agent("researcher")],
+        subagents=SubAgentPolicy(max_active=1),
+        coordinator=[calls(delegate("asker", "Ask which.", "c1"),
+                           delegate("holder", "Hold on.", "c2"),
+                           delegate("researcher", "Find X.", "c3")),
+                     *scripts.pop("coordinator", [says("Done.")])],
+        asker=[calls(use("contract_ask", "a1")), says("Asked.")],
+        holder=[holder, says("Held.")],
+        researcher=[says("Found.")],
+        **scripts,
+    )
+
+
+class TestWaitingOnTheUser:
+    """Spec 5.5 and 6.2: a run waiting on the user (a question, a permission
+    prompt) is ``input_required`` and lends its slot meanwhile; once the user
+    has answered it takes a slot back ahead of the runs that have not
+    started, and is ``running`` again."""
+
+    async def test_a_run_at_a_question_lends_its_slot_and_takes_it_back_first(self, make_crew):
+        crew = asking_crew(make_crew, holder=calls(use("contract_hold", "h1")))
+        while_asked: list[str] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            await HELD["started"].wait()  # the holder works in the asker's slot
+            while_asked.extend(r.status for r in crew.records())
+            return "B"
+
+        crew.answer_with(answer)
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                # The asker waits for its slot back, ahead of the researcher.
+                await until(lambda: crew.slots().waiting == 2)
+            finally:
+                HELD["go"].set()
+            events = await asyncio.wait_for(turn, 10)
+
+        assert while_asked == [RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_QUEUED]
+        assert working(events, RUN_INPUT_REQUIRED, RUN_RUNNING) == [
+            ("asker-1", RUN_INPUT_REQUIRED), ("holder-1", RUN_RUNNING),
+            ("asker-1", RUN_RUNNING), ("researcher-1", RUN_RUNNING),
+        ]
+        # The asker took its slot back and answered before the researcher ran.
+        ended = working(events, RUN_COMPLETED)
+        assert ended.index(("asker-1", RUN_COMPLETED)) < ended.index(
+            ("researcher-1", RUN_COMPLETED)
+        )
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+    async def test_two_runs_at_permission_prompts_with_one_slot_both_finish(
+        self, make_crew, project
+    ):
+        """The permission engine shows one prompt at a time: a run waiting
+        for its turn to ask lends its slot too, or the run asking first could
+        never take its slot back."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=("write_file",))],
+            subagents=SubAgentPolicy(max_active=1),
+            coordinator=[calls(delegate("researcher", "Write one.", "c1"),
+                               delegate("researcher", "Write two.", "c2")),
+                         says("Both written.")],
+            researcher=[calls(use("write_file", "r1", path="one.txt", content="1")),
+                        calls(use("write_file", "r2", path="two.txt", content="2")),
+                        says("Written."), says("Written.")],
+        )
+
+        async def allow_once(request: UserInputRequest) -> str:
+            if request.run.instance == "researcher-1":
+                # Answered once researcher-2 waits for its own prompt, in the
+                # slot researcher-1 lent.
+                await until(lambda: crew.records()[1].status == RUN_INPUT_REQUIRED)
+            return ALLOW_ONCE_CHOICE
+
+        crew.answer_with(allow_once)
+        events = await asyncio.wait_for(crew.turn(), 15)
+
+        assert (project / "one.txt").read_text() == "1"
+        assert (project / "two.txt").read_text() == "2"
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[c])["status"] for c in ("c1", "c2")] == [RUN_COMPLETED] * 2
+        assert working(events, RUN_QUEUED, RUN_INPUT_REQUIRED, RUN_RUNNING) == [
+            ("researcher-2", RUN_QUEUED),
+            ("researcher-1", RUN_INPUT_REQUIRED), ("researcher-2", RUN_RUNNING),
+            ("researcher-2", RUN_INPUT_REQUIRED), ("researcher-1", RUN_RUNNING),
+            ("researcher-2", RUN_RUNNING),
+        ]
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+    async def test_ctrl_c_at_a_question_with_a_run_queued_leaves_no_waiter(self, make_crew):
+        """The asker lends its slot to the holder while the
+        user is slow to answer and the researcher waits for a slot; Ctrl+C
+        stops the turn, the researcher never starts, nothing waits, and the
+        next turn's run starts at once."""
+        crew = asking_crew(
+            make_crew, holder=calls(use("contract_block", "h1")),
+            coordinator=[calls(delegate("researcher", "Find Y.", "c4")), says("Y is 7.")],
+        )
+        withdrawn: list[str] = []
+
+        async def slow(request: UserInputRequest) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                withdrawn.append(request.run.instance)
+                raise
+            return "B"  # pragma: no cover
+
+        crew.answer_with(slow)
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+                await until(lambda: crew.slots().waiting == 1)
+                assert [r.status for r in crew.records()] == [
+                    RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_QUEUED,
+                ]
+            finally:
+                await crew.stop(turn)
+
+        assert withdrawn == ["asker-1"]
+        assert crew.requests("researcher") == 0
+        assert [r.status for r in crew.records()] == [RUN_INTERRUPTED] * 3
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+        events = await asyncio.wait_for(crew.turn("Now Y."), 10)
+
+        assert working(events, RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED) == [
+            ("researcher-2", RUN_STARTED), ("researcher-2", RUN_COMPLETED),
+        ]

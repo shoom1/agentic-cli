@@ -43,6 +43,11 @@ of a queued run ends it as a cancel of a working run does, and its place
 in the queue goes with it. The time a run waits for its slot is not
 counted against its time limit; the time it lends its slot is.
 
+A run that waits on the user (``waiting_on_user``: a question, a permission
+prompt, ``BaseWorkflowManager.request_user_input`` and the permission
+engine) says ``input_required``, lends its slot for the wait, and says
+``running`` once it has its slot back.
+
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
 the run works. A run ends:
@@ -70,7 +75,8 @@ the run works. A run ends:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -92,6 +98,7 @@ from agentic_cli.workflow.agents.runs import (
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
     RUN_QUEUED,
     RUN_REFUSED,
@@ -238,22 +245,62 @@ StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
 @dataclass
 class _Working:
     """A run at work, as its own task sees it: its slot in its conversation's
-    pool, and the child runs it waits on (by run id)."""
+    pool, the child runs it waits on (by run id), and its waits on the user."""
 
     ref: RunRef
     call_id: str
     pool: SlotPool
     slot: Slot
+    emit: Callable[[WorkflowEvent], None]
     children: set[str] = field(default_factory=set)
+    asking: int = 0
 
     def waits_on_only(self, child: str) -> bool:
-        """Whether ``child`` is all the run waits on: its last child."""
-        return self.children <= {child}
+        """Whether ``child`` is all the run waits on: its last child, the user not asked."""
+        return self.asking == 0 and self.children <= {child}
+
+    @asynccontextmanager
+    async def waiting_on_user(self) -> AsyncIterator[None]:
+        """``input_required``, its slot lent for the block, then ``running``; nested waits once."""
+        self.asking += 1
+        if self.asking == 1:
+            self.emit(WorkflowEvent.agent_run(self.ref, RUN_INPUT_REQUIRED, call_id=self.call_id))
+        stopped = False
+        try:
+            async with self.pool.lent(self.slot):
+                yield
+        except asyncio.CancelledError:
+            stopped = True
+            raise
+        finally:
+            self.asking -= 1
+            if self.asking == 0 and not stopped:
+                self.emit(WorkflowEvent.agent_run(self.ref, RUN_RUNNING, call_id=self.call_id))
 
 
 #: The run at work in this task (``_in_run`` sets it in the run's own task,
 #: whose copies its tool calls run in); None in the root's own work.
 _working: ContextVar[_Working | None] = ContextVar("agentic_cli_working_run", default=None)
+
+
+@asynccontextmanager
+async def waiting_on_user() -> AsyncIterator[None]:
+    """The block waits on the user (a question, a permission prompt): the run lends its slot.
+
+    In a sub-agent run's own work, the run says ``input_required``, its slot
+    works for another run meanwhile, and once the block ends it takes the
+    slot back, ahead of the runs that have not started, and says
+    ``running``; nested waits (a prompt waiting its turn behind another's,
+    then the prompt) count once. A wait a cancel ends takes nothing back:
+    the run is being stopped. Nothing in the root's own work, nor outside a
+    run.
+    """
+    working = _working.get()
+    if working is None:
+        yield
+        return
+    async with working.waiting_on_user():
+        yield
 
 
 class RunFailed(Exception):
@@ -554,7 +601,7 @@ class Delegations:
         try:
             if queued:
                 self._emit(WorkflowEvent.agent_run(ref, RUN_RUNNING, call_id=request.call_id))
-            _working.set(_Working(ref, request.call_id, pool, slot))
+            _working.set(_Working(ref, request.call_id, pool, slot, emit=self._emit))
             with control.timing():
                 return await self._hook(run)
         finally:

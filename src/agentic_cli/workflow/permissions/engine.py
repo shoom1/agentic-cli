@@ -586,12 +586,19 @@ class PermissionEngine:
         uncontained: Collection[str] = frozenset(),
         per_call: Mapping[str, str] | None = None,
     ) -> CheckResult:
+        from agentic_cli.workflow.agents.delegate import waiting_on_user
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
         from agentic_cli.workflow.sessions import get_active_run
 
         unmatched = [cap for cap, r in outcomes if r is None]
-        async with self._ask_lock:
+        # A sub-agent run waits on the user from here, its working slot lent
+        # (request_user_input's own wait counts once with this one): while
+        # another run's prompt shows, then while its own does. It takes the
+        # slot back only once the lock is released: a run that waited for
+        # its slot holding the lock would hold every other run's prompt, and
+        # with them the slots their runs lent.
+        async with waiting_on_user(), self._ask_lock:
             # The run whose call is gated: both gates run inside it, so its
             # prompt says which sub-agent asks.
             request = build_request(

@@ -49,7 +49,12 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.agents.delegate import AgentRun, Delegations, RunAnswer
+from agentic_cli.workflow.agents.delegate import (
+    AgentRun,
+    Delegations,
+    RunAnswer,
+    waiting_on_user,
+)
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.usage import (
@@ -2508,6 +2513,12 @@ class BaseWorkflowManager(ABC):
         (``get_active_run()``; None in the root's own calls), so the consumer
         can say which agent asks, whoever built the request.
 
+        A sub-agent run waits for the answer with its working slot lent
+        (``agents/delegate.py::waiting_on_user``): it is ``input_required``
+        meanwhile, another run may work in its slot, and it takes a slot
+        back, ahead of the runs that have not started, once the user has
+        answered.
+
         Args:
             request: The user input request.
 
@@ -2544,10 +2555,11 @@ class BaseWorkflowManager(ABC):
 
         # A call cancelled at its question was not run (workflow/interrupts.py).
         call = get_active_tool_call()
-        if call is None:
-            return await callback(request)
-        with self._open_calls.asking(call.call_id):
-            return await callback(request)
+        async with waiting_on_user():
+            if call is None:
+                return await callback(request)
+            with self._open_calls.asking(call.call_id):
+                return await callback(request)
 
     # Async context manager support
 

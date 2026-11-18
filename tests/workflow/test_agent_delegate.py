@@ -23,6 +23,7 @@ from agentic_cli.workflow.agents import (
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
     RUN_QUEUED,
     RUN_REFUSED,
@@ -41,6 +42,7 @@ from agentic_cli.workflow.agents.delegate import (
     RunAnswer,
     RunFailed,
     started_by,
+    waiting_on_user,
 )
 from agentic_cli.workflow.agents.envelope import (
     INTERRUPTED_ERROR,
@@ -1225,6 +1227,23 @@ class Turn:
         ]
 
 
+class Observed(AgentRuns):
+    """``AgentRuns`` that also keep each ``AGENT_RUN`` they observe, in order:
+    the events a stopped turn reports after its stop reach no consumer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[str, str]] = []
+
+    def observe(self, event: WorkflowEvent) -> None:
+        self.seen.append((event.run.instance, event.metadata["status"]))
+        super().observe(event)
+
+    def of(self, instance: str) -> list[str]:
+        """The statuses ``instance``'s run reported, in order."""
+        return [status for name, status in self.seen if name == instance]
+
+
 class Holding:
     """A hook whose runs each work until let go (``go[instance].set()``);
     ``working`` names the runs whose hook ran, in order."""
@@ -1478,3 +1497,151 @@ class TestACancelWhileQueued:
         await asyncio.wait_for(after.task, 5)
 
         assert after.of("researcher-2") == [RUN_STARTED, RUN_COMPLETED]
+
+
+# -- a run waiting on the user lends its slot ------------------------------------------------
+
+
+class TestWaitingOnTheUser:
+    """A sub-agent run that waits on the user (``waiting_on_user``: a
+    question, a permission prompt) says ``input_required``, lends its slot
+    meanwhile, and takes it back ahead of the runs that have not started
+    (``running``)."""
+
+    async def test_a_run_lends_its_slot_and_takes_it_back_ahead_of_new_runs(self):
+        hook = Holding()
+        runs = AgentRuns()
+        answered = asyncio.Event()
+
+        async def asking(run: AgentRun) -> RunAnswer:
+            if run.ref.instance != "researcher-1":
+                return await hook(run)
+            async with waiting_on_user():
+                await answered.wait()
+            hook.working.append("researcher-1 back")
+            return RunAnswer(text="Asked.")
+
+        made = delegations(asking, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+        hook.go["researcher-3"].set()
+
+        turn = Turn(lambda: asyncio.gather(
+            *(made.delegate(request(call_id=call)) for call in ("c1", "c2", "c3"))
+        ))
+        await until(lambda: hook.working == ["researcher-2"] and pool.waiting == 1)
+        assert runs.record(CONVERSATION, "researcher-1").status == RUN_INPUT_REQUIRED
+        answered.set()
+        await until(lambda: pool.waiting == 2)  # researcher-1 wants it back; researcher-3 waits
+        hook.go["researcher-2"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert hook.working == ["researcher-2", "researcher-1 back", "researcher-3"]
+        assert turn.of("researcher-1") == [
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_COMPLETED,
+        ]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_nested_waits_count_once(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            async with waiting_on_user():
+                async with waiting_on_user():  # a prompt, its turn behind another's
+                    pass
+            return RunAnswer(text="Asked.")
+
+        made = delegations(hook)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-1") == [
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_COMPLETED,
+        ]
+
+    async def test_the_roots_own_wait_lends_nothing_and_says_nothing(self):
+        live = LiveEvents()
+
+        async def source():
+            with live_events.reporting(live):
+                async with waiting_on_user():
+                    pass
+            if False:  # pragma: no cover - a source that yields nothing itself
+                yield
+
+        assert [event async for event in merged(source(), live)] == []
+
+    async def test_a_child_ending_while_its_parent_waits_on_the_user_gives_its_slot_to_the_pool(
+        self,
+    ):
+        answered = asyncio.Event()
+        runs = AgentRuns()
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent != "middle":
+                return RunAnswer(text="Found.")
+
+            async def ask() -> None:
+                async with waiting_on_user():
+                    await answered.wait()
+
+            await asyncio.gather(
+                made.delegate(request(LEAF, caller=run.ref, caller_agent="middle", call_id="m1")),
+                ask(),
+            )
+            return RunAnswer(text="Planned.")
+
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+        turn = Turn(lambda: made.delegate(request(MIDDLE)))
+        await until(lambda: runs.record(CONVERSATION, "leaf-1") is not None
+                    and runs.record(CONVERSATION, "leaf-1").status == RUN_COMPLETED)
+
+        assert pool.free == 1  # not handed back: middle-1 still waits on the user
+        answered.set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("middle-1") == [RUN_STARTED, RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_COMPLETED]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_ctrl_c_while_a_run_waits_on_the_user_and_another_is_queued(self):
+        """researcher-1 lends its slot to researcher-2 while
+        the user is slow to answer and researcher-3 waits for a slot; Ctrl+C
+        stops all three, researcher-3 never starts, nothing waits, and
+        researcher-1 takes nothing back."""
+        hook = Holding()
+        runs = Observed()
+
+        async def asking(run: AgentRun) -> RunAnswer:
+            if run.ref.instance == "researcher-1":
+                async with waiting_on_user():
+                    await asyncio.Event().wait()  # the user is slow to answer
+            return await hook(run)
+
+        made = delegations(asking, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            *(made.delegate(request(call_id=call)) for call in ("c1", "c2", "c3"))
+        ))
+        await until(lambda: hook.working == ["researcher-2"] and pool.waiting == 1)
+        turn.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await turn.task
+
+        assert hook.working == ["researcher-2"]
+        assert runs.of("researcher-1") == [RUN_STARTED, RUN_INPUT_REQUIRED, RUN_INTERRUPTED]
+        assert runs.of("researcher-3") == [RUN_STARTED, RUN_QUEUED, RUN_INTERRUPTED]
+        assert [r.status for r in runs.records(CONVERSATION)] == [RUN_INTERRUPTED] * 3
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_wait_on_the_user_blocks_no_event_loop(self):
+        async def hook(run: AgentRun) -> RunAnswer:
+            async with waiting_on_user():
+                await asyncio.sleep(0)
+            return RunAnswer(text="Asked.")
+
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        with no_blocking_calls():
+            turn = Turn(lambda: made.delegate(request()))
+            await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-1")[-1] == RUN_COMPLETED
