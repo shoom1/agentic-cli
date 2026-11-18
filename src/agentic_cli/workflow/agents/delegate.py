@@ -453,8 +453,9 @@ class Delegations:
         envelope (``cancelled``, with what it had of its work).
 
         Returns:
-            True when this cancelled it; False for no such working run, or
-            one cancelled already.
+            True when this cancelled it; False for no such working run, one
+            cancelled already, or one whose work has ended
+            (``RunControl.finish``).
 
         Raises:
             ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.

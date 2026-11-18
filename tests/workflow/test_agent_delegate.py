@@ -1001,6 +1001,36 @@ class TestTheTimeLimit:
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
 
+    async def test_a_run_whose_work_had_ended_keeps_its_answer(self):
+        """The hook's work ended (``RunControl.finish``) and it still reads
+        what the run did (ADK reads its child session's state) when the
+        time limit fires and its parent stops it: the run completes with its
+        answer and its state."""
+        cancelled: list[bool] = []
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.finish()
+            cancelled.append(made.cancel("researcher-1#1", by="parent", error="no longer needed"))
+            await asyncio.sleep(0.15)  # the read, past the time limit
+            return RunAnswer(text="X is 42.", state={"tasks": [{"description": "find X"}]})
+
+        types = {
+            **TYPES,
+            "researcher": AgentConfig(name="researcher", prompt="p", description="Finds.",
+                                      limits=AgentLimits(timeout=0.05)),
+        }
+        made = delegations(hook, types=types)
+
+        result, events = await asyncio.wait_for(delegated(made, request()), 5)
+
+        assert cancelled == [False]
+        assert (result.result["status"], result.result["result"], result.result["error"]) == (
+            RUN_COMPLETED, "X is 42.", None
+        )
+        assert result.state == {"tasks": [{"description": "find X"}]}
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_COMPLETED)]
+
 
 class TestTheLimitsAtModelCalls:
     """What a backend's run reports to its control at each model call, and how the run ends."""

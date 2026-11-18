@@ -91,6 +91,24 @@ class TestCancel:
 
         assert made.cancelled is None
 
+    async def test_a_run_whose_work_has_ended_is_not_cancelled(self):
+        """Its hook said its work ended (``finish``) and still reads back what
+        the run did: neither a stop nor its time limit cancels it then."""
+        made = control(timeout=0.05)
+
+        async def run() -> str:
+            with made.timing():
+                made.finish()
+                made.cancel(by="parent", error="no longer needed")
+                await asyncio.sleep(0.1)  # reading what it did, past its time limit
+            return "its answer"
+
+        task = asyncio.create_task(run())
+        made.bind(task)
+
+        assert await asyncio.wait_for(task, 5) == "its answer"
+        assert made.cancelled is None
+
     async def test_a_cancel_before_the_task_is_bound_cancels_it_then(self):
         made = control()
         made.cancel(by="user", error="stopped")

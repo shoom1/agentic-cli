@@ -7,10 +7,12 @@ the run's own task, and hands it to the backend's hook as
 
 - ``cancel(by=, error=)`` cancels the run's task: its parent's stop, the
   user's, or a limit's. The first cancel wins, and a run that has ended is
-  not cancelled. The hook, handling the ``CancelledError`` in the run's
-  task, asks ``own_cancel`` whether it is the run's own: then it stops the
-  run as a stopped turn's run stops and returns what it has, and the run
-  ends ``cancelled``; any other cancel (the turn's: Ctrl+C) goes on.
+  not cancelled, nor one whose hook said its work has ended (``finish``)
+  while it still reads back what the run did. The hook, handling the
+  ``CancelledError`` in the run's task, asks ``own_cancel`` whether it is
+  the run's own: then it stops the run as a stopped turn's run stops and
+  returns what it has, and the run ends ``cancelled``; any other cancel
+  (the turn's: Ctrl+C) goes on.
 - The time limit (``timeout``) runs while the hook does (``timing``); past
   it the run is cancelled by its limit.
 - The limits checked at the run's model calls: before each, ``model_call``
@@ -81,6 +83,8 @@ class RunControl:
         # Whether cancel() cancelled the task, and own_cancel() has not yet
         # taken that cancel.
         self._cancelled_task = False
+        # Whether the hook said the run's work has ended (finish()).
+        self._finished = False
 
     # -- the run's task --------------------------------------------------------
 
@@ -96,20 +100,36 @@ class RunControl:
     def cancel(self, *, by: str, error: str) -> None:
         """Cancel the run's task: ``by`` its parent, the user or a limit, for ``error``.
 
-        Does nothing once the run is cancelled (the first cancel wins) or
-        its task has ended, and cancels no task its turn is cancelling
-        already (the run ends as the turn's).
+        Does nothing once the run is cancelled (the first cancel wins), its
+        task has ended or its work has (``finish``), and cancels no task its
+        turn is cancelling already (the run ends as the turn's).
 
         Raises:
             ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.
         """
         if by not in CANCELLED_BY:
             raise ValueError(f"A run is cancelled by its parent, user or limit, not {by!r}.")
-        if self.cancelled is not None or (self._task is not None and self._task.done()):
+        if (
+            self.cancelled is not None
+            or self._finished
+            or (self._task is not None and self._task.done())
+        ):
             return
         self.cancelled = (by, error)
         if self._task is not None:
             self._cancel_task()
+
+    def finish(self) -> None:
+        """In the run's task: its work has ended, so no cancel stops it from now on.
+
+        A hook calls it as the run's stream ends, before it reads back what
+        the run did (ADK reads its child session's state): a limit or a stop
+        that lands during that read would otherwise end the run
+        ``cancelled`` and lose an answer it has made. A cancel the run's
+        work already took (``own_cancel``) stays. The turn's cancel (Ctrl+C)
+        is not the control's, and still stops the read.
+        """
+        self._finished = True
 
     def own_cancel(self) -> bool:
         """In the run's task, handling a ``CancelledError``: whether it is the run's own cancel.

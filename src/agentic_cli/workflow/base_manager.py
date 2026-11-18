@@ -642,9 +642,11 @@ class BaseWorkflowManager(ABC):
         provider's error, or ``RunFailed``). A cancel stops the run; the
         run's own (``run.control.own_cancel()``: a limit's, its parent's,
         the user's) returns what it has, its last text and the shared state
-        it changed, and any other (its turn's) raises. ``run.control``
-        keeps its limits at its model calls (each backend's in its
-        sub-agents' stacks).
+        it changed, and any other (its turn's) raises. Once the run's work
+        has ended, before anything it awaits to read what the run did, it
+        calls ``run.control.finish()``, so a cancel of the run alone then
+        loses nothing. ``run.control`` keeps its limits at its model calls
+        (each backend's in its sub-agents' stacks).
 
         Raises:
             NotImplementedError: This backend runs no sub-agent.

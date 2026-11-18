@@ -2581,6 +2581,55 @@ class TestTheTimeLimit:
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_CANCELLED]
         assert BLOCKING["stopped"].is_set()  # its tool was stopped with it
 
+    @pytest.mark.parametrize("backend", ["adk"], indirect=True)
+    @pytest.mark.parametrize("stop", ["time limit", "parent"])
+    async def test_on_adk_a_run_whose_work_ended_keeps_it_while_its_state_is_read(
+        self, make_crew, stop
+    ):
+        """ADK reads a run's shared state back from its child session once
+        its stream has ended. Its time limit firing during that read, or its
+        parent stopping it then, leaves the run completed with its answer
+        and the tasks it saved. Deep Agents reads nothing after its stream."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
+             agent("researcher", include_state_tools=True, limits=AgentLimits(timeout=1.0))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=[
+                            {"description": "find X", "status": "completed"},
+                        ])),
+                        says("X is 42.")],
+        )
+        await crew.manager._ensure_initialized()
+        service = crew.manager._session_service
+        read = service.get_session
+        during: list[tuple[int, bool | None]] = []
+
+        async def slow_state_read(**kwargs: Any) -> Any:
+            config = kwargs.get("config")
+            if kwargs["app_name"].endswith("--agents") and config is not None \
+                    and config.num_recent_events == 0:
+                stopped = None
+                if stop == "parent":
+                    stopped = crew.cancel("researcher-1#1", by="parent", error="no longer needed")
+                during.append((crew.requests("researcher"), stopped))
+                # Past the run's time limit, which started with its work.
+                await asyncio.sleep(1.3 if stop == "time limit" else 0.05)
+            return await read(**kwargs)
+
+        service.get_session = slow_state_read
+        events = await asyncio.wait_for(crew.turn(), 20)
+
+        # The read came after the run's last answer; a stop then stops nothing.
+        assert during == [(2, False if stop == "parent" else None)]
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_COMPLETED, None)
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+        assert [task["description"] for task in (await crew.state())["tasks"]] == ["find X"]
+
 
 class TestALimitAtAPrompt:
     """A limit that fires while the run waits at a permission prompt (the

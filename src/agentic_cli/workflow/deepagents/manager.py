@@ -799,6 +799,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             raise
         finally:
             var_child_runnable_config.reset(detached)
+        # Its work has ended (nothing below waits; as ADK's, which reads its
+        # state back): no cancel of the run alone stops it now.
+        run.control.finish()
         own = _own_messages(final.get("messages") or [], task.id)
         answers = [message for message in own if isinstance(message, AIMessage)]
         return RunAnswer(

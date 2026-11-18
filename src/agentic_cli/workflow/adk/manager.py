@@ -1503,7 +1503,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         A cancel of the run alone (its control's: a limit, its parent or the
         user) stops it so too, and it returns what it has: the last text it
         wrote and the shared keys it changed; ``Delegations`` ends it
-        cancelled.
+        cancelled. Once its stream has ended its work is done
+        (``RunControl.finish``): a cancel of the run alone while its state
+        is read back does nothing.
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
@@ -1563,6 +1565,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise cause from None
         finally:
             self._report_raw_log()
+        # Its work has ended: a limit or a stop landing during the read of
+        # its state below must not discard the answer it made.
+        run.control.finish()
         if processor.failure is not None and run.control.cancelled is None:
             error, code = processor.failure
             if code == OVERFLOW_ERROR_CODE:
