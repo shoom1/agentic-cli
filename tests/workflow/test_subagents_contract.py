@@ -3104,12 +3104,44 @@ class TestWaitingOnTheUser:
         assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 
+    async def test_a_run_answered_while_its_slot_works_for_another_waits_queued(self, make_crew):
+        """The user answers the asker while the holder works in the asker's
+        lent slot: the asker no longer waits on the user but on its slot,
+        so it says ``queued`` until it has it back, then ``running``."""
+        crew = asking_crew(make_crew, holder=calls(use("contract_hold", "h1")))
+        answered = asyncio.Event()
+
+        async def answer(request: UserInputRequest) -> str:
+            await HELD["started"].wait()  # the holder works in the asker's slot
+            answered.set()
+            return "B"
+
+        crew.answer_with(answer)
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                # Answered, the asker waits for its slot back, as the researcher does.
+                await until(lambda: answered.is_set() and crew.slots().waiting == 2)
+                assert [r.status for r in crew.records()] == [
+                    RUN_QUEUED, RUN_RUNNING, RUN_QUEUED,
+                ]
+            finally:
+                HELD["go"].set()
+            events = await asyncio.wait_for(turn, 10)
+
+        assert [status for instance, status in working(
+            events, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
+        ) if instance == "asker-1"] == [RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING]
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
     async def test_two_runs_at_permission_prompts_with_one_slot_both_finish(
         self, make_crew, project
     ):
         """The permission engine shows one prompt at a time: a run waiting
         for its turn to ask lends its slot too, or the run asking first could
-        never take its slot back."""
+        never take its slot back. researcher-2, answered while researcher-1
+        works in the slot again, waits ``queued`` for it."""
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",)),
              agent("researcher", tools=("write_file",))],
@@ -3140,7 +3172,7 @@ class TestWaitingOnTheUser:
             ("researcher-2", RUN_QUEUED),
             ("researcher-1", RUN_INPUT_REQUIRED), ("researcher-2", RUN_RUNNING),
             ("researcher-2", RUN_INPUT_REQUIRED), ("researcher-1", RUN_RUNNING),
-            ("researcher-2", RUN_RUNNING),
+            ("researcher-2", RUN_QUEUED), ("researcher-2", RUN_RUNNING),
         ]
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 

@@ -1536,7 +1536,7 @@ class TestWaitingOnTheUser:
     """A sub-agent run that waits on the user (``waiting_on_user``: a
     question, a permission prompt) says ``input_required``, lends its slot
     meanwhile, and takes it back ahead of the runs that have not started
-    (``running``)."""
+    (``running``), ``queued`` while it waits for it."""
 
     async def test_a_run_lends_its_slot_and_takes_it_back_ahead_of_new_runs(self):
         hook = Holding()
@@ -1562,12 +1562,65 @@ class TestWaitingOnTheUser:
         assert runs.record(CONVERSATION, "researcher-1").status == RUN_INPUT_REQUIRED
         answered.set()
         await until(lambda: pool.waiting == 2)  # researcher-1 wants it back; researcher-3 waits
+        # Answered, it waits on its slot, no longer on the user.
+        assert runs.record(CONVERSATION, "researcher-1").status == RUN_QUEUED
         hook.go["researcher-2"].set()
         await asyncio.wait_for(turn.task, 5)
 
         assert hook.working == ["researcher-2", "researcher-1 back", "researcher-3"]
         assert turn.of("researcher-1") == [
-            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_COMPLETED,
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED,
+        ]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_question_asked_while_it_waits_for_its_slot_back_is_input_required_again(
+        self,
+    ):
+        """Two calls of one response that each ask: the second asks while the
+        first, answered, waits for its slot back. The run waits on the user
+        again, and says so; once both are answered and its slot is back, it
+        is ``running``."""
+        hook = Holding()
+        runs = AgentRuns()
+        first_answered, second_answered = asyncio.Event(), asyncio.Event()
+        second_asks = asyncio.Event()
+
+        async def asks(answered: asyncio.Event) -> None:
+            async with waiting_on_user():
+                await answered.wait()
+
+        async def asking(run: AgentRun) -> RunAnswer:
+            if run.ref.instance != "researcher-1":
+                return await hook(run)
+
+            async def second() -> None:
+                await second_asks.wait()
+                await asks(second_answered)
+
+            await asyncio.gather(asks(first_answered), second())
+            return RunAnswer(text="Asked twice.")
+
+        made = delegations(asking, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            *(made.delegate(request(call_id=call)) for call in ("c1", "c2"))
+        ))
+        await until(lambda: hook.working == ["researcher-2"])
+        first_answered.set()
+        await until(lambda: pool.waiting == 1)  # researcher-1 wants its slot back
+        assert runs.record(CONVERSATION, "researcher-1").status == RUN_QUEUED
+        second_asks.set()
+        await until(lambda: runs.record(CONVERSATION, "researcher-1").status
+                    == RUN_INPUT_REQUIRED)
+        second_answered.set()
+        await until(lambda: pool.waiting == 1)
+        hook.go["researcher-2"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-1") == [
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_INPUT_REQUIRED, RUN_QUEUED,
+            RUN_RUNNING, RUN_COMPLETED,
         ]
         assert (pool.free, pool.waiting) == (1, 0)
 

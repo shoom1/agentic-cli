@@ -45,9 +45,10 @@ counted against its time limit; the time it lends its slot is.
 
 A run that waits on the user (``waiting_on_user``: a question, a permission
 prompt, ``BaseWorkflowManager.request_user_input`` and the permission
-engine) says ``input_required``, lends its slot for the wait, and says
-``running`` once it has its slot back; a prompt no one can be shown (no
-input callback) lends nothing.
+engine) says ``input_required``, lends its slot for the wait, says
+``queued`` once answered while it waits for its slot back (another run
+works in it), and ``running`` once it has it; a prompt no one can be shown
+(no input callback, or its turn ended) lends nothing.
 
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
@@ -246,7 +247,8 @@ StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
 @dataclass
 class _Working:
     """A run at work, as its own task sees it: its slot in its conversation's
-    pool, the child runs it waits on (by run id), and its waits on the user."""
+    pool, the child runs it waits on (by run id), its waits on the user, and
+    the working status it said last (``running`` from its start)."""
 
     ref: RunRef
     call_id: str
@@ -255,20 +257,32 @@ class _Working:
     emit: Callable[[WorkflowEvent], None]
     children: set[str] = field(default_factory=set)
     asking: int = 0
+    said: str = RUN_RUNNING
 
     def waits_on_only(self, child: str) -> bool:
         """Whether ``child`` is all the run waits on: its last child, the user not asked."""
         return self.asking == 0 and self.children <= {child}
 
+    def say(self, status: str) -> None:
+        """Report ``status``, a working one, unless the run said it last."""
+        if status != self.said:
+            self.said = status
+            self.emit(WorkflowEvent.agent_run(self.ref, status, call_id=self.call_id))
+
     @asynccontextmanager
     async def waiting_on_user(self) -> AsyncIterator[None]:
-        """``input_required``, its slot lent for the block, then ``running``; nested waits once."""
+        """``input_required``, its slot lent for the block, ``queued`` while a take-back
+        waits for a slot, then ``running``; nested waits once.
+
+        A wait that starts while an earlier one waits for the slot back
+        (two calls of one response that each ask) says ``input_required``
+        again: the run waits on the user.
+        """
         self.asking += 1
-        if self.asking == 1:
-            self.emit(WorkflowEvent.agent_run(self.ref, RUN_INPUT_REQUIRED, call_id=self.call_id))
+        self.say(RUN_INPUT_REQUIRED)
         stopped = False
         try:
-            async with self.pool.lent(self.slot):
+            async with self.pool.lent(self.slot, on_wait=lambda: self.say(RUN_QUEUED)):
                 yield
         except asyncio.CancelledError:
             stopped = True
@@ -276,7 +290,7 @@ class _Working:
         finally:
             self.asking -= 1
             if self.asking == 0 and not stopped:
-                self.emit(WorkflowEvent.agent_run(self.ref, RUN_RUNNING, call_id=self.call_id))
+                self.say(RUN_RUNNING)
 
 
 #: The run at work in this task (``_in_run`` sets it in the run's own task,
@@ -290,11 +304,11 @@ async def waiting_on_user() -> AsyncIterator[None]:
 
     In a sub-agent run's own work, the run says ``input_required``, its slot
     works for another run meanwhile, and once the block ends it takes the
-    slot back, ahead of the runs that have not started, and says
-    ``running``; nested waits (a prompt waiting its turn behind another's,
-    then the prompt) count once. A wait a cancel ends takes nothing back:
-    the run is being stopped. Nothing in the root's own work, nor outside a
-    run.
+    slot back, ahead of the runs that have not started, saying ``queued``
+    while it waits for it (another run holds it), and says ``running``;
+    nested waits (a prompt waiting its turn behind another's, then the
+    prompt) count once. A wait a cancel ends takes nothing back: the run is
+    being stopped. Nothing in the root's own work, nor outside a run.
 
     Only a wait that can block belongs in it: a lent slot goes to the first
     run queued for one, which may work its whole run in it before this run

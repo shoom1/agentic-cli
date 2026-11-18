@@ -736,9 +736,10 @@ the start of the entry's title.
   brief's title, the brief's filled fields (`brief`), who started it
   (`started_by`: `agent:<instance>`, `agent:root` for the main agent) and
   how it runs (`mode`: `blocking`, its caller waiting for it), then, while
-  it works, `queued` (waiting for a free working slot), `running` (once it
-  has one, and once the user has answered) and `input_required` (waiting
-  on the user), then `completed` (`partial` for an answer cut at its output
+  it works, `queued` (waiting for a free working slot: to start, or to
+  take its own back once the user has answered while another run works in
+  it), `running` (once it has one) and `input_required` (waiting on the
+  user), then `completed` (`partial` for an answer cut at its output
   limit), `refused`, `failed` or `interrupted`, with the first 200
   characters of its result; a run fails when it cannot finish (a model call of its fails, its request no
   longer fits its model's window, or its model gives no answer), and the

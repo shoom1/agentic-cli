@@ -10,7 +10,8 @@ not started).
 
 A run that waits on its child runs or on the user lends its slot meanwhile
 (``async with pool.lent(slot):``): another run works with it, and the run
-takes one back at ``RETURNING`` when the wait is over. A child that ends
+takes one back at ``RETURNING`` when the wait is over (``on_wait`` is
+called when that take-back has to wait for a slot). A child that ends
 while its parent waits on it alone hands its slot straight to the parent
 (``hand_back``: whether the parent waits on anything else is its caller's
 to know), ahead of every waiter. Everything holding a slot is working, so
@@ -31,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import itertools
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 #: A run taking its slot back, after waiting on its children or the user.
@@ -157,18 +158,22 @@ class SlotPool:
         self.release(slot)
 
     @asynccontextmanager
-    async def lent(self, slot: Slot) -> AsyncIterator[None]:
+    async def lent(
+        self, slot: Slot, *, on_wait: Callable[[], None] | None = None
+    ) -> AsyncIterator[None]:
         """Lend ``slot`` for the block, while its run waits on its children or the user.
 
         A lend of a held slot frees it for another run (of nested lends, the
         first); when the last ends, it is taken back at ``RETURNING`` (at
         once when a slot is free, else ahead of the runs that have not
-        started), unless a child handed it back already. A lend that starts
-        while another of the run's waits is taking the slot back keeps it
-        lent: that wait ends without it, and this one takes it back. A lend
-        that ends in a cancel takes nothing back: its run is being stopped,
-        and its ``release`` is then nothing. An error is no cancel: the run
-        goes on, with its slot back.
+        started), unless a child handed it back already. ``on_wait``, when
+        given, is called as that take-back starts to wait for a slot (none
+        is free): the run's wait is over, and it now waits for its slot. A
+        lend that starts while another of the run's waits is taking the slot
+        back keeps it lent: that wait ends without it, and this one takes it
+        back. A lend that ends in a cancel takes nothing back: its run is
+        being stopped, and its ``release`` is then nothing. An error is no
+        cancel: the run goes on, with its slot back.
 
         Raises:
             ValueError: ``slot`` is another pool's.
@@ -193,13 +198,13 @@ class SlotPool:
         except BaseException:
             slot._lends -= 1
             if slot._lends == 0:
-                await self._take_back(slot)
+                await self._take_back(slot, on_wait)
             raise
         slot._lends -= 1
         if slot._lends == 0:
-            await self._take_back(slot)
+            await self._take_back(slot, on_wait)
 
-    async def _take_back(self, slot: Slot) -> None:
+    async def _take_back(self, slot: Slot, on_wait: Callable[[], None] | None = None) -> None:
         """A lent ``slot`` held again, at ``RETURNING``; nothing for one handed back or released.
 
         A take-back in the heap the slot no longer needs (a child handed it
@@ -210,11 +215,12 @@ class SlotPool:
         slot, and a take-back queued meanwhile (a wait of the run that
         started and ended in between) is withdrawn. So a run's slot has at
         most one take-back waiting for a slot, and none once it is held.
+        ``on_wait`` is called if it has to wait.
         """
         if slot._state != _LENT:
             return
         try:
-            took = await self._take(RETURNING, slot)
+            took = await self._take(RETURNING, slot, on_wait)
         except asyncio.CancelledError:
             if slot._state == _LENT and slot._lends == 0:
                 slot._state = _RELEASED
@@ -229,15 +235,23 @@ class SlotPool:
         # being handed the slot: the slot is back, so it ends without one.
         self._withdraw(slot)
 
-    async def _take(self, priority: int, slot: Slot | None = None) -> bool:
+    async def _take(
+        self,
+        priority: int,
+        slot: Slot | None = None,
+        on_wait: Callable[[], None] | None = None,
+    ) -> bool:
         """Count one slot taken: a free one, else wait in the heap until one is handed over.
 
         False when the wait is ``slot``'s take-back and was withdrawn
-        (``_withdraw``): no slot was taken.
+        (``_withdraw``): no slot was taken. ``on_wait`` is called when it
+        has to wait, before its entry goes in the heap.
         """
         if self._free > 0:
             self._free -= 1
             return True
+        if on_wait is not None:
+            on_wait()
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         entry = (priority, next(self._arrivals), future)
         heapq.heappush(self._waiters, entry)
