@@ -385,8 +385,9 @@ What it supports:
   coordinator writes and the coordinator's plan and tasks; with
   `inherit_context=True` it also starts from the coordinator's
   conversation. Its run's envelope is the call's result, and the
-  coordinator answers the user. Two sub-agents can run at once. `task` is a
-  reserved tool name.
+  coordinator answers the user. Several sub-agent runs can work at once,
+  four by default (`SubAgentPolicy.max_active`, at any depth); a run past
+  them waits for a free slot. `task` is a reserved tool name.
 - **The permission gate on every call**: `PermissionMiddleware`, in every
   agent's stack, identifies each tool by the object the registry issued and
   asks through the input callback, for sub-agents' calls too. A tool that
@@ -1355,11 +1356,16 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `<app_name>--agents`, id `<conversation id>/<instance>`), which
   `/sessions` never lists and which is deleted with its conversation; an
   inheriting run's child session starts with the conversation's events.
+  Only the plan, the tasks and the outside-content mark pass between a run
+  and its caller: any other session-state key an app's ADK tool writes in a
+  sub-agent run stays in the run's child session, and a `user:` or `app:`
+  scoped one is kept under the child app, so the conversation never sees
+  it; nor does the run read the conversation's other keys.
   **On Deep Agents**, each sub-agent's graph runs apart from its parent's,
   in a task of its own; an inheriting run starts from the conversation's
   messages, which its own summarization compacts when they are too large
   for its model.
-- **The limits in 0.7.0.** `inherit_context` is for sub-agents only, and
+- **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task`. Each raises
   `AgentGraphError` at startup.
@@ -1378,7 +1384,12 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `max_tokens` too), the runs one turn may start (`max_runs_per_turn`, 20,
   at any depth) and the runs that work at once (`max_active`, 4, at any
   depth: a run past them waits for a free slot, and one waiting on its
-  children or the user lends its slot meanwhile); an agent's own
+  children or the user lends its slot meanwhile, then waits `queued` to take
+  it back if another run works in it; a tool that puts a timeout around a
+  question, `asyncio.wait_for` or `asyncio.timeout` around
+  `request_user_input`, and goes on when it fires gives its run's slot up
+  for the rest of the run, which works on without one and says
+  `input_required` until it ends); an agent's own
   `limits=AgentLimits(...)` lies over the policy's, field by field. A run's
   last allowed model call is told to answer with what it has, and the run
   completes `partial` (`step limit reached`); past its time, or past its

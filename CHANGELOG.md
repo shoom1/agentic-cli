@@ -73,10 +73,14 @@ the start of the entry's title.
   capability…**; Added: **`task` is a reserved…**)
 - In an ADK app built from configs, a sub-agent is called through `task` and
   returns (no `transfer_to_agent`), seeing only its task unless
-  `inherit_context=True`; a synchronous tool must be safe in a worker thread
-  beside other calls; a prompt's `{name}` is not filled from session state.
-  (Changed: **ADK sub-agents are delegated…**, **On ADK, synchronous…**, **On
-  ADK, an agent's prompt…**)
+  `inherit_context=True`, and shares only the plan, the tasks and the
+  outside-content mark with its caller: any other session-state key an ADK
+  tool writes in a sub-agent run, `user:` and `app:` keys too, never
+  reaches the conversation; a synchronous tool must be safe in a worker
+  thread beside other calls; a prompt's `{name}` is not filled from session
+  state.
+  (Changed: **ADK sub-agents are delegated…**, **One `task` tool on both
+  backends…**, **On ADK, synchronous…**, **On ADK, an agent's prompt…**)
 - On both backends a coordinator delegates with `task(agent_type=, title=,
   objective=, ...)` and reads the run's envelope, a JSON object, as the
   call's result: a prompt that names a sub-agent's own tool
@@ -685,7 +689,8 @@ the start of the entry's title.
   conversation's sub-agent runs, each followed by the runs it started:
   instance, type, status (`running`, `queued` waiting for a free working
   slot, `needs you` waiting on the user, `completed`, `completed (partial)`
-  for an answer cut at its output limit, `refused`, `failed`, `interrupted`),
+  for an answer cut at its output limit, `refused`, `failed`, `cancelled`,
+  `interrupted`),
   run, title, tokens in/out (from the usage ledger, so a run still going
   shows what it has used so far) and time. `/agents <id>` shows one instance
   (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
@@ -743,9 +748,13 @@ the start of the entry's title.
   take its own back once the user has answered while another run works in
   it), `running` (once it has one) and `input_required` (waiting on the
   user), then `completed` (`partial` for an answer cut at its output
-  limit), `refused`, `failed` or `interrupted`, with the first 200
-  characters of its result; a run fails when it cannot finish (a model call of its fails, its request no
-  longer fits its model's window, or its model gives no answer), and the
+  limit), `refused`, `failed`, `cancelled` (by its parent, the user or a
+  limit: `cancelled_by`) or `interrupted`, with the first 200
+  characters of its result; a run fails when it cannot finish (a model
+  call of its fails, its request no longer fits its model's window, or, on
+  ADK, its model's last reply is blocked or ends for a reason other than
+  stop with nothing in it: `<model> returned no answer`; a run whose model
+  wrote no text at all completes, its result empty), and the
   sub-agent's answer is never read for success, so an answer that is JSON
   saying it failed completes), the same on both backends: the framework
   starts and ends every run (`workflow/agents/delegate.py`), each at its own
@@ -1329,9 +1338,10 @@ the start of the entry's title.
   sees only the task its parent gives it; True also sees the parent's
   conversation as it stands, after any summary and without the parent's
   reasoning, the same way on both backends: the run starts from that
-  conversation, less the message that called `task`, then its task message,
-  which ends with a note (`agents/brief.py::INHERITED_CONTEXT_NOTE`) that the
-  conversation is its parent's and its task the message the note ends:
+  conversation (on Deep Agents less the message that called `task`, which
+  ADK's copy keeps), then its task message, which ends with a note
+  (`agents/brief.py::INHERITED_CONTEXT_NOTE`) that the conversation is its
+  parent's and its task the message the note ends:
   without it, Claude at times answered the user's request to the
   coordinator instead of its own. On ADK the conversation's events are
   copied into the run's child session; on Deep Agents they are the run's
@@ -1631,10 +1641,16 @@ the start of the entry's title.
   its result is `{"success": false, "error": ...}` naming what to fix. A
   run starts from the conversation's `plan` and `tasks`, and the changes it
   makes to them reach its caller's state when it returns (the status bar's
-  task list moves then). On ADK each sub-agent type runs on a runner of its
-  own over the manager's session service, on a child session of the run
-  (app `<app_name>--agents`, id `<conversation id>/<instance>`), which no
-  conversation list shows, and, an agent of its own there, its system
+  task list moves then). On ADK nothing else of a run's session state does
+  (with the outside-content mark, these are all a run and its caller
+  share): any other key an app's ADK tool writes in a sub-agent run stays
+  in the run's child session, and a `user:` or `app:` scoped one is kept
+  under the child app (`<app_name>--agents`), so the conversation never
+  sees it, where in 0.6 such keys reached the conversation; nor does a run
+  read the conversation's other keys. On ADK each sub-agent type runs on a
+  runner of its own over the manager's session service, on a child session
+  of the run (app `<app_name>--agents`, id `<conversation id>/<instance>`),
+  which no conversation list shows, and, an agent of its own there, its system
   instruction gets ADK's identity line after its prompt as the root's does
   (`You are an agent. Your internal name is "<name>".`, then its
   description); on Deep Agents each type's graph runs apart from
@@ -2085,7 +2101,7 @@ the start of the entry's title.
   longer takes over the conversation on later turns. Sub-agents see only
   their task, where they saw the whole conversation (set
   `inherit_context=True` for that).
-  `inherit_context` is for the main agent's own sub-agents in 0.7.0:
+  `inherit_context` is for the main agent's own sub-agents:
   `validate_agent_graph` refuses it below another sub-agent, on every
   backend. A prompt
   that names `transfer_to_agent` should say to delegate to the agent
