@@ -2950,6 +2950,17 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **After a failed turn, a call that returned keeps its result on ADK too.**
+  ADK stores a step's parallel results together, after the last, so a turn
+  that failed in between (its one `ERROR`: a sibling call's permission check
+  that raised, a store that refused the write) left a call that had returned
+  without a stored result, and the next turn answered it "Interrupted before
+  it finished", though it had run; a delegation's run ended `completed`
+  while its coordinator read the interruption. ADK now keeps the failed
+  turn's record of the calls that returned (`OpenCalls.failed`), as Deep
+  Agents does: the next turn answers each with its result and the state it
+  changed (`left_open`), any other as interrupted, and forgets the record
+  once those answers are stored, so it answers no later call of the same id.
 - **A model call a tool makes reports its usage.** `generate_simple`
   (web_fetch's and the knowledge base's summaries, the memory proposals)
   reported no `LLM_USAGE` on ADK or Deep Agents, so the status bar's totals
