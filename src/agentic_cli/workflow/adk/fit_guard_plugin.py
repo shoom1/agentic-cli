@@ -18,6 +18,12 @@ plugins, after ADK has built the request (the summary included):
   kept user content starts with a note, ``FIT_NOTE``, as a part of its own:
   no new message, so no provider sees one more user message in a row. The
   session is untouched: the next request starts from the whole history again.
+- In a sub-agent run's request (``keep_task``: a sub-agent type's chain) the
+  run's task message, its invocation's user content, is never left out
+  either: a message steered to the run after a tool result starts a turn,
+  and the turns between the task message and the first kept one go; that
+  turn's opening content joins the task message, after the note, as one
+  user content.
 - It reports ``CONTEXT_TRIMMED(source="fit_guard", turns_dropped=n)`` once a
   turn.
 - When the newest turn alone is over the budget, nothing it could drop would
@@ -95,14 +101,19 @@ class FitGuardPlugin(BasePlugin):
             here (a native ADK YAML app's whose model did not resolve) is left
             alone.
         kinds: Each agent's provider kind, by name, for its characters per token.
+        keep_task: Whether each request's task message (its invocation's
+            user content) is kept whatever is left out: a sub-agent type's
+            chain, whose runs each start from one.
     """
 
     def __init__(
-        self, budgets: Mapping[str, "ContextBudget"], kinds: Mapping[str, "ProviderKind"]
+        self, budgets: Mapping[str, "ContextBudget"], kinds: Mapping[str, "ProviderKind"],
+        *, keep_task: bool = False,
     ) -> None:
         super().__init__(name="fit_guard")
         self._budgets = dict(budgets)
         self._kinds = dict(kinds)
+        self._keep_task = keep_task
         # id(a model call's EventActions) → its request as it came in.
         self._seen: dict[int, _Held] = {}
 
@@ -118,7 +129,8 @@ class FitGuardPlugin(BasePlugin):
         self._seen[id(actions)] = _Held(actions, callback_context.invocation_id, (
             list(llm_request.contents), config.model_copy() if config is not None else None
         ))
-        self._fit(llm_request, agent, budget, kind)
+        task = callback_context.user_content if self._keep_task else None
+        self._fit(llm_request, agent, budget, kind, task)
         llm_request.contents = fold_summary(llm_request.contents)
         return None
 
@@ -166,15 +178,18 @@ class FitGuardPlugin(BasePlugin):
 
     def _fit(
         self, llm_request: "LlmRequest", agent: str, budget: "ContextBudget",
-        kind: "ProviderKind",
+        kind: "ProviderKind", task: types.Content | None = None,
     ) -> None:
-        """Leave the oldest turns out of ``llm_request`` when it is over the budget."""
+        """Leave the oldest turns out of ``llm_request`` when it is over the budget.
+
+        ``task``, a sub-agent run's task message, is never left out.
+        """
         estimate = estimate_request_tokens(llm_request, kind)
         if estimate <= budget.budget:
             return
         overhead = overhead_tokens(llm_request, kind)
         contents, dropped = drop_turns(
-            llm_request.contents, target_tokens=budget.trigger - overhead, kind=kind
+            llm_request.contents, target_tokens=budget.trigger - overhead, kind=kind, task=task
         )
         if not dropped or overhead + _tokens(_contents_chars(contents), kind) > budget.budget:
             # The newest turn alone is over: the overflow handler answers.
@@ -236,7 +251,8 @@ def fold_summary(contents: list[types.Content]) -> list[types.Content]:
 
 
 def drop_turns(
-    contents: list[types.Content], *, target_tokens: float, kind: "ProviderKind"
+    contents: list[types.Content], *, target_tokens: float, kind: "ProviderKind",
+    task: types.Content | None = None,
 ) -> tuple[list[types.Content], int]:
     """``contents`` without their oldest whole turns, under ``target_tokens`` if it can be.
 
@@ -247,6 +263,12 @@ def drop_turns(
     the newest turn always stays, and so do the index and a summary that open
     the conversation. The first kept user content gets ``FIT_NOTE`` as a part
     before its own; ``contents`` themselves are left as they are.
+
+    ``task`` is a sub-agent run's task message (its invocation's user
+    content), which stays too: a message steered to the run after a tool
+    result starts a turn, and once the turns go past the task message, the
+    first kept one's opening content joins it, after the note, as one user
+    content. An inheriting run's history before it goes first.
 
     Each content is measured once; what goes is subtracted from a running
     sum.
@@ -260,6 +282,7 @@ def drop_turns(
     starts = [i for i in range(len(body)) if _starts_turn(body, i)]
     if not starts or starts[-1] == 0:
         return contents, 0
+    kept = _task_at(body, task)
     sizes = [len(content.model_dump_json(exclude_none=True)) for content in contents]
     remaining = sum(sizes) + _NOTE_CHARS
     sizes = sizes[len(head):]
@@ -268,9 +291,13 @@ def drop_turns(
     previous = 0
     for dropped, cut in enumerate(cuts, start=1):
         remaining -= sum(sizes[previous:cut])
+        if kept is not None and previous <= kept < cut:
+            remaining += sizes[kept]  # the task message stays
         previous = cut
         if _tokens(remaining, kind) < target_tokens:
             break
+    if kept is not None and kept < cut:
+        return [*head, _joined(body[kept], body[cut]), *body[cut + 1:]], dropped
     return [*head, _noted(body[cut]), *body[cut + 1:]], dropped
 
 
@@ -300,6 +327,25 @@ def _noted(content: types.Content) -> types.Content:
     """``content`` with ``FIT_NOTE`` as a part before its own."""
     return content.model_copy(update={"parts": [types.Part.from_text(text=FIT_NOTE),
                                                 *(content.parts or [])]})
+
+
+def _joined(task: types.Content, content: types.Content) -> types.Content:
+    """``content`` after ``task`` and ``FIT_NOTE``, as one user content."""
+    return content.model_copy(update={"parts": [*(task.parts or []),
+                                                types.Part.from_text(text=FIT_NOTE),
+                                                *(content.parts or [])]})
+
+
+def _task_at(contents: list[types.Content], task: types.Content | None) -> int | None:
+    """Where ``task`` (a run's task message) is in ``contents``: the last user
+    content with its parts; None for none."""
+    if task is None:
+        return None
+    found = [
+        i for i, content in enumerate(contents)
+        if content.role == "user" and content.parts == task.parts
+    ]
+    return found[-1] if found else None
 
 
 def _starts_turn(contents: list[types.Content], i: int) -> bool:

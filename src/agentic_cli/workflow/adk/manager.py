@@ -85,7 +85,7 @@ from agentic_cli.workflow.outside_content import (
     JOB_RESULT,
     OUTSIDE_CONTENT_KEY,
 )
-from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo
+from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo, get_active_run
 from agentic_cli.workflow.tool_output import tool_output_dir
 from agentic_cli.workflow.usage import adk_usage_event
 
@@ -694,9 +694,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
           call (a run's mark reaches the conversation with its result,
           ``adk/task_tool.py``), and the raw log is the app's own instance
           (one buffer, which the manager drains, ``_report_raw_log``);
-        - ``SubAgentOutcomePlugin`` after the raw log: the run's final
-          answer that a model refused or cut is said so, and marked, as its
-          parent reads it;
+        - ``RunControlPlugin`` after the raw log, which records each answer
+          as the model gave it: the run's limits at its model calls (its
+          control, ``Delegations.control``), before anything else edits
+          the request;
+        - ``SubAgentOutcomePlugin`` after it: the run's final answer that a
+          model refused or cut is said so, and marked, as its parent reads
+          it (an answer whose calls the step or token limit dropped among
+          them);
         - no memory index, and an overflow handler with no main agent: a
           sub-agent's overflow, trimmed and retried once, then answers its
           call with an error response (``CONTEXT_OVERFLOW``) that ends the
@@ -707,6 +712,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         run on this one chain at once, and a provider may number their call
         ids alike.
         """
+        from agentic_cli.workflow.adk.run_control_plugin import RunControlPlugin
         from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
@@ -716,6 +722,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ]
         if self._llm_logging_plugin is not None:
             head.append(self._llm_logging_plugin)
+        head.append(RunControlPlugin(
+            lambda: self._delegations.control(get_active_run()),
+            self._agent_kinds().get(agent.name),
+        ))
         head.append(SubAgentOutcomePlugin())
         return self._chain(
             head=head,
@@ -758,7 +768,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
 
             plugins.append(MemoryIndexPlugin(root=root, index_for=self._memory_index_now))
-        fit_guard = FitGuardPlugin(self._budgets, kinds)
+        # A sub-agent type's chain (no main agent): a run's task message is
+        # never trimmed, whatever was steered to it after.
+        keep_task = root is None
+        fit_guard = FitGuardPlugin(self._budgets, kinds, keep_task=keep_task)
         plugins.append(OverflowPlugin(
             root=root,
             reply_agents=replies,
@@ -767,6 +780,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             models=self._agent_model_refs(),
             summarize_now=self._summarize_now,
             fit_guard=fit_guard,
+            keep_task=keep_task,
         ))
         plugins.append(fit_guard)
         if self._llm_logging_plugin is not None:
@@ -1470,6 +1484,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         so do the raw log's records of its calls. As a turn's runner is, it
         is stopped with its abort signal set first, so ADK seals the calls
         it leaves open, in its child session, before the cancel goes on.
+        A cancel of the run alone (its control's: a limit, its parent or the
+        user) stops it so too, and it returns what it has: the last text it
+        wrote and the shared keys it changed; ``Delegations`` ends it
+        cancelled.
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
@@ -1517,6 +1535,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     self._report_raw_log()
                     async for event in processor.process_event(item, conversation.session_id):
                         live_events.report(event)
+        except asyncio.CancelledError:
+            # The run's own cancel has stopped it as above; any other (its
+            # turn's) goes on.
+            if not run.control.own_cancel():
+                raise
         except RuntimeError as error:
             cause = _plugin_cause(error)
             if cause is error:
@@ -1524,7 +1547,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise cause from None
         finally:
             self._report_raw_log()
-        if processor.failure is not None:
+        if processor.failure is not None and run.control.cancelled is None:
             error, code = processor.failure
             if code == OVERFLOW_ERROR_CODE:
                 raise RunFailed(error, code=code)

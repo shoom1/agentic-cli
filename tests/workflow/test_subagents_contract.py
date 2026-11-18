@@ -35,15 +35,23 @@ from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
 from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow.agents import (
+    RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_REFUSED,
     RUN_STARTED,
+    AgentLimits,
     RunRecord,
     SubAgentPolicy,
 )
-from agentic_cli.workflow.agents.envelope import read_envelope
+from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
+from agentic_cli.workflow.agents.envelope import (
+    STEP_LIMIT_ERROR,
+    TIME_LIMIT_ERROR,
+    TOKEN_LIMIT_ERROR,
+    read_envelope,
+)
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import (
     EventType,
@@ -441,6 +449,24 @@ class Crew:
         assert self._answers is not None
         return await self._answers(agent, call_id)
 
+    def cancel(self, run: str, *, by: str, error: str) -> bool:
+        """Cancel the working run ``run`` alone, as its parent, the user or a
+        limit does (``Delegations.cancel``, in the conversation's context)."""
+        token = set_active_turn(self.conversation)
+        try:
+            return self.manager._delegations.cancel(run, by=by, error=error)
+        finally:
+            reset_active_turn(token)
+
+    def control(self, run: str) -> RunControl | None:
+        """The control of the working run ``run`` (``Delegations.control``)."""
+        ref = next((record.ref for record in self.records() if record.ref.run == run), None)
+        token = set_active_turn(self.conversation)
+        try:
+            return self.manager._delegations.control(ref)
+        finally:
+            reset_active_turn(token)
+
     def recorded(self, call_id: str, run: str | None = None) -> bool:
         """Whether the record holds ``call_id`` of ``run`` (None: the root's
         own call) as finished: its result is kept for a stop to answer with."""
@@ -669,6 +695,19 @@ async def contract_block() -> dict:
     return {"success": True}
 
 
+#: ``HELD["started"]`` is set when a ``contract_hold`` call starts, and
+#: ``HELD["go"]`` lets it return (made per test).
+HELD: dict[str, asyncio.Event] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Hold until let go (a contract-test tool).")
+async def contract_hold() -> dict:
+    """Wait, as a slow tool does, until the test lets it go."""
+    HELD["started"].set()
+    await HELD["go"].wait()
+    return {"success": True}
+
+
 #: What ``contract_leave_behind`` did: ``LEFT["during"]`` is the answer to the
 #: question it asked in its turn, ``LEFT["go"]`` lets its task go on,
 #: ``LEFT["task"]`` is the task.
@@ -764,6 +803,7 @@ async def make_crew(backend, project, monkeypatch):
     cleaned up after the test."""
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
+    HELD["started"], HELD["go"] = asyncio.Event(), asyncio.Event()
     made: list[Crew] = []
 
     def make(
@@ -2413,3 +2453,374 @@ class TestARunsTranscriptIsNoConversation:
         assert await manager.recent_messages(SESSION, user_id=USER) == [
             {"role": "user", "content": "Go."}, {"role": "assistant", "content": "Done."},
         ]
+
+
+# -- per-run control: the runs of a turn, cancelling one run, the limits, steering ------------
+
+
+class TestTheRunsOfATurn:
+    async def test_a_task_call_past_the_limit_reads_why_and_starts_no_run(self, make_crew):
+        crew = make_crew(
+            team(),
+            subagents=SubAgentPolicy(max_runs_per_turn=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")),
+                         says("X only."),
+                         calls(delegate("researcher", "Find Y.", "c3")),
+                         says("Y too.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator", 2)["c2"]) == {
+            "success": False,
+            "error": "This turn has already started 1 sub-agent runs, the most one turn may "
+                     "start. Answer with what you have.",
+        }
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+        assert crew.requests("researcher") == 1
+
+        await crew.turn("Now Y.")  # a new turn starts its own count
+
+        assert envelope_read(crew.results_read("coordinator", 4)["c3"])["result"] == "Y is 7."
+        assert [r.ref.instance for r in crew.records()] == ["researcher-1", "researcher-2"]
+
+
+@register_tool(capabilities=EXEMPT, description="Wait for a run to be cancelled (a contract-test tool).")
+async def contract_await_a_cancelled_run() -> dict:
+    """Wait until a run of this conversation was cancelled, as a slow tool would."""
+    runs = get_service(WORKFLOW).agent_runs
+    conversation = get_active_turn()
+    for _ in range(500):
+        if any(record.status == RUN_CANCELLED for record in runs.records(conversation)):
+            return {"success": True}
+        await asyncio.sleep(0.01)
+    return {"success": False, "error": "no run was cancelled"}
+
+
+class TestCancellingOneRun:
+    """One run stopped alone, by its parent, while its sibling works: the
+    sibling finishes, and the coordinator reads both envelopes."""
+
+    async def test_stopping_one_of_two_parallel_runs_lets_the_other_finish(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher", "checker")),
+             agent("researcher", tools=(contract_lookup, contract_block)),
+             agent("checker", tools=(contract_await_a_cancelled_run,))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("checker", "Check X.", "c2")),
+                         says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        calls(use("contract_block", "r2"))],
+            checker=[calls(use("contract_await_a_cancelled_run", "k1")), says("Checked.")],
+        )
+
+        with no_blocking_calls():
+            turn = crew.start()
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+            assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+            events = await asyncio.wait_for(turn, 10)
+
+        read = crew.results_read("coordinator")
+        assert envelope_read(read["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": "no longer needed", "cancelled_by": "parent",
+        }
+        assert envelope_read(read["c2"])["result"] == "Checked."
+        # The checker was working when the cancel landed: its tool saw it.
+        assert json.loads(crew.results_read("checker")["k1"]) == {"success": True}
+        assert BLOCKING["stopped"].is_set()  # the researcher's tool was stopped
+        assert {r.ref.instance: (r.status, r.cancelled_by) for r in crew.records()} == {
+            "researcher-1": (RUN_CANCELLED, "parent"), "checker-1": (RUN_COMPLETED, None),
+        }
+        (cancelled,) = runs_of(events, RUN_CANCELLED)
+        assert (cancelled.run.run, cancelled.metadata["cancelled_by"]) == ("researcher-1#1", "parent")
+        assert [e for e in events if e.type is EventType.ERROR] == []
+        assert crew.control("researcher-1#1") is None  # it has ended
+
+
+class TestTheTimeLimit:
+    async def test_a_run_past_its_time_is_cancelled_with_what_it_wrote(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_lookup, contract_block),
+                   limits=AgentLimits(timeout=1.0))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        calls(use("contract_block", "r2"))],
+        )
+
+        with no_blocking_calls():
+            events = await asyncio.wait_for(crew.turn(), 20)
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": TIME_LIMIT_ERROR, "cancelled_by": "limit",
+        }
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by, record.error) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR
+        )
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_CANCELLED]
+        assert BLOCKING["stopped"].is_set()  # its tool was stopped with it
+
+
+class TestALimitAtAPrompt:
+    """A limit that fires while the run waits at a permission prompt (the
+    user slow to answer): the prompt is withdrawn, the call is answered as
+    not run, the run ends cancelled by its limit, the turn goes on with its
+    envelope, and the prompts after it still reach the user."""
+
+    async def test_the_prompt_is_withdrawn_and_the_turn_goes_on(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=(contract_ask,)),
+             agent("researcher", tools=("write_file",), limits=AgentLimits(timeout=1.0))],
+            coordinator=[calls(delegate("researcher", "Write a note.", "c1")),
+                         calls(use("contract_ask", "c2")), says("Done."),
+                         calls(use("contract_ask", "c3")), says("Fine.")],
+            researcher=[calls(use("write_file", "r1", path="note.txt", content="hi"))],
+        )
+        withdrawn: list[str] = []
+        asked: list[str] = []
+        answered: list[list[str]] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            if request.run is not None:  # the researcher's permission prompt
+                try:
+                    await asyncio.Event().wait()  # the user is slow to answer
+                except asyncio.CancelledError:
+                    withdrawn.append(request.run.instance)
+                    raise
+            asked.append(request.tool_name)
+            # Read while the turn runs: Deep Agents keeps a run's answers in
+            # the record, which the turn's end clears.
+            answered.append(await crew.answers("researcher", "r1"))
+            return "B"
+
+        crew.answer_with(answer)
+        with no_blocking_calls():
+            events = await asyncio.wait_for(crew.turn(), 20)
+
+        assert withdrawn == ["researcher-1"]
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by, record.error) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR
+        )
+        read = envelope_read(crew.results_read("coordinator", 1)["c1"])
+        assert (read["status"], read["cancelled_by"], read["error"], read["result"]) == (
+            RUN_CANCELLED, "limit", TIME_LIMIT_ERROR, ""
+        )
+        (not_run,) = answered[0]
+        assert NOT_RUN in not_run
+        assert asked == ["contract_ask"]
+        assert '"B"' in crew.results_read("coordinator", 2)["c2"]
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+        await asyncio.wait_for(crew.turn("Ask me again."), 20)
+
+        assert asked == ["contract_ask", "contract_ask"]
+
+
+def limited(**limits: Any) -> list[AgentConfig]:
+    """A coordinator, and a researcher with ``limits`` that may look up and say who it is."""
+    return [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_lookup, contract_whoami),
+              limits=AgentLimits(**limits)),
+    ]
+
+
+def calls_to(events: list[WorkflowEvent], call_id: str) -> list[WorkflowEvent]:
+    """The turn's tool calls and results of the call ``call_id``."""
+    return [
+        event for event in events
+        if event.type in (EventType.TOOL_CALL, EventType.TOOL_RESULT)
+        and event.metadata.get("tool_call_id") == call_id
+    ]
+
+
+class TestTheStepLimit:
+    """The run's last allowed model call is told to answer now, and no call
+    it makes runs; the run completes partial."""
+
+    async def test_the_last_allowed_call_is_told_and_the_run_completes_partial(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking."),
+                        says("X is 42.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert STEP_LIMIT_NOTE not in crew.bodies("researcher")[0]
+        assert crew.last_message("researcher", 1).endswith(STEP_LIMIT_NOTE)
+        # Its tools stay declared: a request holding tool calls and results
+        # without them is one Claude refuses.
+        assert crew.tool_names("researcher", 1) == ["contract_lookup", "contract_whoami"]
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": "X is 42.",
+            "error": STEP_LIMIT_ERROR,
+        }
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+    async def test_a_first_call_that_is_the_last_has_the_note_in_the_task_message(
+        self, make_crew
+    ):
+        crew = make_crew(
+            limited(max_model_calls=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.message_count("researcher", 0) == 1
+        last = crew.last_message("researcher", 0)
+        assert last.startswith("# Task: Find X.") and last.endswith(STEP_LIMIT_NOTE)
+
+    async def test_a_call_made_on_the_last_call_is_dropped_never_run(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking."),
+                        calls(use("contract_whoami", "r2"), text="X is about 42."),
+                        says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["partial"], read["result"], read["error"]) == (
+            RUN_COMPLETED, True, "X is about 42.", STEP_LIMIT_ERROR
+        )
+
+    async def test_a_last_answer_of_calls_alone_leaves_the_text_before_it(self, make_crew):
+        crew = make_crew(
+            limited(max_model_calls=2),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        calls(use("contract_whoami", "r2")),
+                        says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"], read["error"]) == (
+            RUN_COMPLETED, "X is about 42.", STEP_LIMIT_ERROR
+        )
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+
+class TestTheTokenLimit:
+    """A run's input plus output tokens, checked after each model call: an
+    answer past them that asks for tools is the run's last, cancelled by its
+    limit, its calls dropped; one that asks for none ends the run as it
+    would, its result whole."""
+
+    async def test_past_it_the_run_ends_at_that_answer_cancelled(self, make_crew):
+        crew = make_crew(
+            limited(max_tokens=150),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking.",
+                              usage=(60, 20)),
+                        calls(use("contract_whoami", "r2"), text="X is about 42.",
+                              usage=(80, 20)),
+                        says("[never asked]")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": TOKEN_LIMIT_ERROR, "cancelled_by": "limit",
+        }
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (140, 40, 2)
+
+    async def test_a_finishing_answer_past_it_completes_the_run_whole(self, make_crew):
+        crew = make_crew(
+            limited(max_tokens=150),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="Looking.",
+                              usage=(60, 20)),
+                        says("X is 42.", usage=(80, 20))],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by, record.error) == (RUN_COMPLETED, None, None)
+        assert [e for e in events if e.type is EventType.ERROR] == []
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (140, 40, 2)
+
+
+class TestSteering:
+    """A message steered to a run while its tool call is in progress is in
+    its next model request, after its last message, as the user's, and stays
+    in its transcript: still there in the request after."""
+
+    async def test_a_steered_message_reaches_the_next_request_and_stays(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_hold, contract_lookup))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")),
+                        calls(use("contract_lookup", "r2", q="Z")),
+                        says("X is 42; Z is 42.")],
+        )
+
+        with no_blocking_calls():
+            turn = crew.start()
+            await asyncio.wait_for(HELD["started"].wait(), 10)
+            crew.control("researcher-1#1").steer("Also find Z.")
+            HELD["go"].set()
+            await asyncio.wait_for(turn, 10)
+
+        assert "Also find Z." not in crew.bodies("researcher")[0]
+        assert crew.last_message("researcher", 1) == "Also find Z."
+        assert "Also find Z." in crew.bodies("researcher")[2]
+        assert crew.message_count("researcher", 2) == crew.message_count("researcher", 1) + 2
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == (
+            "X is 42; Z is 42."
+        )
+
+    async def test_a_message_steered_before_the_last_allowed_call_comes_before_the_note(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_hold,), limits=AgentLimits(max_model_calls=2))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42.")],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        crew.control("researcher-1#1").steer("Be brief.")
+        HELD["go"].set()
+        await asyncio.wait_for(turn, 10)
+
+        last = crew.bodies("researcher")[1]
+        assert last.index("Be brief.") < last.index(STEP_LIMIT_NOTE)
+        assert crew.last_message("researcher", 1).endswith(STEP_LIMIT_NOTE)

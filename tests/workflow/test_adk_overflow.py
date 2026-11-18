@@ -43,6 +43,7 @@ from pydantic import PrivateAttr  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.models import ProviderKind  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk.fit_guard_plugin import FIT_NOTE  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
@@ -53,6 +54,9 @@ from agentic_cli.workflow.context import (  # noqa: E402
     subagent_overflow_message,
 )
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
+from agentic_cli.workflow.sessions import get_active_run  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.models.fakes import openrouter_spec  # noqa: E402
 from tests.workflow.adk.fakes import (  # noqa: E402
@@ -810,6 +814,54 @@ class TestASubAgentsOverflow:
         assert (error.metadata["recoverable"], error.metadata["agent"]) == (True, "researcher")
         assert len([e for e in events if e.type is EventType.CONTEXT_TRIMMED]) == 1
         assert texts(events)[-1] == "It could not."
+
+
+@register_tool(capabilities=EXEMPT, description="Look X up and steer this run (a test tool).")
+async def overflow_steered_lookup() -> dict:
+    """A long finding; and a message steered to the run that looked, as its parent would."""
+    get_service(WORKFLOW)._delegations.control(get_active_run()).steer("Also find Z.")
+    return {"success": True, "found": LONG}
+
+
+class TestASteeredSubAgentsOverflow:
+    async def test_its_retry_keeps_its_task_message(self, project, monkeypatch):
+        """A message steered to a run after a tool result starts a turn of its
+        own: the retry of its refused request leaves out the turns before
+        it, never the task message, which the rest joins."""
+        _, status, body = SHAPES["claude-400"]
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        looks = claude_says("")
+        looks["content"] = [{"type": "tool_use", "id": "toolu_r1",
+                             "name": "overflow_steered_lookup", "input": {}}]
+        looks["stop_reason"] = "tool_use"
+        api = Team(coordinator=[delegate(), claude_says("X is 42.")],
+                   researcher=[looks, httpx.Response(status, json=body),
+                               claude_says("X is 42; Z is 42.")])
+        route(monkeypatch, anthropic, "AsyncAnthropic", api)
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[
+                AgentConfig(name="coordinator", prompt="You coordinate.",
+                            sub_agents=["researcher"], description="Leads.",
+                            include_state_tools=False),
+                AgentConfig(name="researcher", prompt="You research.",
+                            description="Finds facts.", tools=[overflow_steered_lookup],
+                            include_state_tools=False),
+            ],
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
+                                  prompt_caching_enabled=False),
+        )
+        try:
+            events = await turn(manager, "Find X, please.")
+        finally:
+            await manager.cleanup()
+
+        refused, retry = (r.content.decode() for r in api.requests[2:4])
+        assert "word word" in refused and "Also find Z." in refused
+        assert "word word" not in retry
+        assert "# Task: Find X." in retry
+        assert retry.index("# Task: Find X.") < retry.index(FIT_NOTE) < retry.index("Also find Z.")
+        assert errors(events) == []
+        assert texts(events)[-1] == "X is 42."
 
 
 async def test_the_handler_comes_before_the_fit_guard(project, monkeypatch):

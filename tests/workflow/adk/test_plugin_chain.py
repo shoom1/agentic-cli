@@ -31,9 +31,10 @@ and these tests pin it whole, so a move anywhere fails one of them:
 A native ADK YAML app gets the same chain: only the building of its agents
 differs (``workflow/adk/build.py``). Each sub-agent type's runner has a chain
 of its own in the same order (``_agent_plugin_chain``): no memory index, and
-``subagent_outcome`` after the raw log (which records an answer as the model
-gave it), where a sub-agent's refused or cut answer is said so, in place, so
-every plugin after it still runs.
+after the raw log (which records an answer as the model gave it)
+``run_control``, where the run's limits are kept at its model calls, then
+``subagent_outcome``, where a sub-agent's refused or cut answer is said so;
+both change what they see in place, so every plugin after them still runs.
 """
 
 from __future__ import annotations
@@ -125,7 +126,8 @@ async def test_a_plain_config_built_app(project):
 
 async def test_a_delegating_app(project):
     """A tree with a sub-agent: the conversation's chain is the app's; the
-    sub-agent type's own runner's passes its answers through ``subagent_outcome``."""
+    sub-agent type's own runner's keeps a run's limits (``run_control``) and
+    passes its answers through ``subagent_outcome``."""
     manager = GoogleADKWorkflowManager(
         agent_configs=[
             AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"],
@@ -167,6 +169,7 @@ async def test_a_delegating_app(project):
         "permission",
         "tool_error",
         "llm_logging",
+        "run_control",
         "subagent_outcome",
         "foreign_reasoning",
         "context_cache",

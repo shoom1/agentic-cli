@@ -1269,7 +1269,7 @@ configs = [coordinator, researcher, analyst]
 | `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
 | `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: its task alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
 | `brief_required` | tuple[str, ...] | The brief fields a delegation to this agent must fill (default `("objective",)`; `title` and `objective` are always required): any of `deliverable`, `constraints`, `known`, `done_when`. A `task` call that leaves one empty starts no run, and its caller reads which. Not on the root |
-| `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field. Configuration: validated and kept with the agent, but no run is stopped by them. Not on the root |
+| `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field: each of its runs works under them, and one past a limit ends (see [Sub-agent context](#sub-agent-context)). Not on the root |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -1307,9 +1307,11 @@ its run's envelope as the call's result, a JSON object:
  "status": "completed", "partial": false, "result": "X is 42.", "error": null}
 ```
 
-`status` is `completed` (`partial` for an answer cut at its output limit),
-`refused`, `failed` (`error`: the provider's reason) or `interrupted`, and
-`result` is the run's last text. Only the main agent replies to the user: a
+`status` is `completed` (`partial` for an answer cut at its output limit, or
+one its step limit ended: `error` `step limit reached`), `refused`, `failed`
+(`error`: the provider's reason), `cancelled` (`cancelled_by`: `limit`,
+`parent` or `user`, and `error` why) or `interrupted`, and `result` is the
+run's last text. Only the main agent replies to the user: a
 sub-agent's own text shows in the events box under its run's name (and is
 left out of fact extraction), its envelope passes the
 [tool result cap](#tool-results), and the next turn starts at the main agent
@@ -1369,6 +1371,19 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   A sub-agent's request too long for its model fails its run alike, with the
   warning `<agent>: the request no longer fits <model>'s context window.`,
   the words its parent reads as the run's error.
+- **A run's limits.** `subagents=SubAgentPolicy(...)` (given to the app, a
+  manager or the factory) sets every run's `limits`
+  (`AgentLimits(max_model_calls=100)` by default; a `timeout` in seconds and
+  `max_tokens` too) and the runs one turn may start (`max_runs_per_turn`,
+  20, at any depth); an agent's own `limits=AgentLimits(...)` lies over the
+  policy's, field by field. A run's last allowed model call is told to
+  answer with what it has, and the run completes `partial` (`step limit
+  reached`); past its time, or past its tokens with an answer that asks for
+  tools, it is `cancelled` (`time limit reached`, `token limit reached`)
+  with the text it wrote so far, a prompt it waited at withdrawn (an answer
+  past its tokens that asks for none is its result, and the run completes;
+  a model that reports no usage is not limited by tokens); a `task` call
+  past the runs a turn may start starts no run, and the parent reads why.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of
@@ -1468,7 +1483,7 @@ are `AgentConfig`'s, and an unknown one is an error:
 | `tools` | A list of names: a registered tool's name (`web_search`, or your own), or a dotted path `my_pkg.tools.fn` to a function registered with `@register_tool` |
 | `mcp_servers`, `skills` | As on `AgentConfig`: MCP servers (`name`, `transport`, `command`/`args` or `url`, ...) and skill names |
 | `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (its task alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
-| `brief_required`, `limits` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written; validated and kept, but no run is stopped by them) |
+| `brief_required`, `limits` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written) |
 | `include_state_tools` | `true` by default: the plan and task tools are added |
 
 - **A tool is a name, resolved when the manager is built.** A bare name is
@@ -2380,7 +2395,7 @@ agentic-cli/
 │   │   ├── service_registry.py   # Unified service ContextVar for tools
 │   │   ├── events.py             # WorkflowEvent, EventType
 │   │   ├── config.py             # AgentConfig
-│   │   ├── agents/               # Sub-agents: delegate.py (the framework's task: the brief read, the run started and ended, its envelope), brief.py, envelope.py, runs.py, policy.py, outcome.py
+│   │   ├── agents/               # Sub-agents: delegate.py (the framework's task: the brief read, the run started and ended, its envelope), control.py (a run's limits, its cancel alone, steering), brief.py, envelope.py, runs.py, policy.py, outcome.py
 │   │   ├── settings.py           # WorkflowSettingsMixin
 │   │   ├── retry.py              # is_rate_limit_error: a provider's 429 (the provider clients retry)
 │   │   ├── tool_summaries.py     # Tool result one-liner summaries
@@ -2410,6 +2425,7 @@ agentic-cli/
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── log_filters.py            # What ADK would print over the CLI, logged at debug (installed by run())
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
+│   │   │   ├── run_control_plugin.py     # RunControlPlugin: a sub-agent run's limits and steering at its model calls
 │   │   │   ├── task_progress_plugin.py   # TaskProgressPlugin (deprecated, unused)
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)

@@ -17,6 +17,8 @@ session service (``adk/sessions.py``): app ``child_app(app)``, session
 - A model switch between turns rebuilds the runners and keeps the
   transcripts, the records and the numbering.
 - No child session lists, or is found, as a conversation.
+- A message steered to a run is stored where the run read it: after the
+  tool result before it, before the answer it prompted, on every store.
 
 Turns run the real manager on ``FakeAPI`` (Claude), on the memory store and
 on sqlite.
@@ -37,14 +39,19 @@ from google.adk.sessions import DatabaseSessionService, InMemorySessionService  
 from google.genai import types  # noqa: E402
 
 from agentic_cli.config import BaseSettings  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk import sessions as adk_sessions  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.sessions import child_app  # noqa: E402
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
+from agentic_cli.workflow.sessions import get_active_run  # noqa: E402
 from agentic_cli.workflow.session_readers import open_session_reader  # noqa: E402
 from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI  # noqa: E402
 from tests.workflow.test_adk_delegation import (  # noqa: E402,F401
     Team,
+    calls,
     delegation,
     project,
     route,
@@ -488,3 +495,59 @@ class TestNeverListed:
         assert [row.session_id for row in listed] == ["s"]
         assert (info, exists) == (None, False)
         assert [(row.session_id, row.backend) for row in read] == [("s", "adk")]
+
+
+@register_tool(capabilities=EXEMPT, description="Hold, and steer this run (a test tool).")
+async def child_sessions_steered_hold() -> dict:
+    """A message steered to the run that called it, as its parent would, while it works."""
+    get_service(WORKFLOW)._delegations.control(get_active_run()).steer("Also find Z.")
+    return {"success": True}
+
+
+def what_happened(session) -> list[str]:
+    """Each of a session's events, as what it holds: a text, a call, a result."""
+    told: list[str] = []
+    for event in session.events:
+        for part in (event.content.parts if event.content is not None else ()) or ():
+            if part.function_call:
+                told.append(f"{event.author}: call {part.function_call.name}")
+            elif part.function_response:
+                told.append(f"{event.author}: result {part.function_response.name}")
+            elif part.text:
+                told.append(f"{event.author}: {part.text.splitlines()[0]}")
+    return told
+
+
+class TestASteeredMessage:
+    @pytest.mark.parametrize("store", ["memory", "sqlite"])
+    async def test_it_is_stored_between_the_result_and_the_answer_it_prompted(
+        self, project, monkeypatch, store
+    ):
+        """ADK stamps a model call's answer before the call's callbacks run,
+        so the message steered there was newer than the answer it prompted:
+        a durable store, which orders a session's events by time, read it
+        back after that answer."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(Team(
+            coordinator=[delegation("toolu_c1"), says("Done.")],
+            researcher=[calls("child_sessions_steered_hold", "toolu_r1"),
+                        says("X is 42; Z is 42.")],
+        )))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=team(researcher_tools=(child_sessions_steered_hold,)),
+            settings=BaseSettings(
+                session_store=store, default_model="claude-sonnet-4-6", default_user="u"
+            ),
+        )
+        try:
+            await say(manager, "Find X.")
+            stored = await child(manager, "researcher-1")
+        finally:
+            await manager.cleanup()
+
+        assert what_happened(stored) == [
+            "user: # Task: Find X",
+            "researcher: call child_sessions_steered_hold",
+            "researcher: result child_sessions_steered_hold",
+            "user: Also find Z.",
+            "researcher: X is 42; Z is 42.",
+        ]

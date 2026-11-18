@@ -19,7 +19,9 @@ call a cancelled turn or a crash left without a result, before each run, as
 side and the tool side.
 
 - Model side, outermost first: a sub-agent's refused or cut final answer is
-  said so (``SubAgentOutcomeMiddleware``, every agent but the root), other
+  said so (``SubAgentOutcomeMiddleware``, every agent but the root), a
+  sub-agent run's limits are kept at its model calls (``RunControlMiddleware``,
+  every agent but the root, given the manager's delegations), other
   providers' and other agents' reasoning
   is left out of the request (``ForeignReasoningMiddleware``), Deep Agents'
   summarization counts
@@ -62,6 +64,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     InterruptedCallsMiddleware,
     MemoryIndexMiddleware,
     PermissionMiddleware,
+    RunControlMiddleware,
     SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
@@ -156,8 +159,9 @@ def build_agent_tree(
             the request that carries the summary is sent.
         delegations: The manager's delegations (``BaseWorkflowManager._delegations``):
             given, an agent with sub-agents gets the ``task`` tool, which
-            hands each call to them. Without it no agent delegates (a tree
-            a unit test builds alone).
+            hands each call to them, and every agent but the root
+            ``RunControlMiddleware``, which keeps a run's limits. Without it
+            no agent delegates (a tree a unit test builds alone).
         graphs: Filled, when given, with every agent's graph, by name.
 
     Raises:
@@ -179,6 +183,11 @@ def build_agent_tree(
             memory_index_forget=memory_index_forget if name == root else None,
         )
         if name != root:
+            # Inside the outcome middleware, which reads the answer whose
+            # calls it dropped as final; outside the summarization, which
+            # counts its note.
+            if delegations is not None:
+                model_side = [RunControlMiddleware(delegations), *model_side]
             # Outermost: it sees the answer every other model-side
             # middleware let through, as the run's answer is read.
             model_side = [SubAgentOutcomeMiddleware(), *model_side]

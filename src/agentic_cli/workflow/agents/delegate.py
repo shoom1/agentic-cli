@@ -8,6 +8,9 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 - reads the brief against the caller's own sub-agents (``brief.read_brief``):
   a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
+- counts the run against its turn's (``SubAgentPolicy.max_runs_per_turn``,
+  runs at any depth: ``sessions.runs_this_turn``): a call past it is the
+  error result ``RUNS_PER_TURN_ERROR`` says, and nothing else happens;
 - names the run (``AgentRuns.run_for``: its instance ``<type>-<n>`` and its run
   ``<instance>#1``, under the caller's run; a turn's first run is numbered
   past the instances its conversation's store keeps, which ``stored`` says
@@ -23,6 +26,11 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
   or a failed run's one warning after it), and returns the result envelope
   (``envelope.envelope``) with the shared state the run changed.
 
+Each run works under its ``RunControl`` (``agents/control.py``,
+``AgentRun.control``): its limits (its type's over the policy's), the time
+limit running while the hook does, and a cancel of the run alone
+(``Delegations.cancel``), which its limits use too.
+
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
 the run works. A run ends:
@@ -34,11 +42,17 @@ the run works. A run ends:
   context overflow, ``context.subagent_overflow_message``);
 - ``refused`` when a model refused its last answer (``agents/outcome.py``);
 - ``completed`` otherwise, ``partial`` for an answer cut at its output
-  limit, followed by the cut's one warning (``outcome.cut_off_warning``);
+  limit, followed by the cut's one warning (``outcome.cut_off_warning``),
+  and for a run that made its last allowed model call (its step limit:
+  ``error`` "step limit reached", no warning);
+- ``cancelled`` when its control cancelled it (``cancelled_by`` its parent,
+  the user or a limit: the time limit, the token limit), with what the hook
+  had of its work, ``partial`` when that is any text;
 - ``interrupted`` when its caller's task is cancelled (Ctrl+C stops the
-  turn): the cancel goes on once the run has stopped. A run's own task
-  cancelled while its caller goes on ends ``interrupted`` too, and its
-  caller reads that envelope.
+  turn): the cancel goes on once the run has stopped, whatever else
+  stopped it. A run's own task cancelled by anything but its control while
+  its caller goes on ends ``interrupted`` too, and its caller reads that
+  envelope.
 """
 
 from __future__ import annotations
@@ -52,9 +66,17 @@ from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.brief import BriefError, read_brief, task_message
-from agentic_cli.workflow.agents.envelope import INTERRUPTED_ERROR, envelope
+from agentic_cli.workflow.agents.control import RunControl
+from agentic_cli.workflow.agents.envelope import (
+    CANCELLED_BY,
+    INTERRUPTED_ERROR,
+    STEP_LIMIT_ERROR,
+    envelope,
+)
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
+from agentic_cli.workflow.agents.policy import AgentLimits
 from agentic_cli.workflow.agents.runs import (
+    RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INTERRUPTED,
@@ -68,8 +90,10 @@ from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
+    count_run_this_turn,
     current_turn_scope,
     get_active_turn,
+    runs_this_turn,
     set_active_run,
     set_active_tool_call,
 )
@@ -85,6 +109,12 @@ logger = Loggers.workflow()
 BLOCKING = "blocking"
 #: The longest error text a failed run's log line carries.
 _MAX_LOGGED_ERROR = 500
+#: A ``task`` call's error result once its turn has started the most runs it
+#: may (``SubAgentPolicy.max_runs_per_turn``, the number).
+RUNS_PER_TURN_ERROR = (
+    "This turn has already started {limit} sub-agent runs, the most one turn may start. "
+    "Answer with what you have."
+)
 
 
 def started_by(caller: RunRef | None) -> str:
@@ -132,6 +162,9 @@ class AgentRun:
         state: The shared state it starts from.
         history: An inheriting run's parent conversation, as the backend
             reads it; None for a fresh one.
+        control: Its control (``agents/control.py``): its limits, a cancel
+            of the run alone, the messages steered to it. A run made
+            without one gets one with no limits.
     """
 
     ref: RunRef
@@ -140,6 +173,11 @@ class AgentRun:
     conversation: SessionRef | None
     state: Mapping[str, Any]
     history: Any = None
+    control: RunControl = None  # type: ignore[assignment]  # filled below when None
+
+    def __post_init__(self) -> None:
+        if self.control is None:
+            object.__setattr__(self, "control", RunControl(self.ref, AgentLimits()))
 
 
 @dataclass(frozen=True)
@@ -238,6 +276,8 @@ class Delegations:
         # wait at while one reads them.
         self._numbered: dict[SessionRef, object] = {}
         self._numbering = asyncio.Lock()
+        # The working runs' controls, by (conversation, run id).
+        self._controls: dict[tuple[SessionRef | None, str], RunControl] = {}
 
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
         """The types ``agent`` may start, by name, in its ``sub_agents``' order."""
@@ -248,14 +288,24 @@ class Delegations:
     async def delegate(self, request: DelegationRequest) -> Delegated:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
-        A brief that cannot start a run is the error result, and nothing
-        else happens. A cancel of the caller's task (the turn's) ends the run
-        ``interrupted`` once it has stopped, and goes on.
+        A brief that cannot start a run, or a call past the runs its turn
+        may start, is the error result, and nothing else happens. A cancel
+        of the caller's task (the turn's) ends the run ``interrupted`` once
+        it has stopped, and goes on.
         """
         try:
             config, brief = read_brief(request.arguments, self.sub_agents(request.caller_agent))
         except BriefError as error:
             return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
+        started = runs_this_turn()
+        limit = self.policy.max_runs_per_turn
+        if started is not None and started >= limit:
+            logger.info("subagent_runs_per_turn_reached", agent=config.name, limit=limit)
+            return Delegated(
+                result={"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=limit)},
+                state={}, run=None,
+            )
+        count_run_this_turn()
         conversation = get_active_turn()
         await self._number_past_stored(conversation)
         ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
@@ -263,45 +313,112 @@ class Delegations:
             ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
             brief=brief.fields(), started_by=started_by(request.caller), mode=BLOCKING,
         ))
+        control = RunControl(ref, self._limits(config))
         inner = asyncio.create_task(
-            self._in_run(ref, config, brief, conversation, request), name=f"agent run {ref.run}"
+            self._in_run(ref, config, brief, conversation, request, control),
+            name=f"agent run {ref.run}",
         )
+        control.bind(inner)
+        key = (conversation, ref.run or "")
+        self._controls[key] = control
+        try:
+            return await self._ended(ref, request.call_id, inner, control)
+        finally:
+            self._controls.pop(key, None)
+
+    def control(self, run: RunRef | None) -> RunControl | None:
+        """The control of ``run`` while it works, in the active turn's conversation; else None.
+
+        None for the root's own work (no run), and for a run that has ended.
+        """
+        if run is None or run.run is None:
+            return None
+        return self._controls.get((get_active_turn(), run.run))
+
+    def cancel(self, run_id: str, *, by: str, error: str) -> bool:
+        """Cancel the working run ``run_id`` of the active turn's conversation, alone.
+
+        ``by`` its parent, the user or a limit; ``error`` says why, as its
+        envelope will. Its siblings and its turn go on; its parent reads its
+        envelope (``cancelled``, with what it had of its work).
+
+        Returns:
+            True when this cancelled it; False for no such working run, or
+            one cancelled already.
+
+        Raises:
+            ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.
+        """
+        if by not in CANCELLED_BY:
+            raise ValueError(f"A run is cancelled by its parent, user or limit, not {by!r}.")
+        control = self._controls.get((get_active_turn(), run_id))
+        if control is None or control.cancelled is not None:
+            return False
+        control.cancel(by=by, error=error)
+        return control.cancelled is not None
+
+    def _limits(self, config: AgentConfig) -> AgentLimits:
+        """A run of ``config``'s limits: the type's own over the policy's."""
+        if config.limits is None:
+            return self.policy.limits
+        return config.limits.over(self.policy.limits)
+
+    async def _ended(
+        self, ref: RunRef, call_id: str, inner: asyncio.Task[RunAnswer], control: RunControl
+    ) -> Delegated:
+        """Wait for the run's task ``inner``, then end the run as it went; its envelope."""
         try:
             answer = await inner
         except asyncio.CancelledError:
-            self._end(ref, request.call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
-            task = asyncio.current_task()
-            if task is not None and task.cancelling():
+            if not _caller_cancelling() and control.cancelled is not None:
+                # Its control cancelled it and the hook let the cancel out:
+                # nothing of its work came back.
+                return self._cancelled(ref, call_id, control.cancelled, RunAnswer())
+            self._end(ref, call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
+            if _caller_cancelling():
                 raise
-            # The run's own task was stopped, not its caller's: the caller
-            # reads that it ended.
+            # The run's own task was stopped, not by its control nor its
+            # caller's: the caller reads that it ended.
             return Delegated(
                 result=envelope(ref, RUN_INTERRUPTED, error=INTERRUPTED_ERROR), state={}, run=ref
             )
         except RunFailed as error:
-            return self._failed(ref, request.call_id, str(error), warning=str(error), code=error.code)
+            return self._failed(ref, call_id, str(error), warning=str(error), code=error.code)
         except Exception as error:  # noqa: BLE001 - a sub-agent's failure is its parent's to read
             reason = str(error) or type(error).__name__
             logger.debug("subagent_failed", run=ref.run, exc_info=error)
             return self._failed(
-                ref, request.call_id, reason,
+                ref, call_id, reason,
                 warning=f"{ref.instance} failed: {reason}", code=type(error).__name__,
             )
+        if _caller_cancelling():
+            # The turn was stopped while the run's own cancel ended it (its
+            # hook took that cancel and answered): the run is the turn's.
+            self._end(ref, call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
+            raise asyncio.CancelledError
+        if control.cancelled is not None:
+            return self._cancelled(ref, call_id, control.cancelled, answer)
         if answer.error is not None:
             return self._failed(
-                ref, request.call_id, answer.error, warning=f"{ref.instance} failed: {answer.error}",
+                ref, call_id, answer.error, warning=f"{ref.instance} failed: {answer.error}",
                 code=None, text=answer.text, state=answer.state,
             )
         if answer.outcome == REFUSED:
-            self._end(ref, request.call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR)
+            self._end(ref, call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR)
             result = envelope(ref, RUN_REFUSED, result=answer.text, error=REFUSAL_ERROR)
         else:
-            partial = answer.outcome == CUT
-            end = self._end(ref, request.call_id, RUN_COMPLETED, text=answer.text, partial=partial)
-            warning = cut_off_warning(end)
-            if warning is not None:
-                self._report(warning)
-            result = envelope(ref, RUN_COMPLETED, result=answer.text, partial=partial)
+            stepped = STEP_LIMIT_ERROR if control.at_step_limit else None
+            partial = answer.outcome == CUT or stepped is not None
+            end = self._end(
+                ref, call_id, RUN_COMPLETED, text=answer.text, partial=partial, error=stepped
+            )
+            if answer.outcome == CUT:
+                warning = cut_off_warning(end)
+                if warning is not None:
+                    self._report(warning)
+            result = envelope(
+                ref, RUN_COMPLETED, result=answer.text, partial=partial, error=stepped
+            )
         return Delegated(result=result, state=dict(answer.state), run=ref)
 
     async def _number_past_stored(self, conversation: SessionRef | None) -> None:
@@ -344,11 +461,13 @@ class Delegations:
         brief: Any,
         conversation: SessionRef | None,
         request: DelegationRequest,
+        control: RunControl,
     ) -> RunAnswer:
         """The run, in its own task: the active run, and no tool call active.
 
         The task's context is a copy of its caller's, so what this sets stays
-        here. An inheriting type's history is read here, once.
+        here. An inheriting type's history is read here, once. The run's
+        time limit runs from when its hook starts (``RunControl.timing``).
         """
         set_active_run(ref)
         set_active_tool_call(None)
@@ -356,14 +475,40 @@ class Delegations:
             request.history()
             if config.inherit_context and request.history is not None else None
         )
-        return await self._hook(AgentRun(
+        run = AgentRun(
             ref=ref,
             config=config,
             message=task_message(brief, inherit=config.inherit_context),
             conversation=conversation,
             state=dict(request.state),
             history=history,
-        ))
+            control=control,
+        )
+        with control.timing():
+            return await self._hook(run)
+
+    def _cancelled(
+        self,
+        ref: RunRef,
+        call_id: str,
+        cancelled: tuple[str, str],
+        answer: RunAnswer,
+    ) -> Delegated:
+        """End ``ref``'s run cancelled (``cancelled``: by whom, why) with what ``answer`` had."""
+        by, error = cancelled
+        logger.info("subagent_cancelled", run=ref.run, agent=ref.agent, by=by, error=error)
+        partial = bool(answer.text)
+        self._end(
+            ref, call_id, RUN_CANCELLED, text=answer.text, error=error, partial=partial,
+            cancelled_by=by,
+        )
+        return Delegated(
+            result=envelope(
+                ref, RUN_CANCELLED, result=answer.text, partial=partial, error=error,
+                cancelled_by=by,
+            ),
+            state=dict(answer.state), run=ref,
+        )
 
     def _failed(
         self,
@@ -398,11 +543,12 @@ class Delegations:
         text: str = "",
         error: str | None = None,
         partial: bool = False,
+        cancelled_by: str | None = None,
     ) -> WorkflowEvent:
         """Report and record the ``AGENT_RUN`` that ends ``ref``'s run; that event."""
         end = WorkflowEvent.agent_run(
             ref, status, call_id=call_id, result=result_head(text), error=error,
-            partial=partial, usage=self._usage(ref),
+            partial=partial, usage=self._usage(ref), cancelled_by=cancelled_by,
         )
         self._emit(end)
         return end
@@ -422,3 +568,9 @@ class Delegations:
     def _report(event: WorkflowEvent) -> None:
         """Report ``event`` to the turn's live events (none outside a turn)."""
         live_events.report(event)
+
+
+def _caller_cancelling() -> bool:
+    """Whether the task running ``delegate`` (the caller's: its turn's) is being cancelled."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0

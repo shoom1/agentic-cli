@@ -146,13 +146,16 @@ class _TurnScope:
 
     A task a turn starts copies the turn's context, this object with it; the
     active turn alone (the same ``SessionRef`` before and after) cannot tell
-    such a task that the turn it came from is over, this can.
+    such a task that the turn it came from is over, this can. It also counts
+    the sub-agent runs the turn starts, at any depth (``runs_this_turn``):
+    a run's own task shares its turn's span.
     """
 
-    __slots__ = ("ended",)
+    __slots__ = ("ended", "runs")
 
     def __init__(self) -> None:
         self.ended = False
+        self.runs = 0
 
 
 _turn_scope: ContextVar["_TurnScope | None"] = ContextVar(
@@ -182,6 +185,22 @@ def close_turn_scope(token: Token) -> None:
     _turn_scope.reset(token)
     if scope is not None:
         scope.ended = True
+
+
+def runs_this_turn() -> int | None:
+    """How many sub-agent runs this context's turn has started (``count_run_this_turn``).
+
+    None outside a turn's span: there is no turn to count for.
+    """
+    scope = _turn_scope.get()
+    return None if scope is None else scope.runs
+
+
+def count_run_this_turn() -> None:
+    """Count a sub-agent run this context's turn starts; nothing outside a turn's span."""
+    scope = _turn_scope.get()
+    if scope is not None:
+        scope.runs += 1
 
 
 def turn_has_ended() -> bool:

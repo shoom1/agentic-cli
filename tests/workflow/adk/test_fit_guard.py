@@ -169,6 +169,53 @@ class TestDropTurns:
         assert (kept, dropped) == (contents, 0)
 
 
+class TestASubAgentRunsTaskMessage:
+    """A sub-agent run's task message (``task=``, its invocation's user
+    content) is never left out: a message steered to the run after a tool
+    result starts a turn, and the turns between them go, never the task."""
+
+    TASK = "# Task: Find X.\n\n## Objective\nFind X."
+
+    def test_the_turns_after_it_go_and_the_rest_joins_it(self):
+        task = user(self.TASK)
+        contents = [task, call("lookup", "c1"), result("lookup", "c1", page=LONG),
+                    user("Also find Z."), call("lookup", "c2"), result("lookup", "c2", z=42)]
+
+        kept, dropped = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=task)
+
+        assert dropped == 1
+        # One user content: no provider sees two user messages in a row.
+        assert [part.text for part in kept[0].parts] == [self.TASK, FIT_NOTE, "Also find Z."]
+        assert kept[1:] == contents[4:]
+
+    def test_an_inheriting_runs_history_goes_first(self):
+        task = user(self.TASK)
+        contents = [user(LONG), model("A1."), task, call("lookup", "c1"),
+                    result("lookup", "c1", page=LONG), user("Also find Z."),
+                    call("lookup", "c2"), result("lookup", "c2", z=42)]
+
+        kept, dropped = drop_turns(
+            contents, target_tokens=tokens(contents[2:]) + NOTE_ROOM, kind=CLAUDE, task=task
+        )
+        all_but, every = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=task)
+
+        assert dropped == 1
+        assert [part.text for part in kept[0].parts] == [FIT_NOTE, self.TASK]
+        assert kept[1:] == contents[3:]
+        assert every == 2
+        assert [part.text for part in all_but[0].parts] == [self.TASK, FIT_NOTE, "Also find Z."]
+        assert all_but[1:] == contents[6:]
+
+    def test_without_it_the_oldest_turn_goes_whatever_it_is(self):
+        contents = [user(self.TASK), call("lookup", "c1"), result("lookup", "c1", page=LONG),
+                    user("Also find Z.")]
+
+        kept, dropped = drop_turns(contents, target_tokens=0, kind=CLAUDE)
+
+        assert dropped == 1
+        assert [part.text for part in kept[0].parts] == [FIT_NOTE, "Also find Z."]
+
+
 class TestFoldSummary:
     """A summarized conversation opens with the summary, a user content of its
     own: folded into the next user's text, no provider sees two user messages

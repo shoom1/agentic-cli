@@ -24,10 +24,14 @@ import pytest
 pytest.importorskip("google.adk")
 
 from agentic_cli.config import BaseSettings  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk.fit_guard_plugin import FIT_NOTE, FitGuardPlugin  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
+from agentic_cli.workflow.sessions import get_active_run  # noqa: E402
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, chat_completion  # noqa: E402
 from tests.workflow.test_adk_context_cache import route_gemini  # noqa: E402
@@ -234,6 +238,53 @@ class TestASmallerSubAgent:
         assert len(claude.requests) == 4
         assert [e for e in session.events if e.actions and e.actions.compaction] == []
         assert budget.budget == 19_000
+
+
+@register_tool(capabilities=EXEMPT, description="Read a long page and steer this run (a test tool).")
+async def fit_guard_steered_read() -> dict:
+    """A long page; and a message steered to the run that read it, as its parent would."""
+    get_service(WORKFLOW)._delegations.control(get_active_run()).steer("Also find Z.")
+    return {"success": True, "page": HUGE}
+
+
+class TestASteeredSubAgent:
+    async def test_its_trimmed_request_keeps_its_task_message(self, project, monkeypatch):
+        """A message steered to a run after a long tool result starts a turn of
+        its own: over the run's budget, its next request leaves out the result,
+        never the task message before it, which the rest joins."""
+        delegate = anthropic_message({"type": "tool_use", "id": "toolu_c1", "name": "task",
+                                      "input": {"agent_type": "researcher", "title": "Find X.",
+                                                "objective": "Find X."}})
+        delegate["stop_reason"] = "tool_use"
+        coordinator = [delegate, anthropic_message({"type": "text", "text": "X is 42."})]
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(lambda request: coordinator.pop(0)))
+        server = serve(monkeypatch, Server(answered("", tool="fit_guard_steered_read"),
+                                           answered("X is 42; Z is 42.")))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=[
+                AgentConfig(name="coordinator", prompt="You coordinate.",
+                            sub_agents=["researcher"], description="Leads.",
+                            include_state_tools=False),
+                AgentConfig(name="researcher", prompt="You research.", description="Finds.",
+                            model="local:small", tools=[fit_guard_steered_read],
+                            include_state_tools=False),
+            ],
+            settings=BaseSettings(session_store="memory", model_providers=ENDPOINTS,
+                                  models=MODELS, default_model="claude-sonnet-4-6",
+                                  tool_result_max_chars=200_000),
+        )
+        try:
+            events = await turn(manager, "Find X, please.")
+        finally:
+            await manager.cleanup()
+
+        _, steered = server.bodies
+        sent = json.dumps(steered)
+        assert "word word word" not in sent  # the long page went
+        assert "# Task: Find X." in sent
+        assert sent.index("# Task: Find X.") < sent.index(FIT_NOTE) < sent.index("Also find Z.")
+        (trimmed,) = trims(events)
+        assert (trimmed.metadata["agent"], trimmed.metadata["turns_dropped"]) == ("researcher", 1)
 
 
 # --- a switch to a smaller window after a summary (Review Focus 3) ---------------------------
