@@ -355,6 +355,33 @@ class TestHandBack:
         await late
         assert served == ["late"]
 
+    async def test_to_a_parent_waiting_to_take_its_slot_back_ends_that_wait(self):
+        """The parent's wait is over and it waits in the heap for its slot
+        when its child hands it back: that take-back ends without a slot,
+        and the parent holds the child's."""
+        pool = SlotPool(1)
+        parent = await pool.acquire()
+        over = asyncio.Event()
+
+        async def waits() -> None:
+            async with pool.lent(parent):
+                await over.wait()
+
+        lending = asyncio.create_task(waits())
+        await until(lambda: parent.lent)
+        child = await pool.acquire()  # works in the parent's lent slot
+        over.set()
+        await until(lambda: pool.waiting == 1)  # the parent wants it back
+        pool.hand_back(child, to=parent)
+        try:
+            await until(lending.done, within=1)
+        finally:
+            lending.cancel()
+
+        assert (parent.held, child.held, pool.free, pool.waiting) == (True, False, 0, 0)
+        pool.release(parent)
+        assert (pool.free, pool.waiting) == (1, 0)
+
     async def test_to_a_parent_that_does_not_lend_it_is_a_release(self):
         pool = SlotPool(2)
         parent, child = await pool.acquire(), await pool.acquire()
