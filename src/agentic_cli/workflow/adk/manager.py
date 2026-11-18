@@ -85,7 +85,12 @@ from agentic_cli.workflow.outside_content import (
     JOB_RESULT,
     OUTSIDE_CONTENT_KEY,
 )
-from agentic_cli.workflow.sessions import ConversationChangedError, SessionInfo, get_active_run
+from agentic_cli.workflow.sessions import (
+    ConversationChangedError,
+    SessionInfo,
+    get_active_run,
+    get_active_turn,
+)
 from agentic_cli.workflow.tool_output import tool_output_dir
 from agentic_cli.workflow.usage import adk_usage_event
 
@@ -1212,7 +1217,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         them, and so does a stop whose own answers to the calls ADK's seals
         missed could not be written (``_answer_unsealed``); ADK would keep a
         long-running one in every request, which Claude and OpenAI refuse,
-        and drop any other one with a warning.
+        and drop any other one with a warning. So does a failed turn, for
+        the calls whose results it had not stored; its record of those that
+        returned (``OpenCalls.failed``) answers them with their results.
+        Once the answers are stored the record is forgotten, so it answers
+        no later call of the same id (a provider that numbers its call ids
+        repeats them).
 
         ADK keeps two kinds of call open on purpose. A task-mode agent's
         delegation cannot be built (a native ADK YAML app with one is
@@ -1237,6 +1247,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             logger.debug("left_open_calls_answered", count=sum(
                 len(event.content.parts) for event in answers
             ))
+        self._open_calls.clear(get_active_turn())
         return session
 
     async def _answer_unsealed(self, ref: SessionRef) -> None:
@@ -1420,17 +1431,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # Every call of the turn is answered now, sealed or returned,
                 # but for one a stop's seals took for answered (they pair by
                 # id alone): it is answered here, from the record, before the
-                # record is cleared. One a failure left open is answered at
-                # the next turn (left_open) as interrupted: the state it
-                # changed, which ADK stores with its result, is gone.
+                # record is cleared. A failure keeps the record of the calls
+                # that returned (OpenCalls.failed), as Deep Agents does: ADK
+                # stores a step's parallel results together, after the last,
+                # so one that returned beside a call the failure stopped has
+                # no stored result, and the next turn answers it from the
+                # record, with the state it changed (left_open).
                 ref = self.session_ref(session_id, user_id)
                 if aborted.is_set():
                     # Should those answers not be written, left_open gives
                     # them as the user's.
                     self._open_calls.cancelled(ref)
                     await asyncio.shield(self._answer_unsealed(ref))
-                else:
+                elif failure is None:
                     self._open_calls.clear(ref)
+                else:
+                    self._open_calls.failed(ref)
 
         # Drain any remaining LLM events after processing completes
         if self._llm_logging_plugin:

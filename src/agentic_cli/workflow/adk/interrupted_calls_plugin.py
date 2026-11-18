@@ -20,10 +20,12 @@ manager writes them before the turn clears its record): a finished call
 keeps its result, one at its prompt was not run.
 
 ``left_open`` answers, on the next turn, the calls nothing answered: a
-crash's, a cancel's from before this plugin, or a stop's whose answers
-could not be written as it stopped. ADK would keep a long-running one
-without its result in every later request, which Claude and OpenAI refuse,
-and drop any other one, logging "Dropping function calls" on every request.
+crash's, a cancel's from before this plugin, a stop's whose answers could
+not be written as it stopped, or a failed turn's, whose record keeps the
+calls that returned (ADK had not stored their results yet). ADK would keep
+a long-running one without its result in every later request, which Claude
+and OpenAI refuse, and drop any other one, logging "Dropping function
+calls" on every request.
 
 Each call is recorded and answered as the run's that made it, the active run
 (a sub-agent run is the active one in the task its runner runs in,
@@ -54,7 +56,6 @@ from agentic_cli.workflow.interrupts import (
     MARKER,
     OpenCalls,
     interrupted,
-    unrecorded,
 )
 from agentic_cli.workflow.sessions import (
     ToolCallRef,
@@ -206,30 +207,24 @@ def _invocation(tool_context: Any) -> str | None:
     return getattr(tool_context, "invocation_id", None)
 
 
-def _from_record(open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any) -> Any:
-    """A stopped turn's call answered from the record, as ``run``'s.
+def _from_record(
+    open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any,
+    *, by_user: bool = True,
+) -> Any:
+    """A call left open answered from the record, as ``run``'s.
 
     A finished call keeps what the model would have read (``_Finished.read``);
     the state it changed goes into ``actions``, stored with the answer as
-    with its result. Any other is answered as ``OpenCalls.answer`` says.
+    with its result. Any other is answered as ``OpenCalls.answer`` says:
+    ``by_user`` whether the user stopped its turn (a stopped turn's call, by
+    default).
     """
-    answer = open_calls.answer(call_id, by_user=True, run=run)
+    answer = open_calls.answer(call_id, by_user=by_user, run=run)
     if not isinstance(answer, _Finished):
         return answer
     actions.state_delta.update(answer.state_delta)
     actions.artifact_delta.update(answer.artifact_delta)
     return answer.read
-
-
-def returned(open_calls: OpenCalls, call_id: str | None, run: str | None) -> dict[str, Any] | None:
-    """What the call ``call_id`` of ``run`` returned, from the record; None if it did not finish.
-
-    As ADK stores the result (text under ``result``), and as the model reads
-    it (the cap's cut): what the manager ends a delegation's run with when
-    no event brought its result (``ADKEventProcessor.end_returned_run``).
-    """
-    finished = open_calls.recorded(call_id, run=run)
-    return _as_response(finished.read) if isinstance(finished, _Finished) else None
 
 
 def _as_response(result: Any) -> dict[str, Any]:
@@ -317,47 +312,60 @@ def unsealed(events: list[Event], open_calls: OpenCalls) -> list[Event]:
 
 
 def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
-    """The events that answer the calls nothing answered: a crash's, or a stop's left over.
+    """The events that answer the calls nothing answered: a crash's, a failed
+    turn's, or a stop's left over.
 
     A result answers only a call on its own branch: a sub-agent's result
-    never answers its parent's call of the same id. Each call left open is
-    answered as no record holds it (``interrupts.unrecorded``: a job's state,
-    else ``INTERRUPTED_BY_USER`` when the user stopped the conversation's
-    last turn, ``OpenCalls.take_cancel``, which this asks once, else
-    ``INTERRUPTED``): every turn clears its conversation's record as it ends
-    (``OpenCalls.clear``), and a new process has none. Only the root's own
-    calls (and those of an agent it transferred to) are matched to a job: a
-    conversation stored while sub-agents ran on delegation branches of its
-    own session (``<agent>@<call id>``) may hold a sub-agent's call there,
-    whose run is numbered no more, so its call is answered interrupted, never
-    with another run's job of the same id. A stopped turn
-    answers what ADK's seals missed itself (``unsealed``), so a stop leaves
-    a call here only when those answers could not be written. The answer is
-    in the author, branch, scope and invocation of the event that made the
-    call, so it pairs with its call in that agent's view; calls that share
-    those are answered in one event, marked as ADK marks a seal.
+    never answers its parent's call of the same id. The root's own call left
+    open (and that of an agent it transferred to) is answered from the
+    record (``OpenCalls.answer``, as the root's). A failed turn keeps there
+    the calls that returned (``OpenCalls.failed``), whose results ADK had
+    not stored (it stores a step's parallel results together, after the
+    last): each is answered with its result and the state it changed. A call
+    no record holds gets its job's state, else ``INTERRUPTED_BY_USER`` when
+    the user stopped the conversation's last turn (``OpenCalls.take_cancel``,
+    which this asks once), else ``INTERRUPTED``: a turn that ends otherwise
+    clears its conversation's record (``OpenCalls.clear``), and a new
+    process has none. A conversation stored while sub-agents ran on
+    delegation branches of its own session (``<agent>@<call id>``) may hold
+    a sub-agent's call there, whose run is numbered no more: it is answered
+    interrupted, never with another run's result or job of the same id. A
+    stopped turn answers what ADK's seals missed itself (``unsealed``), so a
+    stop leaves a call here only when those answers could not be written.
+    The answer is in the author, branch, scope and invocation of the event
+    that made the call, so it pairs with its call in that agent's view;
+    calls that share those are answered in one event, marked as ADK marks a
+    seal.
     """
     by_user = open_calls.take_cancel(get_active_turn())
-    return [
-        _answer_event(place, [
+    answers: list[Event] = []
+    for place, calls in _unanswered(events).items():
+        actions = EventActions()
+        answers.append(_answer_event(place, [
             types.FunctionResponse(
                 id=call.id, name=call.name,
-                response=_as_response(_left_open_answer(call.id, place[2], by_user)),
+                response=_as_response(
+                    _left_open_answer(open_calls, call.id, place[2], by_user, actions)
+                ),
             )
             for call in calls
-        ], INTERRUPTED)
-        for place, calls in _unanswered(events).items()
-    ]
+        ], INTERRUPTED, actions))
+    return answers
 
 
-def _left_open_answer(call_id: str | None, branch: str | None, by_user: bool) -> Any:
+def _left_open_answer(
+    open_calls: OpenCalls, call_id: str | None, branch: str | None, by_user: bool,
+    actions: Any,
+) -> Any:
     """What ``left_open`` answers the call ``call_id`` made on ``branch`` with.
 
-    The root's own call (no delegation on its branch) gets its job's state
-    when it submitted one (``unrecorded``, the root's: ``started_by`` None);
-    a sub-agent's on a delegation's branch (``<agent>@<call id>``) cannot be
-    named any more, so its call gets no job.
+    The root's own call (no delegation on its branch) is answered from the
+    record (``_from_record``, as the root's: a call that returned keeps its
+    result, the state it changed going into ``actions``; one no record holds
+    gets its job's state when it submitted one, ``started_by`` None); a
+    sub-agent's on a delegation's branch (``<agent>@<call id>``) cannot be
+    named any more, so its call gets neither.
     """
     if any("@" in segment for segment in (branch or "").split(".")):
         return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
-    return unrecorded(call_id, by_user=by_user)
+    return _from_record(open_calls, call_id, None, actions, by_user=by_user)

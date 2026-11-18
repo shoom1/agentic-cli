@@ -1573,7 +1573,9 @@ is answered "Interrupted by the user before it finished; it may have partly
 run…", one waiting at its permission prompt or at a question "Not run: the
 user cancelled it.", and a request stopped before its reply leaves
 "(Interrupted by the user.)" as the agent's reply. A call a crash left open
-is answered the same way on the next turn. Background jobs the request
+is answered the same way on the next turn. After a turn that fails (its one
+`ERROR`), a call that had returned keeps its result at the next turn, and
+any other call the turn left open is answered as interrupted. Background jobs the request
 started keep running, and a line after the cancel names each still queued
 or running, with how to stop it: "Still running in the background: build
 (j1). Stop one with /jobs cancel <id>."

@@ -276,3 +276,26 @@ class TestLeftOpen:
             "researcher@call_9": {"call_0": interrupted(INTERRUPTED)},
             "researcher@call_9.leaf@call_1": {"call_0": interrupted(INTERRUPTED)},
         }
+
+    async def test_after_a_failed_turn_a_call_that_returned_keeps_its_result(self):
+        """A failed turn keeps the record of its calls that returned
+        (``OpenCalls.failed``): the root's call left open that returned is
+        answered with its result and the state it changed, one that did not
+        as interrupted."""
+        calls = OpenCalls()
+        plugin = InterruptedCallsPlugin(calls)
+        events = [_calls("coordinator", None, ("contract_whoami", "c1"), ("read_file", "c2"))]
+
+        with turn_of(CONVERSATION):
+            await plugin.after_tool_callback(
+                tool=_tool("contract_whoami"), tool_args={},
+                tool_context=_context("c1", state_delta={"seen": True}),
+                result={"success": True},
+            )
+            calls.failed(CONVERSATION)
+            (answer,) = left_open(events, calls)
+
+        assert (answer.author, answer.branch, answer.error_code) == ("coordinator", None, ABORTED)
+        assert _answers(answer) == {"c1": {"success": True}, "c2": interrupted(INTERRUPTED)}
+        # Its state change is stored with its answer, as with its result.
+        assert answer.actions.state_delta == {"seen": True}
