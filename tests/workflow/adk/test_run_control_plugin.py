@@ -145,6 +145,17 @@ class TestThePlugin:
         assert (control.cancelled, control.final_call) == (None, False)
         assert answer.content == model(text("Found it."), call("lookup"))
 
+    async def test_an_answer_with_no_usage_still_counts_the_runs_side_calls(self):
+        control = RunControl(REF, AgentLimits(max_tokens=100), side_tokens=lambda: 120)
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+        answer = LlmResponse(content=model(text("Found it."), call("lookup")))
+
+        await plugin.before_model_callback(callback_context=None, llm_request=LlmRequest())
+        await plugin.after_model_callback(callback_context=None, llm_response=answer)
+
+        assert control.cancelled == ("limit", TOKEN_LIMIT_ERROR)
+        assert answer.content == model(text("Found it."))
+
     async def test_a_partial_answer_counts_nothing(self):
         control = RunControl(REF, AgentLimits(max_tokens=1))
         plugin = RunControlPlugin(lambda: control, "anthropic")

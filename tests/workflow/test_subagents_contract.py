@@ -2889,6 +2889,37 @@ class TestTheTokenLimit:
         used = crew.ledger().totals(run="researcher-1#1")
         assert (used.input, used.output, used.calls) == (140, 40, 2)
 
+    async def test_a_side_call_its_tool_makes_counts_and_limits_it_at_its_next_call(
+        self, make_crew
+    ):
+        """The run's total is what its usage record counts, its tools' side
+        calls included: 50 tokens of its own, then a summary of 110 that its
+        tool asked for, and its next answer (25) is past 150."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_summarize, contract_whoami),
+                   limits=AgentLimits(max_tokens=150))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_summarize", "r1", text="A long page."),
+                              text="Reading.", usage=(40, 10)),
+                        calls(use("contract_whoami", "r2"), text="X is about 42.",
+                              usage=(20, 5)),
+                        says("[never asked]")],
+            side_calls=[says("A summary.", usage=(100, 10))],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": TOKEN_LIMIT_ERROR, "cancelled_by": "limit",
+        }
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (160, 25, 3)
+
 
 class TestSteering:
     """A message steered to a run while its tool call is in progress is in

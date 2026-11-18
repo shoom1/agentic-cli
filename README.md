@@ -1385,9 +1385,11 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   tokens with an answer that asks for tools, it is `cancelled` (`time limit
   reached`, `token limit reached`) with the text it wrote so far, a prompt
   it waited at withdrawn (an answer past its tokens that asks for none is
-  its result, and the run completes; a model that reports no usage is not
-  limited by tokens); a `task` call past the runs a turn may start starts
-  no run, and the parent reads why.
+  its result, and the run completes; its tokens are its total as its usage
+  record counts it, its tools' side calls and its summaries included,
+  checked after each of its model calls, and a model that reports no
+  usage counts none of its own); a `task` call past the runs a turn may
+  start starts no run, and the parent reads why.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of

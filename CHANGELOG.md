@@ -610,11 +610,14 @@ the start of the entry's title.
   starts, is cancelled (`"status": "cancelled"`, `"cancelled_by":
   "limit"`, `"error": "time limit reached"`), the text it wrote so far its
   partial result, and a question or permission prompt it waited at is
-  withdrawn; a model call that takes a run past its `max_tokens` and asks
-  for tools is its last, its calls dropped, and the run is cancelled
+  withdrawn; a model call that takes a run past its `max_tokens` (checked
+  after each of its model calls, against the run's total as its usage
+  record counts it: its own calls, its tools' side calls such as
+  web_fetch's summary, and Deep Agents' summaries of its conversation) and
+  asks for tools is its last, its calls dropped, and the run is cancelled
   likewise (`"token limit reached"`), that answer's text its result, while
   one that asks for none ends the run as it would, completed, its result
-  whole (a model that reports no usage is not limited by tokens).
+  whole (a model that reports no usage counts none of its own).
   Construction refuses, with a `ValueError` naming the field, a limit that
   is not a positive int (a timeout: a positive, finite number; `True` and
   `False` are no numbers here) and a policy whose `limits` is not an

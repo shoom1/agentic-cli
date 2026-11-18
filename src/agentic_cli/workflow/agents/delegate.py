@@ -362,7 +362,9 @@ class Delegations:
             sub-agents (``AgentConfig.sub_agents``).
         hook: Runs one run (``BaseWorkflowManager._run_agent``).
         ledgers: The manager's usage ledgers: a run's end carries what it
-            used, by model. None: an end carries no usage.
+            used, by model, and its token limit counts its side calls
+            (``RunControl``'s ``side_tokens``). None: an end carries no
+            usage, and a run's own calls alone count toward its limit.
         stored: How many instances of each type a conversation's store
             already keeps (``BaseWorkflowManager._stored_instances``), asked
             once per conversation per turn, before the turn's first run is
@@ -441,7 +443,9 @@ class Delegations:
             ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
             brief=brief.fields(), started_by=started_by(request.caller), mode=BLOCKING,
         ))
-        control = RunControl(ref, self._limits(config))
+        control = RunControl(
+            ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref)
+        )
         inner = asyncio.create_task(
             self._in_run(ref, config, brief, conversation, request, control),
             name=f"agent run {ref.run}",
@@ -717,6 +721,22 @@ class Delegations:
         )
         self._emit(end)
         return end
+
+    def _side_tokens(
+        self, conversation: SessionRef | None, ref: RunRef
+    ) -> Callable[[], int] | None:
+        """What ``ref``'s run's side calls have used so far, as its conversation's ledger
+        counts them: its tools' side calls and its summaries (``RunControl``'s
+        ``side_tokens``; its own steps it counts itself). None without ledgers."""
+        if self._ledgers is None:
+            return None
+        ledger = self._ledgers.ledger(conversation)
+
+        def spent() -> int:
+            side = ledger.by_purpose(run=ref.run or "")
+            return sum(totals.input + totals.output for totals in side.values())
+
+        return spent
 
     def _usage(self, ref: RunRef) -> dict[str, dict[str, int]] | None:
         """What ``ref``'s run used, by model, from its conversation's ledger."""

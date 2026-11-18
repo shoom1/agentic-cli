@@ -137,6 +137,13 @@ class TestTheLedger:
             "m": {"input": 110, "output": 11}, "small": {"input": 30, "output": 3},
         }
         assert ledger.run_usage("nobody-1#1") == {}
+        # One run's side calls (a sub-agent run's token limit counts them).
+        assert ledger.by_purpose(run="researcher-1#1") == {
+            PURPOSE_TOOL: UsageTotals(input=30, output=3, calls=1),
+        }
+        assert ledger.by_purpose(run=None) == {
+            PURPOSE_SUMMARIZATION: UsageTotals(input=20, output=2, calls=1),
+        }
 
     def test_a_call_in_a_turn_carries_its_number(self):
         ledger = UsageLedger(CONVERSATION)

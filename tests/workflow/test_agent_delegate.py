@@ -67,7 +67,14 @@ from agentic_cli.workflow.sessions import (
     set_active_tool_call,
     set_active_turn,
 )
-from agentic_cli.workflow.usage import UsageLedgers, UsageTotals, llm_usage_event
+from agentic_cli.workflow.usage import (
+    PURPOSE_SUBAGENT,
+    PURPOSE_SUMMARIZATION,
+    PURPOSE_TOOL,
+    UsageLedgers,
+    UsageTotals,
+    llm_usage_event,
+)
 from tests.loop_guard import no_blocking_calls
 
 CONVERSATION = SessionRef("app", "u", "s")
@@ -1096,6 +1103,39 @@ class TestTheLimitsAtModelCalls:
             RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR, "Found it.", True
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
+
+    async def test_its_side_calls_count_toward_its_tokens(self):
+        """The run's total is what its usage record counts: its tools' side
+        calls and its summaries, recorded under it, count with its own calls
+        (whose own rows are not counted twice); another run's do not."""
+        ledgers = UsageLedgers()
+        other = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1",
+                       parent_run=None, depth=1)
+        seen: list[Any] = []
+
+        def recorded(purpose: str, tokens: int, run: RunRef | None = None) -> None:
+            event = llm_usage_event("anthropic:claude", UsageTotals(input=tokens, calls=1))
+            event.metadata["purpose"] = purpose
+            event.run = run  # None: the run in progress
+            ledgers.record(event)
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.used(40, 10)
+            recorded(PURPOSE_SUBAGENT, 50)  # that call's own row
+            recorded(PURPOSE_TOOL, 30)  # its tool's side call
+            recorded(PURPOSE_SUMMARIZATION, 30)  # a summary of its conversation
+            recorded(PURPOSE_TOOL, 500, run=other)
+            run.control.used(30, 0)  # 80 of its own, 60 besides: 140
+            seen.append(run.control.cancelled)
+            run.control.used(10, 5)  # 155
+            return RunAnswer(text="Found it.")
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_tokens=150))
+        result, _ = await delegated(delegations(hook, policy=policy, ledgers=ledgers), request())
+
+        assert seen == [None]
+        assert (result.result["status"], result.result["cancelled_by"],
+                result.result["error"]) == (RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR)
 
     async def test_a_finishing_answer_over_its_tokens_completes_it_whole(self):
         async def hook(run: AgentRun) -> RunAnswer:

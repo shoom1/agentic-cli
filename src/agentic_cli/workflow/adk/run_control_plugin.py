@@ -22,10 +22,11 @@ for the run in progress (``get_active_run``: the run's own task,
   request whose messages hold tool calls or results when it defines no
   tools, and no call that answer makes is run (below);
 - after each, what it used (``workflow/usage.py::adk_tokens``, by its
-  model's provider kind) goes to ``RunControl.used``, with whether the
-  answer makes function calls: one past the token limit that makes none
-  is the run's result, whole. A model that reports no usage is not limited
-  by tokens;
+  model's provider kind) goes to ``RunControl.used``, which checks the
+  run's total (with what its side calls used), with whether the answer
+  makes function calls: one past the token limit that makes none is the
+  run's result, whole. A call that reports no usage counts none of its
+  own;
 - on the run's last call (``RunControl.final_call``: its step limit's, or
   one past its token limit that makes calls) the answer's function calls
   are dropped, so ADK
@@ -52,7 +53,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE
-from agentic_cli.workflow.usage import adk_tokens
+from agentic_cli.workflow.usage import UsageTotals, adk_tokens
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
@@ -109,9 +110,11 @@ class RunControlPlugin(BasePlugin):
         control = self._control()
         if control is None:
             return None
-        if llm_response.usage_metadata is not None:
-            tokens = adk_tokens(llm_response.usage_metadata, self._kind)
-            control.used(tokens.input, tokens.output, calls=_calls(llm_response))
+        usage = llm_response.usage_metadata
+        # A call that reports no usage counts none of its own; the run's
+        # side calls still count.
+        tokens = adk_tokens(usage, self._kind) if usage is not None else UsageTotals()
+        control.used(tokens.input, tokens.output, calls=_calls(llm_response))
         if control.final_call:
             drop_calls(llm_response)
         return None
