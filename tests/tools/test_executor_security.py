@@ -10,7 +10,9 @@ runs code outside it.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -127,14 +129,16 @@ def test_api_keys_scrubbed_from_subprocess_env(
     monkeypatch.setenv("SOME_TOKEN", "tok")
     monkeypatch.setenv("PATH", "/usr/bin")
 
+    from agentic_cli.tools import executor as executor_module
+
     captured: dict = {}
-    real_run = subprocess.run
+    real_run = executor_module._run_command
 
     def _capture(*args, **kwargs):
         captured["env"] = kwargs.get("env")
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _capture)
+    monkeypatch.setattr(executor_module, "_run_command", _capture)
     executor.execute("print(1)")
 
     env = captured["env"]
@@ -188,17 +192,19 @@ class _Backend:
     """A stand-in OS sandbox: ``"none"`` is no backend; ``wrap_error`` makes
     the wrap fail; ``command(argv)``, when given, is the wrapped command (one
     that fails before Python starts, say); otherwise the "wrap" is the plain
-    command."""
+    command. ``release``, when given, is the wrap's release."""
 
     def __init__(
         self,
         sandbox_type: str = "seatbelt",
         wrap_error: str | None = None,
         command=None,
+        release=None,
     ) -> None:
         self.sandbox_type = sandbox_type
         self.wrap_error = wrap_error
         self.command = command
+        self.release = release
         self.wrapped: list[list[str]] = []
 
     def wrap_python_command(self, argv, working_dir, policy):
@@ -212,7 +218,10 @@ class _Backend:
                 command="", success=False, error=self.wrap_error, sandbox_type=self.sandbox_type
             )
         command = self.command(argv) if self.command else shlex.join(argv)
-        return OSSandboxResult(command=command, sandbox_type=self.sandbox_type)
+        result = OSSandboxResult(command=command, sandbox_type=self.sandbox_type)
+        if self.release is not None:
+            result.release = self.release
+        return result
 
 
 def _fails_at_start(message: str, status: int):
@@ -231,15 +240,17 @@ def _use_backend(monkeypatch: pytest.MonkeyPatch, backend: _Backend) -> _Backend
 
 
 def _record_runs(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Record each subprocess the executor starts (and still start it)."""
+    """Record each process the executor starts (and still start it)."""
+    from agentic_cli.tools import executor as executor_module
+
     runs: list = []
-    real_run = subprocess.run
+    real_run = executor_module._run_command
 
     def _run(*args, **kwargs):
         runs.append((args, kwargs))
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(executor_module, "_run_command", _run)
     return runs
 
 
@@ -452,6 +463,156 @@ def test_a_failed_wrap_without_strict_runs_core_modules_only(
     [(args, kwargs)] = runs  # only the math run started a process, unwrapped
     assert kwargs.get("shell") is not True
     assert _runner_modules(args[0][2]) == SafePythonExecutor.CORE_MODULES
+
+
+def test_the_wrap_is_released_once_the_code_has_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wrap may hold something on the host for its run (bubblewrap's
+    placeholders over missing protected paths): it is released once the run
+    is over, and when the code is refused before it runs."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    events: list[str] = []
+    _use_backend(monkeypatch, _Backend("seatbelt", release=lambda: events.append("release")))
+    from agentic_cli.tools import executor as executor_module
+
+    real_run = executor_module._run_command
+
+    def _run(*args, **kwargs):
+        events.append("run")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(executor_module, "_run_command", _run)
+    with MockContext():
+        ran = execute_python("1 + 1")
+        invalid = execute_python("def (")
+
+    assert ran["success"] is True, ran
+    assert invalid["error"].startswith("Validation error"), invalid
+    assert events == ["run", "release", "release"]
+
+
+def _late_writer(late, *, leave_group: bool = False) -> str:
+    """A command that starts a background process writing ``late`` 3 s later
+    (in a session of its own when ``leave_group``, as bubblewrap's sandbox
+    init is), then waits far longer than any timeout here."""
+    import shlex
+
+    writer = f"sleep 3; echo late > {shlex.quote(str(late))}"
+    start = f"setsid sh -c {shlex.quote(writer)}" if leave_group else f"({writer})"
+    return f"{start} & exec sleep 30"
+
+
+def test_a_timeout_kills_every_process_the_command_started(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The timeout kills the command's whole process group, not its shell
+    alone: what it started in the background (a process the code forked)
+    dies with it."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend("seatbelt", command=lambda argv: _late_writer(late)))
+    with MockContext():
+        result = execute_python("1 + 1", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    time.sleep(3.5)
+    assert not late.exists()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or shutil.which("setsid") is None,
+    reason="finds the processes that left the group through /proc",
+)
+def test_a_timeout_kills_a_child_that_left_the_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """bubblewrap's sandbox init runs in a session of its own
+    (``--new-session``), out of the command's process group: the timeout
+    finds it as the child of a process in the group, and kills it too."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend(
+        "seatbelt", command=lambda argv: _late_writer(late, leave_group=True),
+    ))
+    with MockContext():
+        result = execute_python("1 + 1", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    time.sleep(3.5)
+    assert not late.exists()
+
+
+def test_an_interrupted_run_kills_its_process_group(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A KeyboardInterrupt while the run waits (in a caller on the main
+    thread: the CLI runs calls on a worker thread, which none reaches) kills
+    the whole group too, then goes through."""
+    import time
+
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    late = tmp_path / "late.txt"
+    _use_backend(monkeypatch, _Backend("seatbelt", command=lambda argv: _late_writer(late)))
+
+    def interrupted(self, *args, **kwargs):
+        time.sleep(0.5)  # the background process has started
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    with MockContext(), pytest.raises(KeyboardInterrupt):
+        execute_python("1 + 1", timeout_seconds=10)
+    monkeypatch.undo()
+
+    time.sleep(3.5)
+    assert not late.exists()
+
+
+def test_a_run_that_times_out_keeps_its_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run killed at its timeout may leave the sandbox's processes alive a
+    moment longer (they are killed asynchronously): what the wrap holds for
+    the run, bubblewrap's placeholders, is kept rather than released."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    released: list[str] = []
+    _use_backend(monkeypatch, _Backend("seatbelt", release=lambda: released.append("release")))
+    with MockContext():
+        result = execute_python("while True:\n    pass", timeout_seconds=1)
+
+    assert "timed out" in result["error"], result
+    assert released == []
+
+
+@pytest.mark.parametrize("command", ["kill -9 $$", "exit 143"], ids=["killed", "shell-reported-signal"])
+def test_a_run_killed_by_a_signal_keeps_its_hold(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """A signal from outside that kills the shell or bwrap's monitor returns
+    before the kernel has emptied the sandbox: a status that says a signal
+    ended the run (negative, or 128 and above from a shell) keeps the hold."""
+    from agentic_cli.tools.execution_tools import execute_python
+    from tests.conftest import MockContext
+
+    released: list[str] = []
+    _use_backend(monkeypatch, _Backend(
+        "seatbelt", command=lambda argv: command, release=lambda: released.append("release"),
+    ))
+    with MockContext():
+        result = execute_python("1 + 1")
+
+    assert result["success"] is False, result
+    assert released == []
 
 
 def test_a_sandboxed_run_gets_the_sandboxed_module_set(monkeypatch: pytest.MonkeyPatch) -> None:

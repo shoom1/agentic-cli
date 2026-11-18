@@ -2961,6 +2961,51 @@ step; each entry says what to use instead.
   Agents does: the next turn answers each with its result and the state it
   changed (`left_open`), any other as interrupted, and forgets the record
   once those answers are stored, so it answers no later call of the same id.
+
+- **A timed-out `execute_python` stops the code and what it started.** The
+  timeout killed only the process the executor started (the shell, or
+  bubblewrap's monitor), so the code ran on: on Linux the sandbox's init,
+  in a session of its own, outlived bubblewrap, and on macOS a process the
+  code forked outlived `sandbox-exec`. The command now runs in a session of
+  its own, and a timeout, a KeyboardInterrupt while it waits (in a caller
+  on the main thread), or, in the CLI, a hangup or SIGTERM kills its whole
+  process group and, on Linux, each child of it that left the group
+  (bubblewrap's sandbox init, whose death ends every process in the
+  sandbox); a signal the app ignores (under `nohup`) still changes nothing.
+  A normal exit waits for a running call, as before (to its timeout), and
+  then nothing it started is left; a run that ends on its own takes with it
+  what it left in its group. Outside a pid namespace (on macOS, and on Linux
+  without the sandbox), code that calls `setsid()` can outlive them (on
+  Linux the walk only catches a direct child of a live group member).
+
+- **`execute_python` runs inside bubblewrap on Linux.** It never did: every
+  call was refused with "it did not start (bubblewrap, exit status 1): bwrap:
+  Can't create file at ~/.bash_profile: Read-only file system" (or another
+  protected file the home lacks: most homes lack some of `~/.bashrc`,
+  `~/.bash_profile`, `~/.zshrc`, `~/.profile`, …, and `/System`, a macOS
+  path in the same list, is on no Linux host), or, with `os_sandbox_strict`
+  off, run without the sandbox. The bubblewrap backend bound `/dev/null`
+  over each protected path that did not exist, and bwrap must make that
+  mount point itself, which it cannot do below the read-only root; seen
+  first on GitHub's ubuntu-26.04 runner, the first image with `bwrap` on
+  it, and the same with every bwrap version. A missing protected path the
+  read-only root covers is now left to it (the code still cannot create
+  it). One the code could create (a project's `.git` before `git init`, its
+  `.{app_name}` before the app makes it) is held by a placeholder, an empty
+  folder bound read-only, which the wrap makes and removes once the last run
+  holding it is over (`OSSandboxResult.release`, which the executor calls):
+  bwrap would have left an empty file there, and an empty `.git` file breaks
+  git ("invalid gitfile format"). A run never removes a folder it did not
+  make: a protected folder that is there and empty (an empty `.git`) is bound
+  read-only, and left as it was after a run that ended on its own (after a
+  timeout, or a run a signal ended, the run's hidden hold file stays in it).
+  The code runs as the sandbox's pid 1
+  (`--as-pid-1`), so a run that returned has left no process behind; one that
+  timed out, or that a signal ended, is not released, and its placeholder
+  stays, holding the run's hidden hold file and protected, for later runs to
+  hold. A placeholder that
+  cannot be made where the code could still create the path fails the wrap.
+
 - **A model call a tool makes reports its usage.** `generate_simple`
   (web_fetch's and the knowledge base's summaries, the memory proposals)
   reported no `LLM_USAGE` on ADK or Deep Agents, so the status bar's totals

@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import shlex
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agentic_cli.tools.os_sandbox.policy import OSSandboxPolicy
+
+
+def _nothing_to_release() -> None:
+    """The release of a wrap that holds nothing on the host."""
 
 
 @dataclass
@@ -27,6 +32,17 @@ class OSSandboxResult:
         success: Whether wrapping succeeded.
         error: Error message if wrapping failed.
         sandbox_type: Identifier for which sandbox was used.
+        release: Called once the command has ended on its own, or will not
+            run: it removes what the wrap made on the host for the run
+            (bubblewrap's placeholders over missing protected paths). Not
+            called after a timeout or a kill (a status that says a signal
+            ended the command), which may leave the sandbox's processes alive
+            a moment longer: what the run holds then stays
+            (a placeholder holds the run's hold file and stays protected,
+            and later runs hold it in turn), as it does for a caller that
+            never calls it. A failed wrap
+            holds nothing. No part of the result's value: two results that
+            run the same command compare equal.
     """
 
     command: str
@@ -34,6 +50,7 @@ class OSSandboxResult:
     success: bool = True
     error: str | None = None
     sandbox_type: str = "none"
+    release: Callable[[], None] = field(default=_nothing_to_release, repr=False, compare=False)
 
 
 class OSSandbox(ABC):

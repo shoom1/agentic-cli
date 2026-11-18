@@ -87,8 +87,8 @@ def _protect_memory_folders(policy: "OSSandboxPolicy", settings: Any) -> None:
       the read-only mount.
     * A folder that exists is denied for both backends; one that could not be
       made is denied by seatbelt alone (``deny_write_missing_paths``):
-      bubblewrap binds only what exists, and a bind over a missing path
-      leaves a stray file where the store later makes its folder.
+      bubblewrap covers a missing path with a placeholder folder, which
+      could not be made there either (the run would be refused).
     """
     workspace = getattr(settings, "workspace_dir", None)
     if workspace is None:

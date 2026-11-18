@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -133,8 +134,9 @@ def test_executed_code_cannot_write_there_either(project):
 
 def test_a_folder_that_does_not_exist_is_not_made_a_mount_point(project, tmp_path):
     """A folder that cannot be made is still denied (seatbelt names a path, not
-    a mount) but is left out of the list bubblewrap binds, which would bind
-    /dev/null over it and can leave a stray file where the store makes its folder."""
+    a mount) but is left out of the list bubblewrap binds, which covers a
+    missing path with a placeholder folder: none could be made there either,
+    and the run would be refused."""
     (tmp_path / "blocker").write_text("a file, so nothing can be made below it")
     settings = BaseSettings(app_name="app", workspace_dir=tmp_path / "blocker" / "data")
     policy = _policy(settings)
@@ -183,17 +185,22 @@ class TestEachBackend:
 
     def test_bubblewrap_binds_what_exists_and_needs_no_rename_rule(self, project):
         """A bind mount follows its directory when an ancestor is renamed, so a
-        write through the new name still meets the read-only mount."""
+        write through the new name still meets the read-only mount. (The
+        memory folder, still empty, is held like a placeholder.)"""
         settings = _inside(project)
         policy = _policy(settings)
-        args = BubblewrapSandbox()._build_bwrap_args(project, policy)
+        first = BubblewrapSandbox().wrap_python_command(["python3"], project, policy)
+        args = shlex.split(first.command)
         root = (project / "data").resolve()
         binds = {(args[i + 1], args[i + 2]) for i in range(len(args)) if args[i] == "--ro-bind"}
         assert (str(root / "memory"), str(root / "memory")) in binds
         assert (str(root / "projects"), str(root / "projects")) in binds
         policy.deny_rename_paths.append(str(project / "data"))
         policy.deny_write_missing_paths.append(str(root / "never-made"))
-        assert BubblewrapSandbox()._build_bwrap_args(project, policy) == args
+        second = BubblewrapSandbox().wrap_python_command(["python3"], project, policy)
+        assert second.command == first.command
+        first.release()
+        second.release()
 
 
 @pytest.mark.skipif(
