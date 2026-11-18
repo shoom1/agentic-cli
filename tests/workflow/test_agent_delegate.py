@@ -309,6 +309,22 @@ class TestAFailedRun:
         assert result.result["error"] == said
         warning = events[-1]
         assert (warning.content, warning.metadata["error_code"]) == (said, "CONTEXT_OVERFLOW")
+        assert result.result["result"] == ""
+
+    async def test_its_own_words_carry_the_text_it_wrote(self):
+        said = "researcher: the request no longer fits m's context window."
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            raise RunFailed(said, code="CONTEXT_OVERFLOW", text="X is about 42.")
+
+        result, events = await delegated(delegations(hook), request())
+
+        assert (result.result["status"], result.result["result"], result.result["error"]) == (
+            RUN_FAILED, "X is about 42.", said
+        )
+        started, ended, warning = events
+        assert (ended.metadata["status"], ended.metadata["result"]) == (RUN_FAILED, "X is about 42.")
+        assert warning.content == said
 
 
 class TestTheRunsOwnTask:

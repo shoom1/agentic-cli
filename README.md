@@ -1365,7 +1365,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `AgentGraphError` at startup.
 - **A sub-agent's failure.** A sub-agent whose model call fails does not
   end the turn, on either backend: its run fails, its parent reads the
-  provider's reason in the envelope, the user sees a warning,
+  provider's reason in the envelope, with the text the run wrote before it
+  failed as its result, the user sees a warning,
   `<instance> failed: <the provider's reason>` (`researcher-1 failed: …`),
   and the parent answers. Only the main agent's own failure ends the turn.
   A sub-agent's request too long for its model fails its run alike, with the

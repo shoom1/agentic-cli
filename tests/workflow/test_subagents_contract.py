@@ -1395,6 +1395,58 @@ class TestASubAgentsFailure:
         ]
         assert crew.requests("coordinator") == 2
 
+    async def test_the_text_a_run_wrote_before_it_failed_is_its_result(self, make_crew):
+        """Spec 5.3: a failed envelope carries whatever text the run produced."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("The researcher got halfway.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["success"], read["status"], read["result"]) == (
+            False, RUN_FAILED, "X is about 42."
+        )
+        assert "overloaded" in read["error"]
+        (ended,) = runs_of(events, RUN_FAILED)
+        assert (ended.metadata["result"], ended.metadata["error"]) == (
+            "X is about 42.", read["error"]
+        )
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert warning.content == f"researcher-1 failed: {read['error']}"
+        assert warning.metadata["recoverable"] is True
+        (record,) = crew.records()
+        assert (record.status, record.result) == (RUN_FAILED, "X is about 42.")
+
+    async def test_an_overflow_after_text_keeps_that_text_as_its_result(self, make_crew):
+        too_long = "prompt is too long: 208310 tokens > 200000 maximum"
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("The researcher got halfway.")],
+            # Enough for either backend's retry, should it make one.
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        fails(too_long), fails(too_long)],
+            summaries=[says("The researcher looked X up.")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"], read["error"]) == (
+            RUN_FAILED, "X is about 42.",
+            "researcher: the request no longer fits anthropic:claude-sonnet-4-6's "
+            "context window.",
+        )
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert (warning.content, warning.metadata["error_code"]) == (
+            read["error"], "CONTEXT_OVERFLOW"
+        )
+
     async def test_the_next_turn_runs(self, make_crew):
         crew = make_crew(
             team(),

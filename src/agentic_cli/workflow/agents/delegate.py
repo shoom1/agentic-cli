@@ -56,9 +56,10 @@ the run works. A run ends:
 
 - ``failed`` when the hook raised (not a cancel) or answered an error: the
   parent's envelope carries the reason (the provider's, for a failed model
-  call), and the user is warned once, a recoverable ``ERROR``:
-  ``<instance> failed: <reason>``, or the hook's own words (``RunFailed``: a
-  context overflow, ``context.subagent_overflow_message``);
+  call) and the text the run wrote before it failed, and the user is warned
+  once, a recoverable ``ERROR``: ``<instance> failed: <reason>``, or the
+  hook's own words (``RunFailed``: a context overflow,
+  ``context.subagent_overflow_message``);
 - ``refused`` when a model refused its last answer (``agents/outcome.py``);
 - ``completed`` otherwise, ``partial`` for an answer cut at its output
   limit, followed by the cut's one warning (``outcome.cut_off_warning``),
@@ -210,10 +211,12 @@ class RunAnswer:
     """What the backend hook returns for a run it ran to its end.
 
     Attributes:
-        text: Its last non-empty answer (``""`` for none).
+        text: Its last non-empty answer (``""`` for none), one it wrote
+            before it failed too: a failed run's envelope carries it.
         outcome: How that answer ended (``agents/outcome.py``: ``REFUSED``,
             ``CUT``), None when it ended as an answer should.
-        error: Why it failed, when it did; None when it answered.
+        error: Why it failed, when it did (the provider's reason for a
+            failed model call, ``failure_reason``); None when it answered.
         state: The shared state keys it changed, with their new values.
     """
 
@@ -328,15 +331,25 @@ class RunFailed(Exception):
 
     A hook raises it for a failure it has words for (a sub-agent's context
     overflow, ``context.subagent_overflow_message``): its text is the
-    envelope's ``error`` and the user's warning, as given, and ``code`` that
-    warning's error code. Any other exception a hook lets out fails the run
-    with its text (its type's name, for none), warned of as ``<instance>
-    failed: <reason>`` with the type's name as its code.
+    envelope's ``error`` and the user's warning, as given, ``code`` that
+    warning's error code, and ``text`` the last text the run wrote before
+    it failed (``""`` for none), the envelope's ``result``. A failure in
+    the provider's words (a failed model call) a hook answers instead
+    (``RunAnswer.error``, ``failure_reason``, with the run's last text).
+    Any other exception a hook lets out fails the run with its text (its
+    type's name, for none), warned of as ``<instance> failed: <reason>``
+    with the type's name as its code, and no result.
     """
 
-    def __init__(self, error: str, *, code: str) -> None:
+    def __init__(self, error: str, *, code: str, text: str = "") -> None:
         super().__init__(error)
         self.code = code
+        self.text = text
+
+
+def failure_reason(error: BaseException) -> str:
+    """A failure's reason, as a failed run's envelope gives it: its text, else its type's name."""
+    return str(error) or type(error).__name__
 
 
 class Delegations:
@@ -508,9 +521,11 @@ class Delegations:
                 result=envelope(ref, RUN_INTERRUPTED, error=INTERRUPTED_ERROR), state={}, run=ref
             )
         except RunFailed as error:
-            return self._failed(ref, call_id, str(error), warning=str(error), code=error.code)
+            return self._failed(
+                ref, call_id, str(error), warning=str(error), code=error.code, text=error.text
+            )
         except Exception as error:  # noqa: BLE001 - a sub-agent's failure is its parent's to read
-            reason = str(error) or type(error).__name__
+            reason = failure_reason(error)
             logger.debug("subagent_failed", run=ref.run, exc_info=error)
             return self._failed(
                 ref, call_id, reason,

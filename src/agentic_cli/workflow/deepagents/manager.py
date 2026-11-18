@@ -64,7 +64,7 @@ from agentic_cli.workflow.config import (
     validate_agent_graph,
 )
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed
+from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
     CompactResult,
@@ -739,14 +739,16 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             Its last non-empty answer, as Deep Agents' own ``task`` read one
             (Anthropic may end with an empty ``end_turn`` after its final
             tool call), that answer's outcome mark
-            (``SubAgentOutcomeMiddleware``), and the shared keys it changed.
-            Its answers are the messages after its task message
-            (``_own_messages``): an inheriting run's history is not its own.
+            (``SubAgentOutcomeMiddleware``), and the shared keys it changed;
+            or, for a model call that failed, the provider's reason with the
+            last text it wrote, as of its last finished step. Its answers
+            are the messages after its task message (``_own_messages``): an
+            inheriting run's history is not its own.
 
         Raises:
             RunFailed: Its request no longer fits its model's window, still
-                after its summary (``subagent_overflow_message``).
-            Exception: Its model call failed (the provider's error).
+                after its summary (``subagent_overflow_message``), with the
+                last text it wrote.
         """
         graph = self._agent_graphs[run.ref.agent]
         task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
@@ -787,7 +789,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # goes on.
             if not run.control.own_cancel():
                 raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - the run fails; its parent reads why
+            # The run fails with the text it wrote before it.
+            wrote = _last_text(_answers_in(final, task.id))
             if is_context_overflow(error):
                 model = self._resolved_models.get(run.ref.agent)
                 raise RunFailed(
@@ -795,15 +799,17 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                         run.ref.agent, str(model.ref) if model is not None else "the model"
                     ),
                     code=OVERFLOW_ERROR_CODE,
+                    text=wrote,
                 ) from error
-            raise
+            # A model call failed: the provider's error.
+            logger.debug("subagent_failed", run=run.ref.run, exc_info=error)
+            return RunAnswer(text=wrote, error=failure_reason(error))
         finally:
             var_child_runnable_config.reset(detached)
         # Its work has ended (nothing below waits; as ADK's, which reads its
         # state back): no cancel of the run alone stops it now.
         run.control.finish()
-        own = _own_messages(final.get("messages") or [], task.id)
-        answers = [message for message in own if isinstance(message, AIMessage)]
+        answers = _answers_in(final, task.id)
         return RunAnswer(
             text=_last_text(answers),
             outcome=answer_outcome(answers[-1]) if answers else None,
@@ -964,6 +970,12 @@ def _own_messages(messages: list[Any], task_id: str | None) -> list[Any]:
         if task_id is not None and getattr(message, "id", None) == task_id:
             return messages[index + 1:]
     return []
+
+
+def _answers_in(values: dict[str, Any], task_id: str | None) -> list[AIMessage]:
+    """A run's own answers in its graph's ``values``: the AI messages after its task message."""
+    own = _own_messages(values.get("messages") or [], task_id)
+    return [message for message in own if isinstance(message, AIMessage)]
 
 
 def _last_text(answers: list[AIMessage]) -> str:

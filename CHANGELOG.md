@@ -1642,7 +1642,8 @@ the start of the entry's title.
   "agent": "<instance>", "run": "<run id>", "status": "<status>",
   "partial": <bool>, "result": "<its last text>", "error": <null or one
   line>}`: a failed run's `error` is the provider's reason (where ADK said
-  "Dynamic node <agent> failed"), a refused run's `a model refused the
+  "Dynamic node <agent> failed"), its `result` the text it wrote before it
+  failed, a refused run's `a model refused the
   request` with the refusal notice as its `result`, an interrupted run's
   `interrupted before it finished`. No delegation is an error result any
   more ("Error running sub-agent: …" is gone): the envelope says how the

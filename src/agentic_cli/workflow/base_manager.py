@@ -638,8 +638,12 @@ class BaseWorkflowManager(ABC):
         on ``run.message`` (after ``run.history`` for an inheriting one),
         from the shared state ``run.state``, reports the run's events to the
         turn's live events as they are made, and returns its last answer,
-        its outcome and the shared state it changed. A failure raises (the
-        provider's error, or ``RunFailed``). A cancel stops the run; the
+        its outcome and the shared state it changed. A failed model call is
+        answered (``RunAnswer.error``: the provider's reason,
+        ``failure_reason``) and a failure in the backend's own words raised
+        (``RunFailed``), each with the last text the run wrote, which its
+        envelope carries; any other exception it lets out fails the run with
+        no result. A cancel stops the run; the
         run's own (``run.control.own_cancel()``: a limit's, its parent's,
         the user's) returns what it has, its last text and the shared state
         it changed, and any other (its turn's) raises. Once the run's work
