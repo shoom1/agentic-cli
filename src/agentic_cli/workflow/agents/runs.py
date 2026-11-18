@@ -1,7 +1,8 @@
 """A manager's sub-agent runs, kept by conversation.
 
 Each run is named readably within its conversation: its instance
-``<agent>-<n>`` (``researcher-2``, numbered per agent) and its run
+``<agent>-<n>`` (``researcher-2``, numbered per agent, past the instances
+the conversation's store already keeps: ``number_from``) and its run
 ``<instance>#<n>`` (each instance runs once: ``#1``). The framework names a
 run as it starts it (``agents/delegate.py::Delegations``) with ``run_for``,
 keyed by (conversation, parent run, the parent's call id): the same key
@@ -200,6 +201,22 @@ class AgentRuns:
         )
         self._runs[key] = ref
         return ref
+
+    def number_from(self, conversation: SessionRef | None, counts: Mapping[str, int]) -> None:
+        """Number ``conversation``'s next instances of each agent past ``counts``.
+
+        ``counts[agent]`` is the highest instance number of ``agent`` the
+        conversation's store already keeps (another manager's: before a
+        restart or a switch of backend or store, or another process's between
+        two turns), so ``run_for``'s next instance of it
+        is ``<agent>-<counts[agent] + 1>`` at the earliest. A count is never
+        lowered: an instance this manager numbered already stays numbered,
+        and an open run keeps its name.
+        """
+        for agent, count in counts.items():
+            key = (conversation, agent)
+            if count > self._numbered.get(key, 0):
+                self._numbered[key] = count
 
     def observe(self, event: WorkflowEvent) -> None:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.

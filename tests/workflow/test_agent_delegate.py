@@ -10,7 +10,8 @@ answer says, with its envelope.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from agentic_cli.workflow.agents import (
     AgentRuns,
     SubAgentPolicy,
 )
+from agentic_cli.workflow.agents import delegate as delegate_module
 from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
 from agentic_cli.workflow.agents.delegate import (
     AgentRun,
@@ -43,8 +45,10 @@ from agentic_cli.workflow.sessions import (
     RunRef,
     SessionRef,
     ToolCallRef,
+    close_turn_scope,
     get_active_run,
     get_active_tool_call,
+    open_turn_scope,
     reset_active_tool_call,
     reset_active_turn,
     set_active_tool_call,
@@ -445,3 +449,216 @@ async def test_a_delegation_blocks_no_event_loop():
         result, _ = await delegated(delegations(hook), request())
 
     assert result.result["status"] == RUN_COMPLETED
+
+
+def storing(*answers: Any) -> tuple[Callable[[SessionRef], Awaitable[dict[str, int]]], list[SessionRef]]:
+    """A ``stored`` that answers each ask with the next of ``answers`` (an
+    exception is raised, an ``asyncio.Event`` waited on, then the next
+    answer given); the conversations it was asked about. Each ask yields to
+    the loop before it answers, as a store's read does, so parallel runs
+    meet while one asks."""
+    asked: list[SessionRef] = []
+    left = list(answers)
+
+    async def stored(conversation: SessionRef) -> dict[str, int]:
+        asked.append(conversation)
+        answer = left.pop(0)
+        if isinstance(answer, asyncio.Event):
+            await answer.wait()
+            answer = left.pop(0)
+        await asyncio.sleep(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    return stored, asked
+
+
+@contextlib.contextmanager
+def a_turn() -> Iterator[None]:
+    """A turn of ``CONVERSATION``, as a manager's has it: the active turn,
+    its span open, its live events reported."""
+    token = set_active_turn(CONVERSATION)
+    span = open_turn_scope()
+    try:
+        with live_events.reporting(LiveEvents()):
+            yield
+    finally:
+        close_turn_scope(span)
+        reset_active_turn(token)
+
+
+async def in_turn(made: Delegations, *asked: DelegationRequest) -> list[Any]:
+    """Each of ``asked`` delegated at once in a turn of ``CONVERSATION``; their results."""
+    with a_turn():
+        return list(await asyncio.gather(*(made.delegate(one) for one in asked)))
+
+
+@pytest.fixture
+def logged(monkeypatch) -> list[dict]:
+    """Every log call of ``agents/delegate.py``, with its level."""
+    events: list[dict] = []
+
+    class Recorder:
+        def __getattr__(self, level: str):
+            def log(event: str, **fields) -> None:
+                events.append({"event": event, "log_level": level, **fields})
+
+            return log
+
+    monkeypatch.setattr(delegate_module, "logger", Recorder())
+    return events
+
+
+class TestNumberedPastTheStored:
+    """A conversation's store may keep instances another manager ran (a
+    restart, a switch of backend or store, another process that had the
+    conversation between turns): ``stored`` says how many of each type,
+    asked once per conversation per turn, before the turn's first run is
+    named."""
+
+    async def test_the_first_run_is_numbered_past_them(self):
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2})
+
+        (result,) = await in_turn(delegations(hook, stored=stored), request())
+
+        assert (result.result["agent"], result.run.run) == ("researcher-3", "researcher-3#1")
+        assert asked == [CONVERSATION]
+
+    async def test_it_is_asked_once_per_conversation_per_turn(self):
+        """A turn's runs ask once; the next turn asks again, since another
+        process may have run the conversation in between."""
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2}, {"researcher": 7})
+        made = delegations(hook, stored=stored)
+
+        with a_turn():
+            first = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
+        later = await in_turn(made, request(call_id="c3"))
+
+        assert [r.result["agent"] for r in first + later] == [
+            "researcher-3", "researcher-4", "researcher-8",
+        ]
+        assert asked == [CONVERSATION, CONVERSATION]
+
+    async def test_parallel_first_runs_ask_once_and_both_are_numbered_past_them(self):
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2})
+
+        results = await in_turn(
+            delegations(hook, stored=stored), request(call_id="c1"), request(call_id="c2")
+        )
+
+        assert sorted(r.result["agent"] for r in results) == ["researcher-3", "researcher-4"]
+        assert asked == [CONVERSATION]
+
+    async def test_a_brief_that_cannot_start_a_run_asks_nothing(self):
+        hook, _ = answering()
+        stored, asked = storing()
+
+        (result,) = await in_turn(
+            delegations(hook, stored=stored), request({"agent_type": "researcher"})
+        )
+
+        assert (result.run, asked) == (None, [])
+
+    async def test_a_store_that_cannot_be_read_is_asked_again_at_the_next_run(self):
+        hook, _ = answering()
+        stored, asked = storing(RuntimeError("database is locked"), {"researcher": 5})
+        made = delegations(hook, stored=stored)
+
+        with a_turn():
+            results = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
+
+        assert [r.result["agent"] for r in results] == ["researcher-1", "researcher-6"]
+        assert asked == [CONVERSATION, CONVERSATION]
+
+    async def test_a_store_that_cannot_be_read_is_warned_of_in_the_log(self, logged):
+        hook, _ = answering()
+        failure = RuntimeError("database is locked")
+        stored, _ = storing(failure)
+
+        (result,) = await in_turn(delegations(hook, stored=stored), request())
+
+        assert result.result["status"] == RUN_COMPLETED
+        assert [e for e in logged if e["log_level"] == "warning"] == [{
+            "event": "subagent_instances_unread", "log_level": "warning",
+            "session_id": CONVERSATION.session_id, "error": "database is locked",
+        }]
+        assert [
+            e["exc_info"] for e in logged
+            if (e["event"], e["log_level"]) == ("subagent_instances_unread", "debug")
+        ] == [failure]
+
+    async def test_an_ask_a_cancel_stopped_starts_no_run_and_is_asked_again(self):
+        hook, ran = answering()
+        waiting = asyncio.Event()
+        stored, asked = storing(waiting, {"researcher": 1})
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, stored=stored)
+
+        with a_turn():
+            stopped = asyncio.create_task(made.delegate(request(call_id="c1")))
+            while not asked:
+                await asyncio.sleep(0)
+            stopped.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stopped
+            result = await made.delegate(request(call_id="c2"))
+
+        assert result.result["agent"] == "researcher-2"
+        assert asked == [CONVERSATION, CONVERSATION]
+        assert [run.ref.run for run in ran] == ["researcher-2#1"]
+        assert [record.ref.run for record in runs.records(CONVERSATION)] == ["researcher-2#1"]
+
+    async def test_without_a_turns_span_every_run_asks(self):
+        """A conversation active with no turn's span open (a caller that set
+        the active turn alone) has no turn to remember the ask for."""
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2}, {"researcher": 2})
+        made = delegations(hook, stored=stored)
+
+        token = set_active_turn(CONVERSATION)
+        try:
+            with live_events.reporting(LiveEvents()):
+                results = [await made.delegate(request(call_id=c)) for c in ("c1", "c2")]
+        finally:
+            reset_active_turn(token)
+
+        assert [r.result["agent"] for r in results] == ["researcher-3", "researcher-4"]
+        assert asked == [CONVERSATION, CONVERSATION]
+
+    async def test_the_managers_delegations_ask_its_stored_instances(self):
+        """``BaseWorkflowManager._stored_instances``: the base keeps none; a
+        backend that stores transcripts says how many of each type."""
+        from agentic_cli.workflow.base_manager import BaseWorkflowManager
+        from tests.conftest import MockContext
+
+        class Storing(BaseWorkflowManager):
+            backend_type = "storing"
+
+            def _get_state_tools(self) -> list:
+                return []
+
+            async def _do_initialize(self) -> None:
+                return None
+
+            async def process(self, message, user_id, session_id=None):  # pragma: no cover
+                yield WorkflowEvent.text(message)
+
+            async def _run_agent(self, run: AgentRun) -> RunAnswer:
+                return RunAnswer(text="X is 42.")
+
+        with MockContext(google_api_key="test-key") as context:
+            manager = Storing(list(TYPES.values()), settings=context.settings)
+            base = await BaseWorkflowManager._stored_instances(manager, CONVERSATION)
+
+            async def stored(conversation: SessionRef) -> dict[str, int]:
+                return {"researcher": 4}
+
+            manager._stored_instances = stored
+            (result,) = await in_turn(manager._delegations, request())
+
+        assert base == {}
+        assert result.result["agent"] == "researcher-5"

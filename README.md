@@ -1351,11 +1351,12 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   agent built from a config is offered `transfer_to_agent`; each sub-agent
   type runs on a runner of its own, each run on a child session (app
   `<app_name>--agents`, id `<conversation id>/<instance>`), which
-  `/sessions` never lists; an inheriting run's child session starts with
-  the conversation's events. **On Deep Agents**, each sub-agent's graph runs
-  apart from its parent's, in a task of its own; an inheriting run starts
-  from the conversation's messages, which its own summarization compacts
-  when they are too large for its model.
+  `/sessions` never lists and which is deleted with its conversation; an
+  inheriting run's child session starts with the conversation's events.
+  **On Deep Agents**, each sub-agent's graph runs apart from its parent's,
+  in a task of its own; an inheriting run starts from the conversation's
+  messages, which its own summarization compacts when they are too large
+  for its model.
 - **The limits in 0.7.0.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task`. Each raises

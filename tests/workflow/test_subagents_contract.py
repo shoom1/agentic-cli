@@ -2331,3 +2331,85 @@ class TestOffTheLoop:
             events = await crew.turn()
 
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+
+
+async def transcripts(crew: Crew) -> list[str]:
+    """The sub-agent instances whose transcript the conversation's store keeps.
+
+    ADK keeps each run's transcript in a child session of the conversation's
+    (``adk/sessions.py``: app ``child_app(app)``, session
+    ``<conversation>/<instance>``). Deep Agents keeps one only as a
+    checkpoint: a thread of the conversation's own (``[app, user, session,
+    <instance>]``) or a namespace under its thread; a sub-agent is compiled
+    without a checkpointer, so there is none.
+    """
+    conversation = crew.conversation
+    if crew.backend == "adk":
+        from agentic_cli.workflow.adk.sessions import child_app
+
+        listed = await crew.manager._session_service.list_sessions(
+            app_name=child_app(conversation.app_name), user_id=conversation.user_id,
+        )
+        prefix = f"{conversation.session_id}/"
+        return sorted(
+            session.id.removeprefix(prefix) for session in listed.sessions
+            if session.id.startswith(prefix)
+        )
+    found: set[str] = set()
+    own = [conversation.app_name, conversation.user_id, conversation.session_id]
+    async for saved in crew.manager._checkpointer.alist(None):
+        configurable = saved.config["configurable"]
+        thread = json.loads(configurable["thread_id"])
+        if thread[:3] != own:
+            continue
+        if len(thread) > 3:
+            found.add(str(thread[3]))
+        elif configurable.get("checkpoint_ns"):
+            found.add(configurable["checkpoint_ns"])
+    return sorted(found)
+
+
+class TestARunsTranscriptIsNoConversation:
+    """A sub-agent run's transcript belongs to its conversation: it never
+    lists or opens as a conversation of its own, and deleting the
+    conversation deletes it. (Only ADK keeps one, so only ADK numbers a new
+    manager's instances past the ones a conversation's store keeps:
+    ``tests/workflow/adk/test_child_sessions.py``.)"""
+
+    @staticmethod
+    def two_runs(make_crew) -> Crew:
+        return make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("researcher", "Find Y.", "c2")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+    async def test_deleting_the_conversation_deletes_every_runs_transcript(self, make_crew):
+        crew = self.two_runs(make_crew)
+        manager = crew.manager
+
+        await crew.turn()
+        kept = await transcripts(crew)
+        deleted = await manager.delete_session(SESSION, user_id=USER)
+
+        # Deep Agents keeps no sub-agent transcript (no checkpointer).
+        assert kept == (["researcher-1", "researcher-2"] if crew.backend == "adk" else [])
+        assert deleted is True
+        assert await transcripts(crew) == []
+        assert await manager.list_sessions(user_id=USER) == []
+
+    async def test_none_lists_or_opens_as_a_conversation(self, make_crew):
+        crew = self.two_runs(make_crew)
+        manager = crew.manager
+
+        await crew.turn()
+
+        assert [row.session_id for row in await manager.list_sessions(user_id=USER)] == [SESSION]
+        for instance in ("researcher-1", "researcher-2"):
+            assert await manager.session_info(f"{SESSION}/{instance}", user_id=USER) is None
+            assert await manager.session_exists(f"{SESSION}/{instance}", user_id=USER) is False
+        assert await manager.recent_messages(SESSION, user_id=USER) == [
+            {"role": "user", "content": "Go."}, {"role": "assistant", "content": "Done."},
+        ]

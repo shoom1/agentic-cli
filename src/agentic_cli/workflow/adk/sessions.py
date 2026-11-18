@@ -30,7 +30,10 @@ service: app ``child_app(app_name)`` (``<app>--agents``), session
 ``child_session_id(conversation, instance)`` (``<conversation>/<instance>``),
 the conversation's user. Under its own app name it never lists as a
 conversation. ADK keys a session by at most ``MAX_KEY`` characters, so a
-longer id is refused before anything is stored.
+longer id is refused before anything is stored. A conversation's children
+are deleted with it (``delete_children``: ``ServiceSessions.delete``, the
+manager's and its reader's), and each turn numbers its instances past the
+ones they keep (``stored_instances``), so none is ever another run's.
 """
 
 from __future__ import annotations
@@ -80,6 +83,76 @@ def child_session_id(conversation: str, instance: str) -> str:
             f"ADK stores at most {MAX_KEY}."
         )
     return session_id
+
+
+async def _children(
+    service: "BaseSessionService", app_name: str, user_id: str, conversation: str
+) -> list[str]:
+    """The ids of ``conversation``'s child sessions, ``user_id``'s, in
+    ``app_name``'s child app.
+
+    Each is ``<conversation>/<instance>``, an instance id holding no ``/``:
+    a conversation whose own id goes on past a ``/`` (``s/x``) has children
+    of its own, which are not ``s``'s. Read with ADK's public listing, which
+    returns each session without its events.
+    """
+    prefix = f"{conversation}/"
+    listed = await service.list_sessions(app_name=child_app(app_name), user_id=user_id)
+    return [
+        session.id for session in getattr(listed, "sessions", None) or ()
+        if session.id.startswith(prefix) and "/" not in session.id[len(prefix):]
+    ]
+
+
+async def delete_children(
+    service: "BaseSessionService", app_name: str, user_id: str, conversation: str
+) -> int:
+    """Delete ``conversation``'s child sessions: its sub-agent instances' transcripts.
+
+    Every session of ``app_name``'s child app (``child_app``) that is
+    ``user_id``'s and ``conversation``'s (``<conversation>/<instance>``);
+    their events go with them (ADK's session store deletes a session's
+    events with it). What a conversation's delete leaves of it otherwise.
+
+    Args:
+        service: The session service the conversation is in.
+        app_name: The conversation's app (not the child app).
+        user_id: The conversation's user.
+        conversation: The conversation's id.
+
+    Returns:
+        How many it deleted.
+    """
+    children = await _children(service, app_name, user_id, conversation)
+    for session_id in children:
+        await service.delete_session(
+            app_name=child_app(app_name), user_id=user_id, session_id=session_id
+        )
+    return len(children)
+
+
+async def stored_instances(
+    service: "BaseSessionService", app_name: str, user_id: str, conversation: str
+) -> dict[str, int]:
+    """The highest instance number of each agent type ``conversation``'s child sessions keep.
+
+    Read from their ids (``<conversation>/<type>-<n>``, ``AgentRuns``'
+    instance ids): what another manager ran there (before a restart, or in
+    another process between two turns), which this one numbers past. An id
+    that names no such instance is left out.
+
+    Args:
+        service: The session service the conversation is in.
+        app_name: The conversation's app (not the child app).
+        user_id: The conversation's user.
+        conversation: The conversation's id.
+    """
+    counts: dict[str, int] = {}
+    for session_id in await _children(service, app_name, user_id, conversation):
+        agent, _, number = session_id.rpartition("/")[2].rpartition("-")
+        if agent and number.isascii() and number.isdigit():
+            counts[agent] = max(counts.get(agent, 0), int(number))
+    return counts
 
 
 def typed_prompts(events: list["Event"]) -> list[str]:
@@ -227,11 +300,13 @@ class ServiceSessions:
         return rows
 
     async def delete(self, ref: SessionRef) -> bool:
-        """Delete ``ref``'s session; False if there was none.
+        """Delete ``ref``'s session and its sub-agents' transcripts; False if there was none.
 
         ADK's own delete answers nothing, for an unknown id too, so the
         session is looked up first, without its events
-        (``num_recent_events=0``).
+        (``num_recent_events=0``). Its child sessions (``delete_children``)
+        are deleted after it, whatever the look found: a conversation
+        already gone may have left some. The answer is the conversation's.
         """
         from google.adk.sessions.base_session_service import GetSessionConfig
 
@@ -239,12 +314,12 @@ class ServiceSessions:
             app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
             config=GetSessionConfig(num_recent_events=0),
         )
-        if stored is None:
-            return False
-        await self._service.delete_session(
-            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
-        )
-        return True
+        if stored is not None:
+            await self._service.delete_session(
+                app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+            )
+        await delete_children(self._service, ref.app_name, ref.user_id, ref.session_id)
+        return stored is not None
 
 
 def session_db_url(settings: Any, store: str) -> str | None:
