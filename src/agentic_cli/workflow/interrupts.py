@@ -115,11 +115,10 @@ def unrecorded(
     """The answer for an open call no record holds: its job's state, else why it has none.
 
     ``OpenCalls.answer`` gives it for a call it holds nothing for, matching
-    the job by the instance of the call's run (``started_by``). ADK's
-    ``left_open`` gives it for the root's own calls it answers (``started_by``
-    None), since each turn clears its conversation's record as it ends, and
-    a new process has none; a sub-agent's call there gets no job, its run
-    being numbered no more.
+    the job by the instance of the call's run (``started_by``); ADK's
+    ``left_open`` answers the root's own calls through it (``started_by``
+    None), and a sub-agent's call with no job, its run being numbered no
+    more.
     """
     record = job_for_call(call_id, started_by=started_by)
     if record is not None:
