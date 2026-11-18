@@ -563,6 +563,33 @@ class TestTheAgentAtWork:
         ]
         assert ui.responses() == ["Done."]
 
+    async def test_a_run_that_waits_says_so_under_its_name(self):
+        """A run waiting for a free working slot, or for the user, says so;
+        once it works again, its line says that too. Its start and end write
+        no line (``/agents`` lists them)."""
+        events = [
+            _by(RESEARCHER_1, WorkflowEvent.tool_call("lookup", {"q": "x"})),
+            WorkflowEvent.agent_run(RESEARCHER_2, "started", title="Find Y.", call_id="c2"),
+            WorkflowEvent.agent_run(RESEARCHER_2, "queued", call_id="c2"),
+            WorkflowEvent.agent_run(RESEARCHER_2, "running", call_id="c2"),
+            WorkflowEvent.agent_run(RESEARCHER_2, "input_required", call_id="c2"),
+            WorkflowEvent.agent_run(RESEARCHER_2, "running", call_id="c2"),
+            WorkflowEvent.agent_run(RESEARCHER_2, "completed", call_id="c2", result="Y."),
+        ]
+
+        ui, lines = await _watch(events)
+
+        assert lines == [
+            "researcher-1 › Calling: lookup",
+            "researcher-1 › Calling: lookup",
+            "researcher-2 › Queued: waiting for a free slot",
+            "researcher-2 › Working...",
+            "researcher-2 › Waiting for your answer",
+            "researcher-2 › Working...",
+            "researcher-2 › Working...",
+        ]
+        assert ui.rich() == [] and ui.responses() == []
+
     async def test_a_sub_agents_text_without_a_run_keeps_its_agents_name(self):
         """An event that names no run (an app's own event processor) is
         shown as before: under its agent's name."""

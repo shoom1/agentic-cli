@@ -274,7 +274,8 @@ class TestTaskDescription:
             "response run in parallel.\n\n"
             "A sub-agent sees only the brief you write, unless its line below says it sees "
             "this conversation: put in the brief everything it needs to know.\n\n"
-            "At most 20 runs per turn.\n\n"
+            "At most 4 sub-agents work at once; more calls in one response wait for a free "
+            "slot. At most 20 runs per turn.\n\n"
             "The agents you can hand a task to:\n"
             "- researcher: Finds facts.\n"
             "- writer (its brief also needs: deliverable, done_when): Writes the report."
@@ -300,11 +301,19 @@ class TestTaskDescription:
         )
         assert [e["agent"] for e in logged] == ["researcher"]
 
-    def test_it_states_the_runs_a_turn_may_start_with_the_policys_number(self):
+    def test_it_states_the_working_slots_then_the_runs_a_turn_may_start_with_the_policys_numbers(
+        self,
+    ):
         policy = SubAgentPolicy(max_active=2, max_runs_per_turn=3)
 
-        assert brief_module.limit_sentences(policy) == ["At most 3 runs per turn."]
-        assert task_description(TYPES, policy).split("\n\n")[2] == "At most 3 runs per turn."
+        assert brief_module.limit_sentences(policy) == [
+            "At most 2 sub-agents work at once; more calls in one response wait for a free slot.",
+            "At most 3 runs per turn.",
+        ]
+        assert task_description(TYPES, policy).split("\n\n")[2] == (
+            "At most 2 sub-agents work at once; more calls in one response wait for a free "
+            "slot. At most 3 runs per turn."
+        )
 
     def test_the_limits_in_force_are_one_paragraph_before_the_agents(self, monkeypatch):
         seen: list[SubAgentPolicy] = []

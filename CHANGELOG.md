@@ -177,10 +177,10 @@ the start of the entry's title.
 - On ADK `TASK_PROGRESS` comes only when a tool call changed the task list,
   and a list whose tasks are all done stays: `get_tasks` answers it, where
   0.6 cleared it. (Changed: **On ADK, task progress is reported…**)
-- A sub-agent run past 100 model calls ends with a partial answer, and a turn
-  starts at most 20 sub-agent runs; an app sets other numbers with
-  `subagents=SubAgentPolicy(...)`. (Added: **`SubAgentPolicy` and
-  `AgentLimits`…**)
+- A sub-agent run past 100 model calls ends with a partial answer, more than
+  4 parallel delegations queue, and a turn starts at most 20 sub-agent runs;
+  an app sets other numbers with `subagents=SubAgentPolicy(...)`. (Added:
+  **`SubAgentPolicy` and `AgentLimits`…**)
 
 #### Settings that moved or changed meaning
 
@@ -575,7 +575,17 @@ the start of the entry's title.
   run's limits, enforced on both backends** (`agentic_cli.workflow`, and
   `agentic_cli.workflow.agents` with `DEFAULT_LIMITS`). Frozen dataclasses.
   `SubAgentPolicy` holds an app's numbers for its sub-agents: `max_active`
-  (4, the runs working at once in a conversation, at any depth),
+  (4: at most that many runs of a conversation work at once, at any depth;
+  a run past them waits `queued` for a free working slot, the time it waits
+  not counted against its `timeout`, and a run that waits on its children
+  or on the user (a question, a permission prompt) lends its slot
+  meanwhile, taking one back after ahead of the runs that have not
+  started, so nested delegations never deadlock (a prompt no one can be
+  shown lends nothing: `BaseWorkflowManager.can_request_user_input()`, an
+  input callback set for the turn, which has not ended); `task`'s
+  description says "At most 4 sub-agents work at once; more calls in one
+  response wait for a free slot."; provisional: `agentic_cli.workflow.agents.slots.SlotPool`,
+  the manager's delegations' `slots(conversation)`),
   `max_runs_per_turn` (20: a turn starts at most that many runs, at any
   depth; a `task` call past it starts no run, and its caller reads
   `{"success": false, "error": "This turn has already started 20 sub-agent
@@ -670,8 +680,9 @@ the start of the entry's title.
   to the user, never to its parent (contract-tested on both backends).
 - **`/agents`: the conversation's sub-agent runs.** A table of the open
   conversation's sub-agent runs, each followed by the runs it started:
-  instance, type, status (`running`, `completed`, `completed (partial)` for
-  an answer cut at its output limit, `refused`, `failed`, `interrupted`),
+  instance, type, status (`running`, `queued` waiting for a free working
+  slot, `needs you` waiting on the user, `completed`, `completed (partial)`
+  for an answer cut at its output limit, `refused`, `failed`, `interrupted`),
   run, title, tokens in/out (from the usage ledger, so a run still going
   shows what it has used so far) and time. `/agents <id>` shows one instance
   (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
@@ -724,10 +735,12 @@ the start of the entry's title.
   (`WorkflowEvent.agent_run`; `metadata["status"]` `started`, with its
   brief's title, the brief's filled fields (`brief`), who started it
   (`started_by`: `agent:<instance>`, `agent:root` for the main agent) and
-  how it runs (`mode`: `blocking`, its caller waiting for it), then
-  `completed` (`partial` for an answer cut at its output limit), `refused`,
-  `failed` or `interrupted`, with the first 200 characters of its result; a
-  run fails when it cannot finish (a model call of its fails, its request no
+  how it runs (`mode`: `blocking`, its caller waiting for it), then, while
+  it works, `queued` (waiting for a free working slot), `running` (once it
+  has one, and once the user has answered) and `input_required` (waiting
+  on the user), then `completed` (`partial` for an answer cut at its output
+  limit), `refused`, `failed` or `interrupted`, with the first 200
+  characters of its result; a run fails when it cannot finish (a model call of its fails, its request no
   longer fits its model's window, or its model gives no answer), and the
   sub-agent's answer is never read for success, so an answer that is JSON
   saying it failed completes), the same on both backends: the framework
@@ -737,13 +750,15 @@ the start of the entry's title.
   provisional: `records(ref)`, `record(ref, id)`, `number_from(ref, counts)`
   to number a conversation's instances past the ones its store keeps; a
   record has the brief,
-  `started_by`, `mode` and, for a cancelled run, `cancelled_by`); a run a
+  `started_by`, `mode` and, for a cancelled run, `cancelled_by`, and its
+  status is `running`, `queued` or `input_required` while it works); a run a
   stopped or failed turn leaves open is recorded `interrupted`.
   `get_active_run()` (exported
   from `agentic_cli.workflow` with `RunRef` and `root_run`) is the sub-agent
   run at work, None in the root's own: a sub-agent's
   tools, permission checks and questions see it. A consumer that does not
-  know `AGENT_RUN` ignores it; the CLI ignores it.
+  know `AGENT_RUN` ignores it; the CLI's events box says when a run waits
+  for a slot or for the user.
 
 - **A backend's conversations, read without its manager:
   `agentic_cli.workflow.session_readers`.** `await

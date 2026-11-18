@@ -80,6 +80,10 @@ class Runs:
         ), at)
         return ref
 
+    def now(self, ref: RunRef, status: str, *, at: int) -> None:
+        """``ref``'s run says how it works now: ``queued``, ``running`` or ``input_required``."""
+        self._observe(WorkflowEvent.agent_run(ref, status), at)
+
     def end(self, ref: RunRef, status: str, *, at: int, result: str = "",
             error: str | None = None, partial: bool = False) -> None:
         self._observe(WorkflowEvent.agent_run(
@@ -151,6 +155,23 @@ class TestTheList:
             ("researcher-2", "researcher", "running", "#1", "Find Y.", "—", "10s"),
             ("checker-1", "checker", "refused", "#1", "Check it.", "—", "1s"),
             ("fetcher-1", "fetcher", "failed", "#1", "Fetch Z.", "—", "2s"),
+        ]
+
+    async def test_a_working_run_says_whether_it_works_waits_for_a_slot_or_needs_the_user(
+        self, manager
+    ):
+        runs = Runs(manager, manager.session_ref("s1"))
+        runs.start("researcher", "c1", "Find X.", at=0)
+        queued = runs.start("researcher", "c2", "Find Y.", at=1)
+        runs.now(queued, "queued", at=1)
+        asking = runs.start("researcher", "c3", "Find Z.", at=2)
+        runs.now(asking, "input_required", at=30)
+
+        session = await agents(manager)
+
+        (table,) = session.add_rich.call_args.args
+        assert [(row[0], row[2]) for row in rows_of(table)] == [
+            ("researcher-1", "running"), ("researcher-2", "queued"), ("researcher-3", "needs you"),
         ]
 
     async def test_a_conversation_without_runs_says_so(self, manager):

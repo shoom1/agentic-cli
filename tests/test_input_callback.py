@@ -130,3 +130,42 @@ class TestOnlyInsideItsTurn:
             assert await manager.request_user_input(_request()) == "answer"
         finally:
             close_turn_scope(span)
+
+
+class TestASubAgentRunWaitingOnTheUser:
+    """A question or prompt of a sub-agent run that holds a working slot
+    lends the slot while the user answers (the run ``input_required``), and
+    takes it back after (``running``); the root's asks as before."""
+
+    async def test_it_lends_its_slot_while_the_user_answers(self):
+        from agentic_cli.workflow.agents import RUN_INPUT_REQUIRED, AgentRuns, SubAgentPolicy
+        from tests.workflow.test_agent_delegate import CONVERSATION, Turn, delegations, request
+
+        manager = _manager()
+        runs = AgentRuns()
+        seen: list[tuple[int, str]] = []
+
+        async def answer(asked: UserInputRequest) -> str:
+            seen.append((made.slots(CONVERSATION).free, runs.records(CONVERSATION)[0].status))
+            return "B"
+
+        async def hook(run):
+            from agentic_cli.workflow.agents.delegate import RunAnswer
+
+            return RunAnswer(text=await manager.request_user_input(_request()))
+
+        manager.set_input_callback(answer)
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_active=1))
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(turn.task, 5)
+
+        assert seen == [(1, RUN_INPUT_REQUIRED)]  # its one slot free while the user answers
+        assert turn.of("researcher-1") == ["started", "input_required", "running", "completed"]
+        assert turn.result.result["result"] == "B"
+        assert made.slots(CONVERSATION).free == 1
+
+    async def test_the_roots_own_question_lends_nothing(self):
+        manager = _manager()
+        manager.set_input_callback(AsyncMock(return_value="answer"))
+
+        assert await manager.request_user_input(_request()) == "answer"

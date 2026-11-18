@@ -49,7 +49,12 @@ from agentic_cli.models import (
     resolve_model,
 )
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.agents.delegate import AgentRun, Delegations, RunAnswer
+from agentic_cli.workflow.agents.delegate import (
+    AgentRun,
+    Delegations,
+    RunAnswer,
+    waiting_on_user,
+)
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.runs import AgentRuns
 from agentic_cli.workflow.usage import (
@@ -523,6 +528,18 @@ class BaseWorkflowManager(ABC):
                 # fall through and clear this context's value instead.
                 pass
         self._user_input_callback.set(None)
+
+    def can_request_user_input(self) -> bool:
+        """Whether ``request_user_input`` could reach the user from this context now.
+
+        False when no input callback is set for this context, or the turn
+        this context comes from has ended: ``request_user_input`` then raises
+        ``UserInputUnavailable`` at once. The permission engine asks this
+        before a sub-agent run lends its working slot for a prompt: a prompt
+        no one can be shown is denied without waiting, and the run keeps its
+        slot.
+        """
+        return self._user_input_callback.get() is not None and not turn_has_ended()
 
     @property
     def agent_configs(self) -> list[AgentConfig]:
@@ -2508,6 +2525,15 @@ class BaseWorkflowManager(ABC):
         (``get_active_run()``; None in the root's own calls), so the consumer
         can say which agent asks, whoever built the request.
 
+        A sub-agent run waits for the answer with its working slot lent
+        (``agents/delegate.py::waiting_on_user``): it is ``input_required``
+        meanwhile, another run may work in its slot, and it takes a slot
+        back, ahead of the runs that have not started, once the user has
+        answered. A request no one can answer (``can_request_user_input``)
+        raises before the run lends anything. A callback that answers
+        without waiting still lends the slot: a run queued for one may then
+        work in it before the asking run takes it back.
+
         Args:
             request: The user input request.
 
@@ -2544,10 +2570,11 @@ class BaseWorkflowManager(ABC):
 
         # A call cancelled at its question was not run (workflow/interrupts.py).
         call = get_active_tool_call()
-        if call is None:
-            return await callback(request)
-        with self._open_calls.asking(call.call_id):
-            return await callback(request)
+        async with waiting_on_user():
+            if call is None:
+                return await callback(request)
+            with self._open_calls.asking(call.call_id):
+                return await callback(request)
 
     # Async context manager support
 

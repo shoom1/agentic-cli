@@ -31,6 +31,24 @@ Each run works under its ``RunControl`` (``agents/control.py``,
 limit running while the hook does, and a cancel of the run alone
 (``Delegations.cancel``), which its limits use too.
 
+Each run works in a slot of its conversation's ``SlotPool``
+(``agents/slots.py``, ``SubAgentPolicy.max_active`` slots; the root takes
+none): it takes one before its hook runs, waiting ``queued`` (then
+``running``) when every slot is held, and gives it back at its end. A run
+that delegates lends its slot while it waits for its child (one lend for
+all the children it waits on at once), and the child that ends last hands
+it straight back, so a parent goes on ahead of the runs that have not
+started, and nested delegations never wait on each other's slots. A cancel
+of a queued run ends it as a cancel of a working run does, and its place
+in the queue goes with it. The time a run waits for its slot is not
+counted against its time limit; the time it lends its slot is.
+
+A run that waits on the user (``waiting_on_user``: a question, a permission
+prompt, ``BaseWorkflowManager.request_user_input`` and the permission
+engine) says ``input_required``, lends its slot for the wait, and says
+``running`` once it has its slot back; a prompt no one can be shown (no
+input callback) lends nothing.
+
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
 the run works. A run ends:
@@ -58,7 +76,9 @@ the run works. A run ends:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -79,13 +99,17 @@ from agentic_cli.workflow.agents.runs import (
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
+    RUN_QUEUED,
     RUN_REFUSED,
+    RUN_RUNNING,
     RUN_STARTED,
     AgentRuns,
     result_head,
     run_title,
 )
+from agentic_cli.workflow.agents.slots import NEW, Slot, SlotPool
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
@@ -219,6 +243,72 @@ RunHook = Callable[[AgentRun], Awaitable[RunAnswer]]
 StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
 
 
+@dataclass
+class _Working:
+    """A run at work, as its own task sees it: its slot in its conversation's
+    pool, the child runs it waits on (by run id), and its waits on the user."""
+
+    ref: RunRef
+    call_id: str
+    pool: SlotPool
+    slot: Slot
+    emit: Callable[[WorkflowEvent], None]
+    children: set[str] = field(default_factory=set)
+    asking: int = 0
+
+    def waits_on_only(self, child: str) -> bool:
+        """Whether ``child`` is all the run waits on: its last child, the user not asked."""
+        return self.asking == 0 and self.children <= {child}
+
+    @asynccontextmanager
+    async def waiting_on_user(self) -> AsyncIterator[None]:
+        """``input_required``, its slot lent for the block, then ``running``; nested waits once."""
+        self.asking += 1
+        if self.asking == 1:
+            self.emit(WorkflowEvent.agent_run(self.ref, RUN_INPUT_REQUIRED, call_id=self.call_id))
+        stopped = False
+        try:
+            async with self.pool.lent(self.slot):
+                yield
+        except asyncio.CancelledError:
+            stopped = True
+            raise
+        finally:
+            self.asking -= 1
+            if self.asking == 0 and not stopped:
+                self.emit(WorkflowEvent.agent_run(self.ref, RUN_RUNNING, call_id=self.call_id))
+
+
+#: The run at work in this task (``_in_run`` sets it in the run's own task,
+#: whose copies its tool calls run in); None in the root's own work.
+_working: ContextVar[_Working | None] = ContextVar("agentic_cli_working_run", default=None)
+
+
+@asynccontextmanager
+async def waiting_on_user() -> AsyncIterator[None]:
+    """The block waits on the user (a question, a permission prompt): the run lends its slot.
+
+    In a sub-agent run's own work, the run says ``input_required``, its slot
+    works for another run meanwhile, and once the block ends it takes the
+    slot back, ahead of the runs that have not started, and says
+    ``running``; nested waits (a prompt waiting its turn behind another's,
+    then the prompt) count once. A wait a cancel ends takes nothing back:
+    the run is being stopped. Nothing in the root's own work, nor outside a
+    run.
+
+    Only a wait that can block belongs in it: a lent slot goes to the first
+    run queued for one, which may work its whole run in it before this run
+    takes it back. ``request_user_input`` and the permission engine enter it
+    only when someone can answer (``can_request_user_input``).
+    """
+    working = _working.get()
+    if working is None:
+        yield
+        return
+    async with working.waiting_on_user():
+        yield
+
+
 class RunFailed(Exception):
     """A run's failure in its backend's words: what its parent and its user read.
 
@@ -278,6 +368,16 @@ class Delegations:
         self._numbering = asyncio.Lock()
         # The working runs' controls, by (conversation, run id).
         self._controls: dict[tuple[SessionRef | None, str], RunControl] = {}
+        # Each conversation's working slots, made on first use and kept: a
+        # slot lent while its run waits must come back to the pool it left.
+        self._pools: dict[SessionRef | None, SlotPool] = {}
+
+    def slots(self, conversation: SessionRef | None) -> SlotPool:
+        """``conversation``'s working slots: ``policy.max_active`` of them, made on first use."""
+        pool = self._pools.get(conversation)
+        if pool is None:
+            pool = self._pools[conversation] = SlotPool(self.policy.max_active)
+        return pool
 
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
         """The types ``agent`` may start, by name, in its ``sub_agents``' order."""
@@ -289,7 +389,8 @@ class Delegations:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
         A brief that cannot start a run, or a call past the runs its turn
-        may start, is the error result, and nothing else happens. A cancel
+        may start, is the error result, and nothing else happens. A caller
+        that is a run lends its slot while it waits for this one. A cancel
         of the caller's task (the turn's) ends the run ``interrupted`` once
         it has stopped, and goes on.
         """
@@ -321,8 +422,17 @@ class Delegations:
         control.bind(inner)
         key = (conversation, ref.run or "")
         self._controls[key] = control
+        caller = _working.get()
         try:
-            return await self._ended(ref, request.call_id, inner, control)
+            if caller is None:
+                return await self._ended(ref, request.call_id, inner, control)
+            # The caller waits: its slot works for another run meanwhile.
+            caller.children.add(ref.run or "")
+            try:
+                async with caller.pool.lent(caller.slot):
+                    return await self._ended(ref, request.call_id, inner, control)
+            finally:
+                caller.children.discard(ref.run or "")
         finally:
             self._controls.pop(key, None)
 
@@ -466,9 +576,14 @@ class Delegations:
         """The run, in its own task: the active run, and no tool call active.
 
         The task's context is a copy of its caller's, so what this sets stays
-        here. An inheriting type's history is read here, once. The run's
-        time limit runs from when its hook starts (``RunControl.timing``).
+        here. An inheriting type's history is read here, once. The hook runs
+        in a working slot of the conversation's pool, the run ``queued``
+        while it waits for one; the slot goes back at the run's end, to its
+        caller when the caller waits on it alone (``SlotPool.hand_back``).
+        The run's time limit runs from when its hook starts
+        (``RunControl.timing``), not while it waits for its slot.
         """
+        caller = _working.get()
         set_active_run(ref)
         set_active_tool_call(None)
         history = (
@@ -484,8 +599,28 @@ class Delegations:
             history=history,
             control=control,
         )
-        with control.timing():
-            return await self._hook(run)
+        pool = self.slots(conversation)
+        queued = pool.free == 0
+        if queued:
+            self._emit(WorkflowEvent.agent_run(ref, RUN_QUEUED, call_id=request.call_id))
+        slot = await pool.acquire(NEW)
+        try:
+            if queued:
+                self._emit(WorkflowEvent.agent_run(ref, RUN_RUNNING, call_id=request.call_id))
+            _working.set(_Working(ref, request.call_id, pool, slot, emit=self._emit))
+            with control.timing():
+                return await self._hook(run)
+        finally:
+            if caller is None:
+                pool.release(slot)
+            else:
+                last = caller.waits_on_only(ref.run or "")
+                caller.children.discard(ref.run or "")
+                if last:
+                    # The caller's last wait: its slot goes straight back to it.
+                    pool.hand_back(slot, to=caller.slot)
+                else:
+                    pool.release(slot)
 
     def _cancelled(
         self,

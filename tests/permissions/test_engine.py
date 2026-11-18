@@ -318,6 +318,111 @@ class TestEngineConcurrency:
         assert ask_peak == 1  # never two asks in flight simultaneously
 
 
+class TestASubAgentRunsWaitForThePrompt:
+    """A sub-agent run whose prompt waits behind another's lends its working
+    slot from the moment it waits, and takes it back only once the lock is
+    released: with one slot, two runs that both ask finish."""
+
+    @pytest.mark.asyncio
+    async def test_two_runs_with_one_slot_both_ask_and_both_finish(self, ctx):
+        import asyncio
+
+        from agentic_cli.workflow.agents import (
+            RUN_INPUT_REQUIRED,
+            AgentRuns,
+            SubAgentPolicy,
+        )
+        from agentic_cli.workflow.agents.delegate import RunAnswer
+        from tests.workflow.test_agent_delegate import (
+            CONVERSATION,
+            Turn,
+            delegations,
+            request,
+            until,
+        )
+
+        runs = AgentRuns()
+
+        async def fake_input(asked) -> str:
+            if asked.run.instance == "researcher-1":
+                # Answered once researcher-2 waits for its own prompt: it got
+                # researcher-1's slot, lent while researcher-1 asks.
+                await until(lambda: runs.record(CONVERSATION, "researcher-2").status
+                            == RUN_INPUT_REQUIRED)
+            return ALLOW_ONCE_CHOICE
+
+        w = MagicMock()
+        w.request_user_input = fake_input
+        engine = PermissionEngine(settings=_stub_settings(), workflow=w, ctx=ctx)
+
+        async def hook(run) -> RunAnswer:
+            checked = await engine.check(
+                "web_fetch", [Capability("http.read", target_arg="url")],
+                {"url": f"https://{run.ref.instance}.test/"},
+            )
+            return RunAnswer(text=checked.reason)
+
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_active=1))
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await asyncio.wait_for(turn.task, 10)
+
+        assert [one.result["result"] for one in turn.result] == [
+            "no rule + user allowed (once)", "no rule + user allowed (once)",
+        ]
+        # researcher-2 started in the slot researcher-1 lent at its prompt.
+        assert turn.of("researcher-1") == turn.of("researcher-2") == [
+            "started", "input_required", "running", "completed",
+        ]
+        assert (made.slots(CONVERSATION).free, made.slots(CONVERSATION).waiting) == (1, 0)
+
+    @pytest.mark.asyncio
+    async def test_a_prompt_no_one_can_answer_lends_nothing(self, ctx):
+        """Headless (no input callback), a sub-agent run's prompt is denied
+        at once: the run keeps its slot and goes on ahead of the run queued
+        for one, and never says it waits on the user."""
+        import asyncio
+
+        from agentic_cli.workflow.agents import SubAgentPolicy
+        from agentic_cli.workflow.agents.delegate import RunAnswer
+        from tests.test_input_callback import _manager
+        from tests.workflow.test_agent_delegate import CONVERSATION, Turn, delegations, request
+
+        engine = PermissionEngine(settings=_stub_settings(), workflow=_manager(), ctx=ctx)
+        order: list[str] = []
+
+        async def hook(run) -> RunAnswer:
+            me = run.ref.instance
+            order.append(f"{me} starts")
+            await asyncio.sleep(0)  # a model call first: the other run waits for a slot
+            checked = await engine.check(
+                "web_fetch", [Capability("http.read", target_arg="url")],
+                {"url": f"https://{me}.test/"},
+            )
+            order.append(f"{me} goes on")
+            await asyncio.sleep(0)  # more work after the prompt
+            order.append(f"{me} ends")
+            return RunAnswer(text=checked.reason)
+
+        made = delegations(hook, policy=SubAgentPolicy(max_active=1))
+        turn = Turn(lambda: asyncio.gather(
+            made.delegate(request(call_id="c1")), made.delegate(request(call_id="c2"))
+        ))
+        await asyncio.wait_for(turn.task, 10)
+
+        assert [one.result["result"] for one in turn.result] == [
+            "no rule + no interactive approver to ask",
+        ] * 2
+        assert order == [
+            "researcher-1 starts", "researcher-1 goes on", "researcher-1 ends",
+            "researcher-2 starts", "researcher-2 goes on", "researcher-2 ends",
+        ]
+        assert turn.of("researcher-1") == ["started", "completed"]
+        assert turn.of("researcher-2") == ["started", "queued", "running", "completed"]
+        assert (made.slots(CONVERSATION).free, made.slots(CONVERSATION).waiting) == (1, 0)
+
+
 class TestResolveListTargetArg:
     def test_list_target_arg_resolves_per_item(self, ctx):
         from agentic_cli.workflow.permissions.capabilities import ResolvedCapability

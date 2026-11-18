@@ -19,8 +19,12 @@ import pytest
 from agentic_cli.workflow.agents import (
     RUN_COMPLETED,
     RUN_FAILED,
+    RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
+    RUN_QUEUED,
+    RUN_RUNNING,
     RUN_STARTED,
+    RUN_WORKING_STATUSES,
     AgentRuns,
     RunRecord,
     result_head,
@@ -189,8 +193,33 @@ class TestObserve:
         in_turn(ONE, lambda: runs.observe(event))
 
         assert runs.records(ONE) == [RunRecord(
-            ref=ref, call_id="c1", title="Find X.", status=RUN_STARTED, started=event.timestamp,
+            ref=ref, call_id="c1", title="Find X.", status=RUN_RUNNING, started=event.timestamp,
         )]
+
+    def test_a_working_runs_status_is_the_latest_it_reported(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        seen: list[str] = []
+
+        for status in (RUN_QUEUED, RUN_RUNNING, RUN_INPUT_REQUIRED, RUN_RUNNING):
+            in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(ref, status, call_id="c1")))
+            seen.append(runs.records(ONE)[0].status)
+
+        assert seen == [RUN_QUEUED, RUN_RUNNING, RUN_INPUT_REQUIRED, RUN_RUNNING]
+        assert RUN_WORKING_STATUSES == {RUN_QUEUED, RUN_RUNNING, RUN_INPUT_REQUIRED}
+
+    def test_a_working_status_after_the_end_or_without_a_start_changes_nothing(self):
+        runs = AgentRuns()
+        ended = started(runs, ONE, "c1", "researcher")
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(ended, RUN_COMPLETED, call_id="c1", result="ok")
+        ))
+        unknown = runs.run_for(ONE, None, "c2", "researcher")
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(ended, RUN_RUNNING)))
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(unknown, RUN_QUEUED)))
+
+        assert [(r.ref, r.status) for r in runs.records(ONE)] == [(ended, RUN_COMPLETED)]
 
     def test_an_end_ends_the_record(self):
         runs = AgentRuns()

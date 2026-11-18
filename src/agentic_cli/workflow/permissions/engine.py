@@ -13,6 +13,7 @@ the full decision flow. This file implements:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 from collections.abc import Callable, Collection, Mapping
 from enum import Enum
@@ -577,6 +578,15 @@ class PermissionEngine:
         return f"rule: {rule.source.value}/{rule.effect.value} {cap.name} {rule.target}"
 
 
+    def _can_ask(self) -> bool:
+        """Whether a prompt now could reach the user.
+
+        The workflow says (``BaseWorkflowManager.can_request_user_input``);
+        one that cannot say is taken to be able to, and is asked.
+        """
+        can_ask = getattr(self._workflow, "can_request_user_input", None)
+        return can_ask is None or bool(can_ask())
+
     async def _ask_and_apply(
         self,
         tool_name: str,
@@ -586,12 +596,22 @@ class PermissionEngine:
         uncontained: Collection[str] = frozenset(),
         per_call: Mapping[str, str] | None = None,
     ) -> CheckResult:
+        from agentic_cli.workflow.agents.delegate import waiting_on_user
         from agentic_cli.workflow.permissions.prompt import build_request, parse_response
         from agentic_cli.workflow.permissions.store import append_project_rule
         from agentic_cli.workflow.sessions import get_active_run
 
         unmatched = [cap for cap, r in outcomes if r is None]
-        async with self._ask_lock:
+        # A sub-agent run waits on the user from here, its working slot lent
+        # (request_user_input's own wait counts once with this one): while
+        # another run's prompt shows, then while its own does. It takes the
+        # slot back only once the lock is released: a run that waited for
+        # its slot holding the lock would hold every other run's prompt, and
+        # with them the slots their runs lent. A prompt no one can be shown
+        # (no input callback for this turn) is denied at once: the run lends
+        # nothing for it, and keeps its slot.
+        waits = waiting_on_user() if self._can_ask() else contextlib.nullcontext()
+        async with waits, self._ask_lock:
             # The run whose call is gated: both gates run inside it, so its
             # prompt says which sub-agent asks.
             request = build_request(

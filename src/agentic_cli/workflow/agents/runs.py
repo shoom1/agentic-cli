@@ -10,14 +10,14 @@ names the same run until it has ended, and a new one after (a provider that
 numbers its call ids repeats them every turn).
 
 The records are written from the runs' own events (``AGENT_RUN``: started,
-then one end status), which ``Delegations`` hands to ``observe`` as it makes
-them, under the turn they are reported in. The one other writer is
-``interrupt_open``, for the runs a turn leaves open when it is stopped or
-fails, when no event can reach its consumer any more. A conversation is a
-``SessionRef``, or None for runs started outside a manager's turn. All of it
-is in memory, for as long as its manager lives: a backend switch builds a
-new manager, and the runs recorded before it do not follow (as with its
-usage ledgers).
+then how it works while it does, then one end status), which
+``Delegations`` hands to ``observe`` as it makes them, under the turn they
+are reported in. The one other writer is ``interrupt_open``, for the runs a
+turn leaves open when it is stopped or fails, when no event can reach its
+consumer any more. A conversation is a ``SessionRef``, or None for runs
+started outside a manager's turn. All of it is in memory, for as long as
+its manager lives: a backend switch builds a new manager, and the runs
+recorded before it do not follow (as with its usage ledgers).
 """
 
 from __future__ import annotations
@@ -31,8 +31,16 @@ from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.sessions import RunRef, SessionRef, get_active_turn
 from agentic_cli.workflow.tool_summaries import delegation_summary
 
-#: A run's statuses: started, then one end.
+#: A run's statuses: started, then how it works while it does, then one end.
 RUN_STARTED = "started"
+#: A working run's status: waiting for a free working slot, working, or
+#: waiting on the user (a question, a permission prompt). A record says
+#: ``running`` from its start; its events say ``queued`` when it must wait
+#: for a slot, and ``running`` once it has one, and after the user answered.
+RUN_QUEUED = "queued"
+RUN_RUNNING = "running"
+RUN_INPUT_REQUIRED = "input_required"
+RUN_WORKING_STATUSES = frozenset({RUN_QUEUED, RUN_RUNNING, RUN_INPUT_REQUIRED})
 RUN_COMPLETED = "completed"
 RUN_FAILED = "failed"
 RUN_REFUSED = "refused"
@@ -109,7 +117,9 @@ class RunRecord:
         ref: The run.
         call_id: The parent's call that started it.
         title: Its brief's title.
-        status: ``started`` while it runs, then its end status.
+        status: While it works, ``running``, ``queued`` (waiting for a
+            free working slot) or ``input_required`` (waiting on the user);
+            then its end status.
         started: When it started.
         ended: When it ended; None while it runs.
         result: The first ``RESULT_MAX`` characters of its result.
@@ -222,10 +232,13 @@ class AgentRuns:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.
 
         A start makes the run's record (its call, title, brief, who started
-        it and its mode); an end gives it its status, time, result, error,
-        whether it is partial, what it used and who cancelled it (an end
-        whose start was not seen makes the record too). Any other event
-        changes nothing.
+        it and its mode), ``running``; a working status (``queued``,
+        ``running``, ``input_required``) becomes a working record's status;
+        an end gives it its status, time, result, error, whether it is
+        partial, what it used and who cancelled it (an end whose start was
+        not seen makes the record too). Any other event changes nothing, and
+        neither does a working status of a run that has ended or was never
+        started.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
@@ -238,12 +251,17 @@ class AgentRuns:
                 ref=ref,
                 call_id=metadata.get("call_id"),
                 title=metadata.get("title") or "",
-                status=RUN_STARTED,
+                status=RUN_RUNNING,
                 started=event.timestamp,
                 brief=dict(metadata.get("brief") or {}),
                 started_by=metadata.get("started_by"),
                 mode=metadata.get("mode") or "blocking",
             )
+            return
+        if status in RUN_WORKING_STATUSES:
+            working = records.get(ref.run)
+            if working is not None and working.status not in RUN_END_STATUSES:
+                working.status = status
             return
         if status not in RUN_END_STATUSES:
             return
