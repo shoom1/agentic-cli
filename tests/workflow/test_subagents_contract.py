@@ -1381,6 +1381,8 @@ class TestASubAgentsFailure:
         assert (warning.metadata["recoverable"], warning.metadata["agent"], warning.run) == (
             True, "researcher", RESEARCHER,
         )
+        # Its code is the provider error's type, which the CLI shows after it.
+        assert warning.metadata["error_code"] == "BadRequestError"
         # The parent reads the provider's reason, on both backends.
         read = envelope_read(crew.results_read("coordinator")["c1"])
         assert (read["success"], read["status"], read["result"]) == (False, RUN_FAILED, "")
@@ -1394,6 +1396,60 @@ class TestASubAgentsFailure:
             "The researcher could not do it."
         ]
         assert crew.requests("coordinator") == 2
+
+    async def test_the_text_a_run_wrote_before_it_failed_is_its_result(self, make_crew):
+        """Spec 5.3: a failed envelope carries whatever text the run produced."""
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("The researcher got halfway.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["success"], read["status"], read["result"]) == (
+            False, RUN_FAILED, "X is about 42."
+        )
+        assert "overloaded" in read["error"]
+        (ended,) = runs_of(events, RUN_FAILED)
+        assert (ended.metadata["result"], ended.metadata["error"]) == (
+            "X is about 42.", read["error"]
+        )
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert warning.content == f"researcher-1 failed: {read['error']}"
+        assert (warning.metadata["recoverable"], warning.metadata["error_code"]) == (
+            True, "BadRequestError"
+        )
+        (record,) = crew.records()
+        assert (record.status, record.result) == (RUN_FAILED, "X is about 42.")
+
+    async def test_an_overflow_after_text_keeps_that_text_as_its_result(self, make_crew):
+        too_long = "prompt is too long: 208310 tokens > 200000 maximum"
+        crew = make_crew(
+            team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("The researcher got halfway.")],
+            # Enough for either backend's retry, should it make one.
+            researcher=[calls(use("contract_lookup", "r1", q="X"), text="X is about 42."),
+                        fails(too_long), fails(too_long)],
+            summaries=[says("The researcher looked X up.")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["result"], read["error"]) == (
+            RUN_FAILED, "X is about 42.",
+            "researcher: the request no longer fits anthropic:claude-sonnet-4-6's "
+            "context window.",
+        )
+        (warning,) = [e for e in events if e.type is EventType.ERROR]
+        assert (warning.content, warning.metadata["error_code"]) == (
+            read["error"], "CONTEXT_OVERFLOW"
+        )
 
     async def test_the_next_turn_runs(self, make_crew):
         crew = make_crew(
@@ -2581,6 +2637,55 @@ class TestTheTimeLimit:
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_CANCELLED]
         assert BLOCKING["stopped"].is_set()  # its tool was stopped with it
 
+    @pytest.mark.parametrize("backend", ["adk"], indirect=True)
+    @pytest.mark.parametrize("stop", ["time limit", "parent"])
+    async def test_on_adk_a_run_whose_work_ended_keeps_it_while_its_state_is_read(
+        self, make_crew, stop
+    ):
+        """ADK reads a run's shared state back from its child session once
+        its stream has ended. Its time limit firing during that read, or its
+        parent stopping it then, leaves the run completed with its answer
+        and the tasks it saved. Deep Agents reads nothing after its stream."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
+             agent("researcher", include_state_tools=True, limits=AgentLimits(timeout=1.0))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=[
+                            {"description": "find X", "status": "completed"},
+                        ])),
+                        says("X is 42.")],
+        )
+        await crew.manager._ensure_initialized()
+        service = crew.manager._session_service
+        read = service.get_session
+        during: list[tuple[int, bool | None]] = []
+
+        async def slow_state_read(**kwargs: Any) -> Any:
+            config = kwargs.get("config")
+            if kwargs["app_name"].endswith("--agents") and config is not None \
+                    and config.num_recent_events == 0:
+                stopped = None
+                if stop == "parent":
+                    stopped = crew.cancel("researcher-1#1", by="parent", error="no longer needed")
+                during.append((crew.requests("researcher"), stopped))
+                # Past the run's time limit, which started with its work.
+                await asyncio.sleep(1.3 if stop == "time limit" else 0.05)
+            return await read(**kwargs)
+
+        service.get_session = slow_state_read
+        events = await asyncio.wait_for(crew.turn(), 20)
+
+        # The read came after the run's last answer; a stop then stops nothing.
+        assert during == [(2, False if stop == "parent" else None)]
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_COMPLETED, None)
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+        assert [task["description"] for task in (await crew.state())["tasks"]] == ["find X"]
+
 
 class TestALimitAtAPrompt:
     """A limit that fires while the run waits at a permission prompt (the
@@ -2787,6 +2892,37 @@ class TestTheTokenLimit:
         assert [e for e in events if e.type is EventType.ERROR] == []
         used = crew.ledger().totals(run="researcher-1#1")
         assert (used.input, used.output, used.calls) == (140, 40, 2)
+
+    async def test_a_side_call_its_tool_makes_counts_and_limits_it_at_its_next_call(
+        self, make_crew
+    ):
+        """The run's total is what its usage record counts, its tools' side
+        calls included: 50 tokens of its own, then a summary of 110 that its
+        tool asked for, and its next answer (25) is past 150."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_summarize, contract_whoami),
+                   limits=AgentLimits(max_tokens=150))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_summarize", "r1", text="A long page."),
+                              text="Reading.", usage=(40, 10)),
+                        calls(use("contract_whoami", "r2"), text="X is about 42.",
+                              usage=(20, 5)),
+                        says("[never asked]")],
+            side_calls=[says("A summary.", usage=(100, 10))],
+        )
+
+        events = await crew.turn()
+
+        assert crew.requests("researcher") == 2
+        assert SEEN == [] and calls_to(events, "r2") == []
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "X is about 42.",
+            "error": TOKEN_LIMIT_ERROR, "cancelled_by": "limit",
+        }
+        used = crew.ledger().totals(run="researcher-1#1")
+        assert (used.input, used.output, used.calls) == (160, 25, 3)
 
 
 class TestSteering:
@@ -3055,12 +3191,44 @@ class TestWaitingOnTheUser:
         assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 
+    async def test_a_run_answered_while_its_slot_works_for_another_waits_queued(self, make_crew):
+        """The user answers the asker while the holder works in the asker's
+        lent slot: the asker no longer waits on the user but on its slot,
+        so it says ``queued`` until it has it back, then ``running``."""
+        crew = asking_crew(make_crew, holder=calls(use("contract_hold", "h1")))
+        answered = asyncio.Event()
+
+        async def answer(request: UserInputRequest) -> str:
+            await HELD["started"].wait()  # the holder works in the asker's slot
+            answered.set()
+            return "B"
+
+        crew.answer_with(answer)
+        with no_blocking_calls():
+            turn = crew.start()
+            try:
+                # Answered, the asker waits for its slot back, as the researcher does.
+                await until(lambda: answered.is_set() and crew.slots().waiting == 2)
+                assert [r.status for r in crew.records()] == [
+                    RUN_QUEUED, RUN_RUNNING, RUN_QUEUED,
+                ]
+            finally:
+                HELD["go"].set()
+            events = await asyncio.wait_for(turn, 10)
+
+        assert [status for instance, status in working(
+            events, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
+        ) if instance == "asker-1"] == [RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING]
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
     async def test_two_runs_at_permission_prompts_with_one_slot_both_finish(
         self, make_crew, project
     ):
         """The permission engine shows one prompt at a time: a run waiting
         for its turn to ask lends its slot too, or the run asking first could
-        never take its slot back."""
+        never take its slot back. researcher-2, answered while researcher-1
+        works in the slot again, waits ``queued`` for it."""
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",)),
              agent("researcher", tools=("write_file",))],
@@ -3091,7 +3259,7 @@ class TestWaitingOnTheUser:
             ("researcher-2", RUN_QUEUED),
             ("researcher-1", RUN_INPUT_REQUIRED), ("researcher-2", RUN_RUNNING),
             ("researcher-2", RUN_INPUT_REQUIRED), ("researcher-1", RUN_RUNNING),
-            ("researcher-2", RUN_RUNNING),
+            ("researcher-2", RUN_QUEUED), ("researcher-2", RUN_RUNNING),
         ]
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 

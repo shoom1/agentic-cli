@@ -72,16 +72,17 @@ _HEADINGS = {
 #: is, and which message is its task (Deep Agents' ``_FORK_TASK_PREAMBLE``,
 #: told the way ADK shows that conversation). ``task_message`` ends an
 #: inheriting type's task message with it, on both backends: the run reads
-#: its parent's conversation before that message.
+#: its parent's conversation before that message. ADK's copy of it keeps the
+#: call that handed the run its task and Deep Agents' leaves it out, so the
+#: note says nothing of that call.
 INHERITED_CONTEXT_NOTE = (
     "You are a sub-agent: another agent has handed you a task. The conversation "
     "before the task is that agent's, shown so you know what has been established: "
     "the user's messages in it were addressed to that agent, not to you, and what "
-    "that agent did is quoted, its call handing you this task included. Do not "
-    "carry out those messages yourself or answer as that agent. Your task is the "
-    "request that follows the conversation: complete it directly, and use the "
-    "specific facts, figures and identifiers already established in the "
-    "conversation rather than answering generically."
+    "that agent did is quoted. Do not carry out those messages yourself or answer "
+    "as that agent. Your task is the request that follows the conversation: "
+    "complete it directly, and use the specific facts, figures and identifiers "
+    "already established in the conversation rather than answering generically."
 )
 
 

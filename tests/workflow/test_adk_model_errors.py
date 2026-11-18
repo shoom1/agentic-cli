@@ -123,6 +123,51 @@ async def test_no_answer_ends_the_turn_with_an_error(monkeypatch, answer, model,
     assert not [event for event in events if event.type is EventType.TEXT]
 
 
+async def test_a_sub_agents_reply_that_is_no_answer_fails_its_run_warned_with_its_code(
+    monkeypatch,
+):
+    """The run fails, its parent reads why, and the user's warning carries
+    the reply's code, as the main agent's failed turn does."""
+    import json
+
+    from agentic_cli.workflow.agents import RUN_FAILED
+
+    def coordinator(request) -> dict:
+        body = json.loads(request.content)
+        answer = anthropic_message(model="claude-sonnet-4-6")
+        if len(body["messages"]) == 1:
+            answer.update(stop_reason="tool_use", content=[{
+                "type": "tool_use", "id": "c1", "name": "task",
+                "input": {"agent_type": "researcher", "title": "Find X", "objective": "Find X."},
+            }])
+        else:
+            answer["content"] = [{"type": "text", "text": "The researcher could not."}]
+        return answer
+
+    route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(coordinator))
+    route_gemini(monkeypatch, FakeAPI(finished("MALFORMED_FUNCTION_CALL")))
+    manager = adk(
+        [AgentConfig(name="coordinator", prompt="Delegate.", sub_agents=["researcher"]),
+         AgentConfig(name="researcher", prompt="Find.", description="Finds.",
+                     model="gemini-2.5-flash")],
+        settings(default_model="claude-sonnet-4-6"),
+    )
+    try:
+        events = [e async for e in manager.process("Find X.", user_id="u", session_id="s")]
+    finally:
+        await manager.cleanup()
+
+    (warning,) = errors(events)
+    assert warning.content.startswith(
+        "researcher-1 failed: google:gemini-2.5-flash returned no answer"
+    )
+    assert (warning.metadata["recoverable"], warning.metadata["error_code"]) == (
+        True, "MALFORMED_FUNCTION_CALL"
+    )
+    (record,) = manager.agent_runs.records(manager.session_ref("s", "u"))
+    assert record.status == RUN_FAILED
+
+
 async def test_a_reply_cut_at_its_limit_with_text_is_an_answer(monkeypatch):
     """Text before the limit is the answer, shown as it is."""
     events = await turn_on(

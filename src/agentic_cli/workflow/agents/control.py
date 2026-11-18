@@ -7,22 +7,26 @@ the run's own task, and hands it to the backend's hook as
 
 - ``cancel(by=, error=)`` cancels the run's task: its parent's stop, the
   user's, or a limit's. The first cancel wins, and a run that has ended is
-  not cancelled. The hook, handling the ``CancelledError`` in the run's
-  task, asks ``own_cancel`` whether it is the run's own: then it stops the
-  run as a stopped turn's run stops and returns what it has, and the run
-  ends ``cancelled``; any other cancel (the turn's: Ctrl+C) goes on.
+  not cancelled, nor one whose hook said its work has ended (``finish``)
+  while it still reads back what the run did. The hook, handling the
+  ``CancelledError`` in the run's task, asks ``own_cancel`` whether it is
+  the run's own: then it stops the run as a stopped turn's run stops and
+  returns what it has, and the run ends ``cancelled``; any other cancel
+  (the turn's: Ctrl+C) goes on.
 - The time limit (``timeout``) runs while the hook does (``timing``); past
   it the run is cancelled by its limit.
 - The limits checked at the run's model calls: before each, ``model_call``
   counts it and says whether it is the last allowed (``max_model_calls``),
   whose request ends with ``STEP_LIMIT_NOTE``; after each, ``used`` counts
-  its tokens, and an answer past ``max_tokens`` that asks for tools (the
-  run would go on) has the run cancelled by its limit at that answer; one
-  that asks for none ends the run as it would, its result. On the call that
-  is the run's last (``final_call``) the backend drops the answer's tool
-  calls, so the run ends with that answer: no call past a limit is made,
-  and nothing the model asked for runs after it. A model that reports no
-  usage is not limited by tokens.
+  its tokens, and the run's total (its own calls' tokens and what its other
+  calls used, ``side_tokens``: its tools' side calls, its summaries, as its
+  usage record counts them) is checked: an answer past ``max_tokens`` that
+  asks for tools (the run would go on) has the run cancelled by its limit
+  at that answer; one that asks for none ends the run as it would, its
+  result. On the call that is the run's last (``final_call``) the backend
+  drops the answer's tool calls, so the run ends with that answer: no call
+  past a limit is made, and nothing the model asked for runs after it. A
+  model that reports no usage counts none of its own.
 - ``steer(message)`` gives the run a message, which its next model call
   (``take_steering``) adds after its last message, as a user's.
 
@@ -32,7 +36,7 @@ All of it runs on the event loop; nothing here blocks.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +65,10 @@ class RunControl:
     Args:
         ref: The run.
         limits: Its limits: its type's over the policy's.
+        side_tokens: What the run's other model calls have used so far (its
+            tools' side calls, its summaries; not its own steps, which
+            ``used`` counts), input plus output tokens, as its usage record
+            counts them: counted with its own at each check. None: none.
 
     Attributes:
         ref: The run.
@@ -69,9 +77,16 @@ class RunControl:
             (``parent``, ``user`` or ``limit``) and why, one line.
     """
 
-    def __init__(self, ref: RunRef, limits: AgentLimits) -> None:
+    def __init__(
+        self,
+        ref: RunRef,
+        limits: AgentLimits,
+        *,
+        side_tokens: Callable[[], int] | None = None,
+    ) -> None:
         self.ref = ref
         self.limits = limits
+        self._side_tokens = side_tokens
         self.cancelled: tuple[str, str] | None = None
         self._steering: list[str] = []
         self._calls = 0
@@ -81,6 +96,8 @@ class RunControl:
         # Whether cancel() cancelled the task, and own_cancel() has not yet
         # taken that cancel.
         self._cancelled_task = False
+        # Whether the hook said the run's work has ended (finish()).
+        self._finished = False
 
     # -- the run's task --------------------------------------------------------
 
@@ -96,20 +113,36 @@ class RunControl:
     def cancel(self, *, by: str, error: str) -> None:
         """Cancel the run's task: ``by`` its parent, the user or a limit, for ``error``.
 
-        Does nothing once the run is cancelled (the first cancel wins) or
-        its task has ended, and cancels no task its turn is cancelling
-        already (the run ends as the turn's).
+        Does nothing once the run is cancelled (the first cancel wins), its
+        task has ended or its work has (``finish``), and cancels no task its
+        turn is cancelling already (the run ends as the turn's).
 
         Raises:
             ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.
         """
         if by not in CANCELLED_BY:
             raise ValueError(f"A run is cancelled by its parent, user or limit, not {by!r}.")
-        if self.cancelled is not None or (self._task is not None and self._task.done()):
+        if (
+            self.cancelled is not None
+            or self._finished
+            or (self._task is not None and self._task.done())
+        ):
             return
         self.cancelled = (by, error)
         if self._task is not None:
             self._cancel_task()
+
+    def finish(self) -> None:
+        """In the run's task: its work has ended, so no cancel stops it from now on.
+
+        A hook calls it as the run's stream ends, before it reads back what
+        the run did (ADK reads its child session's state): a limit or a stop
+        that lands during that read would otherwise end the run
+        ``cancelled`` and lose an answer it has made. A cancel the run's
+        work already took (``own_cancel``) stays. The turn's cancel (Ctrl+C)
+        is not the control's, and still stops the read.
+        """
+        self._finished = True
 
     def own_cancel(self) -> bool:
         """In the run's task, handling a ``CancelledError``: whether it is the run's own cancel.
@@ -173,16 +206,21 @@ class RunControl:
     def used(self, input_tokens: int, output_tokens: int, *, calls: bool = True) -> None:
         """Count what one of the run's model calls used, as ``workflow/usage.py`` counts it.
 
-        Past ``max_tokens``, an answer that makes tool calls (``calls``: the
-        run would go on past it) is the run's last, cancelled by its limit:
-        ``cancelled`` is set and the call is the run's last
-        (``final_call``), so it ends with that answer rather than losing it.
-        An answer that makes none ends the run anyway: it is its result,
-        whole, and nothing is cancelled. Its tokens are counted either way.
+        The run's total is its own calls' tokens and what its other calls
+        used (``side_tokens``). Past ``max_tokens``, an answer that makes
+        tool calls (``calls``: the run would go on past it) is the run's
+        last, cancelled by its limit: ``cancelled`` is set and the call is
+        the run's last (``final_call``), so it ends with that answer rather
+        than losing it. An answer that makes none ends the run anyway: it is
+        its result, whole, and nothing is cancelled. Its tokens are counted
+        either way.
         """
         self._tokens += input_tokens + output_tokens
         limit = self.limits.max_tokens
-        if limit is None or self._tokens <= limit or self.cancelled is not None or not calls:
+        if limit is None or self.cancelled is not None or not calls:
+            return
+        side = self._side_tokens() if self._side_tokens is not None else 0
+        if self._tokens + side <= limit:
             return
         self.cancelled = (LIMIT, TOKEN_LIMIT_ERROR)
         self._final = True

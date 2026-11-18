@@ -127,6 +127,9 @@ class TestTheInheritedNote:
             "use the specific facts, figures and identifiers already established in the "
             "conversation rather than answering generically."
         )
+        # True on both backends: Deep Agents' conversation leaves out the call
+        # that handed the run its task, which ADK's keeps.
+        assert "what that agent did is quoted. Do not carry out" in INHERITED_CONTEXT_NOTE
 
 
 class TestReadBrief:

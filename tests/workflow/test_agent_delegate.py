@@ -67,7 +67,14 @@ from agentic_cli.workflow.sessions import (
     set_active_tool_call,
     set_active_turn,
 )
-from agentic_cli.workflow.usage import UsageLedgers, UsageTotals, llm_usage_event
+from agentic_cli.workflow.usage import (
+    PURPOSE_SUBAGENT,
+    PURPOSE_SUMMARIZATION,
+    PURPOSE_TOOL,
+    UsageLedgers,
+    UsageTotals,
+    llm_usage_event,
+)
 from tests.loop_guard import no_blocking_calls
 
 CONVERSATION = SessionRef("app", "u", "s")
@@ -298,6 +305,25 @@ class TestAFailedRun:
         )
         assert events[-1].content == "researcher-1 failed: m returned no answer"
 
+    async def test_a_hook_that_answers_an_error_warns_with_its_code(self):
+        hook, _ = answering("Half an answer.", error="Error code: 400 - overloaded",
+                            error_code="BadRequestError")
+
+        result, events = await delegated(delegations(hook), request())
+
+        assert result.result["error"] == "Error code: 400 - overloaded"
+        warning = events[-1]
+        assert (warning.content, warning.metadata["error_code"]) == (
+            "researcher-1 failed: Error code: 400 - overloaded", "BadRequestError"
+        )
+
+    async def test_an_error_answered_without_a_code_warns_with_none(self):
+        hook, _ = answering("Half an answer.", error="m returned no answer")
+
+        _, events = await delegated(delegations(hook), request())
+
+        assert events[-1].metadata.get("error_code") is None
+
     async def test_its_own_words_are_said_as_given(self):
         said = "researcher: the request no longer fits m's context window."
 
@@ -309,6 +335,22 @@ class TestAFailedRun:
         assert result.result["error"] == said
         warning = events[-1]
         assert (warning.content, warning.metadata["error_code"]) == (said, "CONTEXT_OVERFLOW")
+        assert result.result["result"] == ""
+
+    async def test_its_own_words_carry_the_text_it_wrote(self):
+        said = "researcher: the request no longer fits m's context window."
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            raise RunFailed(said, code="CONTEXT_OVERFLOW", text="X is about 42.")
+
+        result, events = await delegated(delegations(hook), request())
+
+        assert (result.result["status"], result.result["result"], result.result["error"]) == (
+            RUN_FAILED, "X is about 42.", said
+        )
+        started, ended, warning = events
+        assert (ended.metadata["status"], ended.metadata["result"]) == (RUN_FAILED, "X is about 42.")
+        assert warning.content == said
 
 
 class TestTheRunsOwnTask:
@@ -1001,6 +1043,36 @@ class TestTheTimeLimit:
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
 
+    async def test_a_run_whose_work_had_ended_keeps_its_answer(self):
+        """The hook's work ended (``RunControl.finish``) and it still reads
+        what the run did (ADK reads its child session's state) when the
+        time limit fires and its parent stops it: the run completes with its
+        answer and its state."""
+        cancelled: list[bool] = []
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.finish()
+            cancelled.append(made.cancel("researcher-1#1", by="parent", error="no longer needed"))
+            await asyncio.sleep(0.15)  # the read, past the time limit
+            return RunAnswer(text="X is 42.", state={"tasks": [{"description": "find X"}]})
+
+        types = {
+            **TYPES,
+            "researcher": AgentConfig(name="researcher", prompt="p", description="Finds.",
+                                      limits=AgentLimits(timeout=0.05)),
+        }
+        made = delegations(hook, types=types)
+
+        result, events = await asyncio.wait_for(delegated(made, request()), 5)
+
+        assert cancelled == [False]
+        assert (result.result["status"], result.result["result"], result.result["error"]) == (
+            RUN_COMPLETED, "X is 42.", None
+        )
+        assert result.state == {"tasks": [{"description": "find X"}]}
+        assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_COMPLETED)]
+
 
 class TestTheLimitsAtModelCalls:
     """What a backend's run reports to its control at each model call, and how the run ends."""
@@ -1050,6 +1122,39 @@ class TestTheLimitsAtModelCalls:
             RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR, "Found it.", True
         )
         assert statuses(events) == [("agent_run", RUN_STARTED), ("agent_run", RUN_CANCELLED)]
+
+    async def test_its_side_calls_count_toward_its_tokens(self):
+        """The run's total is what its usage record counts: its tools' side
+        calls and its summaries, recorded under it, count with its own calls
+        (whose own rows are not counted twice); another run's do not."""
+        ledgers = UsageLedgers()
+        other = RunRef(agent="leaf", instance="leaf-1", run="leaf-1#1",
+                       parent_run=None, depth=1)
+        seen: list[Any] = []
+
+        def recorded(purpose: str, tokens: int, run: RunRef | None = None) -> None:
+            event = llm_usage_event("anthropic:claude", UsageTotals(input=tokens, calls=1))
+            event.metadata["purpose"] = purpose
+            event.run = run  # None: the run in progress
+            ledgers.record(event)
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            run.control.used(40, 10)
+            recorded(PURPOSE_SUBAGENT, 50)  # that call's own row
+            recorded(PURPOSE_TOOL, 30)  # its tool's side call
+            recorded(PURPOSE_SUMMARIZATION, 30)  # a summary of its conversation
+            recorded(PURPOSE_TOOL, 500, run=other)
+            run.control.used(30, 0)  # 80 of its own, 60 besides: 140
+            seen.append(run.control.cancelled)
+            run.control.used(10, 5)  # 155
+            return RunAnswer(text="Found it.")
+
+        policy = SubAgentPolicy(limits=AgentLimits(max_tokens=150))
+        result, _ = await delegated(delegations(hook, policy=policy, ledgers=ledgers), request())
+
+        assert seen == [None]
+        assert (result.result["status"], result.result["cancelled_by"],
+                result.result["error"]) == (RUN_CANCELLED, "limit", TOKEN_LIMIT_ERROR)
 
     async def test_a_finishing_answer_over_its_tokens_completes_it_whole(self):
         async def hook(run: AgentRun) -> RunAnswer:
@@ -1506,7 +1611,7 @@ class TestWaitingOnTheUser:
     """A sub-agent run that waits on the user (``waiting_on_user``: a
     question, a permission prompt) says ``input_required``, lends its slot
     meanwhile, and takes it back ahead of the runs that have not started
-    (``running``)."""
+    (``running``), ``queued`` while it waits for it."""
 
     async def test_a_run_lends_its_slot_and_takes_it_back_ahead_of_new_runs(self):
         hook = Holding()
@@ -1532,12 +1637,65 @@ class TestWaitingOnTheUser:
         assert runs.record(CONVERSATION, "researcher-1").status == RUN_INPUT_REQUIRED
         answered.set()
         await until(lambda: pool.waiting == 2)  # researcher-1 wants it back; researcher-3 waits
+        # Answered, it waits on its slot, no longer on the user.
+        assert runs.record(CONVERSATION, "researcher-1").status == RUN_QUEUED
         hook.go["researcher-2"].set()
         await asyncio.wait_for(turn.task, 5)
 
         assert hook.working == ["researcher-2", "researcher-1 back", "researcher-3"]
         assert turn.of("researcher-1") == [
-            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_RUNNING, RUN_COMPLETED,
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED,
+        ]
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_question_asked_while_it_waits_for_its_slot_back_is_input_required_again(
+        self,
+    ):
+        """Two calls of one response that each ask: the second asks while the
+        first, answered, waits for its slot back. The run waits on the user
+        again, and says so; once both are answered and its slot is back, it
+        is ``running``."""
+        hook = Holding()
+        runs = AgentRuns()
+        first_answered, second_answered = asyncio.Event(), asyncio.Event()
+        second_asks = asyncio.Event()
+
+        async def asks(answered: asyncio.Event) -> None:
+            async with waiting_on_user():
+                await answered.wait()
+
+        async def asking(run: AgentRun) -> RunAnswer:
+            if run.ref.instance != "researcher-1":
+                return await hook(run)
+
+            async def second() -> None:
+                await second_asks.wait()
+                await asks(second_answered)
+
+            await asyncio.gather(asks(first_answered), second())
+            return RunAnswer(text="Asked twice.")
+
+        made = delegations(asking, runs=runs, policy=SubAgentPolicy(max_active=1))
+        pool = made.slots(CONVERSATION)
+
+        turn = Turn(lambda: asyncio.gather(
+            *(made.delegate(request(call_id=call)) for call in ("c1", "c2"))
+        ))
+        await until(lambda: hook.working == ["researcher-2"])
+        first_answered.set()
+        await until(lambda: pool.waiting == 1)  # researcher-1 wants its slot back
+        assert runs.record(CONVERSATION, "researcher-1").status == RUN_QUEUED
+        second_asks.set()
+        await until(lambda: runs.record(CONVERSATION, "researcher-1").status
+                    == RUN_INPUT_REQUIRED)
+        second_answered.set()
+        await until(lambda: pool.waiting == 1)
+        hook.go["researcher-2"].set()
+        await asyncio.wait_for(turn.task, 5)
+
+        assert turn.of("researcher-1") == [
+            RUN_STARTED, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_INPUT_REQUIRED, RUN_QUEUED,
+            RUN_RUNNING, RUN_COMPLETED,
         ]
         assert (pool.free, pool.waiting) == (1, 0)
 

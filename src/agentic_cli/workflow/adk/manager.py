@@ -77,7 +77,7 @@ from agentic_cli.workflow.adk.sessions import (
 )
 from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
-from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed
+from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.workflow.outside_content import (
@@ -1328,8 +1328,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async with self._turn(session_id, user_id) as ref:
             logger.info("processing_message", message_length=len(message))
             session = await self._get_or_create_session(ref.user_id, ref.session_id)
-            # A crash, an old cancel, or a stop whose answers could not be
-            # written may have left calls without a result.
+            # A crash, an old cancel, a failed turn, or a stop whose answers
+            # could not be written may have left calls without a result.
             session = await self._answer_left_open(session)
             state_delta = {
                 **turn_state(session, message),
@@ -1503,21 +1503,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         A cancel of the run alone (its control's: a limit, its parent or the
         user) stops it so too, and it returns what it has: the last text it
         wrote and the shared keys it changed; ``Delegations`` ends it
-        cancelled.
+        cancelled. Once its stream has ended its work is done
+        (``RunControl.finish``): a cancel of the run alone while its state
+        is read back does nothing.
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
             keys it changed (read back from its child session's state); or,
-            for a reply that is no answer, the error it is.
+            for a reply that is no answer, the error it is and its code; or,
+            for a model call that failed, the provider's reason (out of
+            ADK's plugin wrapper, ``_plugin_cause``) and its error's type,
+            each with the last text it wrote.
 
         Raises:
             RunFailed: Its request no longer fits its model's window
-                (the overflow handler's answer).
+                (the overflow handler's answer), with the last text it wrote.
             ValueError: Its child session's id is longer than ADK stores.
             AlreadyExistsError: The store keeps its instance already (a
                 stored transcript is never replaced).
-            Exception: Its model call failed: the provider's error, out of
-                ADK's plugin wrapper (``_plugin_cause``).
         """
         conversation = run.conversation
         if conversation is None:
@@ -1556,18 +1559,25 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             # turn's) goes on.
             if not run.control.own_cancel():
                 raise
-        except RuntimeError as error:
-            cause = _plugin_cause(error)
-            if cause is error:
-                raise
-            raise cause from None
+        except Exception as error:  # noqa: BLE001 - the run fails; its parent reads why
+            # A model call failed: the provider's error, out of ADK's plugin
+            # wrapper. The run fails with the text it wrote before it.
+            failure = _plugin_cause(error) if isinstance(error, RuntimeError) else error
+            logger.debug("subagent_failed", run=run.ref.run, exc_info=failure)
+            return RunAnswer(
+                text=processor.answer, error=failure_reason(failure),
+                error_code=type(failure).__name__,
+            )
         finally:
             self._report_raw_log()
+        # Its work has ended: a limit or a stop landing during the read of
+        # its state below must not discard the answer it made.
+        run.control.finish()
         if processor.failure is not None and run.control.cancelled is None:
             error, code = processor.failure
             if code == OVERFLOW_ERROR_CODE:
-                raise RunFailed(error, code=code)
-            return RunAnswer(text=processor.answer, error=error)
+                raise RunFailed(error, code=code, text=processor.answer)
+            return RunAnswer(text=processor.answer, error=error, error_code=code)
         ended = await self._session_service.get_session(
             app_name=app, user_id=conversation.user_id, session_id=session_id,
             config=GetSessionConfig(num_recent_events=0),

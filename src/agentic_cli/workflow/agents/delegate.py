@@ -45,9 +45,10 @@ counted against its time limit; the time it lends its slot is.
 
 A run that waits on the user (``waiting_on_user``: a question, a permission
 prompt, ``BaseWorkflowManager.request_user_input`` and the permission
-engine) says ``input_required``, lends its slot for the wait, and says
-``running`` once it has its slot back; a prompt no one can be shown (no
-input callback) lends nothing.
+engine) says ``input_required``, lends its slot for the wait, says
+``queued`` once answered while it waits for its slot back (another run
+works in it), and ``running`` once it has it; a prompt no one can be shown
+(no input callback, or its turn ended) lends nothing.
 
 Each ``AGENT_RUN`` is recorded (``AgentRuns.observe``) as it is made and
 reported to the turn's live events, so it reaches the turn's stream while
@@ -55,9 +56,10 @@ the run works. A run ends:
 
 - ``failed`` when the hook raised (not a cancel) or answered an error: the
   parent's envelope carries the reason (the provider's, for a failed model
-  call), and the user is warned once, a recoverable ``ERROR``:
-  ``<instance> failed: <reason>``, or the hook's own words (``RunFailed``: a
-  context overflow, ``context.subagent_overflow_message``);
+  call) and the text the run wrote before it failed, and the user is warned
+  once, a recoverable ``ERROR``: ``<instance> failed: <reason>``, or the
+  hook's own words (``RunFailed``: a context overflow,
+  ``context.subagent_overflow_message``);
 - ``refused`` when a model refused its last answer (``agents/outcome.py``);
 - ``completed`` otherwise, ``partial`` for an answer cut at its output
   limit, followed by the cut's one warning (``outcome.cut_off_warning``),
@@ -209,17 +211,23 @@ class RunAnswer:
     """What the backend hook returns for a run it ran to its end.
 
     Attributes:
-        text: Its last non-empty answer (``""`` for none).
+        text: Its last non-empty answer (``""`` for none), one it wrote
+            before it failed too: a failed run's envelope carries it.
         outcome: How that answer ended (``agents/outcome.py``: ``REFUSED``,
             ``CUT``), None when it ended as an answer should.
-        error: Why it failed, when it did; None when it answered.
+        error: Why it failed, when it did (the provider's reason for a
+            failed model call, ``failure_reason``); None when it answered.
         state: The shared state keys it changed, with their new values.
+        error_code: The failure's code, the user's warning's ``error_code``:
+            the provider error's type for a failed model call, the reply's
+            code for one that is no answer; None for none.
     """
 
     text: str = ""
     outcome: str | None = None
     error: str | None = None
     state: Mapping[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,7 +254,8 @@ StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
 @dataclass
 class _Working:
     """A run at work, as its own task sees it: its slot in its conversation's
-    pool, the child runs it waits on (by run id), and its waits on the user."""
+    pool, the child runs it waits on (by run id), its waits on the user, and
+    the working status it said last (``running`` from its start)."""
 
     ref: RunRef
     call_id: str
@@ -255,20 +264,32 @@ class _Working:
     emit: Callable[[WorkflowEvent], None]
     children: set[str] = field(default_factory=set)
     asking: int = 0
+    said: str = RUN_RUNNING
 
     def waits_on_only(self, child: str) -> bool:
         """Whether ``child`` is all the run waits on: its last child, the user not asked."""
         return self.asking == 0 and self.children <= {child}
 
+    def say(self, status: str) -> None:
+        """Report ``status``, a working one, unless the run said it last."""
+        if status != self.said:
+            self.said = status
+            self.emit(WorkflowEvent.agent_run(self.ref, status, call_id=self.call_id))
+
     @asynccontextmanager
     async def waiting_on_user(self) -> AsyncIterator[None]:
-        """``input_required``, its slot lent for the block, then ``running``; nested waits once."""
+        """``input_required``, its slot lent for the block, ``queued`` while a take-back
+        waits for a slot, then ``running``; nested waits once.
+
+        A wait that starts while an earlier one waits for the slot back
+        (two calls of one response that each ask) says ``input_required``
+        again: the run waits on the user.
+        """
         self.asking += 1
-        if self.asking == 1:
-            self.emit(WorkflowEvent.agent_run(self.ref, RUN_INPUT_REQUIRED, call_id=self.call_id))
+        self.say(RUN_INPUT_REQUIRED)
         stopped = False
         try:
-            async with self.pool.lent(self.slot):
+            async with self.pool.lent(self.slot, on_wait=lambda: self.say(RUN_QUEUED)):
                 yield
         except asyncio.CancelledError:
             stopped = True
@@ -276,7 +297,7 @@ class _Working:
         finally:
             self.asking -= 1
             if self.asking == 0 and not stopped:
-                self.emit(WorkflowEvent.agent_run(self.ref, RUN_RUNNING, call_id=self.call_id))
+                self.say(RUN_RUNNING)
 
 
 #: The run at work in this task (``_in_run`` sets it in the run's own task,
@@ -290,11 +311,11 @@ async def waiting_on_user() -> AsyncIterator[None]:
 
     In a sub-agent run's own work, the run says ``input_required``, its slot
     works for another run meanwhile, and once the block ends it takes the
-    slot back, ahead of the runs that have not started, and says
-    ``running``; nested waits (a prompt waiting its turn behind another's,
-    then the prompt) count once. A wait a cancel ends takes nothing back:
-    the run is being stopped. Nothing in the root's own work, nor outside a
-    run.
+    slot back, ahead of the runs that have not started, saying ``queued``
+    while it waits for it (another run holds it), and says ``running``;
+    nested waits (a prompt waiting its turn behind another's, then the
+    prompt) count once. A wait a cancel ends takes nothing back: the run is
+    being stopped. Nothing in the root's own work, nor outside a run.
 
     Only a wait that can block belongs in it: a lent slot goes to the first
     run queued for one, which may work its whole run in it before this run
@@ -314,15 +335,26 @@ class RunFailed(Exception):
 
     A hook raises it for a failure it has words for (a sub-agent's context
     overflow, ``context.subagent_overflow_message``): its text is the
-    envelope's ``error`` and the user's warning, as given, and ``code`` that
-    warning's error code. Any other exception a hook lets out fails the run
-    with its text (its type's name, for none), warned of as ``<instance>
-    failed: <reason>`` with the type's name as its code.
+    envelope's ``error`` and the user's warning, as given, ``code`` that
+    warning's error code, and ``text`` the last text the run wrote before
+    it failed (``""`` for none), the envelope's ``result``. A failure in
+    the provider's words (a failed model call) a hook answers instead
+    (``RunAnswer.error``, ``failure_reason``, with the run's last text and
+    the provider error's type as ``RunAnswer.error_code``).
+    Any other exception a hook lets out fails the run with its text (its
+    type's name, for none), warned of as ``<instance> failed: <reason>``
+    with the type's name as its code, and no result.
     """
 
-    def __init__(self, error: str, *, code: str) -> None:
+    def __init__(self, error: str, *, code: str, text: str = "") -> None:
         super().__init__(error)
         self.code = code
+        self.text = text
+
+
+def failure_reason(error: BaseException) -> str:
+    """A failure's reason, as a failed run's envelope gives it: its text, else its type's name."""
+    return str(error) or type(error).__name__
 
 
 class Delegations:
@@ -335,7 +367,9 @@ class Delegations:
             sub-agents (``AgentConfig.sub_agents``).
         hook: Runs one run (``BaseWorkflowManager._run_agent``).
         ledgers: The manager's usage ledgers: a run's end carries what it
-            used, by model. None: an end carries no usage.
+            used, by model, and its token limit counts its side calls
+            (``RunControl``'s ``side_tokens``). None: an end carries no
+            usage, and a run's own calls alone count toward its limit.
         stored: How many instances of each type a conversation's store
             already keeps (``BaseWorkflowManager._stored_instances``), asked
             once per conversation per turn, before the turn's first run is
@@ -414,7 +448,9 @@ class Delegations:
             ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
             brief=brief.fields(), started_by=started_by(request.caller), mode=BLOCKING,
         ))
-        control = RunControl(ref, self._limits(config))
+        control = RunControl(
+            ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref)
+        )
         inner = asyncio.create_task(
             self._in_run(ref, config, brief, conversation, request, control),
             name=f"agent run {ref.run}",
@@ -453,8 +489,9 @@ class Delegations:
         envelope (``cancelled``, with what it had of its work).
 
         Returns:
-            True when this cancelled it; False for no such working run, or
-            one cancelled already.
+            True when this cancelled it; False for no such working run, one
+            cancelled already, or one whose work has ended
+            (``RunControl.finish``).
 
         Raises:
             ValueError: ``by`` is not ``parent``, ``user`` or ``limit``.
@@ -493,9 +530,11 @@ class Delegations:
                 result=envelope(ref, RUN_INTERRUPTED, error=INTERRUPTED_ERROR), state={}, run=ref
             )
         except RunFailed as error:
-            return self._failed(ref, call_id, str(error), warning=str(error), code=error.code)
+            return self._failed(
+                ref, call_id, str(error), warning=str(error), code=error.code, text=error.text
+            )
         except Exception as error:  # noqa: BLE001 - a sub-agent's failure is its parent's to read
-            reason = str(error) or type(error).__name__
+            reason = failure_reason(error)
             logger.debug("subagent_failed", run=ref.run, exc_info=error)
             return self._failed(
                 ref, call_id, reason,
@@ -511,7 +550,7 @@ class Delegations:
         if answer.error is not None:
             return self._failed(
                 ref, call_id, answer.error, warning=f"{ref.instance} failed: {answer.error}",
-                code=None, text=answer.text, state=answer.state,
+                code=answer.error_code, text=answer.text, state=answer.state,
             )
         if answer.outcome == REFUSED:
             self._end(ref, call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR)
@@ -687,6 +726,22 @@ class Delegations:
         )
         self._emit(end)
         return end
+
+    def _side_tokens(
+        self, conversation: SessionRef | None, ref: RunRef
+    ) -> Callable[[], int] | None:
+        """What ``ref``'s run's side calls have used so far, as its conversation's ledger
+        counts them: its tools' side calls and its summaries (``RunControl``'s
+        ``side_tokens``; its own steps it counts itself). None without ledgers."""
+        if self._ledgers is None:
+            return None
+        ledger = self._ledgers.ledger(conversation)
+
+        def spent() -> int:
+            side = ledger.by_purpose(run=ref.run or "")
+            return sum(totals.input + totals.output for totals in side.values())
+
+        return spent
 
     def _usage(self, ref: RunRef) -> dict[str, dict[str, int]] | None:
         """What ``ref``'s run used, by model, from its conversation's ledger."""

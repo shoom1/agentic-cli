@@ -1,4 +1,4 @@
-"""A turn stopped by Ctrl+C, or cut off by a crash: every call gets one result.
+"""A turn stopped by Ctrl+C, cut off by a crash, or failed: every call gets one result.
 
 Ctrl+C stops the whole turn: the agent loop, its model calls, its tool calls
 and its sub-agents. What the model is told afterwards, on both backends
@@ -16,7 +16,10 @@ and its sub-agents. What the model is told afterwards, on both backends
 - a call a crash left open (no cancel ran) is answered on the next turn
   "Interrupted before it finished ...". ADK keeps a long-running call
   without a result in every later request, which Claude refuses; it drops
-  any other one and logs that over the UI on every request.
+  any other one and logs that over the UI on every request;
+- a turn that fails keeps the results of its calls that returned, and the
+  next turn answers each with its own (a call that did not return is
+  answered as a crash's), never a later call of the same id.
 
 The fake Claude refuses, as the real API does, a request with a ``tool_use``
 whose ``tool_result`` is missing.

@@ -537,7 +537,11 @@ class BaseWorkflowManager(ABC):
         ``UserInputUnavailable`` at once. The permission engine asks this
         before a sub-agent run lends its working slot for a prompt: a prompt
         no one can be shown is denied without waiting, and the run keeps its
-        slot.
+        slot. A subclass that overrides ``request_user_input`` to ask
+        through another channel overrides this too, saying when that
+        channel can answer: else the engine takes its prompts for ones no
+        one can be shown, and a sub-agent run keeps its slot while it waits
+        for the answer.
         """
         return self._user_input_callback.get() is not None and not turn_has_ended()
 
@@ -638,13 +642,20 @@ class BaseWorkflowManager(ABC):
         on ``run.message`` (after ``run.history`` for an inheriting one),
         from the shared state ``run.state``, reports the run's events to the
         turn's live events as they are made, and returns its last answer,
-        its outcome and the shared state it changed. A failure raises (the
-        provider's error, or ``RunFailed``). A cancel stops the run; the
+        its outcome and the shared state it changed. A failed model call is
+        answered (``RunAnswer.error``: the provider's reason,
+        ``failure_reason``; ``RunAnswer.error_code``: its error's type, the
+        warning's code) and a failure in the backend's own words raised
+        (``RunFailed``), each with the last text the run wrote, which its
+        envelope carries; any other exception it lets out fails the run with
+        no result. A cancel stops the run; the
         run's own (``run.control.own_cancel()``: a limit's, its parent's,
         the user's) returns what it has, its last text and the shared state
-        it changed, and any other (its turn's) raises. ``run.control``
-        keeps its limits at its model calls (each backend's in its
-        sub-agents' stacks).
+        it changed, and any other (its turn's) raises. Once the run's work
+        has ended, before anything it awaits to read what the run did, it
+        calls ``run.control.finish()``, so a cancel of the run alone then
+        loses nothing. ``run.control`` keeps its limits at its model calls
+        (each backend's in its sub-agents' stacks).
 
         Raises:
             NotImplementedError: This backend runs no sub-agent.

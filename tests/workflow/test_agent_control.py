@@ -91,6 +91,24 @@ class TestCancel:
 
         assert made.cancelled is None
 
+    async def test_a_run_whose_work_has_ended_is_not_cancelled(self):
+        """Its hook said its work ended (``finish``) and still reads back what
+        the run did: neither a stop nor its time limit cancels it then."""
+        made = control(timeout=0.05)
+
+        async def run() -> str:
+            with made.timing():
+                made.finish()
+                made.cancel(by="parent", error="no longer needed")
+                await asyncio.sleep(0.1)  # reading what it did, past its time limit
+            return "its answer"
+
+        task = asyncio.create_task(run())
+        made.bind(task)
+
+        assert await asyncio.wait_for(task, 5) == "its answer"
+        assert made.cancelled is None
+
     async def test_a_cancel_before_the_task_is_bound_cancels_it_then(self):
         made = control()
         made.cancel(by="user", error="stopped")
@@ -279,6 +297,21 @@ class TestTheTokenLimit:
         made.model_call()
 
         assert made.final_call is True
+
+    async def test_the_runs_side_calls_count_with_its_own(self):
+        """``side_tokens``: what the run's tools' side calls and its summaries
+        used so far, as its usage record counts them."""
+        side = {"tokens": 0}
+        made = RunControl(REF, AgentLimits(max_tokens=100), side_tokens=lambda: side["tokens"])
+        task, _ = await a_run(made)
+
+        made.used(40, 10)
+        assert made.cancelled is None
+        side["tokens"] = 45  # a side call its tool made meanwhile
+        made.used(5, 5)  # 50 + 10 of its own, 45 besides: 105
+
+        assert (made.cancelled, made.final_call) == (("limit", TOKEN_LIMIT_ERROR), True)
+        task.cancel()
 
     def test_without_a_limit_any_number_is_fine(self):
         made = control()

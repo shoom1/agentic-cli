@@ -470,10 +470,14 @@ class UsageLedger:
             lambda row: row.agent, lambda row: row.purpose in AGENT_STEP_PURPOSES
         )
 
-    def by_purpose(self) -> dict[str, UsageTotals]:
-        """The side calls, by purpose, in the order each was first made."""
+    def by_purpose(
+        self, *, run: str | None = ...  # type: ignore[assignment]
+    ) -> dict[str, UsageTotals]:
+        """The side calls, by purpose, in the order each was first made; one run's
+        when ``run`` is given (None: the root's own work's)."""
         return self._grouped(
-            lambda row: row.purpose, lambda row: row.purpose not in AGENT_STEP_PURPOSES
+            lambda row: row.purpose,
+            lambda row: row.purpose not in AGENT_STEP_PURPOSES and (run is ... or row.run == run),
         )
 
     def by_model(

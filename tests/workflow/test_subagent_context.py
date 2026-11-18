@@ -3,7 +3,7 @@
 A sub-agent sees the request alone (``inherit_context=False``, the default)
 or its parent's conversation too (``True``). ``validate_agent_graph`` checks
 the field where it sits in the tree, for every backend: the root has no
-parent to inherit from, and in 0.7.0 inheriting is for the main agent's own
+parent to inherit from, and inheriting is for the main agent's own
 sub-agents, and only those without sub-agents of their own.
 
 What each mode sends a model is pinned per backend: ADK in
@@ -70,15 +70,12 @@ class TestTheGraphChecks:
         assert validate_agent_graph(tree(deep=False)).root_name == "lead"
 
     def test_inheriting_is_for_the_main_agents_own_sub_agents(self):
-        # On ADK an inheriting agent is shown the main agent's conversation,
-        # whatever its depth: below a fresh coordinator it would see what its
-        # parent was kept from. Deep Agents' fork sees its parent's. Neither
-        # is offered in 0.7.0.
         with pytest.raises(AgentGraphError) as exc:
             validate_agent_graph(tree("deep"))
         message = str(exc.value)
         assert "'deep'" in message and "'lead'" in message
-        assert "inherit_context" in message and "0.7.0" in message
+        assert "inherit_context" in message and "make it a sub-agent of 'lead'" in message
+        assert "0.7" not in message  # shipped text names no version
 
     def test_a_middle_coordinator_sees_the_request_alone(self):
         assert validate_agent_graph(tree(middle=False)).root_name == "lead"
@@ -106,7 +103,7 @@ class TestTheGraphChecks:
         message = str(exc.value)
         assert "'middle'" in message
         assert "inherit_context" in message and "without sub-agents" in message
-        assert "0.7.0" in message
+        assert "Leave it False on a coordinator" in message and "0.7" not in message
 
     @pytest.mark.parametrize("value", ["fresh", "inherit", 1, None])
     def test_a_value_that_is_not_a_bool_is_named(self, value):

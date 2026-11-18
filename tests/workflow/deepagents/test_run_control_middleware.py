@@ -107,7 +107,7 @@ async def test_an_answer_past_the_token_limit_is_the_last_only_when_it_would_go_
         assert (control.cancelled, kept) == (None, answer)
 
 
-async def test_an_answer_with_no_usage_is_not_limited_by_tokens():
+async def test_an_answer_with_no_usage_counts_none_of_its_own_tokens():
     control = RunControl(REF, AgentLimits(max_tokens=1))
     middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
     answer = AIMessage("Found it.", tool_calls=[CALL])
@@ -117,6 +117,20 @@ async def test_an_answer_with_no_usage_is_not_limited_by_tokens():
 
     assert await middleware.awrap_model_call("the request", handler) is answer
     assert (control.cancelled, control.final_call) == (None, False)
+
+
+async def test_an_answer_with_no_usage_still_counts_the_runs_side_calls():
+    control = RunControl(REF, AgentLimits(max_tokens=100), side_tokens=lambda: 120)
+    middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
+    answer = AIMessage("Found it.", tool_calls=[CALL])
+
+    async def handler(request):
+        return answer
+
+    kept = await middleware.awrap_model_call("the request", handler)
+
+    assert control.cancelled == ("limit", TOKEN_LIMIT_ERROR)
+    assert (kept.content, kept.tool_calls) == ("Found it.", [])
 
 
 async def test_the_messages_steered_since_the_last_call_join_the_runs_state():

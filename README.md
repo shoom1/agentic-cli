@@ -385,8 +385,9 @@ What it supports:
   coordinator writes and the coordinator's plan and tasks; with
   `inherit_context=True` it also starts from the coordinator's
   conversation. Its run's envelope is the call's result, and the
-  coordinator answers the user. Two sub-agents can run at once. `task` is a
-  reserved tool name.
+  coordinator answers the user. Several sub-agent runs can work at once,
+  four by default (`SubAgentPolicy.max_active`, at any depth); a run past
+  them waits for a free slot. `task` is a reserved tool name.
 - **The permission gate on every call**: `PermissionMiddleware`, in every
   agent's stack, identifies each tool by the object the registry issued and
   asks through the input callback, for sub-agents' calls too. A tool that
@@ -1355,17 +1356,23 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `<app_name>--agents`, id `<conversation id>/<instance>`), which
   `/sessions` never lists and which is deleted with its conversation; an
   inheriting run's child session starts with the conversation's events.
+  Only the plan, the tasks and the outside-content mark pass between a run
+  and its caller: any other session-state key an app's ADK tool writes in a
+  sub-agent run stays in the run's child session, and a `user:` or `app:`
+  scoped one is kept under the child app, so the conversation never sees
+  it; nor does the run read the conversation's other keys.
   **On Deep Agents**, each sub-agent's graph runs apart from its parent's,
   in a task of its own; an inheriting run starts from the conversation's
   messages, which its own summarization compacts when they are too large
   for its model.
-- **The limits in 0.7.0.** `inherit_context` is for sub-agents only, and
+- **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task`. Each raises
   `AgentGraphError` at startup.
 - **A sub-agent's failure.** A sub-agent whose model call fails does not
   end the turn, on either backend: its run fails, its parent reads the
-  provider's reason in the envelope, the user sees a warning,
+  provider's reason in the envelope, with the text the run wrote before it
+  failed as its result, the user sees a warning,
   `<instance> failed: <the provider's reason>` (`researcher-1 failed: …`),
   and the parent answers. Only the main agent's own failure ends the turn.
   A sub-agent's request too long for its model fails its run alike, with the
@@ -1377,16 +1384,25 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `max_tokens` too), the runs one turn may start (`max_runs_per_turn`, 20,
   at any depth) and the runs that work at once (`max_active`, 4, at any
   depth: a run past them waits for a free slot, and one waiting on its
-  children or the user lends its slot meanwhile); an agent's own
+  children or the user lends its slot meanwhile; once the user has answered,
+  it waits `queued` to take its slot back if another run works in it; a
+  tool that puts a timeout around a
+  question, `asyncio.wait_for` or `asyncio.timeout` around
+  `request_user_input`, and goes on when it fires gives its run's slot up
+  for the rest of the run, which works on without one and says
+  `input_required` until its next question is answered, then `running`,
+  still without a slot, or until it ends); an agent's own
   `limits=AgentLimits(...)` lies over the policy's, field by field. A run's
   last allowed model call is told to answer with what it has, and the run
   completes `partial` (`step limit reached`); past its time, or past its
   tokens with an answer that asks for tools, it is `cancelled` (`time limit
   reached`, `token limit reached`) with the text it wrote so far, a prompt
   it waited at withdrawn (an answer past its tokens that asks for none is
-  its result, and the run completes; a model that reports no usage is not
-  limited by tokens); a `task` call past the runs a turn may start starts
-  no run, and the parent reads why.
+  its result, and the run completes; its tokens are its total as its usage
+  record counts it, its tools' side calls and its summaries included,
+  checked after each of its model calls, and a model that reports no
+  usage counts none of its own); a `task` call past the runs a turn may
+  start starts no run, and the parent reads why.
 - **A sub-agent's job.** A long-running tool on a sub-agent (a job starter)
   returns the job's id at once, and the sub-agent answers its parent in the
   same turn. When the job finishes, the main agent is told, in a message of

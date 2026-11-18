@@ -336,6 +336,42 @@ class TestLending:
         pool.release(other)
         assert (pool.free, pool.waiting) == (1, 0)
 
+    async def test_a_take_back_that_must_wait_says_so_as_it_starts_to(self):
+        """``on_wait``: the block is over, and no slot is free to take back."""
+        pool = SlotPool(1)
+        slot = await pool.acquire()
+        said: list[str] = []
+        over = asyncio.Event()
+
+        async def waits() -> None:
+            async with pool.lent(slot, on_wait=lambda: said.append("waits")):
+                await over.wait()
+            said.append("back")
+
+        lending = asyncio.create_task(waits())
+        await until(lambda: slot.lent)
+        other = await pool.acquire()  # works in the lent slot
+        over.set()
+        await until(lambda: pool.waiting == 1)
+        assert said == ["waits"]
+        pool.release(other)
+        await asyncio.wait_for(lending, 1)
+
+        assert (said, slot.held) == (["waits", "back"], True)
+
+    async def test_a_take_back_with_a_slot_free_or_handed_back_says_nothing(self):
+        pool = SlotPool(1)
+        slot = await pool.acquire()
+        said: list[str] = []
+
+        async with pool.lent(slot, on_wait=lambda: said.append("waits")):
+            pass  # no other run took the lent slot
+        async with pool.lent(slot, on_wait=lambda: said.append("waits")):
+            child = await pool.acquire()
+            pool.hand_back(child, to=slot)
+
+        assert (said, slot.held, pool.free) == ([], True, 0)
+
 
 class TestHandBack:
     async def test_a_child_hands_its_slot_to_its_parent_waiting_on_it_alone(self):

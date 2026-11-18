@@ -36,7 +36,8 @@ RUN_STARTED = "started"
 #: A working run's status: waiting for a free working slot, working, or
 #: waiting on the user (a question, a permission prompt). A record says
 #: ``running`` from its start; its events say ``queued`` when it must wait
-#: for a slot, and ``running`` once it has one, and after the user answered.
+#: for a slot (to start, or, once the user has answered, to take its own
+#: back while another run works in it), and ``running`` once it has one.
 RUN_QUEUED = "queued"
 RUN_RUNNING = "running"
 RUN_INPUT_REQUIRED = "input_required"
