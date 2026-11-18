@@ -51,6 +51,7 @@ from agentic_cli.workflow.agents import (
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
 from agentic_cli.workflow.agents.slots import SlotPool
 from agentic_cli.workflow.agents.envelope import (
+    INTERRUPTED_ERROR,
     STEP_LIMIT_ERROR,
     TIME_LIMIT_ERROR,
     TOKEN_LIMIT_ERROR,
@@ -63,8 +64,13 @@ from agentic_cli.workflow.events import (
     UserInputUnavailable,
     WorkflowEvent,
 )
-from agentic_cli.workflow.interrupts import INTERRUPTED_BY_USER, NOT_RUN
-from agentic_cli.workflow.permissions import EXEMPT, Capability
+from agentic_cli.workflow.interrupts import (
+    INTERRUPTED,
+    INTERRUPTED_BY_USER,
+    NOT_RUN,
+    interrupted,
+)
+from agentic_cli.workflow.permissions import EXEMPT, Capability, PermissionEngine
 from agentic_cli.workflow.permissions import prompt as permission_prompt
 from agentic_cli.workflow.permissions.prompt import ALLOW_ONCE_CHOICE, DENY_CHOICE
 from agentic_cli.workflow.sessions import (
@@ -3160,3 +3166,87 @@ class TestWaitingOnTheUser:
             ("researcher-1", "w1"), ("researcher-2", "w2"),
         ]
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+
+# -- after a failed turn: the next turn reads what each of its calls returned -------------
+
+#: Why a permission check fails in ``gate_fails_after``.
+GATE_FAILURE = "the permission rules could not be read"
+
+
+def gate_fails_after(monkeypatch, tool: str, condition: Callable[[], bool]) -> None:
+    """Make the permission check of each ``tool`` call raise once ``condition()`` holds.
+
+    Both gates ask the engine before the tool runs and neither turns an
+    engine that raises into the call's result, so the turn fails with its
+    one ``ERROR``; waiting for ``condition`` lets the call's siblings in the
+    same response return first.
+    """
+    check = PermissionEngine.check
+
+    async def failing(self, tool_name, capabilities, args):
+        if tool_name == tool:
+            await until(condition)
+            raise RuntimeError(GATE_FAILURE)
+        return await check(self, tool_name, capabilities, args)
+
+    monkeypatch.setattr(PermissionEngine, "check", failing)
+
+
+class TestAfterAFailedTurn:
+    """A turn that fails ends with its one ``ERROR``. Its calls that returned
+    keep their results: the next turn's root request carries each one's own,
+    and the interrupted text only for a call that did not return."""
+
+    async def test_results_stored_before_a_failed_model_call_are_read_next_turn(
+        self, make_crew
+    ):
+        """Both calls return and their results are stored; the model call
+        after them fails."""
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_lookup, contract_whoami))],
+            coordinator=[calls(use("contract_lookup", "c1", q="X"), use("contract_whoami", "c2")),
+                         fails("overloaded"), says("Back again.")],
+        )
+
+        events = await crew.turn()
+        await crew.turn("And now?")
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert "overloaded" in error.content
+        assert error.metadata["recoverable"] is False
+        assert crew.requests("coordinator") == 3
+        assert crew.result_ids("coordinator") == ["c1", "c2"]
+        read = crew.results_read("coordinator")
+        assert {call: json.loads(text) for call, text in read.items()} == {
+            "c1": {"success": True, "value": 42}, "c2": {"success": True},
+        }
+
+    async def test_a_delegation_still_working_when_a_sibling_fails_the_turn_is_interrupted(
+        self, make_crew, monkeypatch
+    ):
+        """``c2``'s permission check fails the turn while ``c1``'s run still
+        works: the run ends interrupted, and that is what the next turn's
+        coordinator reads for ``c1``."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=("read_file",)),
+             agent("researcher", tools=(contract_hold,))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               use("read_file", "c2", path="notes.txt")),
+                         says("Back again.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42.")],
+        )
+        gate_fails_after(monkeypatch, "read_file", HELD["started"].is_set)
+
+        events = await crew.turn()
+        await crew.turn("And now?")
+
+        (error,) = [e for e in events if e.type is EventType.ERROR]
+        assert GATE_FAILURE in error.content
+        assert [(r.ref, r.status, r.error) for r in crew.records()] == [
+            (RESEARCHER, RUN_INTERRUPTED, INTERRUPTED_ERROR),
+        ]
+        assert crew.result_ids("coordinator") == ["c1", "c2"]
+        read = crew.results_read("coordinator")
+        assert json.loads(read["c1"]) == interrupted(INTERRUPTED)
+        assert json.loads(read["c2"]) == interrupted(INTERRUPTED)
