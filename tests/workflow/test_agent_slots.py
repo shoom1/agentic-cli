@@ -244,6 +244,63 @@ class TestLending:
 
         assert (slot.held, pool.free) == (True, 0)
 
+    async def test_a_wait_that_starts_while_the_slot_waits_to_come_back_lends_it_on(self):
+        """Two waits of one run that do not overlap (two calls of one
+        response): the second starts while the first waits for the slot to
+        come back. The first ends without it, since the run waits again, and
+        the slot comes back once, after the second."""
+        pool = SlotPool(1)
+        parent = await pool.acquire()
+        first_over, second_over = asyncio.Event(), asyncio.Event()
+
+        async def waits(over: asyncio.Event) -> None:
+            async with pool.lent(parent):
+                await over.wait()
+
+        first = asyncio.create_task(waits(first_over))
+        await until(lambda: parent.lent)
+        other = await pool.acquire()  # works in the parent's lent slot
+        first_over.set()
+        await until(lambda: pool.waiting == 1)  # the first wants it back
+        second = asyncio.create_task(waits(second_over))
+        try:
+            await until(first.done, within=1)
+            assert (parent.lent, pool.waiting) == (True, 0)
+            second_over.set()
+            await until(lambda: pool.waiting == 1)  # the second wants it back
+            pool.release(other)
+            await until(second.done, within=1)
+        finally:
+            first.cancel(), second.cancel()
+
+        assert (parent.held, pool.free, pool.waiting) == (True, 0, 0)
+        pool.release(parent)
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_slot_released_while_it_waits_to_come_back_is_not_taken(self):
+        pool = SlotPool(1)
+        slot = await pool.acquire()
+        over = asyncio.Event()
+
+        async def waits() -> None:
+            async with pool.lent(slot):
+                await over.wait()
+
+        lending = asyncio.create_task(waits())
+        await until(lambda: slot.lent)
+        other = await pool.acquire()
+        over.set()
+        await until(lambda: pool.waiting == 1)
+        pool.release(slot)  # its run ended meanwhile
+        try:
+            await until(lending.done, within=1)
+        finally:
+            lending.cancel()
+
+        assert pool.waiting == 0
+        pool.release(other)
+        assert (pool.free, pool.waiting) == (1, 0)
+
 
 class TestHandBack:
     async def test_a_child_hands_its_slot_to_its_parent_waiting_on_it_alone(self):

@@ -43,6 +43,10 @@ _HELD = "held"
 _LENT = "lent"
 _RELEASED = "released"
 
+#: A waiting run's entry in the heap: its priority, its arrival, and the
+#: future a slot handed to it sets (True), or a withdrawn take-back (False).
+_Waiter = tuple[int, int, "asyncio.Future[bool]"]
+
 
 class Slot:
     """One run's working slot, from a ``SlotPool``.
@@ -51,7 +55,7 @@ class Slot:
     the user (``SlotPool.lent``); released once the run has given it back.
     """
 
-    __slots__ = ("_pool", "_state", "_lends")
+    __slots__ = ("_pool", "_state", "_lends", "_back")
 
     def __init__(self, pool: SlotPool) -> None:
         self._pool = pool
@@ -59,6 +63,9 @@ class Slot:
         # The lends in progress (``SlotPool.lent``, nested): the slot is lent
         # on the first and taken back after the last.
         self._lends = 0
+        # Its run's wait in the heap to take it back, while there is one
+        # (``SlotPool._take_back``): one at a time.
+        self._back: _Waiter | None = None
 
     @property
     def held(self) -> bool:
@@ -89,7 +96,7 @@ class SlotPool:
         # One (priority, arrival, future) per waiting run, a heap: a slot
         # handed to it sets its future's result. Arrivals are unique, so two
         # entries never compare their futures.
-        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
+        self._waiters: list[_Waiter] = []
         self._arrivals = itertools.count()
 
     @property
@@ -125,6 +132,8 @@ class SlotPool:
         state, slot._state = slot._state, _RELEASED
         if state == _HELD:
             self._give()
+        else:
+            self._withdraw(slot)
 
     def hand_back(self, slot: Slot, to: Slot) -> None:
         """Release a child's ``slot`` at its end to ``to``, its parent's, which waits on it alone.
@@ -143,6 +152,7 @@ class SlotPool:
         if slot._state == _HELD and to._state == _LENT:
             slot._state = _RELEASED
             to._state = _HELD
+            self._withdraw(to)
             return
         self.release(slot)
 
@@ -153,10 +163,12 @@ class SlotPool:
         A lend of a held slot frees it for another run (of nested lends, the
         first); when the last ends, it is taken back at ``RETURNING`` (at
         once when a slot is free, else ahead of the runs that have not
-        started), unless a child handed it back already. A lend that ends in
-        a cancel takes nothing back: its run is being stopped, and its
-        ``release`` is then nothing. An error is no cancel: the run goes on,
-        with its slot back.
+        started), unless a child handed it back already. A lend that starts
+        while another of the run's waits is taking the slot back keeps it
+        lent: that wait ends without it, and this one takes it back. A lend
+        that ends in a cancel takes nothing back: its run is being stopped,
+        and its ``release`` is then nothing. An error is no cancel: the run
+        goes on, with its slot back.
 
         Raises:
             ValueError: ``slot`` is another pool's.
@@ -166,6 +178,11 @@ class SlotPool:
         if slot._state == _HELD:
             slot._state = _LENT
             self._give()
+        else:
+            # Lent already: an earlier wait of the run that is taking it back
+            # no longer needs it, since the run waits again; this lend takes
+            # it back when it ends.
+            self._withdraw(slot)
         try:
             yield
         except asyncio.CancelledError:
@@ -183,45 +200,78 @@ class SlotPool:
             await self._take_back(slot)
 
     async def _take_back(self, slot: Slot) -> None:
-        """A lent ``slot`` held again, at ``RETURNING``; nothing for one handed back or released."""
+        """A lent ``slot`` held again, at ``RETURNING``; nothing for one handed back or released.
+
+        A wait in the heap the slot no longer needs (a child handed it back,
+        its run released it, or the run lent it again) is withdrawn and takes
+        nothing; a slot handed to it in that same tick goes to the next.
+        """
         if slot._state != _LENT:
             return
         try:
-            await self._take(RETURNING)
+            took = await self._take(RETURNING, slot)
         except asyncio.CancelledError:
-            slot._state = _RELEASED
+            if slot._state == _LENT and slot._lends == 0:
+                slot._state = _RELEASED
             raise
+        if not took:
+            return
+        if slot._state != _LENT or slot._lends > 0:
+            self._give()
+            return
         slot._state = _HELD
 
-    async def _take(self, priority: int) -> None:
-        """Count one slot taken: a free one, else wait in the heap until one is handed over."""
+    async def _take(self, priority: int, slot: Slot | None = None) -> bool:
+        """Count one slot taken: a free one, else wait in the heap until one is handed over.
+
+        False when the wait is ``slot``'s take-back and was withdrawn
+        (``_withdraw``): no slot was taken.
+        """
         if self._free > 0:
             self._free -= 1
-            return
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            return True
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         entry = (priority, next(self._arrivals), future)
         heapq.heappush(self._waiters, entry)
+        if slot is not None:
+            slot._back = entry
         try:
-            await future
+            return await future
         except asyncio.CancelledError:
             if future.done() and not future.cancelled():
-                # Handed a slot in the tick it was cancelled: the next one's.
-                self._give()
+                if future.result():
+                    # Handed a slot in the tick it was cancelled: the next one's.
+                    self._give()
             else:
                 self._leave(entry)
             raise
+        finally:
+            if slot is not None and slot._back is entry:
+                slot._back = None
 
     def _give(self) -> None:
         """A slot came back: hand it to the first waiter still waiting, else it is free."""
         while self._waiters:
             _, _, future = heapq.heappop(self._waiters)
             if not future.done():
-                future.set_result(None)
+                future.set_result(True)
                 return
         self._free += 1
 
-    def _leave(self, entry: tuple[int, int, asyncio.Future[None]]) -> None:
-        """Take a cancelled waiter's ``entry`` out of the heap (``_give`` may have popped it)."""
+    def _withdraw(self, slot: Slot) -> None:
+        """End ``slot``'s take-back waiting in the heap, if any, without a slot."""
+        entry, slot._back = slot._back, None
+        if entry is None:
+            return
+        self._leave(entry)
+        if not entry[2].done():
+            entry[2].set_result(False)
+
+    def _leave(self, entry: _Waiter) -> None:
+        """Take a cancelled or withdrawn waiter's ``entry`` out of the heap.
+
+        ``_give`` may have popped it already.
+        """
         for index, waiting in enumerate(self._waiters):
             if waiting is entry:
                 self._waiters.pop(index)
