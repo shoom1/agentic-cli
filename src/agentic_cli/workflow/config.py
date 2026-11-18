@@ -57,8 +57,8 @@ class AgentConfig:
             conversation as it stands, after any summarizing and without the
             parent's reasoning. A sub-agent works and returns its answer to
             its parent in the same turn on both backends; only the root
-            replies to the user. True only on sub-agents, and in 0.7.0 only
-            on the root's own sub-agents without sub-agents of their own
+            replies to the user. True only on sub-agents, and only on the
+            root's own sub-agents without sub-agents of their own
             (``validate_agent_graph`` checks it).
         brief_required: The brief fields a delegation to this agent must
             fill (``workflow/agents/brief.py``: ``objective``,
@@ -212,10 +212,7 @@ def validate_agent_graph(
     9. the root does not set ``inherit_context``: it has no parent's
        conversation;
     10. ``inherit_context`` only on an agent without sub-agents, and only on
-        the root's own sub-agents. In 0.7.0 a forked Deep Agents coordinator
-        is told that delegating will be refused, which is false for ours, so
-        a real model might never delegate; and below another sub-agent ADK
-        would show it the main agent's whole conversation;
+        the root's own sub-agents;
     11. each agent's ``brief_required`` is a tuple (or list) of brief field
         names: ``title``, or one of ``BRIEF_FIELDS``;
     12. each agent's ``limits`` is None or an ``AgentLimits``;
@@ -333,14 +330,12 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
     if inheriting:
         raise AgentGraphError(
             f"Agent(s) {', '.join(repr(n) for n in inheriting)} set "
-            "inherit_context=True and have sub-agents of their own: in 0.7.0, "
+            "inherit_context=True and have sub-agents of their own: "
             "inherit_context is for agents without sub-agents. Leave it False "
             "on a coordinator."
         )
 
-    # ADK shows an inheriting agent the main agent's conversation, whatever its
-    # depth, so below a fresh coordinator it would see what its parent was kept
-    # from; Deep Agents' fork sees its parent's. 0.7.0 offers neither.
+    # Inheriting is for the main agent's own sub-agents (rule 10).
     nested = sorted({
         sub
         for name, config in config_map.items()
@@ -351,7 +346,7 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
     if nested:
         raise AgentGraphError(
             f"Agent(s) {', '.join(repr(n) for n in nested)} set inherit_context=True "
-            f"below another sub-agent: in 0.7.0, inherit_context is for the main "
+            f"below another sub-agent: inherit_context is for the main "
             f"agent's ({root!r}) own sub-agents. Leave it False, or make it a "
             f"sub-agent of {root!r}."
         )

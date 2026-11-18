@@ -64,8 +64,11 @@ class Slot:
         # The lends in progress (``SlotPool.lent``, nested): the slot is lent
         # on the first and taken back after the last.
         self._lends = 0
-        # Its run's take-back waiting in the heap for a slot, while there
-        # is one (``SlotPool._take_back``).
+        # Its run's take-back waiting for a slot (``SlotPool._take_back``),
+        # from when it joins the heap until its wait ends: for a moment it
+        # may name one ``_give`` has handed a slot already (out of the heap,
+        # its task not yet resumed), whose take-back then keeps that slot or
+        # hands it on.
         self._back: _Waiter | None = None
 
     @property
@@ -172,8 +175,14 @@ class SlotPool:
         lend that starts while another of the run's waits is taking the slot
         back keeps it lent: that wait ends without it, and this one takes it
         back. A lend that ends in a cancel takes nothing back: its run is
-        being stopped, and its ``release`` is then nothing. An error is no
-        cancel: the run goes on, with its slot back.
+        being stopped, and its ``release`` is then nothing. So a cancel that
+        does not stop the run gives the slot up for the rest of it: an app's
+        tool that puts ``asyncio.wait_for`` or ``asyncio.timeout`` around a
+        question (``request_user_input``) and goes on when the timeout fires
+        leaves its run working without a slot (another run may have it, so
+        more than ``size`` work at once), and the run says
+        ``input_required`` until it ends. An error is no cancel: the run
+        goes on, with its slot back.
 
         Raises:
             ValueError: ``slot`` is another pool's.

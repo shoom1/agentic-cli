@@ -1328,8 +1328,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         async with self._turn(session_id, user_id) as ref:
             logger.info("processing_message", message_length=len(message))
             session = await self._get_or_create_session(ref.user_id, ref.session_id)
-            # A crash, an old cancel, or a stop whose answers could not be
-            # written may have left calls without a result.
+            # A crash, an old cancel, a failed turn, or a stop whose answers
+            # could not be written may have left calls without a result.
             session = await self._answer_left_open(session)
             state_delta = {
                 **turn_state(session, message),

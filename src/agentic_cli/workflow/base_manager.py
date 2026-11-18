@@ -537,7 +537,11 @@ class BaseWorkflowManager(ABC):
         ``UserInputUnavailable`` at once. The permission engine asks this
         before a sub-agent run lends its working slot for a prompt: a prompt
         no one can be shown is denied without waiting, and the run keeps its
-        slot.
+        slot. A subclass that overrides ``request_user_input`` to ask
+        through another channel overrides this too, saying when that
+        channel can answer: else the engine takes its prompts for ones no
+        one can be shown, and a sub-agent run keeps its slot while it waits
+        for the answer.
         """
         return self._user_input_callback.get() is not None and not turn_has_ended()
 

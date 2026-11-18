@@ -235,8 +235,10 @@ class OpenCalls:
         """An open call's result: what it returned if it finished, else why it has none.
 
         The call is ``run``'s, in the active turn's conversation. It stays
-        recorded until that conversation's turn ends (``clear``): the step
-        that answers it may be stopped before it is saved.
+        recorded until a turn of that conversation ends with every call
+        answered (``clear``): the step that answers it may be stopped before
+        it is saved, and a failed turn keeps it (``failed``) for the next
+        turn to answer.
 
         Args:
             call_id: The call.
