@@ -271,7 +271,42 @@ class TestLending:
             pool.release(other)
             await until(second.done, within=1)
         finally:
-            first.cancel(), second.cancel()
+            first.cancel()
+            second.cancel()
+
+        assert (parent.held, pool.free, pool.waiting) == (True, 0, 0)
+        pool.release(parent)
+        assert (pool.free, pool.waiting) == (1, 0)
+
+    async def test_a_wait_over_at_once_as_the_slot_comes_back_leaves_no_wait_behind(self):
+        """The run's first wait has been handed its slot back but has not yet
+        gone on when another of its waits starts and ends at once (a prompt
+        answered without waiting): the run holds its slot once, and nothing
+        of it is left waiting in the heap."""
+        pool = SlotPool(1)
+        parent = await pool.acquire()
+        first_over = asyncio.Event()
+
+        async def waits() -> None:
+            async with pool.lent(parent):
+                await first_over.wait()
+
+        async def over_at_once() -> None:
+            async with pool.lent(parent):
+                pass
+
+        first = asyncio.create_task(waits())
+        await until(lambda: parent.lent)
+        other = await pool.acquire()  # works in the parent's lent slot
+        first_over.set()
+        await until(lambda: pool.waiting == 1)  # the first wants it back
+        second = asyncio.create_task(over_at_once())  # runs before the first wakes
+        pool.release(other)  # the first is handed the slot
+        try:
+            await asyncio.wait_for(asyncio.gather(first, second), 1)
+        finally:
+            first.cancel()
+            second.cancel()
 
         assert (parent.held, pool.free, pool.waiting) == (True, 0, 0)
         pool.release(parent)

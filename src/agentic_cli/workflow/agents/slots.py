@@ -63,8 +63,8 @@ class Slot:
         # The lends in progress (``SlotPool.lent``, nested): the slot is lent
         # on the first and taken back after the last.
         self._lends = 0
-        # Its run's wait in the heap to take it back, while there is one
-        # (``SlotPool._take_back``): one at a time.
+        # Its run's take-back waiting in the heap for a slot, while there
+        # is one (``SlotPool._take_back``).
         self._back: _Waiter | None = None
 
     @property
@@ -202,9 +202,14 @@ class SlotPool:
     async def _take_back(self, slot: Slot) -> None:
         """A lent ``slot`` held again, at ``RETURNING``; nothing for one handed back or released.
 
-        A wait in the heap the slot no longer needs (a child handed it back,
-        its run released it, or the run lent it again) is withdrawn and takes
-        nothing; a slot handed to it in that same tick goes to the next.
+        A take-back in the heap the slot no longer needs (a child handed it
+        back, its run released it, or the run lent it again) is withdrawn
+        and takes nothing. One handed a slot before it could be withdrawn
+        gives that slot to the next waiter when the slot is lent again,
+        handed back or released by the time it goes on; else it holds the
+        slot, and a take-back queued meanwhile (a wait of the run that
+        started and ended in between) is withdrawn. So a run's slot has at
+        most one take-back waiting for a slot, and none once it is held.
         """
         if slot._state != _LENT:
             return
@@ -220,6 +225,9 @@ class SlotPool:
             self._give()
             return
         slot._state = _HELD
+        # A take-back another wait of the run queued while this one was
+        # being handed the slot: the slot is back, so it ends without one.
+        self._withdraw(slot)
 
     async def _take(self, priority: int, slot: Slot | None = None) -> bool:
         """Count one slot taken: a free one, else wait in the heap until one is handed over.
