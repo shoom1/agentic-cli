@@ -233,10 +233,15 @@ def limit_sentences(policy: SubAgentPolicy) -> list[str]:
     """The sentences of ``task``'s description that state the limits a delegation enforces.
 
     One sentence for each limit the framework enforces on a delegation, with
-    the number ``policy`` sets, in the order they apply: the runs one turn
-    may start (``max_runs_per_turn``).
+    the number ``policy`` sets, in the order they apply: the runs that work
+    at once (``max_active``: more wait for a free working slot), then the
+    runs one turn may start (``max_runs_per_turn``).
     """
-    return [f"At most {policy.max_runs_per_turn} runs per turn."]
+    return [
+        f"At most {policy.max_active} sub-agents work at once; more calls in one response "
+        "wait for a free slot.",
+        f"At most {policy.max_runs_per_turn} runs per turn.",
+    ]
 
 
 def _type_line(name: str, config: AgentConfig, *, warn: bool = False) -> str:
