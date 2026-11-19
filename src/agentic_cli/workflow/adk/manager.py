@@ -1587,7 +1587,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
             state = ended.state if ended is not None else {}
         except Exception:  # noqa: BLE001 - a run that failed keeps its own error
-            if raised is None:
+            if raised is None and failure is None:
                 raise
             logger.debug("subagent_state_unread", run=run.ref.run, exc_info=True)
         # The plan and the tasks are the run's own, as it left them; only the

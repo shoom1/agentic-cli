@@ -168,6 +168,60 @@ async def test_a_sub_agents_reply_that_is_no_answer_fails_its_run_warned_with_it
     assert record.status == RUN_FAILED
 
 
+async def test_a_failing_state_read_keeps_a_no_answer_runs_own_error(monkeypatch):
+    """The run's child session is read for its plan and tasks once it ended;
+    a read that raises after a no-answer reply leaves them empty and the run
+    failed with the reply's error and code, not the store's."""
+    import json
+
+    from agentic_cli.workflow.agents import RUN_FAILED
+
+    def coordinator(request) -> dict:
+        body = json.loads(request.content)
+        answer = anthropic_message(model="claude-sonnet-4-6")
+        if len(body["messages"]) == 1:
+            answer.update(stop_reason="tool_use", content=[{
+                "type": "tool_use", "id": "c1", "name": "task",
+                "input": {"agent_type": "researcher", "title": "Find X", "objective": "Find X."},
+            }])
+        else:
+            answer["content"] = [{"type": "text", "text": "The researcher could not."}]
+        return answer
+
+    route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(coordinator))
+    route_gemini(monkeypatch, FakeAPI(finished("MALFORMED_FUNCTION_CALL")))
+    manager = adk(
+        [AgentConfig(name="coordinator", prompt="Delegate.", sub_agents=["researcher"]),
+         AgentConfig(name="researcher", prompt="Find.", description="Finds.",
+                     model="gemini-2.5-flash")],
+        settings(default_model="claude-sonnet-4-6"),
+    )
+    await manager._ensure_initialized()
+    service = manager._session_service
+    read = service.get_session
+
+    async def locked(**kwargs):
+        config = kwargs.get("config")
+        if kwargs["app_name"].endswith("--agents") and config is not None \
+                and config.num_recent_events == 0:
+            raise RuntimeError("database is locked")
+        return await read(**kwargs)
+
+    service.get_session = locked
+    try:
+        events = [e async for e in manager.process("Find X.", user_id="u", session_id="s")]
+    finally:
+        await manager.cleanup()
+
+    (warning,) = errors(events)
+    assert warning.content.startswith(
+        "researcher-1 failed: google:gemini-2.5-flash returned no answer"
+    )
+    assert warning.metadata["error_code"] == "MALFORMED_FUNCTION_CALL"
+    (record,) = manager.agent_runs.records(manager.session_ref("s", "u"))
+    assert (record.status, record.plan, record.tasks) == (RUN_FAILED, "", [])
+
+
 async def test_a_reply_cut_at_its_limit_with_text_is_an_answer(monkeypatch):
     """Text before the limit is the answer, shown as it is."""
     events = await turn_on(

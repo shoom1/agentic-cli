@@ -256,9 +256,9 @@ class AgentRuns:
         ``running``, ``input_required``) becomes a working record's status;
         an end gives it its status, time, result, error, whether it is
         partial, what it used, who cancelled it and its own last plan and
-        tasks (an end whose start was not seen makes the record too). Any other event changes nothing, and
-        neither does a working status of a run that has ended or was never
-        started.
+        tasks (an end whose start was not seen makes the record too). Any
+        other event changes nothing, and neither does a working status of a
+        run that has ended or was never started.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
