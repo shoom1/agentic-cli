@@ -667,11 +667,9 @@ async def test_parallel_delegation(hermetic, monkeypatch):
     assert {e.content: e.metadata["agent"] for e in of(events, EventType.TEXT)} == {
         "Research done.": "researcher", "Draft done.": "writer", "Both done.": "lead",
     }
-    # Both wrote tasks in one step: one write stands whole, and nothing failed.
-    assert [t["status"] for t in state["tasks"]] in (
-        ["in_progress", "pending"], ["completed", "completed"]
-    )
-    assert of(events, EventType.TASK_PROGRESS)
+    # Both wrote tasks in one step: each keeps its own, the conversation has none.
+    assert not state.get("tasks")
+    assert of(events, EventType.TASK_PROGRESS) == []
 
 
 async def test_subagent_model_error_then_next_turn(hermetic, monkeypatch):

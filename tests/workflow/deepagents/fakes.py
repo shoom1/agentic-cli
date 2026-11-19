@@ -148,7 +148,8 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     then its task message), apart from its caller's stream, as
     ``DeepAgentsWorkflowManager._run_agent`` runs one; its answer is its
     last text after its task message (an inheriting run's history is not its
-    own), and the plan and tasks it changed flow back. No ledger, no events:
+    own), and the outside-content mark it changed flows back; its plan and
+    tasks stay its own (``RunAnswer.plan``, ``.tasks``). No ledger, no events:
     a manager-level test reads those.
     """
     from langchain_core.messages import HumanMessage
@@ -172,10 +173,13 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
             m.text for m in reversed(own) if isinstance(m, AIMessage) and m.text.strip()
         ), "")
         changed = {
-            key: state[key] for key in ("plan", "tasks")
+            key: state[key] for key in ("outside_content",)
             if key in state and state[key] != run.state.get(key)
         }
-        return RunAnswer(text=text, state=changed)
+        return RunAnswer(
+            text=text, state=changed, plan=state.get("plan") or "",
+            tasks=list(state.get("tasks") or []),
+        )
 
     made = Delegations(
         runs=AgentRuns(), policy=SubAgentPolicy(),

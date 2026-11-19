@@ -26,8 +26,8 @@ finished message, no tokens. Only the agent's own nodes speak:
   (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back, a
   ``task`` call's shown from its envelope (``agents/runs.py::show_as_delegation``);
   and, for the root, its ``tasks``, when they changed: ``TASK_PROGRESS``, in
-  the same step (a sub-agent's list is the conversation's, which its run
-  hands back with its result: the root reports it then).
+  the same step (a sub-agent's list is its own, kept with its run's record:
+  the root reports only its own).
 
 Middleware hooks' updates are not output (``PatchToolCallsMiddleware`` re-adds
 the whole history when it patches it), and a model call inside a tool

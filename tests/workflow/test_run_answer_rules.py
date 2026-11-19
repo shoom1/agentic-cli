@@ -32,36 +32,52 @@ def _deepagents_changed():
 
 
 @pytest.fixture(params=["adk", "deepagents"])
-def changed(request):
+def backend(request):
+    return request.param
+
+
+@pytest.fixture
+def changed(backend):
     """The backend's ``_changed(state at the end, state at the start)``."""
-    return _adk_changed() if request.param == "adk" else _deepagents_changed()
+    return _adk_changed() if backend == "adk" else _deepagents_changed()
+
+
+@pytest.fixture
+def mark(backend):
+    """The backend's one shared key: the outside-content mark."""
+    if backend == "adk":
+        pytest.importorskip("google.adk")
+        from agentic_cli.workflow.adk.task_tool import SHARED_KEYS
+    else:
+        pytest.importorskip("deepagents")
+        from agentic_cli.workflow.deepagents.task_tool import SHARED_KEYS
+    (key,) = SHARED_KEYS
+    return key
 
 
 class TestTheChangedKeys:
-    def test_an_unchanged_key_is_never_handed_back(self, changed):
-        tasks = [{"description": "find X", "status": "pending"}]
-        start = {"plan": "- [ ] find X", "tasks": tasks}
+    def test_an_unchanged_key_is_never_handed_back(self, changed, mark):
+        marked = [{"source": "a page"}]
 
-        # The same objects, and equal copies.
-        assert changed({"plan": start["plan"], "tasks": tasks}, start) == {}
-        assert changed({"plan": "- [ ] find X", "tasks": [dict(tasks[0])]}, start) == {}
+        # The same object, and an equal copy.
+        assert changed({mark: marked}, {mark: marked}) == {}
+        assert changed({mark: [dict(marked[0])]}, {mark: marked}) == {}
 
-    def test_a_changed_key_and_a_new_one_are(self, changed):
-        start = {"plan": "- [ ] find X"}
-        end = {"plan": "- [x] find X", "tasks": [{"description": "find X"}]}
-
-        assert changed(end, start) == end
+    def test_a_changed_key_and_a_new_one_are(self, changed, mark):
+        assert changed({mark: True}, {mark: False}) == {mark: True}
+        assert changed({mark: True}, {}) == {mark: True}
 
     def test_a_key_that_is_not_shared_is_never_handed_back(self, changed):
-        assert changed({"messages": ["hi"], "files": {"a": 1}}, {}) == {}
+        # The plan and the tasks are each run's own, not shared.
+        end = {"messages": ["hi"], "files": {"a": 1}, "plan": "- [ ] x", "tasks": [{"d": 1}]}
+        assert changed(end, {}) == {}
 
-    def test_an_ambiguous_comparison_is_a_change(self, changed):
+    def test_an_ambiguous_comparison_is_a_change(self, changed, mark):
         # An array's == is an array, neither True nor False.
-        start = {"tasks": np.array([1, 2])}
-        end = {"tasks": np.array([1, 2])}
+        start = {mark: np.array([1, 2])}
+        end = {mark: np.array([1, 2])}
 
-        (key,) = changed(end, start)
-        assert key == "tasks"
+        assert list(changed(end, start)) == [mark]
         # The same object is no change, whatever its == says.
         assert changed(start, start) == {}
 

@@ -359,7 +359,7 @@ class TestDelegation:
 
 
 class TestWhatASubAgentSees:
-    async def test_only_the_brief_shared_state_and_its_last_text(self):
+    async def test_only_the_brief_and_the_mark_reach_it_and_its_last_text_comes_back(self):
         coordinator = ScriptedChat(label="coordinator", script=[
             ai(calls=[("save_plan", {"content": "- [ ] find X"})]),
             ai(calls=[task("researcher", "Find X. Report the number.", "c1")]),
@@ -388,18 +388,18 @@ class TestWhatASubAgentSees:
         assert _shape(researcher.conversation(0)) == [("human", task_message(Brief(
             title="Find X. Report the number.", objective="Find X. Report the number."
         )))]
-        # It saw the coordinator's plan ...
+        # It saw none of the coordinator's plan ...
         plan = json.loads(_tool_message(researcher.conversation(1), "r1").text)
-        assert plan == {"success": True, "content": "- [ ] find X"}
-        # ... and its task list flowed back to the coordinator.
-        assert [t["description"] for t in state["tasks"]] == ["find X"]
+        assert "find X" not in json.dumps(plan)
+        # ... and its task list stays its own: the coordinator's state has none.
+        assert not state.get("tasks")
         assert state["plan"] == "- [ ] find X"
         # Its last non-empty text is the result in the coordinator's envelope.
         assert _read(_tool_message(state["messages"], "c1"))["result"] == "X is 42."
         # Its intermediate messages stay out of the coordinator's conversation.
         assert not any("Looking." in m.text for m in state["messages"])
 
-    async def test_parallel_sub_agents_may_both_update_tasks(self):
+    async def test_parallel_sub_agents_each_keep_their_own_tasks(self):
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b"]),
             AgentConfig(name="a", prompt="p", description="Does A."),
@@ -427,7 +427,7 @@ class TestWhatASubAgentSees:
 
         assert _read(_tool_message(state["messages"], "ca"))["result"] == "a done."
         assert _read(_tool_message(state["messages"], "cb"))["result"] == "b done."
-        assert [t["description"] for t in state["tasks"]] in (["a"], ["b"])
+        assert not state.get("tasks")
         assert state["messages"][-1].text == "Both done."
 
 

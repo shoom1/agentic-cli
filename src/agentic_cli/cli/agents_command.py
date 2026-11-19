@@ -9,7 +9,8 @@ long it ran (or has been running). ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent,
 its title, then each run's status, the fields of its brief its parent filled
 (its objective, deliverable, constraints, what was known, when it is done),
-the first lines of its result, its error and its tokens by model.
+the first lines of its result, the plan and the task list it left (its own:
+a run's plan and tasks are not its parent's), its error and its tokens by model.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``) and the tokens its usage ledger's
@@ -31,6 +32,7 @@ from rich.text import Text
 
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
+from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_INPUT_REQUIRED, RUN_STARTED
 from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
 from agentic_cli.workflow.agents.runs import run_number
@@ -151,6 +153,13 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
                 table.add_row(f"  {_label(name)}", Text(record.brief[name]))
         if record.result:
             table.add_row("  Result", Text(_first_lines(record.result)))
+        if record.plan:
+            table.add_row("  Plan", Text(_first_lines(record.plan)))
+        progress = task_progress_data(record.tasks)
+        if progress is not None:
+            counts = progress["progress"]
+            shown = _first_lines(progress["display"])
+            table.add_row("  Tasks", Text(f"{counts['completed']}/{counts['total']}\n{shown}"))
         if record.error:
             table.add_row("  Error", Text(record.error))
         by_model = ledger.by_model(run=record.ref.run)

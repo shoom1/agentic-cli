@@ -373,6 +373,7 @@ class Crew:
     _tool_names: Callable[[str, int], list[str]] | None = None
     _message_count: Callable[[str, int], int] | None = None
     _state: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    _marked: Callable[[], Awaitable[bool]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -440,9 +441,14 @@ class Crew:
         return self._message_count(agent, call)
 
     async def state(self) -> dict[str, Any]:
-        """The conversation's shared state as the root holds it: its plan and tasks."""
+        """The conversation's own state as the root holds it: its plan and tasks."""
         assert self._state is not None
         return await self._state()
+
+    async def marked(self) -> bool:
+        """Whether the conversation's own state holds the outside-content mark."""
+        assert self._marked is not None
+        return await self._marked()
 
     async def answers(self, agent: str, call_id: str) -> list[str]:
         """The answers ``agent``'s call ``call_id`` has after a stopped turn,
@@ -557,9 +563,18 @@ def _adk_crew(
         )
         return {key: session.state[key] for key in ("plan", "tasks") if key in session.state}
 
+    async def marked() -> bool:
+        from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
+
+        session = await manager._session_service.get_session(
+            app_name=manager.session_ref(SESSION, USER).app_name,
+            user_id=USER, session_id=SESSION,
+        )
+        return bool(session.state.get(OUTSIDE_CONTENT_KEY))
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
-        answers, last_message, bodies, tool_names, message_count, state,
+        answers, last_message, bodies, tool_names, message_count, state, marked,
     )
 
 
@@ -642,9 +657,17 @@ def _deepagents_crew(
         )).values
         return {key: values[key] for key in ("plan", "tasks") if key in values}
 
+    async def marked() -> bool:
+        from agentic_cli.workflow.deepagents.sessions import run_config
+
+        values = (await manager._root.aget_state(
+            run_config(manager.session_ref(SESSION, USER))
+        )).values
+        return bool(values.get("outside_content"))
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
-        result_ids, answers, last_message, bodies, tool_names, message_count, state,
+        result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
     )
 
 
@@ -2127,6 +2150,18 @@ async def contract_echo_together(q: str = "") -> dict:
     return {"success": True, "echo": f"echo-{q}"}
 
 
+#: ``contract_meet``'s arrivals by stage (made per test).
+MET: dict[str, int] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Meet the other run (a contract-test tool).")
+async def contract_meet(stage: str = "") -> dict:
+    """Return once two calls have arrived for ``stage``: a rendezvous."""
+    MET[stage] = MET.get(stage, 0) + 1
+    await until(lambda: MET[stage] >= 2, within=10)
+    return {"success": True}
+
+
 @register_tool(capabilities=EXEMPT, description="Wait for a run to end (a contract-test tool).")
 async def contract_await_a_finished_run() -> dict:
     """Wait until a run of this conversation has completed, as a slow tool would."""
@@ -2241,26 +2276,184 @@ class TestEachRunEndsAtItsOwnEnd:
         assert json.loads(crew.results_read("waiter", 1)["w1"]) == {"success": True}
 
 
-class TestSharedState:
-    async def test_the_plan_reaches_a_run_and_its_tasks_come_back(self, make_crew):
+@register_tool(
+    capabilities=EXEMPT, outside_content=True,
+    description="Bring in outside content (a contract-test tool).",
+)
+def contract_bring_outside_content() -> dict:
+    return {"success": True}
+
+
+def research_team() -> list[AgentConfig]:
+    return [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
+            agent("researcher", include_state_tools=True, tools=(contract_bring_outside_content,))]
+
+
+class TestOwnPlanAndTasks:
+    """A run's plan and task list are its own: it starts with none, and what
+    it saves stays with it; only the outside-content mark reaches the conversation."""
+
+    async def test_a_run_starts_without_its_callers_plan_and_tasks(self, make_crew):
         crew = make_crew(
-            [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
-             agent("researcher", include_state_tools=True)],
-            coordinator=[calls(use("save_plan", "c0", content="- [ ] find X")),
+            research_team(),
+            coordinator=[calls(use("save_plan", "c0", content="- [ ] coordinate Z")),
+                         calls(use("save_tasks", "c0b", tasks=[
+                             {"description": "coordinate Z", "status": "pending"}])),
                          calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
-            researcher=[calls(use("get_plan", "r1")),
-                        calls(use("save_tasks", "r2", tasks=[
-                            {"description": "find X", "status": "completed"},
-                        ])),
-                        says("X is 42.")],
+            researcher=[calls(use("get_plan", "r1"), use("get_tasks", "r2")), says("X is 42.")],
         )
 
         await crew.turn()
 
-        assert "find X" in crew.results_read("researcher", 1)["r1"]
+        read = crew.results_read("researcher", 1)
+        assert "coordinate Z" not in read["r1"]
+        assert "coordinate Z" not in read["r2"]
+
+    async def test_what_a_run_saves_stays_its_own(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(use("save_plan", "c0", content="- [ ] coordinate Z")),
+                         calls(use("save_tasks", "c0b", tasks=[
+                             {"description": "coordinate Z", "status": "pending"}])),
+                         calls(delegate("researcher", "Find X.", "c1")),
+                         calls(use("get_plan", "c2"), use("get_tasks", "c3")),
+                         says("Done.")],
+            researcher=[calls(use("save_plan", "r1", content="- [ ] find X")),
+                        calls(use("save_tasks", "r2", tasks=[
+                            {"description": "find X", "status": "completed"}])),
+                        says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        read = crew.results_read("coordinator", -1)
+        assert "coordinate Z" in read["c2"] and "find X" not in read["c2"]
+        assert "coordinate Z" in read["c3"] and "find X" not in read["c3"]
         state = await crew.state()
-        assert state["plan"] == "- [ ] find X"
-        assert [task["description"] for task in state["tasks"]] == ["find X"]
+        assert state["plan"] == "- [ ] coordinate Z"
+        assert [task["description"] for task in state["tasks"]] == ["coordinate Z"]
+        progress = [e for e in events if e.type is EventType.TASK_PROGRESS]
+        assert progress and all("find X" not in str(e.metadata) for e in progress)
+
+    async def test_the_task_box_never_shows_a_runs_tasks(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r2", tasks=[
+                {"description": "find X", "status": "completed"}])), says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        assert [e for e in events if e.type is EventType.TASK_PROGRESS] == []
+        assert not (await crew.state()).get("tasks")
+
+    async def test_two_runs_at_once_keep_their_own_plans(self, make_crew):
+        MET.clear()
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
+             agent("researcher", include_state_tools=True, tools=(contract_meet,))],
+            coordinator=[calls(use("save_plan", "c0", content="- [ ] coordinate Z")),
+                         calls(delegate("researcher", "Find A.", "c1"),
+                               delegate("researcher", "Find B.", "c2")),
+                         says("Both.")],
+            # Each stage ends with a meeting, so no run starts the next stage's
+            # step before the other has taken its own of this one.
+            researcher=[calls(use("save_plan", "s1", content="- [ ] plan A"),
+                              use("contract_meet", "m1", stage="saved")),
+                        calls(use("save_plan", "s2", content="- [ ] plan B"),
+                              use("contract_meet", "m2", stage="saved")),
+                        calls(use("get_plan", "g1"), use("contract_meet", "m3", stage="read")),
+                        calls(use("get_plan", "g2"), use("contract_meet", "m4", stage="read")),
+                        says("One done."), says("The other done.")],
+        )
+
+        await crew.turn()
+
+        seen = [crew.results_read("researcher", call) for call in (4, 5)]
+        for read in seen:
+            saved, other = ("plan A", "plan B") if "s1" in read else ("plan B", "plan A")
+            got = read["g1"] if "g1" in read else read["g2"]
+            assert saved in got
+            assert other not in got
+        assert (await crew.state())["plan"] == "- [ ] coordinate Z"
+
+    async def test_a_run_that_fails_keeps_the_plan_and_tasks_it_saved(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_plan", "r1", content="- [ ] find X")),
+                        calls(use("save_tasks", "r2", tasks=[
+                            {"description": "find X", "status": "in_progress"}])),
+                        fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        (end,) = [e for e in runs_of(events, RUN_FAILED)]
+        assert end.metadata["plan"] == "- [ ] find X"
+        assert [t["description"] for t in end.metadata["tasks"]] == ["find X"]
+        (record,) = crew.records()
+        assert record.plan == "- [ ] find X"
+        assert [t["description"] for t in record.tasks] == ["find X"]
+
+    async def test_the_outside_content_mark_still_reaches_the_conversation(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_bring_outside_content", "r1")), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert (await crew.marked()) is True
+        if crew.backend == "adk":
+            # The write-back itself: the mark rides on the task call's response.
+            from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
+
+            session = await crew.manager._session_service.get_session(
+                app_name=crew.manager.session_ref(SESSION, USER).app_name,
+                user_id=USER, session_id=SESSION,
+            )
+            written = [
+                e for e in session.events
+                if any(r.name == "task" for r in e.get_function_responses())
+                and OUTSIDE_CONTENT_KEY in (e.actions.state_delta or {})
+            ]
+            assert len(written) == 1
+
+    async def test_the_runs_record_keeps_its_last_plan_and_tasks(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_plan", "r1", content="- [ ] find X")),
+                        calls(use("save_tasks", "r2", tasks=[
+                            {"description": "find X", "status": "completed"}])),
+                        says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        (end,) = [e for e in runs_of(events, RUN_COMPLETED)]
+        assert end.metadata["plan"] == "- [ ] find X"
+        assert [t["description"] for t in end.metadata["tasks"]] == ["find X"]
+        (record,) = crew.records()
+        assert record.plan == "- [ ] find X"
+        assert [t["description"] for t in record.tasks] == ["find X"]
+
+    async def test_a_run_with_neither_ends_without_them(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        (end,) = [e for e in runs_of(events, RUN_COMPLETED)]
+        assert "plan" not in end.metadata and "tasks" not in end.metadata
+        (record,) = crew.records()
+        assert (record.plan, record.tasks) == ("", [])
 
 
 class TestAnInheritingRun:
@@ -2645,7 +2838,8 @@ class TestTheTimeLimit:
         """ADK reads a run's shared state back from its child session once
         its stream has ended. Its time limit firing during that read, or its
         parent stopping it then, leaves the run completed with its answer
-        and the tasks it saved. Deep Agents reads nothing after its stream."""
+        and the tasks it saved (kept with its record). Deep Agents reads nothing
+        after its stream."""
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",), include_state_tools=True),
              agent("researcher", include_state_tools=True, limits=AgentLimits(timeout=1.0))],
@@ -2684,7 +2878,7 @@ class TestTheTimeLimit:
         (record,) = crew.records()
         assert (record.status, record.cancelled_by) == (RUN_COMPLETED, None)
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
-        assert [task["description"] for task in (await crew.state())["tasks"]] == ["find X"]
+        assert [task["description"] for task in record.tasks] == ["find X"]
 
 
 class TestALimitAtAPrompt:
@@ -3450,7 +3644,7 @@ class TestAfterAFailedTurn:
     ):
         """Its run ends completed with its answer, and the next turn's
         coordinator reads that run's envelope, as its record says; the tasks
-        the run saved reach the conversation's state too."""
+        the run saved stay with its record, not the conversation's."""
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",), tools=("read_file",),
                    include_state_tools=True),
@@ -3476,5 +3670,6 @@ class TestAfterAFailedTurn:
         answer = envelope_read(read["c1"])
         assert (answer["status"], answer["result"]) == (RUN_COMPLETED, "X is 42.")
         assert json.loads(read["c2"]) == interrupted(INTERRUPTED)
-        state = await crew.state()
-        assert [task["description"] for task in state["tasks"]] == ["find X"]
+        (record,) = crew.records()
+        assert [task["description"] for task in record.tasks] == ["find X"]
+        assert not (await crew.state()).get("tasks")

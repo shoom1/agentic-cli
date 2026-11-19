@@ -132,6 +132,8 @@ class RunRecord:
             for the root).
         mode: How it runs: ``blocking`` (its parent waits for it).
         cancelled_by: Who cancelled it, for a cancelled run.
+        plan: Its own last plan (``""`` for none).
+        tasks: Its own last task list (the state tools' list of dicts).
     """
 
     ref: RunRef
@@ -148,6 +150,23 @@ class RunRecord:
     started_by: str | None = None
     mode: str = "blocking"
     cancelled_by: str | None = None
+    plan: str = ""
+    tasks: list[dict[str, Any]] = field(default_factory=list)
+
+
+def own_plan_and_tasks(state: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """A run's own plan and task list out of ``state``, as both backends read them.
+
+    The plan only when it is a string, the tasks only when they are a list
+    of dicts (the state tools' shape): an app's tool may write any value
+    under those keys, and ``/agents`` draws what is kept.
+    """
+    plan = state.get("plan")
+    tasks = state.get("tasks")
+    return (
+        plan if isinstance(plan, str) else "",
+        list(tasks) if isinstance(tasks, list) and all(isinstance(t, dict) for t in tasks) else [],
+    )
 
 
 def _run_id(instance: str, number: int) -> str:
@@ -236,10 +255,10 @@ class AgentRuns:
         it and its mode), ``running``; a working status (``queued``,
         ``running``, ``input_required``) becomes a working record's status;
         an end gives it its status, time, result, error, whether it is
-        partial, what it used and who cancelled it (an end whose start was
-        not seen makes the record too). Any other event changes nothing, and
-        neither does a working status of a run that has ended or was never
-        started.
+        partial, what it used, who cancelled it and its own last plan and
+        tasks (an end whose start was not seen makes the record too). Any
+        other event changes nothing, and neither does a working status of a
+        run that has ended or was never started.
         """
         ref = event.run
         if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
@@ -282,6 +301,7 @@ class AgentRuns:
         record.partial = bool(metadata.get("partial"))
         record.usage = dict(metadata.get("usage") or {})
         record.cancelled_by = metadata.get("cancelled_by")
+        record.plan, record.tasks = own_plan_and_tasks(metadata)
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""

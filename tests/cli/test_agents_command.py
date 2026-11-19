@@ -85,9 +85,10 @@ class Runs:
         self._observe(WorkflowEvent.agent_run(ref, status), at)
 
     def end(self, ref: RunRef, status: str, *, at: int, result: str = "",
-            error: str | None = None, partial: bool = False) -> None:
+            error: str | None = None, partial: bool = False, plan: str | None = None,
+            tasks: list[dict] | None = None) -> None:
         self._observe(WorkflowEvent.agent_run(
-            ref, status, result=result, error=error, partial=partial
+            ref, status, result=result, error=error, partial=partial, plan=plan, tasks=tasks
         ), at)
 
     def used(self, ref: RunRef, model: str, prompt: int, completion: int) -> None:
@@ -230,6 +231,38 @@ class TestOne:
             ("  Result", "X is 42.\nSource: a.\nSource: b.\n…"),
             ("  Tokens", f"{SONNET}: 1.2k in / 300 out · 1 call"),
             ("", f"{HAIKU}: 100 in / 10 out · 1 call"),
+        ]
+
+    async def test_a_runs_own_plan_and_tasks_after_its_result(self, manager):
+        runs = Runs(manager, manager.session_ref("s1"))
+        ref = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(ref, "completed", at=5, result="X is 42.", plan="- [ ] find X\n- [ ] check X",
+                 tasks=[{"id": "1", "description": "find X", "status": "completed"},
+                        {"id": "2", "description": "check X", "status": "pending"}])
+
+        session = await agents(manager, "researcher-1")
+
+        (panel,) = session.add_rich.call_args.args
+        assert rows_of(panel.renderable) == [
+            ("Type", "researcher"),
+            ("Parent", "root"),
+            ("Title", "Find X."),
+            ("Run #1", "completed · 5s"),
+            ("  Result", "X is 42."),
+            ("  Plan", "- [ ] find X\n- [ ] check X"),
+            ("  Tasks", "1/2\n[ ] check X\n[✓] find X"),
+        ]
+
+    async def test_a_run_without_a_plan_or_tasks_shows_neither(self, manager):
+        runs = Runs(manager, manager.session_ref("s1"))
+        ref = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(ref, "completed", at=5, result="X is 42.")
+
+        session = await agents(manager, "researcher-1")
+
+        (panel,) = session.add_rich.call_args.args
+        assert [row[0] for row in rows_of(panel.renderable)] == [
+            "Type", "Parent", "Title", "Run #1", "  Result",
         ]
 
     async def test_a_run_by_its_id_under_the_run_that_started_it(self, manager):
