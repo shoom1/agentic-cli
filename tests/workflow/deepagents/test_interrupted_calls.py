@@ -114,6 +114,59 @@ class TestAReusedCallId:
         assert first == "call_0" and second.startswith("call_0-")
         assert ids["content"] == ids["additional_kwargs"] == [first, second]
 
+    async def test_an_invalid_call_and_a_valid_one_of_one_id_each_keep_their_block(self):
+        """The model made the invalid ``lookup`` first and the valid
+        ``read_file`` second, both ``call_0``: LangChain lists them apart
+        (valid first), the content blocks in the model's order. Each call
+        and its block end with one id."""
+        answer = AIMessage(
+            content=[
+                {"type": "tool_use", "id": "call_0", "name": "lookup", "input": {}},
+                {"type": "tool_use", "id": "call_0", "name": "read_file",
+                 "input": {"path": "n.txt"}},
+            ],
+            tool_calls=[{"name": "read_file", "args": {"path": "n.txt"}, "id": "call_0",
+                         "type": "tool_call"}],
+            invalid_tool_calls=[{"name": "lookup", "args": '{"q": ', "id": "call_0",
+                                 "error": None, "type": "invalid_tool_call"}],
+        )
+
+        arrived = await _arrived([HumanMessage("One.")], answer)
+
+        blocks = {block["name"]: block["id"] for block in arrived.content}
+        assert arrived.invalid_tool_calls[0]["id"] == blocks["lookup"] == "call_0"
+        assert arrived.tool_calls[0]["id"] == blocks["read_file"] != "call_0"
+
+    async def test_raw_calls_keep_their_calls_ids_too(self):
+        """Chat Completions' raw calls, in the model's order, name each call's new id."""
+        answer = AIMessage(
+            content="",
+            additional_kwargs={"tool_calls": [
+                {"id": "call_0", "type": "function",
+                 "function": {"name": "lookup", "arguments": '{"q": '}},
+                {"id": "call_0", "type": "function",
+                 "function": {"name": "read_file", "arguments": '{"path": "n.txt"}'}},
+            ]},
+            tool_calls=[{"name": "read_file", "args": {"path": "n.txt"}, "id": "call_0",
+                         "type": "tool_call"}],
+            invalid_tool_calls=[{"name": "lookup", "args": '{"q": ', "id": "call_0",
+                                 "error": None, "type": "invalid_tool_call"}],
+        )
+
+        arrived = await _arrived([HumanMessage("One.")], answer)
+
+        raw = {
+            call["function"]["name"]: call["id"]
+            for call in arrived.additional_kwargs["tool_calls"]
+        }
+        assert arrived.invalid_tool_calls[0]["id"] == raw["lookup"] == "call_0"
+        assert arrived.tool_calls[0]["id"] == raw["read_file"] != "call_0"
+
+    async def test_an_answer_without_calls_is_left_as_it_is(self):
+        answer = AIMessage("Done.")
+
+        assert await _arrived(FIRST_TURN, answer) is answer
+
     async def test_the_whole_history_counts_not_only_what_is_sent(self):
         """After a summary the request sends less than the state holds; the
         state's calls are still the conversation's."""

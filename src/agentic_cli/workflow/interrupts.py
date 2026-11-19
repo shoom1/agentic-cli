@@ -84,6 +84,8 @@ def interrupted(text: str) -> dict[str, Any]:
 #: The longest call id ``fresh_call_id`` makes: OpenAI's Chat Completions
 #: takes none longer.
 _CALL_ID_MAX = 40
+#: How many hex digits ``fresh_call_id`` adds, after a ``-``.
+_SUFFIX_DIGITS = 8
 #: A character Claude takes in no call id, which ``fresh_call_id`` replaces.
 _NOT_IN_A_CALL_ID = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -97,9 +99,9 @@ def fresh_call_id(call_id: str, used: Container[str]) -> str:
     provider takes: any other character of ``call_id`` becomes ``_``, and a
     long one is cut before the suffix.
     """
-    stem = _NOT_IN_A_CALL_ID.sub("_", call_id)[: _CALL_ID_MAX - 9]
+    stem = _NOT_IN_A_CALL_ID.sub("_", call_id)[: _CALL_ID_MAX - 1 - _SUFFIX_DIGITS]
     while True:
-        candidate = f"{stem}-{uuid.uuid4().hex[:8]}"
+        candidate = f"{stem}-{uuid.uuid4().hex[:_SUFFIX_DIGITS]}"
         if candidate not in used:
             return candidate
 

@@ -14,9 +14,10 @@ a sub-agent on.
 
 Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a tool
 call a cancelled turn or a crash left without a result, before each run, as
-``workflow/interrupts.py`` says; Deep Agents' own
-``PatchToolCallsMiddleware`` without the manager's record), then the model
-side and the tool side.
+``workflow/interrupts.py`` says, and, the outermost model wrapper, gives a
+call whose id the agent's state already holds an id of its own; Deep
+Agents' own ``PatchToolCallsMiddleware`` without the manager's record), then
+the model side and the tool side.
 
 - Model side, outermost first: a sub-agent's refused or cut final answer is
   said so (``SubAgentOutcomeMiddleware``, every agent but the root), a
