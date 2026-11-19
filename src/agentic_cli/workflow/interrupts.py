@@ -37,12 +37,22 @@ cancelled turn stops, through its ``abort_signal``, and a failed turn's
 calls as that conversation's next turn starts; Deep Agents before the first
 model call of that conversation's next turn, however many turns ran in
 others since).
+
+Every part of this pairs a result with its call by the call's id. A
+provider that numbers its call ids per response (``call_0`` in every one)
+reuses an id the agent's conversation already holds, so both backends give
+such a call an id of its own as the model's answer arrives
+(``fresh_call_id``), before it is stored or run: its result, the record and
+every later request then name it alone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import enum
+import re
+import uuid
+from collections.abc import Container
 from contextlib import contextmanager
 from typing import Any, Iterator
 
@@ -69,6 +79,29 @@ MARKER = "(Interrupted by the user.)"
 def interrupted(text: str) -> dict[str, Any]:
     """A call's result that says why it has none."""
     return {"success": False, "error": text}
+
+
+#: The longest call id ``fresh_call_id`` makes: OpenAI's Chat Completions
+#: takes none longer.
+_CALL_ID_MAX = 40
+#: A character Claude takes in no call id, which ``fresh_call_id`` replaces.
+_NOT_IN_A_CALL_ID = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def fresh_call_id(call_id: str, used: Container[str]) -> str:
+    """An id for a call whose provider gave it ``call_id``, which its
+    conversation already holds: ``call_id`` and a short random suffix
+    (``call_0-3f9a1c2b``), none of ``used``.
+
+    Only ``[A-Za-z0-9_-]``, at most ``_CALL_ID_MAX`` characters, which every
+    provider takes: any other character of ``call_id`` becomes ``_``, and a
+    long one is cut before the suffix.
+    """
+    stem = _NOT_IN_A_CALL_ID.sub("_", call_id)[: _CALL_ID_MAX - 9]
+    while True:
+        candidate = f"{stem}-{uuid.uuid4().hex[:8]}"
+        if candidate not in used:
+            return candidate
 
 
 def job_started(record: Any) -> dict[str, Any]:

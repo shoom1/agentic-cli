@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("google.adk")
 
 from google.adk.events import Event  # noqa: E402
+from google.adk.models.llm_response import LlmResponse  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from agentic_cli.workflow.adk.interrupted_calls_plugin import (  # noqa: E402
@@ -299,3 +300,129 @@ class TestLeftOpen:
         assert _answers(answer) == {"c1": {"success": True}, "c2": interrupted(INTERRUPTED)}
         # Its state change is stored with its answer, as with its result.
         assert answer.actions.state_delta == {"seen": True}
+
+
+class TestPositionalPairing:
+    def test_a_reused_id_left_open_is_answered_and_the_answered_one_is_not(self):
+        """A conversation stored before reused ids were renamed may hold a
+        provider's ``call_0`` twice: a result answers the latest call of its
+        id before it, so the later call, left open, is answered, and the
+        earlier one keeps its one result."""
+        events = [
+            _calls("coordinator", None, ("contract_lookup", "call_0")),
+            _results("coordinator", None, ("contract_lookup", "call_0", {"success": True})),
+            _calls("coordinator", None, ("read_file", "call_0")),
+        ]
+
+        with turn_of(CONVERSATION):
+            (answer,) = left_open(events, OpenCalls())
+
+        (response,) = answer.get_function_responses()
+        assert (response.id, response.name) == ("call_0", "read_file")
+        assert response.response == interrupted(INTERRUPTED)
+
+    def test_an_earlier_call_left_open_is_answered_when_a_later_one_has_its_result(self):
+        events = [
+            _calls("coordinator", None, ("contract_block", "call_0")),
+            _calls("coordinator", None, ("contract_lookup", "call_0")),
+            _results("coordinator", None, ("contract_lookup", "call_0", {"success": True})),
+        ]
+
+        with turn_of(CONVERSATION):
+            (answer,) = left_open(events, OpenCalls())
+
+        (response,) = answer.get_function_responses()
+        assert (response.id, response.name) == ("call_0", "contract_block")
+
+
+def _callback(events: list[Event], branch: str | None = None) -> Any:
+    """A model call's callback context: its session's events and its branch."""
+    invocation = SimpleNamespace(branch=branch)
+    return SimpleNamespace(
+        session=SimpleNamespace(events=events), get_invocation_context=lambda: invocation,
+    )
+
+
+def _answer(*made: tuple[str, str], partial: bool | None = None) -> LlmResponse:
+    """A model's answer that makes ``made`` calls, ``(name, id)`` each."""
+    return LlmResponse(partial=partial, content=types.Content(role="model", parts=[
+        types.Part(function_call=types.FunctionCall(id=call_id, name=name, args={}))
+        for name, call_id in made
+    ]))
+
+
+def _ids(answer: LlmResponse) -> list[str | None]:
+    return [part.function_call.id for part in answer.content.parts]
+
+
+class TestAReusedCallId:
+    """A provider that numbers its call ids per response (``call_0`` in every
+    one) reuses an id the agent's conversation holds. ADK pairs a result
+    with a call by id, so the reused one gets an id of its own as the answer
+    arrives (``after_model_callback``), before ADK stores the answer and
+    runs its calls: in place, since a plugin that returns an answer ends
+    the other plugins' callbacks."""
+
+    async def test_an_id_the_conversation_holds_is_renamed(self):
+        events = [
+            _calls("coordinator", None, ("contract_lookup", "call_0")),
+            _results("coordinator", None, ("contract_lookup", "call_0", {"success": True})),
+        ]
+        answer = _answer(("read_file", "call_0"), ("contract_lookup", "call_1"))
+
+        returned = await InterruptedCallsPlugin(OpenCalls()).after_model_callback(
+            callback_context=_callback(events), llm_response=answer,
+        )
+
+        assert returned is None
+        renamed, kept = _ids(answer)
+        assert renamed.startswith("call_0-") and kept == "call_1"
+
+    async def test_a_new_id_is_kept_as_the_provider_gave_it(self):
+        answer = _answer(("contract_lookup", "call_0"))
+        content = answer.content
+
+        await InterruptedCallsPlugin(OpenCalls()).after_model_callback(
+            callback_context=_callback([]), llm_response=answer,
+        )
+
+        assert answer.content is content
+        assert _ids(answer) == ["call_0"]
+
+    async def test_two_calls_of_one_id_in_one_answer_get_their_own(self):
+        answer = _answer(("contract_lookup", "call_0"), ("contract_lookup", "call_0"))
+
+        await InterruptedCallsPlugin(OpenCalls()).after_model_callback(
+            callback_context=_callback([]), llm_response=answer,
+        )
+
+        first, second = _ids(answer)
+        assert first == "call_0" and second.startswith("call_0-")
+
+    async def test_only_the_agents_own_branch_and_those_above_it_count(self):
+        """ADK shows an agent the events of its branch and its ancestors'
+        (a native ADK YAML app's agents share a session): a sibling's call
+        of the same id is none of its conversation."""
+        events = [
+            _calls("helper", "team.helper", ("contract_lookup", "call_0")),
+            _calls("team", "team", ("contract_lookup", "call_1")),
+        ]
+        answer = _answer(("contract_lookup", "call_0"), ("contract_lookup", "call_1"))
+
+        await InterruptedCallsPlugin(OpenCalls()).after_model_callback(
+            callback_context=_callback(events, branch="team.other"), llm_response=answer,
+        )
+
+        kept, renamed = _ids(answer)
+        assert kept == "call_0" and renamed.startswith("call_1-")
+
+    async def test_a_partial_answer_is_left_to_the_whole_one(self):
+        """ADK neither stores nor runs a streamed partial answer's calls."""
+        events = [_calls("coordinator", None, ("contract_lookup", "call_0"))]
+        answer = _answer(("contract_lookup", "call_0"), partial=True)
+
+        await InterruptedCallsPlugin(OpenCalls()).after_model_callback(
+            callback_context=_callback(events), llm_response=answer,
+        )
+
+        assert _ids(answer) == ["call_0"]

@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -78,7 +79,7 @@ from agentic_cli.workflow.agents.outcome import (
     refusal_notice,
 )
 from agentic_cli.workflow.context import is_context_overflow
-from agentic_cli.workflow.interrupts import MARKER, OpenCalls
+from agentic_cli.workflow.interrupts import MARKER, OpenCalls, fresh_call_id
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
@@ -479,6 +480,16 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     the task it runs in, ``agents/delegate.py``), so a sub-agent's call never
     answers its parent's delegation of the same id.
 
+    Everything pairs a result with its call by id, the provider adapters
+    too. A provider that numbers its call ids per response (``call_0`` in
+    every one) reuses one the agent's state already holds, so each model
+    answer passes through here, outside the stack's model side (it changes
+    a reused call id and nothing else), and such a call gets an id of its
+    own (``workflow.interrupts.fresh_call_id``) before the answer is stored
+    and its calls run. A history stored with an id twice is paired by
+    position: a call is answered by a result of its id that follows its
+    answer, before the next.
+
     Args:
         open_calls: The manager's record of its calls.
         root: Whether this is the main agent's stack.
@@ -494,17 +505,20 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         if not messages:
             return None
         by_user = self._root and self._open.take_cancel(get_active_turn())
-        answered = {message.tool_call_id for message in messages if message.type == "tool"}
         patched: list[AnyMessage] = []
         updates: dict[str, Any] = {}
         changed = False
-        for message in messages:
+        for index, message in enumerate(messages):
             patched.append(message)
             if not isinstance(message, AIMessage):
                 continue
+            answered = _results_after(messages, index)
             for call in (*message.tool_calls, *message.invalid_tool_calls):
                 call_id = call["id"]
-                if call_id is None or call_id in answered:
+                if call_id is None:
+                    continue
+                if answered[call_id]:
+                    answered[call_id] -= 1
                     continue
                 patched.append(self._answer(call, by_user=by_user, updates=updates))
                 changed = True
@@ -539,6 +553,17 @@ class InterruptedCallsMiddleware(AgentMiddleware):
             status="success" if answer.get("success") else "error",
         )
 
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        response = await handler(request)
+        # The agent's whole state, not only what was sent: after a summary
+        # the request holds less.
+        used = _call_ids(request.state["messages"])
+        return _mapped(response, lambda answer: _with_own_call_ids(answer, used))
+
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -572,6 +597,106 @@ class _Finished:
 def _a_reply(message: AnyMessage) -> bool:
     """Whether ``message`` ended its turn: the agent's text, with no call."""
     return isinstance(message, AIMessage) and not message.tool_calls
+
+
+def _results_after(messages: list[AnyMessage], index: int) -> Counter[str]:
+    """How many results of each call id follow ``messages[index]`` before the
+    next model answer: what answers that answer's calls."""
+    found: Counter[str] = Counter()
+    for message in messages[index + 1:]:
+        if isinstance(message, AIMessage):
+            break
+        if isinstance(message, ToolMessage):
+            found[message.tool_call_id] += 1
+    return found
+
+
+def _call_ids(messages: list[AnyMessage]) -> set[str]:
+    """Every call id ``messages`` hold: their calls' and their results'."""
+    ids: set[str] = set()
+    for message in messages:
+        if isinstance(message, AIMessage):
+            ids.update(
+                call["id"] for call in (*message.tool_calls, *message.invalid_tool_calls)
+                if call["id"]
+            )
+        elif isinstance(message, ToolMessage) and message.tool_call_id:
+            ids.add(message.tool_call_id)
+    return ids
+
+
+#: The content blocks that hold a call, by the key that holds its id: Claude's
+#: ``tool_use`` and LangChain's ``tool_call`` by ``id``, the Responses API's
+#: ``function_call`` by ``call_id`` (its ``id`` is the item's).
+_CALL_ID_KEYS = {"tool_use": "id", "tool_call": "id", "function_call": "call_id"}
+
+
+def _with_own_call_ids(message: AIMessage, used: set[str]) -> AIMessage:
+    """``message`` with each call whose id ``used`` holds given an id of its own.
+
+    ``used``: the ids the agent's conversation holds (``_call_ids``). An
+    earlier call of ``message`` counts too, and every id ``message`` ends
+    with is added to it. Only such an id changes, to
+    ``workflow.interrupts.fresh_call_id``'s, wherever the answer names it:
+    its tool calls, and the content blocks and raw calls the provider
+    adapters send back (ChatAnthropic prefers the ``tool_use`` block of a
+    call's id, and would send the old one beside the new). Two calls of one
+    id there are told apart by their order. ``message`` itself when no id
+    changes; else a copy.
+    """
+    renamed: dict[str, list[str]] = {}
+
+    def own(calls: list[Any]) -> list[Any]:
+        kept = []
+        for call in calls:
+            call_id = call.get("id")
+            if call_id:
+                new = fresh_call_id(call_id, used) if call_id in used else call_id
+                renamed.setdefault(call_id, []).append(new)
+                used.add(new)
+                if new != call_id:
+                    call = {**call, "id": new}
+            kept.append(call)
+        return kept
+
+    tool_calls = own(message.tool_calls)
+    invalid_tool_calls = own(message.invalid_tool_calls)
+    if all(new == old for old, news in renamed.items() for new in news):
+        return message
+    content = message.content
+    if isinstance(content, list):
+        content = _renamed_in(content, renamed, lambda block: _CALL_ID_KEYS.get(block.get("type")))
+    additional_kwargs = dict(message.additional_kwargs)
+    if isinstance(additional_kwargs.get("tool_calls"), list):
+        additional_kwargs["tool_calls"] = _renamed_in(
+            additional_kwargs["tool_calls"], renamed, lambda call: "id"
+        )
+    return message.model_copy(update={
+        "content": content,
+        "tool_calls": tool_calls,
+        "invalid_tool_calls": invalid_tool_calls,
+        "additional_kwargs": additional_kwargs,
+    })
+
+
+def _renamed_in(
+    items: list[Any], renamed: dict[str, list[str]], key_of: Callable[[dict], str | None]
+) -> list[Any]:
+    """``items`` with each dict that names a renamed call (under ``key_of(item)``)
+    naming its new id: the n-th naming an id takes the n-th call's of it."""
+    seen: Counter[str] = Counter()
+    changed = []
+    for item in items:
+        key = key_of(item) if isinstance(item, dict) else None
+        old = item.get(key) if key else None
+        if isinstance(old, str) and old in renamed:
+            news = renamed[old]
+            new = news[min(seen[old], len(news) - 1)]
+            seen[old] += 1
+            if new != old:
+                item = {**item, key: new}
+        changed.append(item)
+    return changed
 
 
 class ActiveToolCallMiddleware(AgentMiddleware):

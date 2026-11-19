@@ -2980,6 +2980,22 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **A provider that reuses tool-call ids no longer leaves a stopped or failed
+  call unanswered.** A provider that numbers its call ids per response
+  (`call_0` in every one) reuses an id the conversation already holds, and
+  everything that pairs a result with its call by id took the later call for
+  answered by the earlier call's result: a call a stop or a failed turn left
+  open got no result (or, on Deep Agents, the earlier call's), and Claude and
+  OpenAI refused that request and every later one of the conversation. Both
+  backends now give a reused id an id of its own as the model's answer
+  arrives (`workflow.interrupts.fresh_call_id`: the old id and a short
+  suffix, `call_0-3f9a1c2b`; ADK's `InterruptedCallsPlugin.after_model_callback`,
+  Deep Agents' `InterruptedCallsMiddleware.awrap_model_call`, in every
+  agent's stack), so its result, the record and every later request name it
+  alone; an id new to the agent's conversation is kept as the provider gave
+  it. A conversation stored with an id twice is paired by position when its
+  open calls are answered: a result answers the call of its id before it.
+
 - **After a failed turn, a call that returned keeps its result on ADK too.**
   ADK stores a step's parallel results together, after the last, so a turn
   that failed in between (its one `ERROR`: a sibling call's permission check
