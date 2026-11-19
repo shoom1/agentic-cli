@@ -158,10 +158,8 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
         progress = task_progress_data(record.tasks)
         if progress is not None:
             counts = progress["progress"]
-            table.add_row(
-                "  Tasks",
-                Text(f"{counts['completed']}/{counts['total']}\n{_first_lines(progress['display'])}"),
-            )
+            shown = _first_lines(progress["display"])
+            table.add_row("  Tasks", Text(f"{counts['completed']}/{counts['total']}\n{shown}"))
         if record.error:
             table.add_row("  Error", Text(record.error))
         by_model = ledger.by_model(run=record.ref.run)

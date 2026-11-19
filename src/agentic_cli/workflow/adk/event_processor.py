@@ -92,9 +92,8 @@ class ADKEventProcessor:
     result, when the list differs from the one this turn last reported
     (``start_turn`` forgets it), as on Deep Agents: a call that changed
     nothing reports nothing, and a list whose tasks are all done stays in the
-    session for ``get_tasks``. A sub-agent run's list is the conversation's,
-    which its ``task`` call writes back as it returns: the conversation's
-    processor reports it then.
+    session for ``get_tasks``. A sub-agent run's list is its own: a run's
+    processor reports none, and the conversation's reports only its own.
 
     A conversation the model of an agent that replies no longer takes ends
     its turn with an error response from the overflow handler

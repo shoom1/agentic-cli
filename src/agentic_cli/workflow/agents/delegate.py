@@ -161,8 +161,8 @@ class DelegationRequest:
         caller_agent: The calling agent's type name.
         call_id: The caller's ``task`` call.
         arguments: ``task``'s arguments as the model wrote them.
-        state: The shared state at the call (the plan, the tasks, the
-            outside-content mark), which the run starts from.
+        state: The shared state at the call (the outside-content mark),
+            which the run starts from.
         history: Called once, only when the chosen type inherits its
             parent's conversation: that conversation, as the backend reads it.
     """

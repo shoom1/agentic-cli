@@ -78,6 +78,7 @@ from agentic_cli.workflow.adk.sessions import (
 from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
+from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
 from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.workflow.outside_content import (
@@ -1512,11 +1513,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             Its last answer with text, that answer's outcome mark, the shared
             keys it changed and its own plan and tasks as it left them (read
             back from its child session's state); or,
-            for a reply that is no answer, the error it is and its code (with
-            its plan and tasks too); or,
+            for a reply that is no answer, the error it is and its code; or,
             for a model call that failed, the provider's reason (out of
             ADK's plugin wrapper, ``_plugin_cause``) and its error's type,
-            each with the last text it wrote.
+            each with the last text it wrote. Each of these carries the run's
+            own plan and tasks as it left them (left empty when its child
+            session cannot be read after a failure).
 
         Raises:
             RunFailed: Its request no longer fits its model's window
@@ -1543,6 +1545,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             run=run.ref,
         )
         aborted = asyncio.Event()
+        raised: BaseException | None = None
         stream = self._agent_runners[run.ref.agent].run_async(
             user_id=conversation.user_id,
             session_id=session_id,
@@ -1564,31 +1567,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 raise
         except Exception as error:  # noqa: BLE001 - the run fails; its parent reads why
             # A model call failed: the provider's error, out of ADK's plugin
-            # wrapper. The run fails with the text it wrote before it.
-            failure = _plugin_cause(error) if isinstance(error, RuntimeError) else error
-            logger.debug("subagent_failed", run=run.ref.run, exc_info=failure)
-            return RunAnswer(
-                text=processor.answer, error=failure_reason(failure),
-                error_code=type(failure).__name__,
-            )
+            # wrapper. The run fails with the text it wrote before it, and the
+            # plan and tasks it left, read below.
+            raised = _plugin_cause(error) if isinstance(error, RuntimeError) else error
+            logger.debug("subagent_failed", run=run.ref.run, exc_info=raised)
         finally:
             self._report_raw_log()
         # Its work has ended: a limit or a stop landing during the read of
         # its state below must not discard the answer it made.
         run.control.finish()
         failure = processor.failure if run.control.cancelled is None else None
-        if failure is not None and failure[1] == OVERFLOW_ERROR_CODE:
+        if raised is None and failure is not None and failure[1] == OVERFLOW_ERROR_CODE:
             raise RunFailed(failure[0], code=failure[1], text=processor.answer)
-        ended = await self._session_service.get_session(
-            app_name=app, user_id=conversation.user_id, session_id=session_id,
-            config=GetSessionConfig(num_recent_events=0),
-        )
-        state = ended.state if ended is not None else {}
+        state: Mapping[str, Any] = {}
+        try:
+            ended = await self._session_service.get_session(
+                app_name=app, user_id=conversation.user_id, session_id=session_id,
+                config=GetSessionConfig(num_recent_events=0),
+            )
+            state = ended.state if ended is not None else {}
+        except Exception:  # noqa: BLE001 - a run that failed keeps its own error
+            if raised is None:
+                raise
+            logger.debug("subagent_state_unread", run=run.ref.run, exc_info=True)
         # The plan and the tasks are the run's own, as it left them; only the
         # shared keys go back to the caller.
-        own: dict[str, Any] = {
-            "plan": state.get("plan") or "", "tasks": list(state.get("tasks") or []),
-        }
+        plan, tasks = own_plan_and_tasks(state)
+        own: dict[str, Any] = {"plan": plan, "tasks": tasks}
+        if raised is not None:
+            return RunAnswer(
+                text=processor.answer, error=failure_reason(raised),
+                error_code=type(raised).__name__, **own,
+            )
         if failure is not None:
             return RunAnswer(
                 text=processor.answer, error=failure[0], error_code=failure[1], **own
@@ -1923,7 +1933,9 @@ def _tool_names(tools: list[Any]) -> set[str]:
 
 
 def _changed(state: "Mapping[str, Any]", start: "Mapping[str, Any]") -> dict[str, Any]:
-    """The shared keys (the outside-content mark) ``state`` holds that differ from what a run started from.
+    """The shared keys (the outside-content mark) ``state`` holds that changed.
+
+    What a run started from is ``start``.
 
     Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
     private, copied, as the Deep Agents manager's ``_changed`` copies it): a

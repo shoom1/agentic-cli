@@ -20,14 +20,14 @@ class AgentCliState(AgentState):
 
     ``messages`` keeps LangChain's ``add_messages``. ``plan`` and ``tasks``
     are written by ``save_plan`` and ``save_tasks`` (the LangGraph-library
-    state tools). A sub-agent receives them with its brief and its changes
-    flow back to the coordinator; two sub-agents running in parallel may
-    both change ``tasks`` in one step, which a key without a reducer would
+    state tools). A sub-agent has its own, starting empty, and none flows
+    back to the coordinator; one agent's parallel ``save_tasks`` calls in
+    one step may both change ``tasks``, which a key without a reducer would
     fail with ``InvalidUpdateError``. The last write wins.
 
     ``outside_content`` is the tool that first brought outside content into
-    the conversation (``""``: none yet); a sub-agent's mark flows back with
-    its other changed keys.
+    the conversation (``""``: none yet); a sub-agent's mark flows back
+    alone, as the one key a run shares with its caller.
     """
 
     plan: Annotated[NotRequired[str], _last]

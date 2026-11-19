@@ -65,6 +65,7 @@ from agentic_cli.workflow.config import (
 )
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
+from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.context import (
     OVERFLOW_ERROR_CODE,
     CompactResult,
@@ -806,9 +807,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 ) from error
             # A model call failed: the provider's error.
             logger.debug("subagent_failed", run=run.ref.run, exc_info=error)
+            plan, tasks = own_plan_and_tasks(final)
             return RunAnswer(
                 text=wrote, error=failure_reason(error), error_code=type(error).__name__,
-                plan=final.get("plan") or "", tasks=list(final.get("tasks") or []),
+                plan=plan, tasks=tasks,
             )
         finally:
             var_child_runnable_config.reset(detached)
@@ -816,12 +818,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         # state back): no cancel of the run alone stops it now.
         run.control.finish()
         answers = _answers_in(final, task.id)
+        plan, tasks = own_plan_and_tasks(final)
         return RunAnswer(
             text=_last_text(answers),
             outcome=answer_outcome(answers[-1]) if answers else None,
             state=_changed(final, inputs),
-            plan=final.get("plan") or "",
-            tasks=list(final.get("tasks") or []),
+            plan=plan,
+            tasks=tasks,
         )
 
     def _recording(
@@ -996,7 +999,9 @@ def _last_text(answers: list[AIMessage]) -> str:
 
 
 def _changed(final: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-    """The shared keys (the outside-content mark) ``final`` holds that differ from what the run started from.
+    """The shared keys (the outside-content mark) ``final`` holds that changed.
+
+    What the run started from is ``inputs``.
 
     Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
     private, copied): a key returned exactly as it was received is no

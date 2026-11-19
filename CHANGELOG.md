@@ -1649,14 +1649,14 @@ the start of the entry's title.
   already known`, `## Done when`). A call whose brief misses a field its
   type requires, or names a type that is not the caller's, starts no run:
   its result is `{"success": false, "error": ...}` naming what to fix. A
-  run starts with no plan and no tasks of its own, and what it saves stays
-  with it (the status bar's task list is the conversation's alone). On ADK
-  nothing else of a run's session state reaches its caller but the
-  outside-content mark: any other key an app's ADK tool writes in a sub-agent run stays
-  in the run's child session, and a `user:` or `app:` scoped one is kept
-  under the child app (`<app_name>--agents`), so the conversation never
-  sees it, where in 0.6 such keys reached the conversation; nor does a run
-  read the conversation's other keys. On ADK each sub-agent type runs on a
+  run starts with no plan and no tasks, and what it saves stays with it (the
+  status bar's task list is the conversation's alone). On ADK nothing else
+  of a run's session state reaches its caller but the outside-content mark:
+  any other key an app's ADK tool writes in a sub-agent run stays in the
+  run's child session, and a `user:` or `app:` scoped one is kept under the
+  child app (`<app_name>--agents`), so the conversation never sees it, where
+  in 0.6 such keys reached the conversation; nor does a run read the
+  conversation's other keys. On ADK each sub-agent type runs on a
   runner of its own over the manager's session service, on a child session
   of the run (app `<app_name>--agents`, id `<conversation id>/<instance>`),
   which no conversation list shows, and, an agent of its own there, its system

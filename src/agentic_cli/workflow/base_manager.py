@@ -640,9 +640,11 @@ class BaseWorkflowManager(ABC):
         Called in the run's own task, where the run is the active run and no
         tool call is (``agents/delegate.py``). It runs ``run.config``'s agent
         on ``run.message`` (after ``run.history`` for an inheriting one),
-        from the shared state ``run.state``, reports the run's events to the
-        turn's live events as they are made, and returns its last answer,
-        its outcome and the shared state it changed. A failed model call is
+        from the shared state ``run.state`` (the outside-content mark: its
+        plan and tasks start empty), reports the run's events to the turn's
+        live events as they are made, and returns its last answer, its
+        outcome, the shared state it changed and its own last plan and tasks
+        (``RunAnswer.plan``, ``RunAnswer.tasks``). A failed model call is
         answered (``RunAnswer.error``: the provider's reason,
         ``failure_reason``; ``RunAnswer.error_code``: its error's type, the
         warning's code) and a failure in the backend's own words raised

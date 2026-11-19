@@ -1358,10 +1358,11 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `/sessions` never lists and which is deleted with its conversation; an
   inheriting run's child session starts with the conversation's events.
   Only the outside-content mark passes between a run and its caller (its
-  plan and tasks are its own): any other session-state key an app's ADK tool writes in a
-  sub-agent run stays in the run's child session, and a `user:` or `app:`
-  scoped one is kept under the child app, so the conversation never sees
-  it; nor does the run read the conversation's other keys.
+  plan and tasks are its own): any other session-state key an app's ADK
+  tool writes in a sub-agent run stays in the run's child session, and a
+  `user:` or `app:` scoped one is kept under the child app, so the
+  conversation never sees it; nor does the run read the conversation's
+  other keys.
   **On Deep Agents**, each sub-agent's graph runs apart from its parent's,
   in a task of its own; an inheriting run starts from the conversation's
   messages, which its own summarization compacts when they are too large

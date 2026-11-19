@@ -441,7 +441,7 @@ class Crew:
         return self._message_count(agent, call)
 
     async def state(self) -> dict[str, Any]:
-        """The conversation's shared state as the root holds it: its plan and tasks."""
+        """The conversation's own state as the root holds it: its plan and tasks."""
         assert self._state is not None
         return await self._state()
 
@@ -2378,6 +2378,25 @@ class TestOwnPlanAndTasks:
             assert other not in got
         assert (await crew.state())["plan"] == "- [ ] coordinate Z"
 
+    async def test_a_run_that_fails_keeps_the_plan_and_tasks_it_saved(self, make_crew):
+        crew = make_crew(
+            research_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("save_plan", "r1", content="- [ ] find X")),
+                        calls(use("save_tasks", "r2", tasks=[
+                            {"description": "find X", "status": "in_progress"}])),
+                        fails("overloaded")],
+        )
+
+        events = await crew.turn()
+
+        (end,) = [e for e in runs_of(events, RUN_FAILED)]
+        assert end.metadata["plan"] == "- [ ] find X"
+        assert [t["description"] for t in end.metadata["tasks"]] == ["find X"]
+        (record,) = crew.records()
+        assert record.plan == "- [ ] find X"
+        assert [t["description"] for t in record.tasks] == ["find X"]
+
     async def test_the_outside_content_mark_still_reaches_the_conversation(self, make_crew):
         crew = make_crew(
             research_team(),
@@ -2388,6 +2407,20 @@ class TestOwnPlanAndTasks:
         await crew.turn()
 
         assert (await crew.marked()) is True
+        if crew.backend == "adk":
+            # The write-back itself: the mark rides on the task call's response.
+            from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
+
+            session = await crew.manager._session_service.get_session(
+                app_name=crew.manager.session_ref(SESSION, USER).app_name,
+                user_id=USER, session_id=SESSION,
+            )
+            written = [
+                e for e in session.events
+                if any(r.name == "task" for r in e.get_function_responses())
+                and OUTSIDE_CONTENT_KEY in (e.actions.state_delta or {})
+            ]
+            assert len(written) == 1
 
     async def test_the_runs_record_keeps_its_last_plan_and_tasks(self, make_crew):
         crew = make_crew(

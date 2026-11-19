@@ -256,6 +256,24 @@ class TestObserve:
         record = runs.records(ONE)[0]
         assert (record.plan, record.tasks) == ("- [x] find X", tasks)
 
+    def test_a_plan_that_is_no_string_and_tasks_that_are_no_dicts_are_left_out(self):
+        from agentic_cli.workflow.agents.runs import own_plan_and_tasks
+
+        assert own_plan_and_tasks({"plan": ["x"], "tasks": "none"}) == ("", [])
+        assert own_plan_and_tasks({"plan": 5, "tasks": [{"description": "a"}, "b"]}) == ("", [])
+        assert own_plan_and_tasks({"plan": "p", "tasks": [{"description": "a"}]}) == (
+            "p", [{"description": "a"}],
+        )
+        assert own_plan_and_tasks({}) == ("", [])
+
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_COMPLETED, call_id="c1", plan=5, tasks="x"  # type: ignore[arg-type]
+        )))
+        record = runs.records(ONE)[0]
+        assert (record.plan, record.tasks) == ("", [])
+
     def test_an_end_without_them_leaves_the_record_empty(self):
         runs = AgentRuns()
         ref = started(runs, ONE, "c1", "researcher")
