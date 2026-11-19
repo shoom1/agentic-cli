@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -78,7 +79,7 @@ from agentic_cli.workflow.agents.outcome import (
     refusal_notice,
 )
 from agentic_cli.workflow.context import is_context_overflow
-from agentic_cli.workflow.interrupts import MARKER, OpenCalls
+from agentic_cli.workflow.interrupts import MARKER, OpenCalls, fresh_call_id
 from agentic_cli.workflow.langchain_models import without_foreign_reasoning
 from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_outside_content
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
@@ -479,6 +480,16 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     the task it runs in, ``agents/delegate.py``), so a sub-agent's call never
     answers its parent's delegation of the same id.
 
+    Everything pairs a result with its call by id, the provider adapters
+    too. A provider that numbers its call ids per response (``call_0`` in
+    every one) reuses one the agent's state already holds, so each model
+    answer passes through here, outside the stack's model side (it changes
+    a reused call id and nothing else), and such a call gets an id of its
+    own (``workflow.interrupts.fresh_call_id``) before the answer is stored
+    and its calls run. A history stored with an id twice is paired by
+    position: a call is answered by a result of its id that follows its
+    answer, before the next.
+
     Args:
         open_calls: The manager's record of its calls.
         root: Whether this is the main agent's stack.
@@ -494,17 +505,20 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         if not messages:
             return None
         by_user = self._root and self._open.take_cancel(get_active_turn())
-        answered = {message.tool_call_id for message in messages if message.type == "tool"}
         patched: list[AnyMessage] = []
         updates: dict[str, Any] = {}
         changed = False
-        for message in messages:
+        for index, message in enumerate(messages):
             patched.append(message)
             if not isinstance(message, AIMessage):
                 continue
+            answered = _results_after(messages, index)
             for call in (*message.tool_calls, *message.invalid_tool_calls):
                 call_id = call["id"]
-                if call_id is None or call_id in answered:
+                if call_id is None:
+                    continue
+                if answered[call_id]:
+                    answered[call_id] -= 1
                     continue
                 patched.append(self._answer(call, by_user=by_user, updates=updates))
                 changed = True
@@ -539,6 +553,21 @@ class InterruptedCallsMiddleware(AgentMiddleware):
             status="success" if answer.get("success") else "error",
         )
 
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        response = await handler(request)
+        if not any(
+            answer.tool_calls or answer.invalid_tool_calls for answer in _answers(response)
+        ):
+            return response
+        # The agent's whole state, not only what was sent: after a summary
+        # the request holds less.
+        used = _call_ids(request.state["messages"])
+        return _mapped(response, lambda answer: _with_own_call_ids(answer, used))
+
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -572,6 +601,149 @@ class _Finished:
 def _a_reply(message: AnyMessage) -> bool:
     """Whether ``message`` ended its turn: the agent's text, with no call."""
     return isinstance(message, AIMessage) and not message.tool_calls
+
+
+def _results_after(messages: list[AnyMessage], index: int) -> Counter[str]:
+    """How many results of each call id follow ``messages[index]`` before the
+    next model answer: what answers that answer's calls."""
+    found: Counter[str] = Counter()
+    for message in messages[index + 1:]:
+        if isinstance(message, AIMessage):
+            break
+        if isinstance(message, ToolMessage):
+            found[message.tool_call_id] += 1
+    return found
+
+
+def _call_ids(messages: list[AnyMessage]) -> set[str]:
+    """Every call id ``messages`` hold: their calls' and their results'."""
+    ids: set[str] = set()
+    for message in messages:
+        if isinstance(message, AIMessage):
+            ids.update(
+                call["id"] for call in (*message.tool_calls, *message.invalid_tool_calls)
+                if call["id"]
+            )
+        elif isinstance(message, ToolMessage) and message.tool_call_id:
+            ids.add(message.tool_call_id)
+    return ids
+
+
+#: The content blocks that hold a call, by the key that holds its id: Claude's
+#: ``tool_use`` and LangChain's ``tool_call`` by ``id``, the Responses API's
+#: ``function_call`` by ``call_id`` (its ``id`` is the item's).
+_CALL_ID_KEYS = {"tool_use": "id", "tool_call": "id", "function_call": "call_id"}
+
+
+def _with_own_call_ids(message: AIMessage, used: set[str]) -> AIMessage:
+    """``message`` with each call whose id ``used`` holds given an id of its own.
+
+    ``used``: the ids the agent's conversation holds (``_call_ids``). An
+    earlier call of ``message``, in the order the model made them, counts
+    too, and every id ``message`` ends with is added to it. Only such an id
+    changes, to ``workflow.interrupts.fresh_call_id``'s, in the answer's
+    tool calls and invalid tool calls, its content blocks that hold a call
+    (``_CALL_ID_KEYS``; ChatAnthropic prefers the ``tool_use`` block of a
+    call's id, and would send the old one beside the new), and Chat
+    Completions' raw calls (``additional_kwargs["tool_calls"]``). Each block
+    and raw call is matched to its call by id, then name and arguments
+    (``_matched``), and the model's order is theirs: LangChain lists the
+    invalid calls after the valid ones. An adapter's other data kept by call
+    id (langchain-google-genai's thought signatures, OpenRouter's
+    ``reasoning_details``) keeps the old id: no provider is known to both
+    reuse ids and keep such data by them. ``message`` itself when no id
+    changes; else a copy.
+    """
+    calls = [*message.tool_calls, *message.invalid_tool_calls]
+    content = message.content
+    blocks = _matched(content if isinstance(content, list) else [], calls)
+    raw_calls = message.additional_kwargs.get("tool_calls")
+    raw = _matched(raw_calls if isinstance(raw_calls, list) else [], calls)
+    held = next((found for found in (blocks, raw) if any(i is not None for i in found)), [])
+    order = [i for i in held if i is not None]
+    order += [i for i in range(len(calls)) if i not in order]
+    new_ids: list[str | None] = [None] * len(calls)
+    for i in order:
+        old = calls[i].get("id")
+        if old:
+            new_ids[i] = fresh_call_id(old, used) if old in used else old
+            used.add(new_ids[i])
+    if all(new_ids[i] in (None, call.get("id")) for i, call in enumerate(calls)):
+        return message
+    renamed = [
+        call if new_ids[i] in (None, call.get("id")) else {**call, "id": new_ids[i]}
+        for i, call in enumerate(calls)
+    ]
+    additional_kwargs = dict(message.additional_kwargs)
+    if isinstance(raw_calls, list):
+        additional_kwargs["tool_calls"] = _with_ids(raw_calls, raw, new_ids)
+    return message.model_copy(update={
+        "content": _with_ids(content, blocks, new_ids) if isinstance(content, list) else content,
+        "tool_calls": renamed[:len(message.tool_calls)],
+        "invalid_tool_calls": renamed[len(message.tool_calls):],
+        "additional_kwargs": additional_kwargs,
+    })
+
+
+def _held_call(item: Any) -> tuple[str, Any, Any, Any] | None:
+    """The call a content block or a raw call holds: the key of its id, its id,
+    name and arguments; None for an item that holds none."""
+    if not isinstance(item, dict):
+        return None
+    function = item.get("function")
+    if isinstance(function, dict):  # Chat Completions' raw call
+        return "id", item.get("id"), function.get("name"), function.get("arguments")
+    key = _CALL_ID_KEYS.get(item.get("type"))
+    if key is None:
+        return None
+    arguments = next((item[k] for k in ("input", "args", "arguments") if k in item), None)
+    return key, item.get(key), item.get("name"), arguments
+
+
+def _matched(items: list[Any], calls: list[Any]) -> list[int | None]:
+    """For each of ``items`` (content blocks, or raw calls), the index in
+    ``calls`` of the call it holds, None for one that holds none.
+
+    A call of its id that no earlier item took, ranked by its name matching,
+    then its arguments matching, then by order: of two calls with one id, the
+    one of the item's name wins, and of those the one of its arguments, else
+    the first.
+    """
+    taken: set[int] = set()
+    found: list[int | None] = []
+    for item in items:
+        held = _held_call(item)
+        free = [] if held is None else [
+            i for i, call in enumerate(calls) if i not in taken and call.get("id") == held[1]
+        ]
+        best = max(free, default=None, key=lambda i: (
+            calls[i].get("name") == held[2], _parsed(calls[i].get("args")) == _parsed(held[3]), -i,
+        ))
+        if best is not None:
+            taken.add(best)
+        found.append(best)
+    return found
+
+
+def _parsed(arguments: Any) -> Any:
+    """A call's arguments as a value: JSON text parsed, anything else as it is."""
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except ValueError:
+            return arguments
+    return arguments
+
+
+def _with_ids(items: list[Any], matched: list[int | None], new_ids: list[str | None]) -> list[Any]:
+    """``items`` with each one that holds a call (``matched``) naming that call's new id."""
+    changed = []
+    for item, i in zip(items, matched):
+        held = _held_call(item) if i is not None else None
+        if held is not None and new_ids[i] not in (None, held[1]):
+            item = {**item, held[0]: new_ids[i]}
+        changed.append(item)
+    return changed
 
 
 class ActiveToolCallMiddleware(AgentMiddleware):

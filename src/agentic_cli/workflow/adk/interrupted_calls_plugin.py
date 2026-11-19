@@ -38,6 +38,15 @@ ADK stops at the first plugin whose ``after_tool_callback`` returns a value,
 so this one is registered before ``ToolResultCapPlugin``, which tells it each
 cut it makes (``ToolResultCapPlugin.on_cut``): a finished result it answers
 with is the cap's own cut, whose full output was saved once.
+
+All of it, and ADK's own request builder, pairs a result with a call by id.
+A provider that numbers its call ids per response (``call_0`` in every one)
+reuses one the agent's conversation holds, so ``after_model_callback`` gives
+such a call an id of its own (``workflow.interrupts.fresh_call_id``) as the
+answer arrives: ADK stores the answer and runs its calls after the
+callback, under that id. Every runner's chain has this plugin, a sub-agent
+run's too. A conversation stored with an id twice is paired by position:
+a result answers the latest open call of its id before it.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from agentic_cli.workflow.interrupts import (
     INTERRUPTED_BY_USER,
     MARKER,
     OpenCalls,
+    fresh_call_id,
     interrupted,
 )
 from agentic_cli.workflow.sessions import (
@@ -66,7 +76,9 @@ from agentic_cli.workflow.sessions import (
 )
 
 if TYPE_CHECKING:
+    from google.adk.agents.callback_context import CallbackContext
     from google.adk.agents.invocation_context import InvocationContext
+    from google.adk.models.llm_response import LlmResponse
     from google.adk.tools import BaseTool
     from google.adk.tools.tool_context import ToolContext
 
@@ -116,6 +128,44 @@ class InterruptedCallsPlugin(BasePlugin):
         # id: two runs of one sub-agent, each on its own invocation of one
         # runner, may number their calls alike.
         self._active: dict[tuple[str | None, str], Any] = {}
+
+    async def after_model_callback(
+        self, *, callback_context: "CallbackContext", llm_response: "LlmResponse"
+    ) -> None:
+        """Give each call whose id the agent's conversation holds an id of its own.
+
+        The conversation is the session's events the agent sees (its branch's
+        and those above it, ``_ids_in_view``), and the answer's calls before
+        it: only such an id changes. ADK builds the answer's event from this
+        response after the callback, fills a missing id (``adk-`` and a uuid,
+        never one in use), then stores the event and runs its calls by its
+        ids. Changed in place: a plugin that returns an answer ends the
+        other plugins' callbacks. A streamed partial answer is neither stored
+        nor run, so the whole one is renamed.
+        """
+        content = llm_response.content
+        if llm_response.partial or content is None or not any(
+            part.function_call is not None and part.function_call.id
+            for part in content.parts or ()
+        ):
+            return None
+        used = _ids_in_view(
+            callback_context.session.events, callback_context.get_invocation_context().branch
+        )
+        parts: list[types.Part] = []
+        renamed = False
+        for part in content.parts or ():
+            call = part.function_call
+            if call is not None and call.id:
+                if call.id in used:
+                    call = call.model_copy(update={"id": fresh_call_id(call.id, used)})
+                    part = part.model_copy(update={"function_call": call})
+                    renamed = True
+                used.add(call.id)
+            parts.append(part)
+        if renamed:
+            llm_response.content = content.model_copy(update={"parts": parts})
+        return None
 
     async def before_tool_callback(
         self, *, tool: "BaseTool", tool_args: dict[str, Any], tool_context: "ToolContext | None"
@@ -207,6 +257,22 @@ def _invocation(tool_context: Any) -> str | None:
     return getattr(tool_context, "invocation_id", None)
 
 
+def _ids_in_view(events: list[Event], branch: str | None) -> set[str]:
+    """The call ids the events an agent on ``branch`` sees hold: its calls' and results'.
+
+    ADK shows an agent the events of no branch, of its own and of those above
+    it (``a.b`` sees ``a``'s), not a sibling's.
+    """
+    ids: set[str] = set()
+    for event in events:
+        theirs = event.branch
+        if branch and theirs and branch != theirs and not branch.startswith(theirs + "."):
+            continue
+        ids.update(call.id for call in event.get_function_calls() if call.id)
+        ids.update(response.id for response in event.get_function_responses() if response.id)
+    return ids
+
+
 def _from_record(
     open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any,
     *, by_user: bool = True,
@@ -242,18 +308,30 @@ def _unanswered(events: list[Event]) -> dict[_Place, list[types.FunctionCall]]:
     """The calls in ``events`` that no result answers, by where each was made.
 
     A result answers only a call on its own branch: a sub-agent's result
-    never answers its parent's call of the same id.
+    never answers its parent's call of the same id. And it answers the
+    latest call of its id still open before it: a conversation stored while
+    a provider's reused ids were kept (``call_0`` in every response) holds
+    an id twice, and a later call of it left open is still open.
     """
-    answered = {
-        (event.branch, response.id) for event in events
-        for response in event.get_function_responses() if response.id
-    }
-    grouped: dict[_Place, list[types.FunctionCall]] = {}
+    made: list[tuple[_Place, types.FunctionCall]] = []
+    waiting: dict[tuple[str | None, str], list[int]] = {}
+    answered: set[int] = set()
     for event in events:
+        for response in event.get_function_responses():
+            calls = waiting.get((event.branch, response.id)) if response.id else None
+            if calls:
+                answered.add(calls.pop())
         for call in event.get_function_calls():
-            if call.id and (event.branch, call.id) not in answered:
-                key = (event.invocation_id, event.author, event.branch, event.isolation_scope)
-                grouped.setdefault(key, []).append(call)
+            if call.id:
+                waiting.setdefault((event.branch, call.id), []).append(len(made))
+                made.append((
+                    (event.invocation_id, event.author, event.branch, event.isolation_scope),
+                    call,
+                ))
+    grouped: dict[_Place, list[types.FunctionCall]] = {}
+    for index, (place, call) in enumerate(made):
+        if index not in answered:
+            grouped.setdefault(place, []).append(call)
     return grouped
 
 

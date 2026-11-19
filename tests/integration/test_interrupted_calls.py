@@ -985,8 +985,9 @@ async def test_on_adk_calls_whose_results_the_store_refused_keep_them(hermetic, 
 async def test_on_adk_a_failed_turns_record_answers_no_later_call(hermetic, monkeypatch):
     """A failed turn's record answers its own calls left open at the next
     turn, and nothing after: a later call of the same id (a provider that
-    numbers its call ids repeats them), left running by a stop, is the
-    user's, not the earlier call's result."""
+    numbers its call ids repeats them), given an id of its own as it
+    arrives and left running by a stop, is the user's, not the earlier
+    call's result."""
     from agentic_cli.workflow.adk.interrupted_calls_plugin import ABORTED
     from agentic_cli.workflow.interrupts import interrupted
 
@@ -1008,11 +1009,12 @@ async def test_on_adk_a_failed_turns_record_answers_no_later_call(hermetic, monk
     assert [e.metadata["recoverable"] for e in failed if e.type is EventType.ERROR] == [False]
     stopped = session.events[-1].invocation_id
     (answer,) = [
-        response.response for event in session.events
+        response for event in session.events
         if event.invocation_id == stopped and event.error_code == ABORTED
-        for response in event.get_function_responses() if response.id == "call_0"
+        for response in event.get_function_responses() if response.name == "ic_wait"
     ]
-    assert answer == interrupted(INTERRUPTED_BY_USER)
+    assert answer.id.startswith("call_0-")
+    assert answer.response == interrupted(INTERRUPTED_BY_USER)
 
 
 # --- the ADK it rests on ----------------------------------------------------------------

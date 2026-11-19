@@ -65,6 +65,7 @@ from agentic_cli.workflow.events import (
     WorkflowEvent,
 )
 from agentic_cli.workflow.interrupts import (
+    _CALL_ID_MAX,
     INTERRUPTED,
     INTERRUPTED_BY_USER,
     NOT_RUN,
@@ -336,13 +337,17 @@ def _claude_results(body: dict[str, Any]) -> dict[str, str]:
         if isinstance(content, str):
             continue
         for block in content:
-            if block.get("type") != "tool_result":
-                continue
-            held = block.get("content")
-            if isinstance(held, list):
-                held = "".join(part.get("text", "") for part in held if isinstance(part, dict))
-            results[block["tool_use_id"]] = held if isinstance(held, str) else json.dumps(held)
+            if block.get("type") == "tool_result":
+                results[block["tool_use_id"]] = _claude_result_text(block)
     return results
+
+
+def _claude_result_text(block: dict[str, Any]) -> str:
+    """A Claude ``tool_result`` block's content, as text."""
+    held = block.get("content")
+    if isinstance(held, list):
+        held = "".join(part.get("text", "") for part in held if isinstance(part, dict))
+    return held if isinstance(held, str) else json.dumps(held)
 
 
 def _claude_result_ids(body: dict[str, Any]) -> list[str]:
@@ -352,6 +357,77 @@ def _claude_result_ids(body: dict[str, Any]) -> list[str]:
         for message in body["messages"] if not isinstance(message["content"], str)
         for block in message["content"] if block.get("type") == "tool_result"
     ]
+
+
+#: How ``call_results`` lists a result that answers no call of the model
+#: message before it, under its call id.
+NO_CALL = "(no call) "
+#: How ``call_results`` lists a call whose id an earlier call of the request has.
+REPEATED = "(repeated) "
+
+
+class _CallResults:
+    """Builds ``Crew.call_results``' list: each call in order, with the results
+    for it that come right after its model message, before anything else
+    (Claude and OpenAI take no other place). A call whose id an earlier call
+    of the request has is listed under ``REPEATED``."""
+
+    def __init__(self) -> None:
+        self.found: list[tuple[str, list[str]]] = []
+        self._seen: set[str] = set()
+        self._open: dict[str, list[int]] = {}
+
+    def model_message(self, call_ids: list[str]) -> None:
+        self._open = {}
+        for call_id in call_ids:
+            self._open.setdefault(call_id, []).append(len(self.found))
+            self.found.append((REPEATED + call_id if call_id in self._seen else call_id, []))
+            self._seen.add(call_id)
+
+    def result(self, call_id: str, text: str) -> None:
+        # Two calls of one id in one message (flagged) each get every result of it.
+        for index in self._open.get(call_id, ()):
+            self.found[index][1].append(text)
+        if call_id not in self._open:
+            self.found.append((NO_CALL + call_id, [text]))
+
+    def other(self) -> None:
+        """Anything but a result: no result after it answers the model message's calls."""
+        self._open = {}
+
+
+def _claude_call_results(body: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """``Crew.call_results`` of a Claude request."""
+    built = _CallResults()
+    for message in body["messages"]:
+        content = message["content"]
+        blocks = [] if isinstance(content, str) else content
+        if message["role"] == "assistant":
+            built.model_message([b["id"] for b in blocks if b.get("type") == "tool_use"])
+            continue
+        if isinstance(content, str):
+            built.other()
+        for block in blocks:
+            if block.get("type") == "tool_result":
+                built.result(block["tool_use_id"], _claude_result_text(block))
+            else:
+                built.other()
+    return built.found
+
+
+def _messages_call_results(messages: list[Any]) -> list[tuple[str, list[str]]]:
+    """``Crew.call_results`` of a LangChain request's messages (Deep Agents')."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    built = _CallResults()
+    for message in messages:
+        if isinstance(message, AIMessage):
+            built.model_message([made["id"] for made in message.tool_calls])
+        elif isinstance(message, ToolMessage):
+            built.result(message.tool_call_id, message.text)
+        else:
+            built.other()
+    return built.found
 
 
 # -- the crew: a team's manager on one backend -----------------------------------
@@ -374,6 +450,7 @@ class Crew:
     _message_count: Callable[[str, int], int] | None = None
     _state: Callable[[], Awaitable[dict[str, Any]]] | None = None
     _marked: Callable[[], Awaitable[bool]] | None = None
+    _call_results: Callable[[str, int], list[tuple[str, list[str]]]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -423,6 +500,16 @@ class Crew:
         is seen in its session (``answers``), not here."""
         assert self._result_ids is not None
         return self._result_ids(agent, call)
+
+    def call_results(self, agent: str, call: int = -1) -> list[tuple[str, list[str]]]:
+        """Each call ``agent``'s model request ``call`` held, in order: its id,
+        and the results of that id (as text) that come right after its model
+        message, before anything else. A valid request has exactly one for
+        each call; a result anywhere else is listed on its own, its id after
+        ``NO_CALL``, and a call whose id an earlier call has, its id after
+        ``REPEATED``."""
+        assert self._call_results is not None
+        return self._call_results(agent, call)
 
     def bodies(self, agent: str) -> list[str]:
         """Each of ``agent``'s model requests whole, as text: every message
@@ -572,9 +659,13 @@ def _adk_crew(
         )
         return bool(session.state.get(OUTSIDE_CONTENT_KEY))
 
+    def call_results(name: str, call: int) -> list[tuple[str, list[str]]]:
+        return _claude_call_results([body for sent, body in claude.sent if sent == name][call])
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
+        _call_results=call_results,
     )
 
 
@@ -665,9 +756,13 @@ def _deepagents_crew(
         )).values
         return bool(values.get("outside_content"))
 
+    def call_results(name: str, call: int) -> list[tuple[str, list[str]]]:
+        return _messages_call_results(models.chats[name].conversation(call))
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
+        _call_results=call_results,
     )
 
 
@@ -3673,3 +3768,190 @@ class TestAfterAFailedTurn:
         (record,) = crew.records()
         assert [task["description"] for task in record.tasks] == ["find X"]
         assert not (await crew.state()).get("tasks")
+
+
+# -- a provider that reuses call ids: each call still gets its own result ------------------
+
+
+def _renamed(call_id: str, original: str) -> bool:
+    """Whether ``call_id`` is ``original`` given an id of its own: a short
+    suffix after it, in the characters every provider takes."""
+    suffix = call_id.removeprefix(original + "-")
+    return (
+        call_id != original and suffix != call_id and suffix.isalnum()
+        and len(call_id) <= _CALL_ID_MAX and all(c.isalnum() or c in "_-" for c in call_id)
+    )
+
+
+class TestAReusedCallId:
+    """A provider that numbers its call ids per response (``call_0`` in every
+    one) reuses an id the conversation already holds. The reused id is
+    renamed as the answer arrives, so each call in a later request is
+    followed by exactly one result, its own: Claude and OpenAI refuse a
+    request with a call left unanswered, and every one after it."""
+
+    async def test_a_stopped_call_after_a_failed_turn_is_answered_as_interrupted(
+        self, make_crew
+    ):
+        """The first turn's ``call_0`` returns, then its model call fails (the
+        record keeps the call); the second turn's ``call_0`` is stopped. The
+        third turn's request answers each with its own result: never the
+        first call's for the second."""
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_lookup, contract_block))],
+            coordinator=[calls(use("contract_lookup", "call_0", q="X")), fails("overloaded"),
+                         calls(use("contract_block", "call_0")), says("Back again.")],
+        )
+
+        await crew.turn()
+        turn = crew.start("Wait.")
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        await crew.stop(turn)
+        await crew.turn("And now?")
+
+        (first, (looked_up,)), (second, (stopped,)) = crew.call_results("coordinator")
+        assert first == "call_0"
+        assert _renamed(second, "call_0"), second
+        assert json.loads(looked_up) == {"success": True, "value": 42}
+        assert json.loads(stopped) == interrupted(INTERRUPTED_BY_USER)
+
+    async def test_a_call_that_failed_its_turn_is_answered_after_an_answered_one(
+        self, make_crew, monkeypatch
+    ):
+        """The first turn's ``call_0`` is answered; the second turn's
+        ``call_0`` fails the turn at its permission check. The third turn's
+        request answers it as interrupted."""
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_lookup, "read_file"))],
+            coordinator=[calls(use("contract_lookup", "call_0", q="X")), says("First."),
+                         calls(use("read_file", "call_0", path="notes.txt")), says("Third.")],
+        )
+
+        await crew.turn("One.")
+        gate_fails_after(monkeypatch, "read_file", lambda: True)
+        failed = await crew.turn("Two.")
+        await crew.turn("Three.")
+
+        (error,) = [e for e in failed if e.type is EventType.ERROR]
+        assert GATE_FAILURE in error.content
+        (first, (looked_up,)), (second, (failed_call,)) = crew.call_results("coordinator")
+        assert first == "call_0"
+        assert _renamed(second, "call_0"), second
+        assert json.loads(looked_up) == {"success": True, "value": 42}
+        assert json.loads(failed_call) == interrupted(INTERRUPTED)
+
+    async def test_a_sub_agent_renames_its_own_reused_id_not_its_parents(self, make_crew):
+        """The researcher's first call has the id of the delegation that
+        started it, which is in its parent's conversation, not its own: it is
+        kept. Its second call reuses its own first call's id: that one is
+        renamed (every agent's model answers go through the rename)."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_lookup,))],
+            coordinator=[calls(delegate("researcher", "Find X.", "call_0")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "call_0", q="X")),
+                        calls(use("contract_lookup", "call_0", q="Y")), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        (first, (one,)), (second, (other,)) = crew.call_results("researcher")
+        assert first == "call_0"
+        assert _renamed(second, "call_0"), second
+        assert json.loads(one) == json.loads(other) == {"success": True, "value": 42}
+        ((delegation, (envelope,)),) = crew.call_results("coordinator")
+        assert delegation == "call_0"
+        assert envelope_read(envelope)["result"] == "X is 42."
+
+    async def test_two_calls_of_one_id_in_one_answer_each_get_their_own_result(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_lookup,))],
+            coordinator=[calls(use("contract_lookup", "call_0", q="X"),
+                               use("contract_lookup", "call_0", q="Y")),
+                         says("Both.")],
+        )
+
+        await crew.turn()
+
+        (first, (one,)), (second, (other,)) = crew.call_results("coordinator")
+        assert first == "call_0"
+        assert _renamed(second, "call_0"), second
+        assert json.loads(one) == json.loads(other) == {"success": True, "value": 42}
+
+
+def _claude_request(*messages: tuple[str, Any]) -> dict[str, Any]:
+    """A Claude request body of ``messages``, ``(role, content)`` each."""
+    return {"messages": [{"role": role, "content": content} for role, content in messages]}
+
+
+def _tool_use(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_use", "id": call_id, "name": "contract_lookup", "input": {}}
+
+
+def _tool_result(call_id: str, text: str = "42") -> dict[str, Any]:
+    return {"type": "tool_result", "tool_use_id": call_id, "content": text}
+
+
+class TestCallResults:
+    """``Crew.call_results`` passes only a request Claude and OpenAI take: each
+    call id once in it, and each call's results right after its model
+    message, before anything else."""
+
+    def test_a_call_id_twice_in_one_answer_is_flagged(self):
+        body = _claude_request(
+            ("user", "Go."),
+            ("assistant", [_tool_use("call_0"), _tool_use("call_0")]),
+            ("user", [_tool_result("call_0")]),
+        )
+
+        assert _claude_call_results(body) == [
+            ("call_0", ["42"]), (REPEATED + "call_0", ["42"]),
+        ]
+
+    def test_a_call_id_an_earlier_answer_used_is_flagged(self):
+        body = _claude_request(
+            ("user", "Go."),
+            ("assistant", [_tool_use("call_0")]), ("user", [_tool_result("call_0", "1")]),
+            ("assistant", [_tool_use("call_0")]), ("user", [_tool_result("call_0", "2")]),
+        )
+
+        assert _claude_call_results(body) == [("call_0", ["1"]), (REPEATED + "call_0", ["2"])]
+
+    def test_a_result_after_another_message_answers_nothing(self):
+        body = _claude_request(
+            ("user", "Go."),
+            ("assistant", [_tool_use("call_0")]),
+            ("user", "Wait."),
+            ("user", [_tool_result("call_0")]),
+        )
+
+        assert _claude_call_results(body) == [("call_0", []), (NO_CALL + "call_0", ["42"])]
+
+    def test_a_result_after_text_in_its_own_message_answers_nothing(self):
+        body = _claude_request(
+            ("user", "Go."),
+            ("assistant", [_tool_use("call_0")]),
+            ("user", [{"type": "text", "text": "Wait."}, _tool_result("call_0")]),
+        )
+
+        assert _claude_call_results(body) == [("call_0", []), (NO_CALL + "call_0", ["42"])]
+
+    def test_a_langchain_request_is_held_to_the_same(self):
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        def call(call_id: str) -> dict[str, Any]:
+            return {"name": "contract_lookup", "args": {}, "id": call_id, "type": "tool_call"}
+
+        messages = [
+            HumanMessage("Go."),
+            AIMessage("", tool_calls=[call("call_0"), call("call_0")]),
+            ToolMessage("42", tool_call_id="call_0"),
+            HumanMessage("Wait."),
+            ToolMessage("43", tool_call_id="call_0"),
+        ]
+
+        assert _messages_call_results(messages) == [
+            ("call_0", ["42"]), (REPEATED + "call_0", ["42"]), (NO_CALL + "call_0", ["43"]),
+        ]

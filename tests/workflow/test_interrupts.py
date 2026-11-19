@@ -26,6 +26,7 @@ from agentic_cli.workflow.interrupts import (
     INTERRUPTED_BY_USER,
     NOT_RUN,
     OpenCalls,
+    fresh_call_id,
     interrupted,
     job_for_call,
     job_started,
@@ -305,3 +306,31 @@ class TestAJobAnswersOnlyItsOwnRunsCall:
                 assert calls.answer("call_0", by_user=True, run=None) == job_started(
                     jobs.records[0]
                 )
+
+
+class TestFreshCallId:
+    """A provider that numbers its call ids per response (``call_0``, ...)
+    reuses them in a conversation: the reused one gets an id of its own."""
+
+    def test_it_is_the_old_id_and_a_short_suffix(self):
+        new = fresh_call_id("call_0", {"call_0"})
+
+        stem, suffix = new.rsplit("-", 1)
+        assert stem == "call_0"
+        assert len(suffix) == 8 and suffix.isalnum()
+
+    def test_it_is_never_one_already_used(self):
+        used = {"call_0"}
+
+        made = {fresh_call_id("call_0", used) for _ in range(50)}
+
+        assert len(made) == 50 and not made & used
+
+    def test_it_takes_only_what_every_provider_takes(self):
+        """Claude takes ``[A-Za-z0-9_-]``; OpenAI's Chat Completions an id of
+        at most 40 characters."""
+        new = fresh_call_id("functions.write_todos:0" + "x" * 60, set())
+
+        assert len(new) <= 40
+        assert all(c.isalnum() or c in "_-" for c in new)
+        assert new.startswith("functions_write_todos_0x")
