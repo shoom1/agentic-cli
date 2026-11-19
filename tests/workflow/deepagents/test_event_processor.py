@@ -763,9 +763,6 @@ class TestARealTurn:
             for e in events
             if e.type is not EventType.LLM_USAGE
         ]
-        progress = task_progress_data(
-            [{"id": "x", "description": "find X", "status": "in_progress"}]
-        )
         assert seen == [
             ("tool_call", "coordinator", "save_plan"),
             ("tool_result", "coordinator", "save_plan"),
@@ -778,7 +775,6 @@ class TestARealTurn:
             ("text", "researcher", "It is 42."),
             ("agent_run", "researcher", "researcher-1 completed"),
             ("tool_result", "coordinator", "task"),
-            ("task_progress", "coordinator", progress["display"]),
             ("text", "coordinator", "X is 42."),
         ]
         assert [(e.metadata["agent"], e.metadata.get("subagent")) for e in events

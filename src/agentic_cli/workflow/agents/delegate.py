@@ -217,7 +217,14 @@ class RunAnswer:
             ``CUT``), None when it ended as an answer should.
         error: Why it failed, when it did (the provider's reason for a
             failed model call, ``failure_reason``); None when it answered.
-        state: The shared state keys it changed, with their new values.
+        state: The shared state keys it changed, with their new values (the
+            outside-content mark: a run's plan and tasks are its own).
+        plan: Its plan as it left it (``""`` for none): a run's own, never
+            written back to its caller.
+        tasks: Its task list as it left it (the state tools' list of dicts).
+            Both are filled for a run that completed and for one the hook
+            answered as failed (``error``); a run that raised (``RunFailed``),
+            was cancelled or was interrupted carries none.
         error_code: The failure's code, the user's warning's ``error_code``:
             the provider error's type for a failed model call, the reply's
             code for one that is no answer; None for none.
@@ -228,6 +235,8 @@ class RunAnswer:
     error: str | None = None
     state: Mapping[str, Any] = field(default_factory=dict)
     error_code: str | None = None
+    plan: str = ""
+    tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -551,15 +560,20 @@ class Delegations:
             return self._failed(
                 ref, call_id, answer.error, warning=f"{ref.instance} failed: {answer.error}",
                 code=answer.error_code, text=answer.text, state=answer.state,
+                plan=answer.plan, tasks=answer.tasks,
             )
         if answer.outcome == REFUSED:
-            self._end(ref, call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR)
+            self._end(
+                ref, call_id, RUN_REFUSED, text=answer.text, error=REFUSAL_ERROR,
+                plan=answer.plan, tasks=answer.tasks,
+            )
             result = envelope(ref, RUN_REFUSED, result=answer.text, error=REFUSAL_ERROR)
         else:
             stepped = STEP_LIMIT_ERROR if control.at_step_limit else None
             partial = answer.outcome == CUT or stepped is not None
             end = self._end(
-                ref, call_id, RUN_COMPLETED, text=answer.text, partial=partial, error=stepped
+                ref, call_id, RUN_COMPLETED, text=answer.text, partial=partial, error=stepped,
+                plan=answer.plan, tasks=answer.tasks,
             )
             if answer.outcome == CUT:
                 warning = cut_off_warning(end)
@@ -694,11 +708,13 @@ class Delegations:
         code: str | None,
         text: str = "",
         state: Mapping[str, Any] | None = None,
+        plan: str = "",
+        tasks: list[dict[str, Any]] | None = None,
     ) -> Delegated:
         """End ``ref``'s run failed with ``error``, warn the user, and its envelope."""
         logger.info("subagent_failed", run=ref.run, agent=ref.agent,
                     error=truncate(error, _MAX_LOGGED_ERROR))
-        self._end(ref, call_id, RUN_FAILED, text=text, error=error)
+        self._end(ref, call_id, RUN_FAILED, text=text, error=error, plan=plan, tasks=tasks)
         warned = WorkflowEvent.error(warning, error_code=code, recoverable=True)
         warned.metadata["agent"] = ref.agent
         warned.run = ref
@@ -718,11 +734,17 @@ class Delegations:
         error: str | None = None,
         partial: bool = False,
         cancelled_by: str | None = None,
+        plan: str = "",
+        tasks: list[dict[str, Any]] | None = None,
     ) -> WorkflowEvent:
-        """Report and record the ``AGENT_RUN`` that ends ``ref``'s run; that event."""
+        """Report and record the ``AGENT_RUN`` that ends ``ref``'s run; that event.
+
+        The end carries the run's last ``plan`` and ``tasks`` when it has any.
+        """
         end = WorkflowEvent.agent_run(
             ref, status, call_id=call_id, result=result_head(text), error=error,
             partial=partial, usage=self._usage(ref), cancelled_by=cancelled_by,
+            plan=plan or None, tasks=list(tasks) if tasks else None,
         )
         self._emit(end)
         return end

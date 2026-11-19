@@ -10,11 +10,13 @@ and returns the result envelope. The call is answered with the envelope as
 JSON (unescaped, as ADK's), one ``ToolMessage``, and the shared state the run
 changed in the same ``Command``.
 
-The shared state is the conversation's plan, tasks and outside-content mark
-(``SHARED_KEYS``): a run starts from its caller's, and what it changes comes
-back, as Deep Agents' own ``task`` handed it on. An inheriting type sees its
-caller's effective conversation (the root's): its messages with its summary
-applied, without the message that called ``task`` (``inherited_messages``).
+A run's plan and task list are its own: it starts with none, and what it
+saves stays with it (``RunAnswer.plan``, ``RunAnswer.tasks``), so the
+conversation's are the delegating agent's alone. The one shared key is the
+outside-content mark (``SHARED_KEYS``): a run starts from its caller's, and
+what it changes comes back. An inheriting type sees its caller's effective
+conversation (the root's): its messages with its summary applied, without
+the message that called ``task`` (``inherited_messages``).
 
 The framework built the tool, so it binds it to the ``task`` declaration
 (``tools/_core/delegation.py``): the permission gate knows it by identity.
@@ -45,9 +47,11 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.agents.delegate import Delegations
     from agentic_cli.workflow.config import AgentConfig
 
-#: The state a run shares with its caller (``state.AgentCliState``): it starts
-#: from the caller's, and the keys it changes come back with its result.
-SHARED_KEYS = ("plan", "tasks", "outside_content")
+#: The state a run shares with its caller (``state.AgentCliState``): the
+#: outside-content mark alone, which starts from the caller's and comes back
+#: with the run's result when it changed. The plan and the tasks are each
+#: run's own.
+SHARED_KEYS = ("outside_content",)
 
 
 def build_task_tool(

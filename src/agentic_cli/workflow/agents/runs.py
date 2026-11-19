@@ -132,6 +132,8 @@ class RunRecord:
             for the root).
         mode: How it runs: ``blocking`` (its parent waits for it).
         cancelled_by: Who cancelled it, for a cancelled run.
+        plan: Its own last plan (``""`` for none).
+        tasks: Its own last task list (the state tools' list of dicts).
     """
 
     ref: RunRef
@@ -148,6 +150,8 @@ class RunRecord:
     started_by: str | None = None
     mode: str = "blocking"
     cancelled_by: str | None = None
+    plan: str = ""
+    tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _run_id(instance: str, number: int) -> str:
@@ -236,7 +240,7 @@ class AgentRuns:
         it and its mode), ``running``; a working status (``queued``,
         ``running``, ``input_required``) becomes a working record's status;
         an end gives it its status, time, result, error, whether it is
-        partial, what it used and who cancelled it (an end whose start was
+        partial, what it used, who cancelled it and its own last plan and tasks (an end whose start was
         not seen makes the record too). Any other event changes nothing, and
         neither does a working status of a run that has ended or was never
         started.
@@ -282,6 +286,8 @@ class AgentRuns:
         record.partial = bool(metadata.get("partial"))
         record.usage = dict(metadata.get("usage") or {})
         record.cancelled_by = metadata.get("cancelled_by")
+        record.plan = metadata.get("plan") or ""
+        record.tasks = list(metadata.get("tasks") or [])
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""

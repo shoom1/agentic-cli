@@ -73,8 +73,8 @@ the start of the entry's title.
   capability…**; Added: **`task` is a reserved…**)
 - In an ADK app built from configs, a sub-agent is called through `task` and
   returns (no `transfer_to_agent`), seeing only its task unless
-  `inherit_context=True`, and shares only the plan, the tasks and the
-  outside-content mark with its caller: any other session-state key an ADK
+  `inherit_context=True`, and shares only the outside-content mark with its
+  caller (its plan and tasks are its own): any other session-state key an ADK
   tool writes in a sub-agent run, `user:` and `app:` keys too, never
   reaches the conversation; a synchronous tool must be safe in a worker
   thread beside other calls; a prompt's `{name}` is not filled from session
@@ -1055,8 +1055,8 @@ the start of the entry's title.
   - **Delegation.** A coordinator delegates through the framework's `task`
     tool, as on ADK (see Changed: **One `task` tool on both backends…**):
     each sub-agent's graph is built on its own and runs apart from its
-    coordinator's stream, in a task of its own, from the task message, the
-    coordinator's `plan` and `tasks`, and for one with
+    coordinator's stream, in a task of its own, from the task message, and
+    for one with
     `inherit_context=True` the conversation too (see
     `AgentConfig.inherit_context`); its last text is the envelope's result,
     and its own text shows as activity, not as the reply. Two sub-agents may
@@ -1612,6 +1612,13 @@ the start of the entry's title.
 
 ### Changed
 
+- **A sub-agent's plan and task list are its own, on both backends.** A run
+  starts with no plan and no tasks, keeps what it saves (its last plan and
+  tasks are on its record, and `/agents <id>` shows them after its result),
+  and writes nothing of them to its caller: the conversation's plan and task
+  list, and the status bar's task box, are the coordinator's alone, and two
+  runs at once no longer overwrite each other's. Only the outside-content
+  mark reaches the conversation.
 - **On ADK, a conversation's sub-agent transcripts are deleted with it, and no
   run reuses one.** Each sub-agent run's transcript is a child
   session of its conversation (app `<app_name>--agents`, id `<conversation
@@ -1642,11 +1649,10 @@ the start of the entry's title.
   already known`, `## Done when`). A call whose brief misses a field its
   type requires, or names a type that is not the caller's, starts no run:
   its result is `{"success": false, "error": ...}` naming what to fix. A
-  run starts from the conversation's `plan` and `tasks`, and the changes it
-  makes to them reach its caller's state when it returns (the status bar's
-  task list moves then). On ADK nothing else of a run's session state does
-  (with the outside-content mark, these are all a run and its caller
-  share): any other key an app's ADK tool writes in a sub-agent run stays
+  run starts with no plan and no tasks of its own, and what it saves stays
+  with it (the status bar's task list is the conversation's alone). On ADK
+  nothing else of a run's session state reaches its caller but the
+  outside-content mark: any other key an app's ADK tool writes in a sub-agent run stays
   in the run's child session, and a `user:` or `app:` scoped one is kept
   under the child app (`<app_name>--agents`), so the conversation never
   sees it, where in 0.6 such keys reached the conversation; nor does a run

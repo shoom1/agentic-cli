@@ -205,6 +205,8 @@ class WorkflowEvent:
         started_by: str | None = None,
         mode: str | None = None,
         cancelled_by: str | None = None,
+        plan: str | None = None,
+        tasks: list[dict[str, Any]] | None = None,
     ) -> "WorkflowEvent":
         """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
 
@@ -233,6 +235,8 @@ class WorkflowEvent:
                 for the root).
             mode: How it runs: ``blocking`` (its parent waits for it).
             cancelled_by: A cancelled run's canceller: ``parent``, ``user`` or ``limit``.
+            plan: An end's last plan of the run's own (``metadata["plan"]``).
+            tasks: An end's last task list of the run's own (``metadata["tasks"]``).
         """
         metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
         if title is not None:
@@ -253,6 +257,10 @@ class WorkflowEvent:
             metadata["mode"] = mode
         if cancelled_by is not None:
             metadata["cancelled_by"] = cancelled_by
+        if plan is not None:
+            metadata["plan"] = plan
+        if tasks is not None:
+            metadata["tasks"] = tasks
         return cls(
             type=EventType.AGENT_RUN,
             content=f"{ref.instance} {status}",

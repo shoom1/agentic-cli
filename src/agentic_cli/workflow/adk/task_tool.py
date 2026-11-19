@@ -17,11 +17,13 @@ non-Latin answer is six times as long), and a long one is cut by the tool
 result cap as the dict it holds (``workflow/tool_output.py``), so the parent
 reads JSON still.
 
-The shared state is the conversation's plan, tasks and outside-content mark
-(``SHARED_KEYS``): a run starts from the caller's (``tool_context.state``),
-and the keys it changes are written back there, so they ride on the call's
-function response into the conversation's state. An inheriting type reads
-the conversation (``inherited_events``).
+A run's plan and task list are its own: it starts with none, and what it
+saves stays with it (``RunAnswer.plan``, ``RunAnswer.tasks``), so the
+conversation's are the delegating agent's alone. The one shared key is the
+outside-content mark (``SHARED_KEYS``): a run starts from the caller's
+(``tool_context.state``) and, when it changes it, writes it back there, so it
+rides on the call's function response into the conversation's state. An
+inheriting type reads the conversation (``inherited_events``).
 
 The framework builds the tool, so it binds it to the ``task`` declaration
 (``tools/_core/delegation.py``) as it is made: the permission gate knows it
@@ -56,9 +58,11 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.agents.delegate import Delegations
     from agentic_cli.workflow.config import AgentConfig
 
-#: The state a run shares with its caller: the plan and the tasks (the state
-#: tools', ``tools/adk/state_tools.py``) and the outside-content mark.
-SHARED_KEYS = ("plan", "tasks", OUTSIDE_CONTENT_KEY)
+#: The state a run shares with its caller: the outside-content mark alone (a
+#: security mark: memory writes in a marked conversation are approved per
+#: call). The plan and the tasks (the state tools', ``tools/adk/state_tools.py``)
+#: are each run's own.
+SHARED_KEYS = (OUTSIDE_CONTENT_KEY,)
 
 
 class TaskTool(BaseTool):

@@ -382,7 +382,7 @@ What it supports:
   gets the framework's `task` tool, as on ADK (see
   [Sub-agent context](#sub-agent-context)). Each sub-agent's graph runs
   apart from its coordinator's, in a task of its own, from the brief the
-  coordinator writes and the coordinator's plan and tasks; with
+  coordinator writes; with
   `inherit_context=True` it also starts from the coordinator's
   conversation. Its run's envelope is the call's result, and the
   coordinator answers the user. Several sub-agent runs can work at once,
@@ -1298,9 +1298,10 @@ both backends. The parent calls the framework's `task` tool, the same on both:
 `agent_type`, one of its own sub-agents, and a brief, `title` and `objective`
 (required), `deliverable`, `constraints`, `known` (what the parent already
 knows that the task needs) and `done_when`. The sub-agent's run starts from its
-task message, the brief as sections (`# Task: <title>`, `## Objective`, …), and
-from the conversation's plan and tasks (its changes to them come back to its
-parent); it works with its own prompt, tools and model, and its parent reads
+task message, the brief as sections (`# Task: <title>`, `## Objective`, …); it
+has a plan and a task list of its own (it starts with none, and what it saves
+stays with it: `/agents <id>` shows them), and works with its own prompt,
+tools and model, and its parent reads
 its run's envelope as the call's result, a JSON object:
 
 ```json
@@ -1328,7 +1329,7 @@ Each sub-agent's `inherit_context` sets what it sees:
 
 | `inherit_context` | The sub-agent sees |
 |-------------------|--------------------|
-| `False` (the default) | Its task message alone (and the conversation's plan and tasks) |
+| `False` (the default) | Its task message alone |
 | `True` | First its parent's conversation as it stands: after any summary, without the parent's reasoning; its task message then ends with a note that the conversation is its parent's |
 
 ```python
@@ -1356,8 +1357,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `<app_name>--agents`, id `<conversation id>/<instance>`), which
   `/sessions` never lists and which is deleted with its conversation; an
   inheriting run's child session starts with the conversation's events.
-  Only the plan, the tasks and the outside-content mark pass between a run
-  and its caller: any other session-state key an app's ADK tool writes in a
+  Only the outside-content mark passes between a run and its caller (its
+  plan and tasks are its own): any other session-state key an app's ADK tool writes in a
   sub-agent run stays in the run's child session, and a `user:` or `app:`
   scoped one is kept under the child app, so the conversation never sees
   it; nor does the run read the conversation's other keys.

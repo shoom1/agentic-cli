@@ -1492,8 +1492,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         In the run's own task (``agents/delegate.py``): the child session
         (``child_app``, ``child_session_id``: the conversation's id and the
-        run's instance) is made with the shared state the run starts from
-        and, for an inheriting run, the conversation's events
+        run's instance) is made with the state the run starts from (the
+        outside-content mark alone: its plan and tasks start empty) and, for
+        an inheriting run, the conversation's events
         (``task_tool.inherited_events``), then the runner runs the task
         message on it as one invocation. Its events go to the turn's live
         events as they are made, through a processor made for the run, and
@@ -1509,8 +1510,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         Returns:
             Its last answer with text, that answer's outcome mark, the shared
-            keys it changed (read back from its child session's state); or,
-            for a reply that is no answer, the error it is and its code; or,
+            keys it changed and its own plan and tasks as it left them (read
+            back from its child session's state); or,
+            for a reply that is no answer, the error it is and its code (with
+            its plan and tasks too); or,
             for a model call that failed, the provider's reason (out of
             ADK's plugin wrapper, ``_plugin_cause``) and its error's type,
             each with the last text it wrote.
@@ -1573,18 +1576,26 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Its work has ended: a limit or a stop landing during the read of
         # its state below must not discard the answer it made.
         run.control.finish()
-        if processor.failure is not None and run.control.cancelled is None:
-            error, code = processor.failure
-            if code == OVERFLOW_ERROR_CODE:
-                raise RunFailed(error, code=code, text=processor.answer)
-            return RunAnswer(text=processor.answer, error=error, error_code=code)
+        failure = processor.failure if run.control.cancelled is None else None
+        if failure is not None and failure[1] == OVERFLOW_ERROR_CODE:
+            raise RunFailed(failure[0], code=failure[1], text=processor.answer)
         ended = await self._session_service.get_session(
             app_name=app, user_id=conversation.user_id, session_id=session_id,
             config=GetSessionConfig(num_recent_events=0),
         )
         state = ended.state if ended is not None else {}
+        # The plan and the tasks are the run's own, as it left them; only the
+        # shared keys go back to the caller.
+        own: dict[str, Any] = {
+            "plan": state.get("plan") or "", "tasks": list(state.get("tasks") or []),
+        }
+        if failure is not None:
+            return RunAnswer(
+                text=processor.answer, error=failure[0], error_code=failure[1], **own
+            )
         return RunAnswer(
-            text=processor.answer, outcome=processor.outcome, state=_changed(state, run.state)
+            text=processor.answer, outcome=processor.outcome, state=_changed(state, run.state),
+            **own,
         )
 
     async def _child_session(
@@ -1912,7 +1923,7 @@ def _tool_names(tools: list[Any]) -> set[str]:
 
 
 def _changed(state: "Mapping[str, Any]", start: "Mapping[str, Any]") -> dict[str, Any]:
-    """The shared keys ``state`` holds that differ from what a run started from.
+    """The shared keys (the outside-content mark) ``state`` holds that differ from what a run started from.
 
     Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
     private, copied, as the Deep Agents manager's ``_changed`` copies it): a

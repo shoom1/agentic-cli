@@ -244,6 +244,29 @@ class TestObserve:
 
         assert runs.records(ONE)[0].usage == used
 
+    def test_an_end_keeps_the_runs_own_plan_and_tasks(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        tasks = [{"id": "1", "description": "find X", "status": "completed"}]
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_COMPLETED, call_id="c1", result="ok", plan="- [x] find X", tasks=tasks
+        )))
+
+        record = runs.records(ONE)[0]
+        assert (record.plan, record.tasks) == ("- [x] find X", tasks)
+
+    def test_an_end_without_them_leaves_the_record_empty(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(ref, RUN_COMPLETED, call_id="c1", result="ok")
+        ))
+
+        record = runs.records(ONE)[0]
+        assert (record.plan, record.tasks) == ("", [])
+
     def test_a_partial_end_says_so(self):
         runs = AgentRuns()
         ref = started(runs, ONE, "c1", "researcher")
