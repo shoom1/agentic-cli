@@ -704,8 +704,10 @@ def _matched(items: list[Any], calls: list[Any]) -> list[int | None]:
     """For each of ``items`` (content blocks, or raw calls), the index in
     ``calls`` of the call it holds, None for one that holds none.
 
-    A call of its id that no earlier item took: the one of its name and
-    arguments first, then of its name, then the first.
+    A call of its id that no earlier item took, ranked by its name matching,
+    then its arguments matching, then by order: of two calls with one id, the
+    one of the item's name wins, and of those the one of its arguments, else
+    the first.
     """
     taken: set[int] = set()
     found: list[int | None] = []
