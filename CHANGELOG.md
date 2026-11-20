@@ -625,17 +625,20 @@ the start of the entry's title.
   conversation, `subagent_records_not_saved`, and fails neither the run nor
   the turn): on ADK in a session of the child app named as the conversation
   (`<app_name>--agents`, id `<conversation id>`, its `%` and `/`
-  percent-encoded, as in its instances' ids; state key
-  `agentic_cli.agents`, `adk/sessions.py::RECORDS_KEY`), on Deep Agents in
+  percent-encoded, as in its instances' ids; the state split by key so a
+  write holds what changed: the header under `agentic_cli.agents`,
+  `adk/sessions.py::RECORDS_KEY`, and a key for each instance and run), on Deep Agents in
   the store beside the checkpointer (namespace `("agentic_cli", "agents",
   <app>, <user>)`, key the session id); the memory store keeps them for the
   process. They load with the conversation (`load_session`, a turn's start,
   `/agents`; the manager's `load_agents(ref)`, provisional): a run found
   working (the app was killed in it) reads `interrupted` and its instance
-  `idle`, so a follow-up continues it, new instances are numbered past them
-  (on Deep Agents from the records' counters and instance ids, the
-  checkpointer's instance threads read only for a conversation whose records
-  name none), and records of another version are ignored with one warning
+  `idle` (`closed` for a type that is not continuable), so a follow-up
+  continues it, new instances are numbered past them (on Deep Agents past the
+  records' counters and ids and the checkpointer's instance threads, whose
+  first checkpoint holds no message, and a first run whose thread the store
+  keeps all the same fails rather than continue it), and records of another
+  version, or that do not read, are ignored with one warning
   (`subagent_records_ignored`). `AgentRuns.export(ref)` and
   `restore(ref, data)` (provisional; `RECORDS_VERSION`) are the format, and
   `AgentRuns(on_change=)` tells each change; a backend keeps them through
@@ -3123,16 +3126,6 @@ step; each entry says what to use instead.
   closed instance's are dropped (logged). ADK counts each one stored as its
   child session's append returns, Deep Agents once the model call after it
   holds it.
-- **Deleting a conversation leaves nothing of its sub-agents behind.** Its
-  instances' transcripts are deleted first (on ADK they were deleted after
-  the conversation, so a delete cut short left ones nothing could reach),
-  then its records, then the conversation; the manager forgets the
-  conversation (its sub-agent records, the record of a failed turn's calls
-  and every stop, its usage ledger, its numbering), so a conversation of
-  the same id starts from `researcher-1`. On ADK a conversation's
-  transcripts are found by the instances its records name, where every child
-  session of the user was listed, and the stored instances of one
-  conversation are read under a lock of its own, not one shared by all.
 - **A call a stopped sub-agent run left at its prompt says what stopped it.**
   `Not run: its parent stopped the run before this call ran.` (or `its time
   limit`, `its token limit`) where every stop read "Not run: the user
@@ -3142,6 +3135,18 @@ step; each entry says what to use instead.
   the user's stop of that run) ends `cancelled`, `cancelled_by: "parent"`,
   `error: "its parent's run was stopped"`, its instance idle, where it ended
   `interrupted` as on Ctrl+C, which still makes every run the turn's.
+- **Deleting a conversation leaves nothing of its sub-agents behind.** Its
+  instances' transcripts are deleted first (on ADK they were deleted after
+  the conversation, so a delete cut short left ones nothing could reach),
+  then its records, then the conversation; the manager forgets the
+  conversation (its sub-agent records, the record of a failed turn's calls
+  and every stop, its usage ledger, its numbering), so a conversation of
+  the same id starts from `researcher-1`. On ADK each turn finds a
+  conversation's transcripts to number past by the instances its records
+  name, where every child session of the user was listed, a delete removes
+  those and every child session that names the conversation (a transcript
+  whose start write was lost goes too), and the stored instances of one
+  conversation are read under a lock of its own, not one shared by all.
 
 - **google-adk 2.15: a Claude refusal reads as before, Deep Agents'
   `load_skill` answers as ADK's, and Ctrl+C during a tool call warns of

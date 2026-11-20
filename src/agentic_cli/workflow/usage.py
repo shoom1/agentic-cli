@@ -20,7 +20,8 @@ step, ``subagent`` for a sub-agent's, and a side call's purpose otherwise
 
 Each manager keeps a ledger per conversation (``UsageLedgers``), in memory
 for as long as that manager lives: a backend switch builds a new manager,
-and the rows recorded before it do not follow (as with its ``agent_runs``).
+and the rows recorded before it do not follow; each run's totals by model
+are kept with its record (``AgentRuns``), beside the conversation.
 A row per call, recorded where the event is made, before an app's
 ``on_event`` hook could drop it, under the turn it is made in, with how long
 the call took (``latency_ms``: every call is timed, on both backends). The

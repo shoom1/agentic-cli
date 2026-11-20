@@ -171,8 +171,9 @@ my-app --resume <id>    # that one (-r); an id that is not saved exits with stat
 Inside the app, `/resume` opens a picker (Enter opens a conversation, Esc
 keeps the current one) and `/resume <id>` opens one by id; `/sessions` lists them with their titles (the first prompt), turns and
 last update. A resumed conversation shows its last 10 messages again, and
-its sub-agents come back with it (`/agents`): a run the app was stopped in
-reads `interrupted`, and the sub-agent can be continued. The
+its sub-agents come back with it (`/agents`): a run the app was killed in
+reads `interrupted`, and its sub-agent can be continued (one whose type is
+not continuable is closed). The
 model and the settings stay this run's; "Allow for this session" grants,
 sandbox kernels and the task list are not restored. One conversation is
 open in one process at a time: two would lose a turn, so a conversation
@@ -1398,7 +1399,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   named as the conversation; Deep Agents: an item of the store beside the
   checkpointer), written as each run starts, works and ends, and loaded with
   it: after a restart its instances are there, a run the app was killed in
-  reads `interrupted` (its instance `idle`, ready to continue), and new
+  reads `interrupted` (its instance `idle`, ready to continue, or `closed` for
+  a type that is not continuable), and new
   instances are numbered past the stored ones. Deleting the conversation
   deletes them, after the transcripts.
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`

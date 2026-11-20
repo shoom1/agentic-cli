@@ -591,8 +591,9 @@ class BaseWorkflowManager(ABC):
         calls (summaries, ``generate_simple``), each counted alike on every
         backend (``workflow/usage.py``): totals by run, agent, model, purpose
         and turn. In memory, for this manager's life (a backend switch builds
-        a new manager, and the rows before it do not follow, as with
-        ``agent_runs``). ``usage_of`` reads another conversation's.
+        a new manager, and the rows before it do not follow; each run's
+        totals by model are kept with its record, beside the conversation).
+        ``usage_of`` reads another conversation's.
         """
         return self.usage_of(self.session_ref())
 
