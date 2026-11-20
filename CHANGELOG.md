@@ -575,6 +575,41 @@ the start of the entry's title.
 
 ### Added
 
+- **A parent's tools that continue its sub-agents, `message_agent`,
+  `stop_agent` and `check_agents`, on both backends, with
+  `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them
+  beside `task`; with the policy at its defaults (`follow_ups` False) an
+  agent gets `task` alone. The names are declared by the framework, exempt,
+  as `task` is (`tools/_core/delegation.py`: `FOLLOW_UP_TOOLS`), so an app's
+  `register_tool(name="message_agent")` (or either other) raises, an agent
+  offered them whose own tools use one fails to build (`AgentGraphError`),
+  and a Deep Agents MCP tool of one of their names is skipped with a notice.
+  `message_agent(agent, message, interrupt=false)` sends one of the
+  caller's own sub-agents a message: an idle one runs a follow-up with it
+  (blocking; its envelope is the result, shown as a delegation, and counts
+  toward `max_runs_per_turn`); a running one gets it before its next step
+  (`{"success": true, "agent", "run", "status": "running", "note": "Your
+  message was given to its run before its next step."}`), or, with
+  `interrupt`, its run is cancelled by its parent ("stopped by its parent
+  for a new message") and a follow-up starts with the message. One instance
+  runs one run at a time: of two messages to one idle instance in one
+  answer, the first starts its run and the second is steered into it.
+  `stop_agent(agent, close=false)` cancels its running run by its parent
+  ("stopped by its parent"), leaving it idle (only the user's stop leaves
+  one `stopped`); `close` also closes it and its sub-agents (a running one,
+  and a running sub-agent of it, as its run ends): `{"success": true,
+  "agent", "status", "stopped": <run> or null, "closed": [<ids>]}`.
+  `check_agents(agent?)` lists the caller's sub-agents, newest first: each
+  one's status, title, current or last run and its status, the first lines
+  of its result and the tokens all its runs used. Each refuses, as its
+  error result, a sub-agent that is not the caller's (`'<x>' is not one of
+  your sub-agents. Yours: <ids>.`), a closed one and one the user stopped,
+  and `message_agent` a blank message (`message_agent needs a message.`).
+  The manager's delegations gain `message(FollowUpRequest, interrupt=)`,
+  `stop(ref, caller, instance, close=)`, `check(ref, caller, instance=)`,
+  `steer(ref, run_id, message)` and `cancel(..., conversation=)`
+  (provisional).
+
 - **Sub-agent instances, continued with follow-up runs, on both backends.**
   A delegation starts an instance (`researcher-2`) that outlives its run:
   `idle` once the run ends, it takes follow-ups, each its next run
@@ -1662,6 +1697,14 @@ the start of the entry's title.
   `exit_status`: an app's own attributes of those names move.
 
 ### Changed
+
+- **A sub-agent run that did not complete fully names its open tasks.** The
+  envelope of a run that ended partial (its step limit, a cut answer),
+  failed or cancelled ends with `"open_tasks"`: the descriptions of its own
+  tasks whose status is not `completed`, in its list's order, when it has
+  any (`envelope(open_tasks=)`, `open_task_descriptions`), so its parent can
+  continue it with `message_agent`. A cancelled run's end keeps its plan
+  and tasks, on its `AGENT_RUN` and its record, as any other end does.
 
 - **A sub-agent's plan and task list are its own, on both backends.** An
   instance's first run starts with no plan and no tasks (its follow-ups
@@ -3035,6 +3078,23 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
+
+- **A message steered to a sub-agent run is never lost.** One its
+  transcript does not hold when the run ends (no model call came after it,
+  or the run was stopped before it was stored) goes to the instance's next
+  run, which takes it at its first model call, after its own message; a
+  closed instance's are dropped (logged). ADK counts each one stored as its
+  child session's append returns, Deep Agents once the model call after it
+  holds it.
+- **A call a stopped sub-agent run left at its prompt says what stopped it.**
+  `Not run: its parent stopped the run before this call ran.` (or `its time
+  limit`, `its token limit`) where every stop read "Not run: the user
+  cancelled it.", which the user's stop still reads, on both backends.
+- **A sub-agent whose parent's run is stopped says so.** A run working when
+  a run above it is cancelled by its control (its parent's stop, a limit,
+  the user's stop of that run) ends `cancelled`, `cancelled_by: "parent"`,
+  `error: "its parent's run was stopped"`, its instance idle, where it ended
+  `interrupted` as on Ctrl+C, which still makes every run the turn's.
 
 - **google-adk 2.15: a Claude refusal reads as before, Deep Agents'
   `load_skill` answers as ADK's, and Ctrl+C during a tool call warns of

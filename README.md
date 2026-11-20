@@ -387,7 +387,8 @@ What it supports:
   conversation. Its run's envelope is the call's result, and the
   coordinator answers the user. Several sub-agent runs can work at once,
   four by default (`SubAgentPolicy.max_active`, at any depth); a run past
-  them waits for a free slot. `task` is a reserved tool name.
+  them waits for a free slot. `task` is a reserved tool name, and so are `message_agent`,
+  `stop_agent` and `check_agents` (an MCP tool of one is skipped).
 - **The permission gate on every call**: `PermissionMiddleware`, in every
   agent's stack, identifies each tool by the object the registry issued and
   asks through the input callback, for sub-agents' calls too. A tool that
@@ -1375,9 +1376,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   (`researcher-1`, numbered per type in its conversation) that outlives its
   run: `idle` once the run ends, it can be continued with a follow-up, its
   next run (`researcher-1#2`), which sees everything the instance did
-  before and answers with an envelope as the first did. An app's tool
-  sends one through the manager's delegations (`follow_up(FollowUpRequest(
-  instance=, message=, started_by=, ...))`, provisional); an instance runs
+  before and answers with an envelope as the first did. A parent sends
+  one with `message_agent` (below), an app's tool through the manager's
+  delegations (`follow_up(FollowUpRequest(instance=, message=,
+  started_by=, ...))`, provisional); an instance runs
   one run at a time, a closed one or (for an agent) one the user stopped is
   refused, and an agent may continue only its own sub-agents. A type with
   `continuable=False` is closed when its run ends, and past
@@ -1388,10 +1390,27 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   are answered before its next run's message: from the record when one
   finished (a crash on Deep Agents leaves no record, so each reads
   interrupted there).
+- **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
+  every agent with sub-agents gets three more tools beside `task` (with the
+  policy's defaults, `task` alone): `message_agent(agent, message,
+  interrupt=false)` sends one of its sub-agents a message, which an idle
+  one runs as a follow-up (the envelope comes back as `task`'s does) and a
+  running one gets before its next step, or, with `interrupt`, its run is
+  stopped and a new one starts with the message; `stop_agent(agent,
+  close=false)` stops its running run, leaving it idle, `close` also
+  closing it and its own sub-agents (a closed one cannot be messaged; its
+  work stays readable to the user); `check_agents(agent?)` lists its
+  sub-agents, newest first, with each one's status, last run, the first
+  lines of its result and its tokens. A sub-agent the user stopped is the
+  user's to continue. A run that did not complete fully (partial, failed,
+  cancelled) names the tasks it left open in its envelope (`open_tasks`),
+  so its parent can continue it; a message sent to a run that ended before
+  reading it reaches its instance's next run.
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
-  coordinator cannot have a tool of its own named `task`. Each raises
-  `AgentGraphError` at startup.
+  coordinator cannot have a tool of its own named `task` (nor, with
+  `follow_ups`, one named `message_agent`, `stop_agent` or `check_agents`).
+  Each raises `AgentGraphError` at startup.
 - **A sub-agent's failure.** A sub-agent whose model call fails does not
   end the turn, on either backend: its run fails, its parent reads the
   provider's reason in the envelope, with the text the run wrote before it
