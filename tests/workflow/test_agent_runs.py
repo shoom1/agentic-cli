@@ -561,6 +561,22 @@ class TestInstances:
         assert 0 < order[0] < order[1] and order[2] == 0
         assert runs.end_order(TWO, second.run) == 0
 
+    def test_a_run_ended_twice_does_not_give_the_next_end_its_number(self):
+        """A turn that ends a run open (``interrupt_open``) and then the run's own
+        late end: each end still gets a number of its own."""
+        runs = AgentRuns()
+        first = started(runs, ONE, "c1", "researcher")
+        second = started(runs, ONE, "c2", "writer")
+        runs.interrupt_open(ONE)
+        ended(runs, ONE, first)
+        third = started(runs, ONE, "c3", "reader")
+        ended(runs, ONE, third)
+
+        order = [runs.end_order(ONE, ref.run) for ref in (first, second, third)]
+
+        assert len(set(order)) == 3
+        assert order[2] > order[0] > order[1]
+
     def test_they_are_kept_by_conversation_in_start_order(self):
         runs = AgentRuns()
         for call_id, agent in (("c1", "writer"), ("c2", "researcher")):
@@ -590,7 +606,12 @@ class TestTitlesAndResults:
 
 
 class _Delegating(BaseWorkflowManager):
-    """A backend whose turn starts one sub-agent run, then ends it, unless stopped first."""
+    """A backend whose turn starts one sub-agent run, then ends it, unless stopped first.
+
+    ``one_shot``: the run's type is not continuable.
+    """
+
+    one_shot = False
 
     @property
     def backend_type(self) -> str:
@@ -605,7 +626,9 @@ class _Delegating(BaseWorkflowManager):
     async def process(self, message, user_id, session_id=None):
         async with self._turn(session_id, user_id) as ref:
             child = self.agent_runs.run_for(ref, None, "c1", "researcher")
-            start = WorkflowEvent.agent_run(child, RUN_STARTED, title=message, call_id="c1")
+            start = WorkflowEvent.agent_run(
+                child, RUN_STARTED, title=message, call_id="c1", continuable=not self.one_shot
+            )
             self.agent_runs.observe(start)
             yield start
             end = WorkflowEvent.agent_run(child, RUN_COMPLETED, call_id="c1", result="done")
@@ -626,6 +649,17 @@ class TestTheTurnEndsItsOpenRuns:
 
         (record,) = manager.agent_runs.records(manager.session_ref("s", "u"))
         assert record.status == RUN_INTERRUPTED
+
+    async def test_a_one_shot_run_it_stops_closes_its_instance_and_frees_its_stop(self, manager):
+        manager.one_shot = True
+        ref = manager.session_ref("s", "u")
+        events = manager.process("Find X.", "u", "s")
+        await anext(events)
+        manager._open_calls.cancelled(ref, instance="researcher-1")
+        await events.aclose()
+
+        assert manager.agent_runs.instance(ref, "researcher-1").status == "closed"
+        assert manager._open_calls.take_cancel(ref, instance="researcher-1") is False
 
     async def test_each_turn_is_counted_in_its_conversations_ledger(self, manager):
         for _ in range(2):

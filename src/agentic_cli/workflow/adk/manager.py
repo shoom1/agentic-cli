@@ -1501,8 +1501,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         message on it as one invocation. A follow-up (``run.follow_up``) runs
         on the session its instance's earlier runs left, the calls they left
         open answered first, and its message is the invocation's input. Its
-        events go to the turn's live events as they are made, through a processor made for the run, and
-        so do the raw log's records of its calls. As a turn's runner is, it
+        events go to the turn's live events as they are made, through a
+        processor made for the run, and so do the raw log's records of its
+        calls. As a turn's runner is, it
         is stopped with its abort signal set first, so ADK seals the calls
         it leaves open, in its child session, before the cancel goes on.
         A cancel of the run alone (its control's: a limit, its parent or the

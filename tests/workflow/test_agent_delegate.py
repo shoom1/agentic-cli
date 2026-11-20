@@ -2153,7 +2153,8 @@ class TestARefusedFollowUp:
             )
             await working.wait()
             made.cancel("researcher-1#2", by="parent", error="no longer needed")
-            return await both
+            # Bounded: were both to start a run, the second would wait for ever.
+            return await asyncio.wait_for(both, 5)
 
         (first, second), _ = await turned(work)
 

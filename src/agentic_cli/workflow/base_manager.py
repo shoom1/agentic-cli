@@ -56,7 +56,7 @@ from agentic_cli.workflow.agents.delegate import (
     waiting_on_user,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
-from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -2213,7 +2213,14 @@ class BaseWorkflowManager(ABC):
                 finally:
                     # A sub-agent run the turn leaves open (a cancel, a
                     # failure) ends with it: no event can say so any more.
-                    self.agent_runs.interrupt_open(ref, usage=ledger.run_usage)
+                    for stopped in self.agent_runs.interrupt_open(ref, usage=ledger.run_usage):
+                        # An instance left closed (a one-shot type) never runs
+                        # again to answer its calls: free them.
+                        known = self.agent_runs.instance(ref, stopped.instance)
+                        open_calls = getattr(self, "_open_calls", None)
+                        closed = known is not None and known.status == INSTANCE_CLOSED
+                        if closed and open_calls is not None:
+                            open_calls.take_cancel(ref, instance=stopped.instance)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False

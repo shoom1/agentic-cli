@@ -592,8 +592,9 @@ the start of the entry's title.
   <ids>.` (`You have no sub-agents yet.` for none; an agent may continue only
   its own children), `<id> is closed; start a new one with task.`, `<id> was
   stopped by the user; only the user can continue it.` (for any sender but
-  the user), `<id> is running: an instance runs one run at a time.`, `A
-  follow-up needs a message.`. An instance's status is `running`, `idle`,
+  the user), `<id> is running: an instance runs one run at a time.`, `<id>'s
+  type '<type>' is not one of this app's agents.` (a type the app no longer
+  has), `A follow-up needs a message.`. An instance's status is `running`, `idle`,
   `stopped` (the user cancelled its run: only the user may start its next) or
   `closed` (`INSTANCE_STATUSES` and `InstanceRecord`, exported from
   `agentic_cli.workflow.agents`; `agent_runs.instances(ref)`,

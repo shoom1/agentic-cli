@@ -252,8 +252,10 @@ class AgentRuns:
         # Each conversation's instances, by id, in start order.
         self._instances: dict[Any, dict[str, InstanceRecord]] = {}
         # Each conversation's runs by the order their ends were recorded in
-        # (1, 2, ...): what ranks instances by when their last run ended.
+        # (1, 2, ...): what ranks instances by when their last run ended; and
+        # how many numbers each conversation has given (only ever growing).
         self._ended_in: dict[Any, dict[str, int]] = {}
+        self._end_numbers: dict[Any, int] = {}
 
     def run_for(
         self, conversation: SessionRef | None, parent: RunRef | None, call_id: str, agent: str
@@ -396,8 +398,7 @@ class AgentRuns:
         record.usage = dict(metadata.get("usage") or {})
         record.cancelled_by = metadata.get("cancelled_by")
         record.plan, record.tasks = own_plan_and_tasks(metadata)
-        order = self._ended_in.setdefault(conversation, {})
-        order[ref.run] = len(order) + 1
+        self._number_end(conversation, ref.run)
         instance = self._instance_of(conversation, ref, metadata)
         if ref.run not in instance.runs:
             instance.runs.append(ref.run)
@@ -444,8 +445,7 @@ class AgentRuns:
             if record.status not in RUN_END_STATUSES:
                 record.status = RUN_INTERRUPTED
                 record.ended = now
-                order = self._ended_in.setdefault(conversation, {})
-                order[record.ref.run or ""] = len(order) + 1
+                self._number_end(conversation, record.ref.run or "")
                 known = self._instances.get(conversation, {}).get(record.ref.instance)
                 if known is not None and known.status == INSTANCE_RUNNING:
                     known.status = INSTANCE_IDLE if known.continuable else INSTANCE_CLOSED
@@ -459,10 +459,18 @@ class AgentRuns:
         self._records.pop(conversation, None)
         self._instances.pop(conversation, None)
         self._ended_in.pop(conversation, None)
+        self._end_numbers.pop(conversation, None)
         self._runs = {key: ref for key, ref in self._runs.items() if key[0] != conversation}
         self._numbered = {
             key: count for key, count in self._numbered.items() if key[0] != conversation
         }
+
+    def _number_end(self, conversation: SessionRef | None, run: str) -> None:
+        """Give ``run``'s end the next number of ``conversation``: a run recorded
+        ended twice takes a new one, and no end shares another's."""
+        number = self._end_numbers.get(conversation, 0) + 1
+        self._end_numbers[conversation] = number
+        self._ended_in.setdefault(conversation, {})[run] = number
 
     def _instance_of(
         self, conversation: SessionRef | None, ref: RunRef, metadata: Mapping[str, Any]
