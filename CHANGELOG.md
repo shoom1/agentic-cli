@@ -633,7 +633,8 @@ the start of the entry's title.
   `stopped`), `stop_instance`, `close_instance` (both written to the store
   before they return), `steer_instance(instance, message)` (the user's message
   to a running run, before its next step), `instance_result` (the envelope of
-  the latest run the user started) and `tell_root(text)`, a turn of the root
+  the latest run the user started, through the tool result cap) and
+  `tell_root(text)`, a turn of the root
   on a notice the user did not type (marked as a job's notice is, so fact
   extraction and the conversation's title and turns leave it out; the
   outside-content mark a user's run brought is written with it), whose notice
@@ -1554,9 +1555,11 @@ the start of the entry's title.
   and the log warns once per folder. Reading a saved output back cuts it
   again without a second file. Every result is covered: registered, MCP and
   skill tools, `job_result`, and a sub-agent run's envelope (`task`'s
-  result, on both backends). A string that holds a JSON object (the
-  envelope, a framework tool's dict in a Deep Agents `ToolMessage`) is cut
-  as that dict and given back as JSON, so its parent reads JSON still. ADK's
+  result, on both backends, and the one the notice after a sub-agent's
+  view carries, saved under the instance's name). A string that holds a
+  JSON object (the envelope, a framework tool's dict in a Deep Agents
+  `ToolMessage`) is cut as that dict and given back as JSON, so its parent
+  reads JSON still. ADK's
   `ToolResultCapPlugin` caps every agent but one with `after_tool_callback`s
   of its own (a native ADK YAML app's), which ADK would skip once it cut;
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate

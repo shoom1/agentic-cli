@@ -19,6 +19,7 @@ view is read-only.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -393,6 +394,32 @@ class TestTheMainAgentIsTold:
         # Back in the view and out again: nothing new to tell.
         await typed(app, "/agent researcher-1", "/back")
         assert crew.requests("coordinator") == 3
+
+    async def test_a_result_over_the_cap_is_told_cut_with_its_note(self, make_crew):
+        """The envelope the notice carries passes the tool result cap, as a
+        ``task`` result does: cut to ``tool_result_max_chars``, with the note
+        that names its full output, saved for ``read_file``."""
+        crew, app = await in_a_view(
+            make_crew, coordinator=[says("Noted.")], researcher=[says("Y is 7. " * 1_000)],
+        )
+        crew.manager.settings.tool_result_max_chars = 2_000
+
+        await typed(app, "Now find Y.", "/back")
+
+        notice = crew.last_message("coordinator")
+        frame = view_notice("researcher-1", {})[: -len("{}")]
+        assert notice.startswith(frame), notice[:200]
+        sent = notice[len(frame):]
+        assert len(sent) <= 2_000, len(sent)
+        read = json.loads(sent)
+        assert (read["run"], read["status"], read["success"]) == (
+            "researcher-1#2", RUN_COMPLETED, True,
+        )
+        assert read["result"].startswith("Y is 7.") and "characters cut]" in read["result"]
+        assert read["truncated"].startswith("Cut: ") and "tool-output/researcher-1-" in (
+            read["truncated"]
+        )
+        assert crew.manager.instance_result("researcher-1", session_id=SESSION) == read
 
     async def test_without_a_run_of_yours_nothing_is_told(self, make_crew):
         crew, app = await in_a_view(make_crew)

@@ -99,6 +99,7 @@ from agentic_cli.workflow.sessions import (
     set_active_turn,
     turn_has_ended,
 )
+from agentic_cli.workflow.tool_output import cap_tool_result, tool_output_dir
 from agentic_cli.workflow.service_registry import (
     get_service,
     set_service_registry,
@@ -863,7 +864,8 @@ class BaseWorkflowManager(ABC):
 
     @property
     def _instance_results(self) -> dict[tuple[SessionRef, str], dict[str, Any]]:
-        """The latest envelope of each instance the user ran, by conversation and instance."""
+        """The latest envelope of each instance the user ran, by conversation and
+        instance, as the cap left it (``_user_ran``)."""
         held = self.__dict__.get("_instance_results_held")
         if held is None:
             held = self.__dict__["_instance_results_held"] = {}
@@ -887,8 +889,8 @@ class BaseWorkflowManager(ABC):
         conversation's outside-content mark; a mark it brought marks the
         conversation here. A stopped instance runs (only the user may); one
         that is unknown, closed or running, or a blank message, is one
-        ``ERROR`` event and nothing runs. The run's full envelope is kept for
-        ``instance_result``.
+        ``ERROR`` event and nothing runs. The run's envelope is kept for
+        ``instance_result``, through the tool result cap.
 
         Stopping the stream (Ctrl+C cancels the consumer, or it closes the
         generator) is the user's stop of the run: it ends ``cancelled`` by
@@ -945,11 +947,39 @@ class BaseWorkflowManager(ABC):
                             yield event
 
     def _user_ran(self, ref: SessionRef, instance: str, delegated: Delegated) -> None:
-        """Take what a run the user started left: its mark on the conversation, its envelope."""
+        """Take what a run the user started left: its mark on the conversation, its envelope.
+
+        The envelope is kept as the root reads it (``view_notice``): through
+        the tool result cap, as every envelope a model reads is (a ``task``
+        result's too), so one over ``tool_result_max_chars`` is cut as a
+        dict, its note under ``truncated`` naming its full output, saved
+        once, as the run ends, in the tool-output folder under the
+        instance's name.
+        """
         for value in delegated.state.values():
             if isinstance(value, str) and value:
                 self._outside_marks.mark(ref, value)
-        self._instance_results[(ref, instance)] = dict(delegated.result)
+        self._instance_results[(ref, instance)] = self._capped(instance, dict(delegated.result))
+
+    def _capped(self, instance: str, result: dict[str, Any]) -> dict[str, Any]:
+        """``result`` through the tool result cap, under ``instance``'s name; uncut if the cap fails."""
+        try:
+            capped = cap_tool_result(
+                result,
+                tool_name=instance,
+                max_chars=self._settings.tool_result_max_chars,
+                folder=tool_output_dir(self._settings.app_name),
+            )
+        except Exception as error:  # noqa: BLE001 - the cap never raises by design
+            # A bug in the cap must not lose the envelope: it goes uncut, as
+            # a tool result does when the backends' cap fails.
+            logger.warning(
+                "tool_result_cap_failed", tool=instance,
+                error_type=type(error).__name__, error=str(error),
+            )
+            logger.debug("tool_result_cap_failed", tool=instance, exc_info=error)
+            return result
+        return capped if isinstance(capped, dict) else result
 
     def instance_result(
         self, instance: str, *, session_id: str | None = None, user_id: str | None = None
@@ -957,8 +987,10 @@ class BaseWorkflowManager(ABC):
         """The envelope of the latest run of ``instance`` that the user started (provisional).
 
         Kept in memory for the conversation (the records keep only the head
-        of a result); None when no run of the user's ended there, or after
-        the conversation was deleted.
+        of a result), as the tool result cap left it: one over
+        ``tool_result_max_chars`` is cut, its note under ``truncated`` naming
+        its full output. None when no run of the user's ended there, or
+        after the conversation was deleted.
         """
         return self._instance_results.get((self.session_ref(session_id, user_id), instance))
 
