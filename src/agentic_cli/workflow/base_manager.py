@@ -925,6 +925,7 @@ class BaseWorkflowManager(ABC):
                 try:
                     delegated = await asyncio.shield(work)
                 except asyncio.CancelledError:
+                    stop_it()  # a run that started after the consumer's stop looked
                     await asyncio.wait([work])
                     if not work.cancelled() and work.exception() is None:
                         self._user_ran(ref, instance, work.result())

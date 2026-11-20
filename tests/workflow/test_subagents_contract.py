@@ -5839,7 +5839,6 @@ class TestTheConversationNamed:
         assert [e.content for e in told if e.type is EventType.TEXT] == ["Noted."]
 
 
-
 class TestTheUsersControlOffTheLoop:
     async def test_it_blocks_no_event_loop(self, make_crew):
         crew = make_crew(
@@ -5918,3 +5917,91 @@ class TestANoticeToTheRoot:
             events = [event async for event in crew.manager.tell_root("A notice.")]
 
         assert [e.content for e in events if e.type is EventType.TEXT] == ["Noted."]
+
+
+class TestTheUsersStopInTheWindowBeforeTheRunStarts:
+    """A Ctrl+C that lands as ``run_instance`` starts merging: its pump is
+    made but has not run, so the instance is not ``running`` yet. The run
+    that starts then is still stopped by the user."""
+
+    async def test_ctrl_c_as_the_stream_starts_stops_the_run_by_the_user(self, make_crew):
+        import inspect
+
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+        await crew.turn()
+
+        async def view() -> None:
+            async for _ in crew.manager.run_instance("researcher-1", "Go on."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        landed = False
+        for _ in range(10_000):
+            await asyncio.sleep(0)
+            pumps = [t for t in asyncio.all_tasks() if t.get_name() == live_events.PUMP_TASK]
+            if pumps and inspect.getcoroutinestate(pumps[0].get_coro()) == inspect.CORO_CREATED:
+                viewing.cancel()
+                landed = True
+                break
+            if viewing.done():
+                break
+        assert landed, "the cancel could not be landed in the window"
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(viewing, 10)
+
+        second = crew.records()[-1]
+        assert (second.ref.run, second.status, second.cancelled_by) == (
+            "researcher-1#2", RUN_CANCELLED, "user",
+        )
+        assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+
+
+class TestTheUsersControlAfterARestart:
+    async def test_stop_and_close_load_the_records_first(self, make_crew):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        await first.turn()
+        await first.manager.cleanup()
+        second = make_crew(follow_team(), store="sqlite")
+        await second.manager.initialize_services()
+
+        assert await second.manager.stop_instance("researcher-1") is True
+        assert second.instances() == [("researcher-1", INSTANCE_STOPPED)]
+        assert await second.manager.close_instance("researcher-1") == ["researcher-1"]
+
+    async def test_close_alone_loads_the_records_first(self, make_crew):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        await first.turn()
+        await first.manager.cleanup()
+        second = make_crew(follow_team(), store="sqlite")
+        await second.manager.initialize_services()
+
+        assert await second.manager.close_instance("researcher-1") == ["researcher-1"]
+
+
+class TestTheEntryPointsRefusals:
+    async def test_a_blank_steer_is_a_value_error(self, make_crew):
+        crew = make_crew(
+            parent_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42.")],
+        )
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+
+        with pytest.raises(ValueError):
+            crew.manager.steer_instance("researcher-1", "  ")
+
+        HELD["go"].set()
+        await asyncio.wait_for(turn, 10)
