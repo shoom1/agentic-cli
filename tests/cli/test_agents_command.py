@@ -7,7 +7,9 @@ each run's status and time, its brief's other fields (a follow-up's message),
 the first lines of its result, its error and its tokens by model. An instance
 that was followed up shows a row per run. The runs are a real manager's records, filled as its event
 processors fill them (``AgentRuns.observe`` under the conversation's turn),
-and the tokens its usage ledger's; nothing reaches a provider.
+and the tokens its usage ledger's; nothing reaches a provider. A manager that
+did not run them (a restart) loads them from the conversation's store as
+``/agents`` asks, each run's tokens its record's.
 """
 
 from __future__ import annotations
@@ -48,10 +50,8 @@ def hermetic(tmp_path, monkeypatch):
     monkeypatch.setattr(agents_command, "_now", lambda: NOW)
 
 
-@pytest.fixture
-async def manager():
-    """A real manager (built, not started: its runs and ledgers need no services)."""
-    built = GoogleADKWorkflowManager(
+def built() -> GoogleADKWorkflowManager:
+    return GoogleADKWorkflowManager(
         agent_configs=[
             AgentConfig(name="coordinator", prompt="Coordinate.", sub_agents=["researcher"],
                         description="Leads."),
@@ -59,8 +59,14 @@ async def manager():
         ],
         settings=BaseSettings(session_store="memory", default_model=SONNET),
     )
-    yield built
-    await built.cleanup()
+
+
+@pytest.fixture
+async def manager():
+    """A real manager (built, not started: its runs and ledgers need no services)."""
+    made = built()
+    yield made
+    await made.cleanup()
 
 
 class Runs:
@@ -95,9 +101,10 @@ class Runs:
 
     def end(self, ref: RunRef, status: str, *, at: int, result: str = "",
             error: str | None = None, partial: bool = False, plan: str | None = None,
-            tasks: list[dict] | None = None) -> None:
+            tasks: list[dict] | None = None, usage: dict | None = None) -> None:
         self._observe(WorkflowEvent.agent_run(
-            ref, status, result=result, error=error, partial=partial, plan=plan, tasks=tasks
+            ref, status, result=result, error=error, partial=partial, plan=plan, tasks=tasks,
+            usage=usage,
         ), at)
 
     def used(self, ref: RunRef, model: str, prompt: int, completion: int) -> None:
@@ -369,6 +376,56 @@ class TestOne:
             "No sub-agent nobody-1 in this conversation. Type /agents for the list."
         )
         session.add_rich.assert_not_called()
+
+
+class TestAfterARestart:
+    """The runs are the conversation's records, kept beside it in its store: a
+    manager that did not run them loads them as ``/agents`` asks, and shows
+    each run's tokens from its record (its usage ledger holds none of them)."""
+
+    async def test_the_stored_runs_are_listed_with_their_tokens(self, manager):
+        earlier = built()
+        runs = Runs(earlier, earlier.session_ref("s1"))
+        first = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(first, "completed", at=12, result="X is 42.", usage={
+            SONNET: {"input": 1_200, "output": 300}, HAIKU: {"input": 100, "output": 10},
+        })
+        runs.start("researcher", "c2", "Find Y.", at=50)  # working when the app was killed
+        await manager.initialize_services()
+        await manager._save_agent_records(
+            manager.session_ref("s1"), earlier.agent_runs.export(earlier.session_ref("s1"))
+        )
+
+        listed = await agents(manager)
+        shown = await agents(manager, "researcher-1")
+
+        (table,) = listed.add_rich.call_args.args
+        assert [row[:6] for row in rows_of(table)] == [
+            ("researcher-1", "researcher", "completed", "#1", "Find X.", "1.3k / 310"),
+            ("researcher-2", "researcher", "interrupted", "#1", "Find Y.", "—"),
+        ]
+        (panel,) = shown.add_rich.call_args.args
+        assert rows_of(panel.renderable)[-2:] == [
+            ("  Tokens", f"{SONNET}: 1.2k in / 300 out"),
+            ("", f"{HAIKU}: 100 in / 10 out"),
+        ]
+
+    async def test_records_that_cannot_be_read_are_said_and_the_runs_held_shown(
+        self, manager, monkeypatch
+    ):
+        crew_ran(manager)
+
+        async def unreadable(conversation: SessionRef) -> None:
+            raise OSError("disk unreadable")
+
+        monkeypatch.setattr(manager, "load_agents", unreadable)
+        session = await agents(manager)
+
+        session.add_warning.assert_called_once_with(
+            "Sub-agent records not read from the store: disk unreadable"
+        )
+        (table,) = session.add_rich.call_args.args
+        assert len(rows_of(table)) == 5
 
 
 class _Down:
