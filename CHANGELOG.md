@@ -727,8 +727,10 @@ the start of the entry's title.
   working (the app was killed in it) reads `interrupted` and its instance
   `idle` (`closed` for a type that is not continuable), so a follow-up
   continues it, new instances are numbered past them (on Deep Agents past the
-  records' counters and ids and the checkpointer's instance threads, whose
-  first checkpoint holds no message, and a first run whose thread the store
+  records' counters and ids and the checkpointer's instance threads, read
+  from each thread's first checkpoint, which holds its first run's input:
+  the brief, and an inheriting instance's copy of its parent's
+  conversation; and a first run whose thread the store
   keeps all the same fails rather than continue it), and records of another
   version, or that do not read, are ignored with one warning
   (`subagent_records_ignored`) and never written over: that conversation's

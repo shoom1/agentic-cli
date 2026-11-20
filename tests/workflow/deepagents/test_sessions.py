@@ -279,13 +279,15 @@ class TestStoredInstances:
 
         assert await CheckpointSessions(saver, store).stored_instances(ref()) == {}
 
-    async def test_the_threads_are_the_floor_under_the_records_and_read_cheaply(
+    async def test_the_threads_are_the_floor_under_the_records_read_from_their_first_input(
         self, saver, store, monkeypatch
     ):
         """The records' counters and ids number past what they hold, and the
         threads past what the records never named (a start write that was
-        lost): each thread's first checkpoint says so, which holds no
-        messages, so no transcript is unpickled on the event loop."""
+        lost): each thread's first checkpoint says so. That checkpoint holds
+        the run's first input, its brief (in the ``__start__`` channel and in
+        its pending writes), which the saver decodes, and no message of the
+        transcript after it: no later checkpoint is read."""
         await say(saver, ref())
         await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
         await instance_ran(saver, ref(), "researcher-6", "Lost.", "Lost again.")  # unnamed
@@ -296,12 +298,19 @@ class TestStoredInstances:
                 {"instance": "researcher-1"}, {"instance": "writer-2"}, {"instance": "notes"},
             ],
         })
-        decoded: list[int] = []
+        decoded: list[tuple[int, list[str], list[str]]] = []
         alist = saver.alist
 
         async def listing(*args, **kwargs):
             async for item in alist(*args, **kwargs):
-                decoded.append(len(item.checkpoint["channel_values"].get("messages", ())))
+                values = item.checkpoint["channel_values"]
+                start = values.get("__start__") or {}
+                decoded.append((
+                    len(values.get("messages", ())),
+                    [message.content for message in start.get("messages", ())],
+                    [message.content for _, channel, written in item.pending_writes
+                     if channel == "messages" for message in written],
+                ))
                 yield item
 
         monkeypatch.setattr(saver, "alist", listing)
@@ -309,10 +318,14 @@ class TestStoredInstances:
         counts = await sessions.stored_instances(ref())
 
         assert counts == {"researcher": 6, "writer": 2}
-        assert decoded == [0, 0]  # one empty first checkpoint a thread, none of the later ones
+        first_inputs = [
+            (0, ["Then One."], ["Then One."]), (0, ["Then Lost."], ["Then Lost."]),
+        ]
+        # Each thread's first input, twice over; nothing a later run wrote.
+        assert sorted(decoded) == sorted(first_inputs)
         decoded.clear()
         assert await sessions.instances(ref()) == ["researcher-1", "researcher-6"]
-        assert decoded == [0, 0]
+        assert sorted(decoded) == sorted(first_inputs)
 
     async def test_records_that_name_no_instance_read_the_threads(self, saver, store):
         await instance_ran(saver, ref(), "researcher-4")

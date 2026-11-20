@@ -1038,10 +1038,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """The highest instance number of each type ``conversation``'s checkpointer keeps.
 
         The base's hook (``Delegations`` asks it once per conversation per
-        turn): read from the conversation's stored records when they name
-        instances, else from the instance threads
-        (``CheckpointSessions.stored_instances``), so a manager after a
-        restart numbers past what another ran there.
+        turn): read from the conversation's stored records and, as their
+        floor, its instance threads (``CheckpointSessions.stored_instances``),
+        so a manager after a restart numbers past what another ran there.
         """
         if self._sessions is None:
             return {}
