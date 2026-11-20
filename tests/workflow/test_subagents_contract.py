@@ -16,8 +16,9 @@ outside-content mark; it answers with the envelope as JSON, as ``task``
 does. ``make_crew(..., store="sqlite")`` keeps the conversation in the
 default sqlite store, so a second crew is a restart; ``no_seals`` stops a
 turn as a killed process does (ADK writes no seal), and ``carried_over``
-gives the new manager the instances and runs the first one recorded. Each agent's prompt is ``You are <name>.``, by which ADK's
-fake API tells the agents apart.
+gives the new manager the instances and runs the first one recorded. Each
+agent's prompt is ``You are <name>.``, by which ADK's fake API tells the
+agents apart.
 
 Offline: no provider is reached and no catalog lists (``tests/conftest.py``).
 """
@@ -4173,6 +4174,45 @@ class TestAFollowUp:
 
         assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
         assert crew.message_count("researcher", 1) == 1
+
+    async def test_a_follow_up_that_ends_without_text_returns_none_of_the_first_runs(
+        self, make_crew
+    ):
+        """Its answer is read after its own message: the first run's text is
+        not the follow-up's result."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Now Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_lookup", "r2", q="Y")), says("")],
+        )
+
+        await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == ""
+
+    async def test_an_inheriting_instance_sees_its_parents_conversation_once(self, make_crew):
+        """The copy of the parent's conversation is made at the instance's first
+        run: a follow-up neither copies it again nor answers the parent's own
+        open call in it."""
+        crew = make_crew(
+            follow_team(inherit_context=True),
+            coordinator=[says("The parent said hello."),
+                         calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Now Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn("Hello.")
+        await crew.turn("Go.")
+
+        first, second = crew.bodies("researcher")
+        assert first.count("The parent said hello.") == 1
+        assert second.count("The parent said hello.") == 1
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert [len(answers) for _, answers in crew.call_results("researcher", 1)] == [
+            len(answers) for _, answers in crew.call_results("researcher", 0)
+        ]
 
     async def test_a_follow_up_blocks_no_event_loop(self, make_crew):
         crew = make_crew(

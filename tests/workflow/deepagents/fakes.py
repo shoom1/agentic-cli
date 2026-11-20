@@ -139,6 +139,13 @@ class ScriptedModels:
         return self.chats[resolved.agent]
 
 
+def _instance_thread(run: Any) -> str:
+    """The thread a run of a tree test is on: its instance's, by conversation when it has one."""
+    if run.conversation is None:
+        return f"instance:{run.ref.instance}"
+    return f"instance:{run.conversation.session_id}:{run.ref.instance}"
+
+
 def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     """The delegations of a tree a test builds alone (``build_agent_tree``, no manager).
 
@@ -166,7 +173,7 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
             state = await graphs[run.ref.agent].ainvoke(
                 {**run.state, "messages": [*(run.history or ()), task]},
                 # Its instance's own thread (used when the tree has a checkpointer).
-                {"configurable": {"thread_id": f"instance:{run.ref.instance}"}},
+                {"configurable": {"thread_id": _instance_thread(run)}},
             )
         finally:
             var_child_runnable_config.reset(detached)

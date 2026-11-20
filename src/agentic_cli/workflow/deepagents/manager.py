@@ -783,7 +783,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         processor = DeepAgentsEventProcessor(
             root=self._root_agent_name,
             agent_models=self._resolved_models,
-            session_id=conversation.session_id if conversation is not None else None,
+            session_id=conversation.session_id,
             budgets=self._budgets,
             ledgers=self._usage_ledgers,
             run=run.ref,
