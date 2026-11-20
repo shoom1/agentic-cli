@@ -4856,7 +4856,6 @@ class TestTheParentsTools:
             True, {"success": True, "agents": [rows["checker-1"]]}
         )
 
-
     async def test_they_block_no_event_loop(self, make_crew):
         crew = make_crew(
             parent_team(), subagents=FOLLOWING,
@@ -5009,3 +5008,81 @@ class TestASteeredMessageIsNeverLost:
         sent = crew.bodies("researcher")[1]
         assert sent.index("Go on.") < sent.index("Also Z.")
         assert sent.count("Also Z.") == 1
+
+    async def test_one_stored_in_its_transcript_is_not_given_again(self, make_crew):
+        """A message the run's model call took and stored is in the transcript
+        once: the instance's next run does not take it a second time."""
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(message("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42."), says("Went on.")],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        assert crew.manager._delegations.steer(crew.conversation, "researcher-1#1", "Also Z.")
+        HELD["go"].set()
+        await asyncio.wait_for(turn, 10)
+        await crew.turn("Go on.")
+
+        assert crew.requests("researcher") == 3
+        assert crew.bodies("researcher")[2].count("Also Z.") == 1
+
+
+class TestTheMarkComesBackThroughTheParentsTools:
+    """The outside-content mark a follow-up run sets reaches its caller's
+    state, as ``task``'s does: a security mark (memory writes in a marked
+    conversation are approved per call), which a restart must keep."""
+
+    async def test_the_roots_follow_up(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_bring_outside_content,))],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Read the page.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_bring_outside_content", "r1")),
+                        says("Read it.")],
+        )
+
+        await crew.turn()
+
+        assert (await crew.marked()) is True
+        if crew.backend == "adk":
+            # The write-back itself: the mark rides on the response of the call.
+            session = await crew.manager._session_service.get_session(
+                app_name=crew.manager.session_ref(SESSION, USER).app_name,
+                user_id=USER, session_id=SESSION,
+            )
+            written = [
+                e for e in session.events
+                if any(r.name == "message_agent" for r in e.get_function_responses())
+                and OUTSIDE_CONTENT_KEY in (e.actions.state_delta or {})
+            ]
+            assert len(written) == 1
+
+    async def test_a_sub_agents_follow_up_of_its_own_child(self, make_crew):
+        """A middle agent uses the tools on its own children: the follow-up is
+        its run's (``started_by``, ``parent_run``, its call), and the mark
+        reaches the middle agent's transcript."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("middle",)),
+             agent("middle", sub_agents=("leaf",)),
+             agent("leaf", tools=(contract_bring_outside_content,))],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("middle", "Plan X.", "c1")), says("Done.")],
+            middle=[calls(delegate("leaf", "Look X up.", "m1")),
+                    calls(message("leaf-1", "Read the page.", "m2")), says("Planned.")],
+            leaf=[says("X."), calls(use("contract_bring_outside_content", "l1")),
+                  says("Read it.")],
+        )
+
+        await crew.turn()
+
+        record = next(r for r in crew.records() if r.ref.run == "leaf-1#2")
+        assert (record.started_by, record.ref.parent_run, record.call_id) == (
+            "agent:middle-1", "middle-1#1", "m2"
+        )
+        assert await crew.instance_mark("middle-1") == "contract_bring_outside_content"
+        assert (await crew.marked()) is True

@@ -603,8 +603,12 @@ the start of the entry's title.
   one's status, title, current or last run and its status, the first lines
   of its result and the tokens all its runs used. Each refuses, as its
   error result, a sub-agent that is not the caller's (`'<x>' is not one of
-  your sub-agents. Yours: <ids>.`), a closed one and one the user stopped,
-  and `message_agent` a blank message (`message_agent needs a message.`).
+  your sub-agents. Yours: <ids>.`); `message_agent` and `stop_agent` also
+  a closed one and one the user stopped, and `message_agent` a blank
+  message (`message_agent needs a message.`); `check_agents` lists closed
+  and stopped ones with their status. A message to a run that takes no more
+  steps (just stopped, or being closed) waits for the run to end and then
+  follows the instance up, or is refused as closed.
   The manager's delegations gain `message(FollowUpRequest, interrupt=)`,
   `stop(ref, caller, instance, close=)`, `check(ref, caller, instance=)`,
   `steer(ref, run_id, message)` and `cancel(..., conversation=)`
