@@ -146,7 +146,9 @@ def _instance_thread(run: Any) -> str:
     return f"instance:{run.conversation.session_id}:{run.ref.instance}"
 
 
-def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
+def tree_delegations(
+    configs: Sequence[Any], graphs: dict[str, Any], *, policy: Any = None
+) -> Any:
     """The delegations of a tree a test builds alone (``build_agent_tree``, no manager).
 
     Pass the result as ``build_agent_tree(delegations=...)`` and the same dict
@@ -158,7 +160,8 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     last text after its task message (an inheriting run's history is not its
     own), and the outside-content mark it changed flows back; its plan and
     tasks stay its own (``RunAnswer.plan``, ``.tasks``). No ledger, no events:
-    a manager-level test reads those.
+    a manager-level test reads those. The delegations run under ``policy``
+    (``SubAgentPolicy()`` when None).
     """
     from langchain_core.messages import HumanMessage
     from langchain_core.runnables.config import var_child_runnable_config
@@ -192,7 +195,7 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
         )
 
     made = Delegations(
-        runs=AgentRuns(), policy=SubAgentPolicy(),
+        runs=AgentRuns(), policy=policy if policy is not None else SubAgentPolicy(),
         types={config.name: config for config in configs}, hook=hook,
     )
     return lambda: made

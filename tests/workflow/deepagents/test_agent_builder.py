@@ -42,7 +42,13 @@ from agentic_cli.tools.registry import (  # noqa: E402
     register_tool,
 )
 from agentic_cli.workflow.agents import brief as brief_module  # noqa: E402
-from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
+from agentic_cli.workflow.agents import SubAgentPolicy  # noqa: E402
+from agentic_cli.workflow.agents.brief import (  # noqa: E402
+    Brief,
+    follow_up_description,
+    follow_up_parameters,
+    task_message,
+)
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
@@ -98,7 +104,7 @@ def created(monkeypatch) -> dict[str, dict]:
     return calls
 
 
-def _tree(configs, models, tools=None, checkpointer=None, **options):
+def _tree(configs, models, tools=None, checkpointer=None, policy=None, **options):
     graphs: dict = {}
     return build_agent_tree(
         configs,
@@ -108,7 +114,7 @@ def _tree(configs, models, tools=None, checkpointer=None, **options):
         prompts={config.name: f"You are {config.name}." for config in configs},
         settings=None,
         checkpointer=checkpointer,
-        delegations=tree_delegations(configs, graphs),
+        delegations=tree_delegations(configs, graphs, policy=policy),
         graphs=graphs,
         **options,
     )
@@ -554,3 +560,67 @@ class TestEveryStack:
             "error": "builder_flaky failed: RuntimeError: flaky broke",
         }
         assert _read(_tool_message(state["messages"], "c1"))["result"] == "Could not."
+
+
+class TestTheParentsTools:
+    """With the policy's ``follow_ups`` a delegating agent also gets
+    ``message_agent``, ``stop_agent`` and ``check_agents``, each bound to its
+    declaration; by default ``task`` alone."""
+
+    NAMES = ["task", "message_agent", "stop_agent", "check_agents"]
+
+    def test_by_default_task_alone(self, created):
+        _tree([COORDINATOR, RESEARCHER],
+              {"coordinator": ScriptedChat(), "researcher": ScriptedChat()})
+
+        assert [tool.name for tool in created["coordinator"]["tools"]] == ["task"]
+
+    def test_with_follow_ups_every_delegating_agent_gets_them(self, created):
+        configs = [
+            AgentConfig(name="coordinator", prompt="p", sub_agents=["lead"], description="c"),
+            AgentConfig(name="lead", prompt="p", sub_agents=["worker"], description="Leads."),
+            AgentConfig(name="worker", prompt="p", description="Works."),
+        ]
+        _tree(configs, {name: ScriptedChat() for name in ("coordinator", "lead", "worker")},
+              policy=SubAgentPolicy(follow_ups=True))
+
+        assert [tool.name for tool in created["coordinator"]["tools"]] == self.NAMES
+        assert [tool.name for tool in created["lead"]["tools"]] == self.NAMES
+        assert created["worker"]["tools"] == []
+        for tool in created["coordinator"]["tools"][1:]:
+            assert identify_tool(tool) is get_registry().get(tool.name)
+            assert (tool.description, tool.args_schema) == (
+                follow_up_description(tool.name), follow_up_parameters(tool.name)
+            )
+
+    def test_an_own_tool_of_one_of_their_names_is_refused(self):
+        def stop_agent(agent: str) -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(AgentGraphError) as exc:
+            _tree(
+                [COORDINATOR, RESEARCHER],
+                {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+                tools={"coordinator": to_langchain_tools([stop_agent])},
+                policy=SubAgentPolicy(follow_ups=True),
+            )
+
+        assert str(exc.value) == (
+            "Agent 'coordinator' continues its sub-agents through tools named message_agent, "
+            "stop_agent and check_agents, so its own tools cannot include 'stop_agent'; "
+            "rename that tool."
+        )
+
+    def test_without_follow_ups_an_own_tool_of_one_of_their_names_is_its_own(self, created):
+        def stop_agent(agent: str) -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        _tree(
+            [COORDINATOR, RESEARCHER],
+            {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+            tools={"coordinator": to_langchain_tools([stop_agent])},
+        )
+
+        assert [tool.name for tool in created["coordinator"]["tools"]] == ["stop_agent", "task"]
