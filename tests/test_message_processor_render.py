@@ -612,3 +612,125 @@ class TestTheAgentAtWork:
         _, lines = await _watch([found])
 
         assert lines == ["researcher: X is 42."]
+
+
+# --- a sub-agent's view: its run, and the main agent's notice ------------------------
+
+
+RESEARCHER_1_2 = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
+WRITER_1 = RunRef("writer", "writer-1", "writer-1#1", "researcher-1#2", 2)
+
+
+class _Viewing(_Watching):
+    """Replays events as an instance's run (``run_instance``) or as a notice
+    turn of the root (``tell_root``), noting what it was asked."""
+
+    def __init__(self, events: list[WorkflowEvent], ui: _Watched) -> None:
+        super().__init__(events, ui)
+        self.asked: list[tuple] = []
+
+    async def run_instance(self, instance, message, *, session_id=None, user_id=None):
+        self.asked.append(("run_instance", instance, message, session_id, user_id))
+        async for event in self.process(message, user_id, session_id):
+            yield event
+
+    async def tell_root(self, text, *, session_id=None, user_id=None):
+        self.asked.append(("tell_root", text, session_id, user_id))
+        async for event in self.process(text, user_id, session_id):
+            yield event
+
+
+def _text_of(run: RunRef, text: str) -> WorkflowEvent:
+    """A sub-agent run's text, marked as the backends mark it."""
+    event = _by(run, WorkflowEvent.text(text))
+    event.metadata.update(agent=run.agent, subagent=True)
+    return event
+
+
+class TestAViewsRun:
+    """In a sub-agent's view the user's line is the instance's next run
+    (``process_instance``, ``run_instance``), drawn as a turn: the instance's
+    text is the reply and its lines name nobody (it is the agent in view);
+    a run it starts is shown as in any turn, under its name."""
+
+    async def test_the_instances_text_is_the_reply_and_its_lines_name_nobody(self):
+        events = [
+            WorkflowEvent.agent_run(RESEARCHER_1_2, "started", input="Go on."),
+            _by(RESEARCHER_1_2, WorkflowEvent.tool_call("lookup", {"q": "x"})),
+            _by(WRITER_1, WorkflowEvent.tool_call("draft", {})),
+            _text_of(WRITER_1, "A draft.\nMore."),
+            _text_of(RESEARCHER_1_2, "Y is 7."),
+            WorkflowEvent.agent_run(RESEARCHER_1_2, "completed", result="Y is 7."),
+        ]
+        ui = _Watched()
+        workflow = _Viewing(events, ui)
+
+        result = await MessageProcessor().process_instance(
+            "researcher-1", "Go on.", workflow_controller=ReplayController(workflow), ui=ui,
+            settings=_settings(), session_id="s1",
+        )
+
+        assert result.delivered
+        assert workflow.asked == [("run_instance", "researcher-1", "Go on.", "s1", "tester")]
+        assert workflow.lines == [
+            "Processing...", "Calling: lookup", "writer-1 › Calling: draft",
+            "writer-1 › A draft.", "writer-1 › A draft.", "writer-1 › A draft.",
+        ]
+        assert ui.responses() == ["Y is 7."]
+
+    async def test_each_of_its_run_events_draws_the_status_bar_again(self):
+        """The bar names the instance's status, which its run's start and end change."""
+        ui = _Watched()
+        workflow = _Viewing([
+            WorkflowEvent.agent_run(RESEARCHER_1_2, "started", input="Go on."),
+            WorkflowEvent.agent_run(WRITER_1, "started", title="Draft it."),
+            WorkflowEvent.agent_run(RESEARCHER_1_2, "completed", result="Y is 7."),
+        ], ui)
+        controller = ReplayController(workflow)
+
+        await MessageProcessor().process_instance(
+            "researcher-1", "Go on.", workflow_controller=controller, ui=ui,
+            settings=_settings(),
+        )
+
+        assert controller.status_bar_updates == 3  # its start, its end, the turn's end
+
+    async def test_a_turn_of_the_main_agent_still_shows_a_sub_agents_text_as_its_line(self):
+        """Outside a view nothing changed: the same run's text is a status line."""
+        ui, lines = await _watch([_text_of(RESEARCHER_1_2, "Y is 7.")])
+
+        assert lines == ["researcher-1 › Y is 7."]
+        assert ui.responses() == []
+
+    async def test_a_refusal_is_the_turns_error(self):
+        ui = _Watched()
+        workflow = _Viewing([WorkflowEvent.error("researcher-1 is closed.")], ui)
+
+        result = await MessageProcessor().process_instance(
+            "researcher-1", "Go on.", workflow_controller=ReplayController(workflow), ui=ui,
+            settings=_settings(),
+        )
+
+        assert not result.delivered
+        assert ui.errors() == ["researcher-1 is closed."]
+
+
+class TestANoticeTurn:
+    """``process_notice``: the main agent told what the user did in a view
+    (``tell_root``), drawn as a job's notice turn is: its reply is the reply."""
+
+    async def test_the_root_reads_the_notice_and_its_answer_is_shown(self):
+        ui = _Watched()
+        workflow = _Viewing([WorkflowEvent.text("Noted: Y is 7.")], ui)
+
+        result = await MessageProcessor().process_notice(
+            "The user worked with researcher-1 directly.",
+            workflow_controller=ReplayController(workflow), ui=ui, settings=_settings(),
+            session_id="s1",
+        )
+
+        assert result.delivered
+        assert workflow.asked == [
+            ("tell_root", "The user worked with researcher-1 directly.", "s1", "tester"),
+        ]
+        assert ui.responses() == ["Noted: Y is 7."]
