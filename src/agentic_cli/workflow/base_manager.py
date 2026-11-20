@@ -56,6 +56,7 @@ from agentic_cli.workflow.agents.delegate import (
     waiting_on_user,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
+from agentic_cli.workflow.agents.records import RecordsWriter
 from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
@@ -569,12 +570,17 @@ class BaseWorkflowManager(ABC):
         (``workflow/agents/runs.py``): ``records(ref)`` lists a
         conversation's runs in the order they started and ``instances(ref)``
         its sub-agent instances, each with its status; a turn ends the runs
-        it leaves open (``_turn``). In memory, for this manager's life
-        (a backend switch builds a new manager); made on first use.
+        it leaves open (``_turn``). Kept in memory for this manager's life
+        (a model switch keeps it), and beside each conversation in its store
+        (the backend's store hooks): written as they change, loaded with the
+        conversation (``load_agents``), so another manager (after a restart,
+        or a backend's) reads them; made on first use.
         """
         runs = self.__dict__.get("_agent_runs")
         if runs is None:
-            runs = self.__dict__["_agent_runs"] = AgentRuns()
+            runs = self.__dict__["_agent_runs"] = AgentRuns(
+                on_change=self._agent_records_changed
+            )
         return runs
 
     @property
@@ -636,6 +642,130 @@ class BaseWorkflowManager(ABC):
         base keeps none.
         """
         return {}
+
+    # ---- Sub-agent records beside the conversation ----
+    #
+    # A conversation's records (``agent_runs``: its instances, its runs with
+    # their briefs, envelopes and usage, its id counters) are kept in its
+    # store through the backend's hooks: written at each run event that
+    # changes them (``RecordsWriter``: one write at a time per conversation,
+    # the latest records each time), all written before a turn returns,
+    # loaded once per conversation (``load_agents``: ``load_session`` and each
+    # turn's start), and deleted with the conversation by the backend's
+    # session code, after the transcripts and before the conversation
+    # (``_deleting`` around the backend's delete). The base keeps none: its
+    # records are this manager's, in memory.
+
+    async def _load_agent_records(self, conversation: SessionRef) -> Mapping[str, Any] | None:
+        """``conversation``'s stored records (an ``AgentRuns.export``), or None (a backend hook).
+
+        None when the store keeps none. A store that cannot be read raises.
+        The base keeps none.
+        """
+        return None
+
+    async def _save_agent_records(
+        self, conversation: SessionRef, data: Mapping[str, Any]
+    ) -> None:
+        """Keep ``data`` (``AgentRuns.export``) as ``conversation``'s records (a backend hook).
+
+        Replaces what the store kept. Called one at a time per conversation
+        (``RecordsWriter``); a failure is warned of once per conversation and
+        fails nothing. The base keeps none.
+        """
+        return None
+
+    async def load_agents(self, conversation: SessionRef) -> None:
+        """Load ``conversation``'s sub-agent records from its store, once (provisional).
+
+        ``load_session`` and each turn's start call it; a call after the
+        first that loaded does nothing, and so does one before the manager
+        is initialized (its store is not open: the turn's start loads). The
+        stored records replace what this manager holds of the conversation
+        (``AgentRuns.restore``): a run found working is ended
+        ``interrupted`` and its instance made idle, which is written back.
+        Records of another version are ignored with one warning: the
+        conversation starts with none, numbered past the transcripts its
+        store keeps (``_stored_instances``), and its next write replaces them.
+
+        Raises:
+            Exception: The store's, when its records cannot be read; nothing
+                is loaded, and the next call reads it again.
+        """
+        loaded = self._agents_loaded
+        if conversation in loaded or not self._initialized:
+            return
+        lock = self.__dict__.get("_agents_loading")
+        if lock is None:
+            lock = self.__dict__["_agents_loading"] = asyncio.Lock()
+        async with lock:
+            if conversation in loaded:
+                return
+            data = await self._load_agent_records(conversation)
+            loaded.add(conversation)
+            if data is None:
+                return
+            try:
+                interrupted = self.agent_runs.restore(conversation, data)
+            except ValueError as error:
+                logger.warning(
+                    "subagent_records_ignored", session_id=conversation.session_id,
+                    error=str(error),
+                )
+                return
+            logger.info(
+                "subagent_records_loaded", session_id=conversation.session_id,
+                runs=len(self.agent_runs.records(conversation)), interrupted=len(interrupted),
+            )
+            if interrupted:
+                self._agent_records.changed(conversation)
+
+    @property
+    def _agents_loaded(self) -> set[SessionRef]:
+        """The conversations whose records ``load_agents`` loaded (made on first use)."""
+        loaded = self.__dict__.get("_agents_loaded_set")
+        if loaded is None:
+            loaded = self.__dict__["_agents_loaded_set"] = set()
+        return loaded
+
+    @property
+    def _agent_records(self) -> RecordsWriter:
+        """What writes the conversations' records to their store (made on first use)."""
+        writer = self.__dict__.get("_records_writer")
+        if writer is None:
+            writer = self.__dict__["_records_writer"] = RecordsWriter(
+                export=self.agent_runs.export,
+                # Looked up at each write: a test or a backend may replace it.
+                save=lambda conversation, data: self._save_agent_records(conversation, data),
+            )
+        return writer
+
+    def _agent_records_changed(self, conversation: SessionRef | None) -> None:
+        """``conversation``'s records changed (``AgentRuns``' ``on_change``): write them.
+
+        Only a conversation whose records were loaded is written: a write
+        replaces what its store keeps.
+        """
+        if conversation is not None and conversation in self._agents_loaded:
+            self._agent_records.changed(conversation)
+
+    async def _agent_records_written(self, conversation: SessionRef) -> None:
+        """Wait until ``conversation``'s records are written. Never raises."""
+        writer = self.__dict__.get("_records_writer")
+        if writer is not None:
+            await writer.flush(conversation)
+
+    @contextlib.asynccontextmanager
+    async def _deleting(self, conversation: SessionRef) -> AsyncGenerator[None, None]:
+        """The block deletes ``conversation`` from the store; this manager then forgets it.
+
+        Before the block, nothing more of its records is written (a write
+        under way is waited for, so none lands after the delete).
+        """
+        writer = self.__dict__.get("_records_writer")
+        if writer is not None:
+            await writer.discard(conversation)
+        yield
 
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).
@@ -2192,20 +2322,26 @@ class BaseWorkflowManager(ABC):
         backend re-checked under it) and the workflow context
         (:meth:`_workflow_context`: the settings, the services and the
         active turn, reset as the block ends) are entered, in that order.
-        As the block ends, however it ends, the sub-agent runs it left open
-        are recorded interrupted (``agent_runs``), with what they used; each
-        turn is counted in its conversation's usage ledger (``usage_of``).
+        The conversation's sub-agent records are loaded first, once
+        (``load_agents``). As the block ends, however it ends, the sub-agent
+        runs it left open are recorded interrupted (``agent_runs``), with
+        what they used, and the turn waits until the records are written to
+        the store; each turn is counted in its conversation's usage ledger
+        (``usage_of``).
 
         Yields:
             The turn's conversation.
 
         Raises:
             RuntimeError: The backend cannot be made ready (``_turn_admission``).
+            Exception: The store's, when the conversation's sub-agent records
+                cannot be read (``load_agents``): the turn does not start.
         """
         ref = self.session_ref(session_id, user_id)
         bind_context(session_id=ref.session_id, user_id=ref.user_id)
         async with self._turn_admission():
             with self._workflow_context(session_id=ref.session_id, user_id=ref.user_id):
+                await self.load_agents(ref)
                 ledger = self.usage_of(ref)
                 ledger.begin_turn()
                 try:
@@ -2221,6 +2357,7 @@ class BaseWorkflowManager(ABC):
                         closed = known is not None and known.status == INSTANCE_CLOSED
                         if closed and open_calls is not None:
                             open_calls.take_cancel(ref, instance=stopped.instance)
+                    await self._agent_records_written(ref)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False
@@ -2298,7 +2435,12 @@ class BaseWorkflowManager(ABC):
         catalog, self._catalog = self._catalog, None
 
         not_synchronous: list[TypeError] = []
-        closers = self._detached(self._detach_backend, not_synchronous)
+        closers: list[Closer] = []
+        writer = self.__dict__.get("_records_writer")
+        if writer is not None:
+            # The sub-agent records being written finish before the store closes.
+            closers.append(("subagent_records", writer.flush_all))
+        closers += self._detached(self._detach_backend, not_synchronous)
         if not keep_store:
             closers += self._detached(self._detach_store, not_synchronous)
         closers.append((
@@ -2766,7 +2908,11 @@ class BaseWorkflowManager(ABC):
         False if it's new — but the id is adopted either way so the next turn
         continues it, once the store was asked (a cancel or an error before
         that adopts nothing). A backend without durable sessions has nothing
-        to resume, so it adopts the id and returns False.
+        to resume, so it adopts the id and returns False. Its sub-agent
+        records load with it (``load_agents``), read again from the store
+        whenever the conversation is opened (another process may have had it
+        in between); records that cannot be read now are warned of and read
+        again at its next turn's start.
 
         Args:
             session_id: Session to adopt.
@@ -2787,8 +2933,22 @@ class BaseWorkflowManager(ABC):
         else:
             exists = await self.session_exists(session_id, user_id=user_id)
         self.session_id = session_id
-        self._forget_memory_index(self.session_ref(session_id, user_id))
+        ref = self.session_ref(session_id, user_id)
+        self._forget_memory_index(ref)
         logger.info("session_adopted", session_id=session_id, resumed=exists)
+        # Its sub-agent records load with it, read again from the store
+        # (another process may have had the conversation since this manager
+        # last did: its own writes land first).
+        await self._agent_records_written(ref)
+        self._agents_loaded.discard(ref)
+        try:
+            await self.load_agents(ref)
+        except Exception as error:  # noqa: BLE001 - the conversation is adopted all the same
+            logger.warning(
+                "subagent_records_unread", session_id=session_id,
+                error=str(error) or type(error).__name__,
+            )
+            logger.debug("subagent_records_unread", exc_info=error)
         return exists
 
     # ---- Backend hooks (override in ADK / LangGraph managers) ----
