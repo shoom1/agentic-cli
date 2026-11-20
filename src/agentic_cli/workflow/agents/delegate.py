@@ -38,6 +38,16 @@ instances are open than ``SubAgentPolicy.max_open`` allows (the oldest idle
 one is closed), else ``idle``. ``Delegations.close`` closes an idle or
 stopped instance and its descendants.
 
+The parent's tools (``agents/follow_ups.py``) call ``Delegations.message``
+(an idle instance's follow-up, or a running one's run steered, or with
+``interrupt`` cancelled by its parent and followed up), ``stop`` (a running
+instance's run cancelled by its parent, leaving it idle; with ``close``, the
+instance and its descendants closed, a running one's at its run's end) and
+``check`` (a caller's sub-agents), and the user's lines reach a running run
+through ``steer``. A message steered to a run that its transcript does not
+hold when the run ends (``RunControl.unstored``) is kept for the instance's
+next run, which starts with it steered: a message is never lost.
+
 Each run works under its ``RunControl`` (``agents/control.py``,
 ``AgentRun.control``): its limits (its type's over the policy's), the time
 limit running while the hook does, and a cancel of the run alone
@@ -82,15 +92,17 @@ the run works. A run ends:
   had of its work, ``partial`` when that is any text;
 - ``interrupted`` when its caller's task is cancelled (Ctrl+C stops the
   turn): the cancel goes on once the run has stopped, whatever else
-  stopped it. A run's own task cancelled by anything but its control while
-  its caller goes on ends ``interrupted`` too, and its caller reads that
-  envelope.
+  stopped it, unless a run above it was cancelled by its control (its
+  parent's stop, a limit, the user's stop of that run): then it ends
+  ``cancelled`` by its parent, saying so (``_stopped_with_caller``). A
+  run's own task cancelled by anything but its control while its caller
+  goes on ends ``interrupted`` too, and its caller reads that envelope.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -100,12 +112,13 @@ from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.brief import BriefError, read_brief, task_message
-from agentic_cli.workflow.agents.control import RunControl
+from agentic_cli.workflow.agents.control import PARENT_CAUSE, RunControl
 from agentic_cli.workflow.agents.envelope import (
     CANCELLED_BY,
     INTERRUPTED_ERROR,
     STEP_LIMIT_ERROR,
     envelope,
+    open_task_descriptions,
 )
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
 from agentic_cli.workflow.agents.policy import AgentLimits
@@ -116,6 +129,7 @@ from agentic_cli.workflow.agents.runs import (
     INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
+    RUN_END_STATUSES,
     RUN_FAILED,
     RUN_INPUT_REQUIRED,
     RUN_INTERRUPTED,
@@ -136,6 +150,7 @@ from agentic_cli.workflow.sessions import (
     count_run_this_turn,
     current_turn_scope,
     get_active_turn,
+    release_run_this_turn,
     reset_active_turn,
     runs_this_turn,
     set_active_run,
@@ -174,6 +189,23 @@ STOPPED_ERROR = "{instance} was stopped by the user; only the user can continue 
 RUNNING_ERROR = "{instance} is running: an instance runs one run at a time."
 TYPE_GONE_ERROR = "{instance}'s type '{agent}' is not one of this app's agents."
 NO_MESSAGE_ERROR = "A follow-up needs a message."
+#: A message that is not text, or is blank.
+MESSAGE_NEEDED_ERROR = "message_agent needs a message."
+#: The note of a steered message's result.
+STEERED_NOTE = "Your message was given to its run before its next step."
+#: A run its parent stopped (``stop_agent``), and one it replaced with a message.
+STOPPED_BY_PARENT_ERROR = "stopped by its parent"
+REPLACED_ERROR = "stopped by its parent for a new message"
+#: A run the user replaced with a message of theirs.
+REPLACED_BY_USER_ERROR = "stopped by the user for a new message"
+#: Why a parent's ``stop_agent`` closes an instance.
+CLOSED_BY_PARENT = "closed by its parent"
+#: The error of a run that ended with a parent's run its control stopped.
+WITH_ITS_PARENT_ERROR = "its parent's run was stopped"
+#: Who cancels a run for its parent's tools (``cancelled_by``).
+PARENT = "parent"
+#: How many lines of a run's result ``check`` shows.
+_CHECK_LINES = 3
 #: Why an instance past ``SubAgentPolicy.max_open`` is closed.
 MAX_OPEN_REASON = "more than {limit} sub-agents open: the oldest idle one is closed"
 #: The statuses of an instance that waits between its runs.
@@ -186,6 +218,19 @@ def started_by(caller: RunRef | None) -> str:
     ``agent:root`` for the root's own calls (no run, or ``root_run``).
     """
     return f"agent:{caller.instance if caller is not None else 'root'}"
+
+
+def _refused(error: str) -> Delegated:
+    """The error result of a call that starts no run and steers none."""
+    return Delegated(result={"success": False, "error": error}, state={}, run=None)
+
+
+def _not_yours(instance: str, yours: Sequence[InstanceRecord]) -> str:
+    """What a caller is told of an instance that is not its own sub-agent."""
+    names = ", ".join(i.instance for i in yours)
+    return NOT_YOURS_ERROR.format(
+        instance=instance, yours=YOURS.format(instances=names) if yours else NO_SUB_AGENTS
+    )
 
 
 @dataclass(frozen=True)
@@ -313,7 +358,8 @@ class Delegated:
     Attributes:
         result: The envelope, or the error result of a call that started no run.
         state: What the run changed of the shared state; empty when none started.
-        run: The run, None when no run started.
+        run: The run; for a steer, the run the message was given to; None when
+            no run started.
     """
 
     result: dict[str, Any]
@@ -484,6 +530,12 @@ class Delegations:
         self._numbering = asyncio.Lock()
         # The working runs' controls, by (conversation, run id).
         self._controls: dict[tuple[SessionRef | None, str], RunControl] = {}
+        # Each working run's end (set once it has ended), the messages steered
+        # to an instance's run that its transcript did not hold (by conversation
+        # and instance), and the instances to close at their runs' ends, with why.
+        self._ends: dict[tuple[SessionRef | None, str], asyncio.Event] = {}
+        self._unread: dict[tuple[SessionRef | None, str], list[str]] = {}
+        self._closing: dict[tuple[SessionRef | None, str], str] = {}
         # Each conversation's working slots, made on first use and kept: a
         # slot lent while its run waits must come back to the pool it left.
         self._pools: dict[SessionRef | None, SlotPool] = {}
@@ -533,7 +585,9 @@ class Delegations:
             history=request.history if config.inherit_context else None,
         )
 
-    async def follow_up(self, request: FollowUpRequest) -> Delegated:
+    async def follow_up(
+        self, request: FollowUpRequest, *, _reserved: list[bool] | None = None
+    ) -> Delegated:
         """Run the instance ``request`` names once more, to its end; its envelope.
 
         The instance's next run (``AgentRuns.next_run``), through the same
@@ -559,10 +613,13 @@ class Delegations:
             assert instance is not None
             config = self._types[instance.agent]
             if request.started_by != USER:
-                refused = self._past_runs_per_turn(instance.agent)
-                if refused is not None:
-                    return refused
-                count_run_this_turn()
+                if _reserved is None:
+                    refused = self._past_runs_per_turn(instance.agent)
+                    if refused is not None:
+                        return refused
+                    count_run_this_turn()
+                else:
+                    _reserved[0] = False  # the reserved run starts now
             caller = request.caller
             ref = self._runs.next_run(
                 conversation, request.instance,
@@ -586,18 +643,325 @@ class Delegations:
 
         Returns:
             The ids closed, the instance first, then its descendants in the
-            order they started; empty when it could not be closed.
+            order they started; empty when it could not be closed. A
+            descendant that works is not among them: it is closed as its run
+            ends.
         """
         with _as_turn(conversation):
             record = self._runs.instance(conversation, instance)
             if record is None or record.status not in _OPEN:
                 return []
+            below = self._descendants(conversation, instance)
             closed: list[str] = []
-            for one in [record, *self._descendants(conversation, instance)]:
+            for one in [record, *below]:
                 if one.status in _OPEN:
                     self._close(conversation, one, reason)
                     closed.append(one.instance)
+            # A descendant that works is closed as its run ends.
+            self._close_at_end(conversation, below, reason)
             return closed
+
+    async def message(
+        self,
+        request: FollowUpRequest,
+        *,
+        interrupt: bool = False,
+        _reserved: list[bool] | None = None,
+    ) -> Delegated:
+        """Send a message to a sub-agent instance: ``message_agent``'s.
+
+        An idle instance runs it as a follow-up (``follow_up``). A running
+        one of the sender's (the user's: any) is steered: the message
+        reaches its run before its next step (``Delegated.result`` says so,
+        with the run), or, with ``interrupt``, its run is cancelled by its
+        parent and the message starts a follow-up once it has ended. One run
+        per instance at a time: everything up to a follow-up's start is one
+        synchronous step, so of two messages to one idle instance in one
+        response the first starts its run and the second is steered into it.
+        A run that takes no more steps (cancelled, its work ended, or an
+        instance its parent is closing) is not steered: its end is waited for,
+        and the message then follows up the idle instance or is refused as
+        ``follow_up`` refuses (closed, stopped by the user); to an instance
+        being closed it is refused as closed at once, since the answer is
+        known. An interrupt of an agent's keeps the turn's run it checked
+        for: the run is counted as the check is made, so no call in the same
+        answer can take it before the follow-up starts (it is given back when
+        no run starts from it, whatever stops the call). A blank message,
+        and anything ``follow_up`` refuses (``interrupt`` included: nothing is
+        cancelled for a message that cannot start a run), is the error result
+        and nothing else happens. The sender's interrupt is its own stop: the
+        user's reads ``cancelled_by`` ``user``, a parent's ``parent``.
+
+        Returns:
+            The follow-up's result, or the steer's; ``state`` is the shared
+            state a follow-up run changed.
+        """
+        conversation = (
+            request.conversation if request.conversation is not None else get_active_turn()
+        )
+        with _as_turn(conversation):
+            if not isinstance(request.message, str) or not request.message.strip():
+                return _refused(MESSAGE_NEEDED_ERROR)
+            control = self._working_control(conversation, request)
+            if control is None:
+                return await self.follow_up(request, _reserved=_reserved)
+            ref = control.ref
+            if (conversation, ref.instance) in self._closing:
+                return _refused(CLOSED_ERROR.format(instance=ref.instance))
+            stopping = control.stopping
+            if not interrupt and not stopping:
+                control.steer(request.message)
+                logger.info("subagent_steered", run=ref.run, started_by=request.started_by)
+                return Delegated(
+                    result={"success": True, "agent": ref.instance, "run": ref.run,
+                            "status": RUN_RUNNING, "note": STEERED_NOTE},
+                    state={}, run=ref,
+                )
+            ended = self._ends[(conversation, ref.run or "")]
+            made_here = False
+            if interrupt and not stopping:
+                error = self._follow_up_refused(conversation, request, running_ok=True)
+                if error is None and request.started_by != USER:
+                    refused = self._past_runs_per_turn(ref.agent)
+                    error = refused.result["error"] if refused is not None else None
+                if error is not None:
+                    return _refused(error)
+                if request.started_by != USER and _reserved is None:
+                    count_run_this_turn()
+                    _reserved, made_here = [True], True
+                by, why = (USER, REPLACED_BY_USER_ERROR) if request.started_by == USER else (
+                    PARENT, REPLACED_ERROR
+                )
+                self.cancel(ref.run or "", by=by, error=why, conversation=conversation)
+        try:
+            await ended.wait()
+            # Idle now: its follow-up (or, should another run have started
+            # meanwhile, a steer of that one).
+            return await self.message(request, _reserved=_reserved)
+        finally:
+            if made_here and _reserved is not None and _reserved[0]:
+                release_run_this_turn()  # no run started from it: give its place back
+
+    def stop(
+        self,
+        conversation: SessionRef | None,
+        caller: RunRef | None,
+        instance: str,
+        *,
+        close: bool = False,
+    ) -> dict[str, Any]:
+        """Stop one of ``caller``'s sub-agents: ``stop_agent``'s result.
+
+        A running instance's run is cancelled at once, by its parent
+        (``cancel``); the instance is idle again once the run ends. With
+        ``close`` the instance and its descendants are closed: an idle one at
+        once, a running one (and any descendant that works) as its run ends
+        (``closed`` names them all). An idle instance without ``close`` is
+        left as it is. The instance's status is the one it is left in once
+        its run has ended; ``stopped`` is the run cancelled, None when none
+        worked or its work had ended.
+
+        Returns:
+            The result, or the error result for an instance that is not the
+            caller's, one that is closed, or one the user stopped (only the
+            user continues it).
+        """
+        conversation = conversation if conversation is not None else get_active_turn()
+        with _as_turn(conversation):
+            yours = self._yours(conversation, caller)
+            record = next((i for i in yours if i.instance == instance), None)
+            error = self._refused_to(instance, yours, record)
+            if error is not None:
+                return {"success": False, "error": error}
+            assert record is not None
+            below = self._descendants(conversation, instance)
+            reaching = [record.instance, *(i.instance for i in below if i.status != INSTANCE_CLOSED)]
+            control = self._working_control(conversation, record=record)
+            stopped: str | None = None
+            closed: list[str] = []
+            if control is not None:
+                run = control.ref.run or ""
+                if self.cancel(run, by=PARENT, error=STOPPED_BY_PARENT_ERROR,
+                               conversation=conversation):
+                    stopped = run
+                if close:
+                    self._close_at_end(conversation, [record, *below], CLOSED_BY_PARENT)
+                    closed = reaching
+                left = INSTANCE_CLOSED if close or not record.continuable else INSTANCE_IDLE
+            elif close:
+                self.close(conversation, instance, reason=CLOSED_BY_PARENT)
+                closed = reaching
+                left = INSTANCE_CLOSED
+            else:
+                left = record.status
+            logger.info("subagent_stopped", instance=instance, run=stopped, closed=closed)
+            return {"success": True, "agent": instance, "status": left, "stopped": stopped,
+                    "closed": closed}
+
+    def check(
+        self, conversation: SessionRef | None, caller: RunRef | None, instance: str | None = None
+    ) -> dict[str, Any]:
+        """``caller``'s sub-agents, or one of them: ``check_agents``' result.
+
+        Each row is an instance's status, title, last run and its status,
+        the first lines of that run's result (none while it works) and the
+        input and output tokens of all its runs: an ended run's from its
+        record, a working one's from the conversation's ledger. Newest
+        first; closed ones too. A name that is not the caller's sub-agent is
+        the error result.
+        """
+        conversation = conversation if conversation is not None else get_active_turn()
+        with _as_turn(conversation):
+            yours = self._yours(conversation, caller)
+            if instance is not None:
+                found = next((i for i in yours if i.instance == instance), None)
+                if found is None:
+                    return {"success": False, "error": _not_yours(instance, yours)}
+                yours = [found]
+            return {
+                "success": True,
+                "agents": [self._checked(conversation, one) for one in reversed(yours)],
+            }
+
+    def steer(self, conversation: SessionRef | None, run_id: str, message: str) -> bool:
+        """Give the working run ``run_id`` of ``conversation`` (the active turn's, for None)
+        ``message``, before its next model call.
+
+        Returns:
+            False when no such run works, or it takes no more steps
+            (cancelled, or its work has ended).
+
+        Raises:
+            ValueError: ``message`` is not text, or blank.
+        """
+        key = (conversation if conversation is not None else get_active_turn(), run_id)
+        control = self._controls.get(key)
+        if control is None or control.stopping:
+            return False
+        control.steer(message)
+        return True
+
+    def stop_cause(self, run: RunRef | None, *, conversation: SessionRef | None = None) -> str | None:
+        """What stopped ``run``, for a call it left at its prompt (``interrupts.not_run``).
+
+        Its own control's cancel (``RunControl.stop_cause``: its parent, its
+        time limit, its token limit), else ``its parent`` when a run above
+        it was cancelled by its control; None for the user's stop, a run
+        that was not stopped, the root and a run that does not work.
+        """
+        if run is None or run.run is None:
+            return None
+        conversation = conversation if conversation is not None else get_active_turn()
+        control = self._controls.get((conversation, run.run))
+        if control is not None and control.cancelled is not None:
+            return control.stop_cause
+        return PARENT_CAUSE if self._parent_stopped(conversation, run) else None
+
+    def _yours(self, conversation: SessionRef | None, caller: RunRef | None) -> list[InstanceRecord]:
+        """The instances ``caller`` started (the root's, for None), in start order."""
+        sender = caller.instance if caller is not None else "root"
+        return [i for i in self._runs.instances(conversation) if i.parent == sender]
+
+    def _working_control(
+        self,
+        conversation: SessionRef | None,
+        request: FollowUpRequest | None = None,
+        *,
+        record: InstanceRecord | None = None,
+    ) -> RunControl | None:
+        """The control of the run that works for an instance, else None.
+
+        The instance is ``record``, or the one ``request`` names when it is
+        the sender's (the user's: any); None for an instance that is not
+        running.
+        """
+        if record is None:
+            assert request is not None
+            record = self._runs.instance(conversation, request.instance)
+            if record is None:
+                return None
+            if request.started_by != USER and not any(
+                i.instance == record.instance for i in self._yours(conversation, request.caller)
+            ):
+                return None
+        if record.status != INSTANCE_RUNNING or not record.runs:
+            return None
+        return self._controls.get((conversation, record.runs[-1]))
+
+    @staticmethod
+    def _refused_to(
+        instance: str, yours: Sequence[InstanceRecord], record: InstanceRecord | None
+    ) -> str | None:
+        """Why a parent may not stop ``instance``, else None."""
+        if record is None:
+            return _not_yours(instance, yours)
+        if record.status == INSTANCE_CLOSED:
+            return CLOSED_ERROR.format(instance=instance)
+        if record.status == INSTANCE_STOPPED:
+            return STOPPED_ERROR.format(instance=instance)
+        return None
+
+    def _checked(self, conversation: SessionRef | None, record: InstanceRecord) -> dict[str, Any]:
+        """One row of ``check``."""
+        runs = [r for r in self._runs.records(conversation) if r.ref.instance == record.instance]
+        last = runs[-1] if runs else None
+        spent = {"input": 0, "output": 0}
+        for run in runs:
+            usage = run.usage
+            if run.status not in RUN_END_STATUSES and self._ledgers is not None:
+                usage = self._ledgers.ledger(conversation).run_usage(run.ref.run or "")
+            for totals in usage.values():
+                spent["input"] += totals.get("input", 0)
+                spent["output"] += totals.get("output", 0)
+        return {
+            "agent": record.instance,
+            "type": record.agent,
+            "status": record.status,
+            "title": record.title,
+            "run": last.ref.run if last is not None else None,
+            "run_status": last.status if last is not None else None,
+            "result": (
+                "\n".join(last.result.splitlines()[:_CHECK_LINES]) if last is not None else ""
+            ),
+            "tokens": spent,
+        }
+
+    def _parent_stopped(self, conversation: SessionRef | None, ref: RunRef) -> bool:
+        """Whether a run above ``ref`` was cancelled by its control: its parent's stop, a limit, the user's."""
+        parent = ref.parent_run
+        while parent:
+            control = self._controls.get((conversation, parent))
+            if control is None:
+                return False
+            if control.cancelled is not None:
+                return True
+            parent = control.ref.parent_run
+        return False
+
+    def _close_at_end(
+        self, conversation: SessionRef | None, records: Sequence[InstanceRecord], reason: str
+    ) -> None:
+        """Close each of ``records`` that works as its run ends (``_end``)."""
+        for record in records:
+            if record.status == INSTANCE_RUNNING:
+                self._closing[(conversation, record.instance)] = reason
+
+    def _drop_unread(self, conversation: SessionRef | None, instance: str) -> None:
+        """Forget the messages kept for the next run of ``instance``, which will not run."""
+        dropped = self._unread.pop((conversation, instance), None)
+        if dropped:
+            logger.info("subagent_steering_dropped", instance=instance, messages=len(dropped))
+
+    def _keep_unread(
+        self, conversation: SessionRef | None, instance: str, unread: Sequence[str]
+    ) -> None:
+        """Keep the messages a run's transcript did not hold for the instance's next run."""
+        if not unread:
+            return
+        record = self._runs.instance(conversation, instance)
+        self._unread.setdefault((conversation, instance), []).extend(unread)
+        if record is not None and record.status == INSTANCE_CLOSED:
+            self._drop_unread(conversation, instance)
 
     def _past_runs_per_turn(self, agent: str) -> Delegated | None:
         """The error result of a call past the runs its turn may start, else None."""
@@ -612,9 +976,17 @@ class Delegations:
         return None
 
     def _follow_up_refused(
-        self, conversation: SessionRef | None, request: FollowUpRequest
+        self,
+        conversation: SessionRef | None,
+        request: FollowUpRequest,
+        *,
+        running_ok: bool = False,
     ) -> str | None:
-        """Why ``request`` cannot start a run, else None."""
+        """Why ``request`` cannot start a run, else None.
+
+        ``running_ok``: a running instance is no reason (an interrupt asks
+        whether the message could start a run once the instance's run ends).
+        """
         message = request.message
         if not isinstance(message, str) or not message.strip():
             return NO_MESSAGE_ERROR
@@ -625,16 +997,12 @@ class Delegations:
             yours = [i for i in self._runs.instances(conversation) if i.parent == sender]
         found = next((i for i in yours if i.instance == request.instance), None)
         if found is None:
-            names = ", ".join(i.instance for i in yours)
-            return NOT_YOURS_ERROR.format(
-                instance=request.instance,
-                yours=YOURS.format(instances=names) if yours else NO_SUB_AGENTS,
-            )
+            return _not_yours(request.instance, yours)
         if found.status == INSTANCE_CLOSED or not found.continuable:
             return CLOSED_ERROR.format(instance=found.instance)
         if found.status == INSTANCE_STOPPED and request.started_by != USER:
             return STOPPED_ERROR.format(instance=found.instance)
-        if found.status == INSTANCE_RUNNING:
+        if found.status == INSTANCE_RUNNING and not running_ok:
             return RUNNING_ERROR.format(instance=found.instance)
         if found.agent not in self._types:
             return TYPE_GONE_ERROR.format(instance=found.instance, agent=found.agent)
@@ -660,6 +1028,9 @@ class Delegations:
         control = RunControl(
             ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref)
         )
+        # What an earlier run was steered and did not store: this run's, after its own message.
+        for unread in self._unread.pop((conversation, ref.instance), ()):
+            control.steer(unread)
         inner = asyncio.create_task(
             self._in_run(
                 ref, config, conversation, call_id, control,
@@ -670,19 +1041,31 @@ class Delegations:
         control.bind(inner)
         key = (conversation, ref.run or "")
         self._controls[key] = control
+        ended = self._ends[key] = asyncio.Event()
         caller = _working.get()
+
+        async def ended_run() -> Delegated:
+            # As the run ends, before its caller waits for its slot back: a
+            # follow-up then starts with the messages this run did not store.
+            try:
+                return await self._ended(ref, call_id, inner, control)
+            finally:
+                self._controls.pop(key, None)
+                self._ends.pop(key, None)
+                self._keep_unread(conversation, ref.instance, control.unstored())
+
         try:
             if caller is None:
-                return await self._ended(ref, call_id, inner, control)
+                return await ended_run()
             # The caller waits: its slot works for another run meanwhile.
             caller.children.add(ref.run or "")
             try:
                 async with caller.pool.lent(caller.slot):
-                    return await self._ended(ref, call_id, inner, control)
+                    return await ended_run()
             finally:
                 caller.children.discard(ref.run or "")
         finally:
-            self._controls.pop(key, None)
+            ended.set()
 
     def control(self, run: RunRef | None) -> RunControl | None:
         """The control of ``run`` while it works, in the active turn's conversation; else None.
@@ -693,8 +1076,10 @@ class Delegations:
             return None
         return self._controls.get((get_active_turn(), run.run))
 
-    def cancel(self, run_id: str, *, by: str, error: str) -> bool:
-        """Cancel the working run ``run_id`` of the active turn's conversation, alone.
+    def cancel(
+        self, run_id: str, *, by: str, error: str, conversation: SessionRef | None = None
+    ) -> bool:
+        """Cancel the working run ``run_id`` of ``conversation`` (the active turn's, for None), alone.
 
         ``by`` its parent, the user or a limit; ``error`` says why, as its
         envelope will. Its siblings and its turn go on; its parent reads its
@@ -710,7 +1095,8 @@ class Delegations:
         """
         if by not in CANCELLED_BY:
             raise ValueError(f"A run is cancelled by its parent, user or limit, not {by!r}.")
-        control = self._controls.get((get_active_turn(), run_id))
+        key = (conversation if conversation is not None else get_active_turn(), run_id)
+        control = self._controls.get(key)
         if control is None or control.cancelled is not None:
             return False
         control.cancel(by=by, error=error)
@@ -729,13 +1115,14 @@ class Delegations:
         try:
             answer = await inner
         except asyncio.CancelledError:
-            if not _caller_cancelling() and control.cancelled is not None:
+            if _caller_cancelling():
+                self._stopped_with_caller(ref, call_id, RunAnswer())
+                raise
+            if control.cancelled is not None:
                 # Its control cancelled it and the hook let the cancel out:
                 # nothing of its work came back.
                 return self._cancelled(ref, call_id, control.cancelled, RunAnswer())
             self._end(ref, call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
-            if _caller_cancelling():
-                raise
             # The run's own task was stopped, not by its control nor its
             # caller's: the caller reads that it ended.
             return Delegated(
@@ -753,9 +1140,9 @@ class Delegations:
                 warning=f"{ref.instance} failed: {reason}", code=type(error).__name__,
             )
         if _caller_cancelling():
-            # The turn was stopped while the run's own cancel ended it (its
-            # hook took that cancel and answered): the run is the turn's.
-            self._end(ref, call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
+            # The caller was stopped while the run's own cancel ended it (its
+            # hook took that cancel and answered): the run is its caller's.
+            self._stopped_with_caller(ref, call_id, answer)
             raise asyncio.CancelledError
         if control.cancelled is not None:
             return self._cancelled(ref, call_id, control.cancelled, answer)
@@ -783,7 +1170,8 @@ class Delegations:
                 if warning is not None:
                     self._report(warning)
             result = envelope(
-                ref, RUN_COMPLETED, result=answer.text, partial=partial, error=stepped
+                ref, RUN_COMPLETED, result=answer.text, partial=partial, error=stepped,
+                open_tasks=open_task_descriptions(answer.tasks) if partial else None,
             )
         return Delegated(result=result, state=dict(answer.state), run=ref)
 
@@ -879,6 +1267,19 @@ class Delegations:
                 else:
                     pool.release(slot)
 
+    def _stopped_with_caller(self, ref: RunRef, call_id: str | None, answer: RunAnswer) -> None:
+        """End ``ref``'s run, whose caller's task is being cancelled.
+
+        A run above it cancelled by its control (its parent's stop, a limit,
+        the user's stop of that run) is what stopped the caller: the run
+        ends ``cancelled`` by its parent, saying so. Otherwise the turn is
+        stopped (Ctrl+C), and the run ends ``interrupted``.
+        """
+        if self._parent_stopped(get_active_turn(), ref):
+            self._cancelled(ref, call_id, (PARENT, WITH_ITS_PARENT_ERROR), answer)
+        else:
+            self._end(ref, call_id, RUN_INTERRUPTED, error=INTERRUPTED_ERROR)
+
     def _cancelled(
         self,
         ref: RunRef,
@@ -892,12 +1293,12 @@ class Delegations:
         partial = bool(answer.text)
         self._end(
             ref, call_id, RUN_CANCELLED, text=answer.text, error=error, partial=partial,
-            cancelled_by=by,
+            cancelled_by=by, plan=answer.plan, tasks=answer.tasks,
         )
         return Delegated(
             result=envelope(
                 ref, RUN_CANCELLED, result=answer.text, partial=partial, error=error,
-                cancelled_by=by,
+                cancelled_by=by, open_tasks=open_task_descriptions(answer.tasks),
             ),
             state=dict(answer.state), run=ref,
         )
@@ -924,7 +1325,10 @@ class Delegations:
         warned.run = ref
         self._report(warned)
         return Delegated(
-            result=envelope(ref, RUN_FAILED, result=text, error=error),
+            result=envelope(
+                ref, RUN_FAILED, result=text, error=error,
+                open_tasks=open_task_descriptions(tasks or []),
+            ),
             state=dict(state or {}), run=ref,
         )
 
@@ -945,13 +1349,17 @@ class Delegations:
 
         The end carries the run's last ``plan`` and ``tasks`` when it has any,
         and the status it leaves its instance in: ``closed`` for a type that
-        is not continuable or one past ``max_open`` (the oldest idle
-        instance is closed: another one after this event), ``stopped`` for
-        the user's cancel, else ``idle``.
+        is not continuable, an instance its parent closed while the run worked
+        (``stop`` with ``close``: each open descendant is closed after this
+        event) or one past ``max_open`` (the oldest idle instance is closed:
+        another one after this event), ``stopped`` for the user's cancel,
+        else ``idle``.
         """
         conversation = get_active_turn()
         instance = self._runs.instance(conversation, ref.instance)
-        if instance is not None and not instance.continuable:
+        # A close its parent asked for while the run worked, applied now.
+        closing_reason = self._closing.pop((conversation, ref.instance), None)
+        if (instance is not None and not instance.continuable) or closing_reason is not None:
             left = INSTANCE_CLOSED
         elif status == RUN_CANCELLED and cancelled_by == USER:
             left = INSTANCE_STOPPED
@@ -969,9 +1377,13 @@ class Delegations:
         self._emit(end)
         if left == INSTANCE_CLOSED:
             self._release_stop(conversation, ref.instance)
+        if closing_reason is not None:
+            for below in self._descendants(conversation, ref.instance):
+                if below.status in _OPEN:
+                    self._close(conversation, below, closing_reason)
         for other in closing:
             record = self._runs.instance(conversation, other)
-            if other != ref.instance and record is not None:
+            if other != ref.instance and record is not None and record.status in _OPEN:
                 self._close(
                     conversation, record,
                     MAX_OPEN_REASON.format(limit=self.policy.max_open),
@@ -1028,6 +1440,7 @@ class Delegations:
             return
         logger.info("subagent_closed", instance=record.instance, reason=reason)
         self._release_stop(conversation, record.instance)
+        self._drop_unread(conversation, record.instance)
         self._emit(WorkflowEvent.agent_instance(last.ref, INSTANCE_CLOSED, reason=reason))
 
     def _side_tokens(

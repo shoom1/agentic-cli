@@ -819,7 +819,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # Its instance's next run answers the calls this one left open
             # as the user's (as ADK seals them). The run's own cancel has
             # stopped it; any other (its turn's) goes on.
-            self._open_calls.cancelled(conversation, instance=run.ref.instance)
+            self._open_calls.cancelled(
+                conversation, instance=run.ref.instance,
+                cause=self._delegations.stop_cause(run.ref, conversation=conversation),
+            )
             if not run.control.own_cancel():
                 raise
         except Exception as error:  # noqa: BLE001 - the run fails; its parent reads why

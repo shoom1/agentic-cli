@@ -147,3 +147,24 @@ async def test_the_messages_steered_since_the_last_call_join_the_runs_state():
         (HumanMessage, "Also find Z."), (HumanMessage, "Be brief."),
     ]
     assert await middleware.abefore_model({}, None) is None  # given once
+
+
+async def test_steered_messages_are_stored_once_a_model_call_holds_them():
+    """Taken into the state before a model call (``abefore_model``), a message
+    is the run's unstored one until that call's request holds it: the step
+    that added it is checkpointed by then."""
+    control = RunControl(REF, AgentLimits())
+    middleware = RunControlMiddleware(lambda: SimpleNamespace(control=lambda run: control))
+    control.steer("Also Z.")
+
+    update = await middleware.abefore_model({"messages": []}, None)
+
+    assert [m.content for m in update["messages"]] == ["Also Z."]
+    assert control.unstored() == ["Also Z."]
+
+    async def handler(request):
+        return AIMessage("Found it.")
+
+    await middleware.awrap_model_call(SimpleNamespace(messages=update["messages"]), handler)
+
+    assert control.unstored() == []

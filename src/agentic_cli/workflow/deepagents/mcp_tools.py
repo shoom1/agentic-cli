@@ -37,7 +37,7 @@ from langchain_mcp_adapters.sessions import create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from agentic_cli.logging import Loggers
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, ToolRegistry
 from agentic_cli.workflow.mcp import MCPServerConfig, to_langchain_connection
 from agentic_cli.workflow.permissions.capabilities import Capability
@@ -262,7 +262,8 @@ def without_clashes(
     """The MCP tools whose names are free on ``agent``, and a notice per one skipped.
 
     A name is taken by one of the agent's own ``tools``, by an MCP tool kept
-    before it (servers in order), and always by ``task``, the delegation tool.
+    before it (servers in order), and always by ``task``, the delegation tool,
+    and by the parent's tools for its sub-agents (``FOLLOW_UP_TOOLS``).
 
     Returns:
         The MCP tools to add, and the notices.
@@ -273,6 +274,8 @@ def without_clashes(
     for tool in mcp_tools:
         if tool.name == TASK_TOOL:
             why = "that name is reserved for delegating to sub-agents"
+        elif tool.name in FOLLOW_UP_TOOLS:
+            why = "that name is reserved for continuing sub-agents"
         elif tool.name in taken:
             why = "the agent already has a tool of that name"
         else:

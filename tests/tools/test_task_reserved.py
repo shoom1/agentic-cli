@@ -1,4 +1,4 @@
-"""``task`` is a framework tool name: the delegation tool.
+"""``task`` is a framework tool name: the delegation tool (and the parent's other tools).
 
 A coordinator on the Deep Agents backend delegates through a ``task`` tool
 that Deep Agents builds. It has no backend-neutral implementation, so the
@@ -17,7 +17,15 @@ import textwrap
 import pytest
 
 from agentic_cli.tools import register_tool
-from agentic_cli.tools._core.delegation import TASK_TOOL, declare_delegation_tool
+from agentic_cli.tools._core.delegation import (
+    CHECK_AGENTS_TOOL,
+    FOLLOW_UP_TOOLS,
+    MESSAGE_AGENT_TOOL,
+    STOP_AGENT_TOOL,
+    TASK_TOOL,
+    declare_delegation_tool,
+    declare_follow_up_tools,
+)
 from agentic_cli.tools.registry import (
     ToolCategory,
     bind_tool_identity,
@@ -111,3 +119,78 @@ def test_identify_tool_resolves_a_bound_object_to_the_declaration():
 
     assert identify_tool(tool) is definition
     assert identify_tool(DelegationTool()) is None
+
+
+# -- the parent's tools: message_agent, stop_agent, check_agents ----------------------------
+
+
+class TestTheParentsToolsAreReserved:
+    """``message_agent``, ``stop_agent`` and ``check_agents`` are declared
+    beside ``task``, exempt, with no backend-neutral callable: each backend
+    builds its own and binds it to its declaration."""
+
+    def test_their_names(self):
+        assert (MESSAGE_AGENT_TOOL, STOP_AGENT_TOOL, CHECK_AGENTS_TOOL) == (
+            "message_agent", "stop_agent", "check_agents",
+        )
+        assert FOLLOW_UP_TOOLS == ("message_agent", "stop_agent", "check_agents")
+
+    @pytest.mark.parametrize("name, description", [
+        ("message_agent", "Send a message to one of your sub-agents."),
+        ("stop_agent", "Stop one of your sub-agents."),
+        ("check_agents", "Check on your sub-agents."),
+    ])
+    def test_each_is_declared_by_the_framework(self, name, description):
+        definition = get_registry().get(name)
+
+        assert definition is not None
+        assert definition.func is None
+        assert definition.description == description
+        assert definition.capabilities is EXEMPT
+        assert definition.category is ToolCategory.PLANNING
+
+    def test_declaring_them_again_is_idempotent(self):
+        before = tuple(get_registry().get(name) for name in FOLLOW_UP_TOOLS)
+
+        assert declare_follow_up_tools() == before
+
+    @pytest.mark.parametrize("name", ["message_agent", "stop_agent", "check_agents"])
+    def test_an_application_tool_of_one_of_their_names_raises(self, name):
+        def run(agent: str) -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(ValueError, match=f"'{name}' is already registered"):
+            register_tool(name=name, capabilities=EXEMPT)(run)
+
+        with pytest.raises(ValueError, match=f"'{name}' is ambiguous"):
+            resolve_tools([name])
+
+
+@pytest.mark.parametrize("name", FOLLOW_UP_TOOLS)
+def test_the_parents_tools_are_reserved_before_any_tool_registers(name, tmp_path):
+    """A fresh interpreter: the first thing an application can import (the
+    registry) already has each of the parent's tools declared."""
+    code = textwrap.dedent(
+        f"""
+        from agentic_cli.tools.registry import register_tool
+        from agentic_cli.workflow.permissions import EXEMPT
+
+        def run(agent: str) -> dict:
+            \"\"\"An application tool.\"\"\"
+            return {{}}
+
+        try:
+            register_tool(name={name!r}, capabilities=EXEMPT)(run)
+        except ValueError as error:
+            print("refused:", error)
+        else:
+            print("registered")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path, timeout=120
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith(f"refused: Tool '{name}' is already registered")

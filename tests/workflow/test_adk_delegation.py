@@ -77,11 +77,14 @@ from agentic_cli.tools.skills import SkillStore  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.permission_plugin import _UNVERIFIED, PermissionPlugin  # noqa: E402
 from agentic_cli.workflow.adk.sessions import child_app  # noqa: E402
-from agentic_cli.workflow.adk.task_tool import TaskTool  # noqa: E402
+from agentic_cli.workflow.adk.task_tool import FollowUpTool, TaskTool  # noqa: E402
+from agentic_cli.workflow.agents import SubAgentPolicy  # noqa: E402
 from agentic_cli.workflow.agents import brief as brief_module  # noqa: E402
 from agentic_cli.workflow.agents.brief import (  # noqa: E402
     INHERITED_CONTEXT_NOTE,
     Brief,
+    follow_up_description,
+    follow_up_parameters,
     task_message,
 )
 from agentic_cli.workflow.agents.envelope import read_envelope  # noqa: E402
@@ -1045,6 +1048,103 @@ class TestTheNameClash:
 
         root = await built(configs)
         assert not any(isinstance(tool, TaskTool) for tool in root.tools)
+
+
+class TestTheParentsTools:
+    """With the policy's ``follow_ups`` a delegating agent also gets
+    ``message_agent``, ``stop_agent`` and ``check_agents``, each the
+    framework's, bound to its declaration; by default ``task`` alone."""
+
+    @staticmethod
+    async def root_of(
+        configs: list[AgentConfig], policy: SubAgentPolicy
+    ) -> tuple[LlmAgent, dict[str, LlmAgent]]:
+        manager = GoogleADKWorkflowManager(
+            agent_configs=configs, subagents=policy,
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+        )
+        await manager.initialize_services()
+        try:
+            return manager._root_agent, dict(manager._agents)
+        finally:
+            await manager.cleanup()
+
+    async def test_by_default_task_alone(self, project):
+        root, _ = await self.root_of(team(), SubAgentPolicy())
+
+        assert [tool.name for tool in root.tools] == ["task"]
+
+    async def test_with_follow_ups_every_delegating_agent_gets_them(self, project):
+        configs = [
+            team()[0],
+            AgentConfig(name="researcher", prompt=PROMPTS["researcher"], description="Finds.",
+                        sub_agents=["checker"], include_state_tools=False),
+            AgentConfig(name="checker", prompt="You check.", description="Checks.",
+                        include_state_tools=False),
+        ]
+        root, agents = await self.root_of(configs, SubAgentPolicy(follow_ups=True))
+
+        names = ["task", "message_agent", "stop_agent", "check_agents"]
+        assert [tool.name for tool in root.tools] == names
+        assert [tool.name for tool in agents["researcher"].tools] == names
+        assert agents["checker"].tools == []
+        for tool in root.tools[1:]:
+            assert type(tool) is FollowUpTool
+            assert identify_tool(tool) is get_registry().get(tool.name)
+            assert await _gate(tool) is None
+            declared = tool._get_declaration()
+            assert (declared.description, declared.parameters_json_schema) == (
+                follow_up_description(tool.name), follow_up_parameters(tool.name)
+            )
+
+    async def test_a_subclass_is_denied(self, project):
+        class Message(FollowUpTool):
+            pass
+
+        tool = Message("message_agent", lambda: None)
+
+        assert identify_tool(tool) is None
+        assert _denied(await _gate(tool))
+
+    async def test_an_own_tool_of_one_of_their_names_fails_the_build(self, project):
+        def check_agents() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(AgentGraphError) as exc:
+            await self.root_of(team(tools=[check_agents]), SubAgentPolicy(follow_ups=True))
+
+        assert str(exc.value) == (
+            "Agent 'coordinator' continues its sub-agents through tools named message_agent, "
+            "stop_agent and check_agents, so its own tools cannot include 'check_agents'; "
+            "rename that tool."
+        )
+
+    async def test_the_error_names_the_first_clash_in_the_order_of_their_names(self, project):
+        """On both backends, whatever the order of the agent's own tools."""
+        def check_agents() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        def message_agent() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(AgentGraphError, match="cannot include 'message_agent'"):
+            await self.root_of(
+                team(tools=[check_agents, message_agent]), SubAgentPolicy(follow_ups=True)
+            )
+
+    async def test_without_follow_ups_an_own_tool_of_one_of_their_names_is_its_own(self, project):
+        def check_agents() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        root, _ = await self.root_of(team(tools=[check_agents]), SubAgentPolicy())
+
+        assert [getattr(tool, "name", None) or tool.__name__ for tool in root.tools] == [
+            "check_agents", "task",
+        ]
 
 
 # --- permission identity ---------------------------------------------------------------

@@ -20,6 +20,12 @@ the message that called ``task`` (``inherited_messages``).
 
 The framework built the tool, so it binds it to the ``task`` declaration
 (``tools/_core/delegation.py``): the permission gate knows it by identity.
+
+With ``SubAgentPolicy.follow_ups`` a delegating agent also gets the parent's
+other tools (``build_follow_up_tools``: ``message_agent``, ``stop_agent``,
+``check_agents``), each bound to its own declaration and answering as
+``task`` does: its result as JSON, one ``ToolMessage``, the shared state a
+follow-up run changed in the same ``Command``.
 """
 
 from __future__ import annotations
@@ -37,10 +43,16 @@ from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
-from agentic_cli.workflow.agents.brief import task_description, task_parameters
+from agentic_cli.workflow.agents.brief import (
+    follow_up_description,
+    follow_up_parameters,
+    task_description,
+    task_parameters,
+)
 from agentic_cli.workflow.agents.delegate import DelegationRequest
+from agentic_cli.workflow.agents.follow_ups import call_follow_up_tool
 from agentic_cli.workflow.sessions import get_active_run
 
 if TYPE_CHECKING:
@@ -90,6 +102,44 @@ def build_task_tool(
         infer_schema=False,
     )
     bind_tool_identity(tool, get_registry().get(TASK_TOOL))
+    return tool
+
+
+def build_follow_up_tools(delegations: Callable[[], Delegations]) -> list[StructuredTool]:
+    """The parent's tools (``message_agent``, ``stop_agent``, ``check_agents``), in
+    ``FOLLOW_UP_TOOLS`` order.
+
+    Args:
+        delegations: The manager's delegations, asked for at each call.
+    """
+    return [_follow_up_tool(name, delegations) for name in FOLLOW_UP_TOOLS]
+
+
+def _follow_up_tool(name: str, delegations: Callable[[], Delegations]) -> StructuredTool:
+    """One of the parent's tools, bound to its declaration."""
+
+    async def call(runtime: ToolRuntime, **arguments: Any) -> Command:
+        state = runtime.state
+        delegated = await call_follow_up_tool(
+            delegations(), name, arguments,
+            call_id=runtime.tool_call_id,
+            state={key: state[key] for key in SHARED_KEYS if key in state},
+        )
+        answer = ToolMessage(
+            json.dumps(delegated.result, ensure_ascii=False),
+            tool_call_id=runtime.tool_call_id,
+            name=name,
+        )
+        return Command(update={**delegated.state, "messages": [answer]})
+
+    tool = StructuredTool.from_function(
+        coroutine=call,
+        name=name,
+        description=follow_up_description(name),
+        args_schema=follow_up_parameters(name),
+        infer_schema=False,
+    )
+    bind_tool_identity(tool, get_registry().get(name))
     return tool
 
 

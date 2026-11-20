@@ -3,7 +3,8 @@
 A blocking delegation returns its run's envelope: whether it succeeded (only
 a completed run did, partial or not), its instance and run, its status,
 whether its answer is partial, its final text and a one-line error, and for
-a cancelled run who cancelled it. ``read_envelope`` finds one in a
+a cancelled run who cancelled it, and for a run that did not complete fully
+the tasks it left open. ``read_envelope`` finds one in a
 delegation's result as either backend's ``TOOL_RESULT`` carries it (a dict,
 or the JSON text of one), and never raises.
 """
@@ -21,6 +22,7 @@ from agentic_cli.workflow.agents.envelope import (
     TIME_LIMIT_ERROR,
     TOKEN_LIMIT_ERROR,
     envelope,
+    open_task_descriptions,
     read_envelope,
 )
 from agentic_cli.workflow.agents.runs import (
@@ -112,6 +114,43 @@ class TestEnvelope:
     def test_only_a_cancelled_run_names_who_cancelled_it(self):
         with pytest.raises(ValueError, match="cancelled_by"):
             envelope(RESEARCHER, RUN_FAILED, cancelled_by="user")
+
+
+class TestOpenTasks:
+    """A run that did not complete fully names the tasks it left open, so its
+    parent can continue it with a follow-up."""
+
+    def test_they_come_last_when_given(self):
+        value = envelope(RESEARCHER, RUN_COMPLETED, result="So far...", partial=True,
+                         error=STEP_LIMIT_ERROR, open_tasks=["find Y", "find Z"])
+        assert list(value)[-1] == "open_tasks"
+        assert value["open_tasks"] == ["find Y", "find Z"]
+
+    def test_after_who_cancelled_it(self):
+        value = envelope(RESEARCHER, RUN_CANCELLED, error="stopped", cancelled_by="parent",
+                         open_tasks=("find Y",))
+        assert list(value)[-2:] == ["cancelled_by", "open_tasks"]
+        assert value["open_tasks"] == ["find Y"]
+
+    @pytest.mark.parametrize("given", [None, [], ()])
+    def test_none_without_any(self, given):
+        assert "open_tasks" not in envelope(
+            RESEARCHER, RUN_FAILED, error="why", open_tasks=given
+        )
+
+    def test_the_descriptions_of_the_tasks_not_completed_in_their_order(self):
+        tasks = [
+            {"description": "find X", "status": "completed"},
+            {"description": "find Y", "status": "in_progress"},
+            {"description": "find Z"},  # the state tools' default: pending
+            {"description": "skip W", "status": "cancelled"},
+            {"status": "pending"},  # no description: nothing to name
+            {"description": 7, "status": "pending"},
+        ]
+        assert open_task_descriptions(tasks) == ["find Y", "find Z", "skip W"]
+
+    def test_none_for_none(self):
+        assert open_task_descriptions([]) == []
 
 
 class TestReadEnvelope:

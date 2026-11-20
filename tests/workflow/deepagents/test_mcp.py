@@ -688,6 +688,30 @@ class TestNotices:
         ]
 
 
+class TestReservedNames:
+    def test_the_parents_tools_names_are_reserved_on_every_agent(self):
+        """As ``task`` is: an MCP tool of one of their names is skipped, whatever
+        the agent and the policy."""
+        def served(name: str) -> StructuredTool:
+            return StructuredTool(
+                name=name, description="A server's tool.", args_schema={"type": "object"},
+                coroutine=None, metadata={mcp_tools.SERVER_KEY: "atlas"},
+            )
+
+        kept, notices = mcp_tools.without_clashes(
+            "researcher", [], [served(name) for name in
+                               ("message_agent", "stop_agent", "check_agents", "lookup")],
+        )
+
+        assert [tool.name for tool in kept] == ["lookup"]
+        assert notices == [
+            f"MCP tool '{name}' of server 'atlas' is skipped for agent 'researcher': that "
+            "name is reserved for continuing sub-agents. Set tool_name_prefix on the server "
+            "to rename its tools."
+            for name in ("message_agent", "stop_agent", "check_agents")
+        ]
+
+
 def _tool(manager, name: str) -> BaseTool:
     """The tool object the root agent's tool node runs under ``name``."""
     return manager._root.nodes["tools"].bound.tools_by_name[name]

@@ -28,7 +28,13 @@ the run's own task, and hands it to the backend's hook as
   past a limit is made, and nothing the model asked for runs after it. A
   model that reports no usage counts none of its own.
 - ``steer(message)`` gives the run a message, which its next model call
-  (``take_steering``) adds after its last message, as a user's.
+  (``take_steering``) adds after its last message, as a user's. A message
+  stays unstored until its backend says the run's transcript holds it
+  (``stored``); ``Delegations`` gives the unstored ones (``unstored``) to
+  the instance's next run, so a message is never lost.
+- ``stop_cause`` is what a call the run left at its permission prompt is
+  told stopped the run: its parent, its time limit or its token limit
+  (None for the user's stop).
 
 All of it runs on the event loop; nothing here blocks.
 """
@@ -57,6 +63,10 @@ STEP_LIMIT_NOTE = (
 )
 #: Who cancels a run at one of its limits.
 LIMIT = "limit"
+#: What stopped a run, as a call it left at its prompt is told.
+PARENT_CAUSE = "its parent"
+TIME_LIMIT_CAUSE = "its time limit"
+TOKEN_LIMIT_CAUSE = "its token limit"
 
 
 class RunControl:
@@ -89,6 +99,8 @@ class RunControl:
         self._side_tokens = side_tokens
         self.cancelled: tuple[str, str] | None = None
         self._steering: list[str] = []
+        # Messages taken by a model call whose backend has not said it stored them.
+        self._taken: list[str] = []
         self._calls = 0
         self._tokens = 0
         self._final = False
@@ -226,6 +238,11 @@ class RunControl:
         self._final = True
 
     @property
+    def stopping(self) -> bool:
+        """Whether the run takes no more steps: it is cancelled, or its work has ended (``finish``)."""
+        return self.cancelled is not None or self._finished
+
+    @property
     def at_step_limit(self) -> bool:
         """Whether the run has made its last allowed model call."""
         limit = self.limits.max_model_calls
@@ -251,4 +268,25 @@ class RunControl:
     def take_steering(self) -> list[str]:
         """The messages given since the run's last model call, oldest first; given once."""
         taken, self._steering = self._steering, []
+        self._taken.extend(taken)
         return taken
+
+    def stored(self, count: int | None = None) -> None:
+        """The run's transcript now holds the first ``count`` messages taken (all, for None)."""
+        del self._taken[:count]
+
+    def unstored(self) -> list[str]:
+        """The messages the run's transcript does not hold: taken and not yet stored, then never taken."""
+        return [*self._taken, *self._steering]
+
+    @property
+    def stop_cause(self) -> str | None:
+        """What stopped the run, for a call it left at its prompt; None while it works or for the user's stop."""
+        if self.cancelled is None:
+            return None
+        by, error = self.cancelled
+        if by == "parent":
+            return PARENT_CAUSE
+        if by == LIMIT:
+            return TOKEN_LIMIT_CAUSE if error == TOKEN_LIMIT_ERROR else TIME_LIMIT_CAUSE
+        return None

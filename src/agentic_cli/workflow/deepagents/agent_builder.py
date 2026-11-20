@@ -5,8 +5,9 @@ checkpointer (a sub-agent's runs are on a thread of its instance's own, which
 its follow-ups continue); a tree built without a checkpointer compiles its
 sub-agents with none. An agent with
 sub-agents gets the framework's ``task`` tool (``task_tool.build_task_tool``)
-among its tools: a call hands the brief to the manager's ``Delegations``,
-which runs the sub-agent's graph apart from the caller's stream
+among its tools (with ``SubAgentPolicy.follow_ups``, also the parent's other
+tools, ``task_tool.build_follow_up_tools``): a call hands the brief to the
+manager's ``Delegations``, which runs the sub-agent's graph apart from the caller's stream
 (``DeepAgentsWorkflowManager._run_agent``) and answers with the result
 envelope. Only the configured sub-agents are offered: there is no automatic
 general-purpose sub-agent, and none of Deep Agents' file tools. ``graphs``,
@@ -56,7 +57,7 @@ from langchain.agents import create_agent
 from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 
 from agentic_cli.models import CacheMechanism
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import FOLLOW_UP_CLASH_ERROR, FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
@@ -72,7 +73,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     ToolResultCapMiddleware,
 )
 from agentic_cli.workflow.deepagents.state import AgentCliState
-from agentic_cli.workflow.deepagents.task_tool import build_task_tool
+from agentic_cli.workflow.deepagents.task_tool import build_follow_up_tools, build_task_tool
 from agentic_cli.workflow.context import ContextBudget
 from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.outside_content import OutsideContentMarks
@@ -199,10 +200,18 @@ def build_agent_tree(
                 (name, middleware) for middleware in model_side
                 if isinstance(middleware, ReportingSummarizationMiddleware)
             )
-        own = _own_tools(config, tools.get(name, []), delegates=bool(config.sub_agents))
+        follows = (
+            bool(config.sub_agents) and delegations is not None
+            and delegations().policy.follow_ups
+        )
+        own = _own_tools(
+            config, tools.get(name, []), delegates=bool(config.sub_agents), follows=follows
+        )
         if config.sub_agents and delegations is not None:
             types = {sub: config_map[sub] for sub in config.sub_agents}
             own = [*own, build_task_tool(name, types, delegations)]
+            if follows:
+                own = [*own, *build_follow_up_tools(delegations)]
         return create_agent(
             model=model,
             tools=own,
@@ -225,18 +234,26 @@ def build_agent_tree(
 
 
 def _own_tools(
-    config: AgentConfig, tools: list["BaseTool"], *, delegates: bool
+    config: AgentConfig, tools: list["BaseTool"], *, delegates: bool, follows: bool = False
 ) -> list["BaseTool"]:
     """The agent's tools; a delegating agent's must leave ``task`` to delegation.
 
     A model is offered one tool per name, so a delegating agent's own tool
-    named ``task`` would take its delegation tool's place, or lose it.
+    named ``task`` would take its delegation tool's place, or lose it; so
+    would one named like a tool of the parent's that ``follows`` (the policy's
+    ``follow_ups``) gives it.
     """
     if delegates and any(tool.name == TASK_TOOL for tool in tools):
         raise AgentGraphError(
             f"Agent {config.name!r} delegates to sub-agents through a tool named "
             f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
         )
+    if follows:
+        own_names = {tool.name for tool in tools}
+        # The first in ``FOLLOW_UP_TOOLS`` order, as on ADK.
+        clash = next((name for name in FOLLOW_UP_TOOLS if name in own_names), None)
+        if clash is not None:
+            raise AgentGraphError(FOLLOW_UP_CLASH_ERROR.format(agent=config.name, tool=clash))
     return list(tools)
 
 

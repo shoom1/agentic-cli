@@ -1084,7 +1084,9 @@ class RunControlMiddleware(AgentMiddleware):
     - before each model call (a node hook, ``abefore_model``), the messages
       steered to the run since its last (``RunControl.take_steering``) are
       added to its state after its last message, each a ``HumanMessage``,
-      so they stay in its transcript;
+      so they stay in its transcript, each the run's stored one
+      (``RunControl.stored``) once the model call after it holds it (the
+      step that added it is checkpointed by then);
     - the call is counted (``RunControl.model_call``),
       and the run's last allowed one gets ``STEP_LIMIT_NOTE`` after its last
       message, in the request only (``with_note``). Its tools stay bound:
@@ -1131,6 +1133,8 @@ class RunControlMiddleware(AgentMiddleware):
         control = self._control()
         if control is None:
             return await handler(request)
+        # What abefore_model added is in this request, and its step is checkpointed.
+        control.stored()
         if control.model_call():
             request = request.override(messages=with_note(request.messages, STEP_LIMIT_NOTE))
         response = await handler(request)

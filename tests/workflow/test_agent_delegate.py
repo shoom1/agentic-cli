@@ -25,6 +25,7 @@ from agentic_cli.workflow.agents import (
     DEFAULT_LIMITS,
     INSTANCE_CLOSED,
     INSTANCE_IDLE,
+    INSTANCE_RUNNING,
     INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
@@ -74,6 +75,7 @@ from agentic_cli.workflow.sessions import (
     open_turn_scope,
     reset_active_tool_call,
     reset_active_turn,
+    runs_this_turn,
     set_active_tool_call,
     set_active_turn,
 )
@@ -992,10 +994,16 @@ class TestCancellingOneRun:
         assert out == {"first": True, "again": False}
         assert (result.result["cancelled_by"], result.result["error"]) == ("parent", "stop")
 
-    async def test_a_parent_cancelled_alone_ends_its_working_child_interrupted(self):
-        """A parent run cancelled by its control while its child works: the
-        child's caller (the parent's call) is stopped, so the child is the
-        parent's, interrupted; the parent ends cancelled with what it had."""
+    @pytest.mark.parametrize("by, error", [
+        ("parent", "no longer needed"), ("limit", TIME_LIMIT_ERROR), ("user", "stopped"),
+    ])
+    async def test_a_parent_cancelled_alone_ends_its_working_child_cancelled_by_its_parent(
+        self, by, error
+    ):
+        """A parent run cancelled by its control while its child works (its
+        parent's stop, a limit, the user's): the child's caller (the
+        parent's call) is stopped, so the child ends cancelled by its
+        parent, saying so; the parent ends cancelled with what it had."""
         child_working = asyncio.Event()
         made: Delegations
 
@@ -1026,7 +1034,7 @@ class TestCancellingOneRun:
 
         watcher = asyncio.create_task(started())
         result, _, cancelled = await stopped(
-            made, working, by="parent", error="no longer needed",
+            made, working, by=by, error=error,
             asked=request({"agent_type": "middle", "title": "Plan", "objective": "Plan X."}),
             run="middle-1#1",
         )
@@ -1034,9 +1042,13 @@ class TestCancellingOneRun:
 
         assert cancelled is True
         assert (result.result["status"], result.result["result"]) == (RUN_CANCELLED, "Planned half.")
-        assert {r.ref.instance: (r.status, r.cancelled_by) for r in runs.records(CONVERSATION)} == {
-            "middle-1": (RUN_CANCELLED, "parent"), "leaf-1": (RUN_INTERRUPTED, None),
+        assert {
+            r.ref.instance: (r.status, r.cancelled_by, r.error) for r in runs.records(CONVERSATION)
+        } == {
+            "middle-1": (RUN_CANCELLED, by, error),
+            "leaf-1": (RUN_CANCELLED, "parent", "its parent's run was stopped"),
         }
+        assert runs.instance(CONVERSATION, "leaf-1").status == INSTANCE_IDLE
 
 
 class TestTheTimeLimit:
@@ -2435,3 +2447,1031 @@ class TestClose:
 async def _now(value: Any) -> Any:
     """``value``, awaited: a synchronous call as ``turned``'s work."""
     return value
+
+
+# -- the parent's tools: a message, a stop, a look; steering never lost ----------------------
+
+STEERED = "Your message was given to its run before its next step."
+FIND_Y = {"agent_type": "researcher", "title": "Find Y", "objective": "Find Y."}
+PLAN = {"agent_type": "middle", "title": "Plan", "objective": "Plan X."}
+
+
+def blocking(*runs: str) -> tuple[Hook, dict[str, asyncio.Event], list[AgentRun]]:
+    """A hook whose ``runs`` (by id) work until cancelled, each setting its
+    event once it works (and returning ``Half way.`` on its own cancel);
+    every other run answers ``Did: <its message>``; the runs it was asked."""
+    working = {run: asyncio.Event() for run in runs}
+    asked: list[AgentRun] = []
+
+    async def hook(run: AgentRun) -> RunAnswer:
+        asked.append(run)
+        if run.ref.run not in working:
+            return RunAnswer(text=f"Did: {run.message}")
+        working[run.ref.run].set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if not run.control.own_cancel():
+                raise
+            return RunAnswer(text="Half way.")
+        return RunAnswer()  # pragma: no cover
+
+    return hook, working, asked
+
+
+class TestAMessage:
+    """``message``, ``message_agent``'s: an idle instance's follow-up; a
+    running one's run steered, or with ``interrupt`` stopped and followed
+    up; one run per instance at a time."""
+
+    async def test_to_an_idle_instance_is_its_follow_up(self):
+        hook, _, asked = blocking()
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            return await made.message(follow(message="Now find Y."))
+
+        result, _ = await turned(work)
+
+        assert result.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_COMPLETED, "partial": False, "result": "Did: Now find Y.",
+            "error": None,
+        }
+        assert (asked[-1].follow_up, asked[-1].message) == (True, "Now find Y.")
+
+    async def test_to_a_running_one_is_steered_to_its_run(self):
+        hook, working, asked = blocking("researcher-1#2")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            told = await made.message(follow(message="Also Z.", call_id="c3"))
+            steered = asked[-1].control.unstored()
+            made.cancel("researcher-1#2", by="parent", error="enough")
+            await running
+            return told, steered
+
+        (told, steered), _ = await turned(work)
+
+        assert told.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": "running", "note": STEERED,
+        }
+        assert (told.run.run, told.state) == ("researcher-1#2", {})
+        assert steered == ["Also Z."]
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == [
+            "researcher-1#1", "researcher-1#2",
+        ]
+
+    async def test_two_at_once_to_an_idle_one_start_one_run_and_steer_the_other(self):
+        """Two ``message_agent`` calls in one response: the first claims the
+        instance as it starts its run, the second is steered into that run,
+        and both get a result."""
+        taken: list[list[str]] = []
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            taken.append(run.control.take_steering())  # its first model call
+            run.control.stored()
+            return RunAnswer(text=f"Did: {run.message}")
+
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            return await asyncio.gather(
+                made.message(follow(message="Find Y.", call_id="c2")),
+                made.message(follow(message="Find Z.", call_id="c3")),
+            )
+
+        (first, second), _ = await turned(work)
+
+        assert (first.result["run"], first.result["status"], first.result["result"]) == (
+            "researcher-1#2", RUN_COMPLETED, "Did: Find Y."
+        )
+        assert second.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": "running", "note": STEERED,
+        }
+        assert taken == [[], ["Find Z."]]
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == [
+            "researcher-1#1", "researcher-1#2",
+        ]
+
+    async def test_with_interrupt_its_run_is_stopped_and_a_new_one_starts_with_it(self):
+        hook, working, _ = blocking("researcher-1#2")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            replaced = await made.message(
+                follow(message="Do Y instead.", call_id="c3"), interrupt=True
+            )
+            return await running, replaced
+
+        (stopped_run, replaced), _ = await turned(work)
+
+        assert stopped_run.result == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_CANCELLED, "partial": True, "result": "Half way.",
+            "error": "stopped by its parent for a new message", "cancelled_by": "parent",
+        }
+        assert (replaced.result["run"], replaced.result["result"]) == (
+            "researcher-1#3", "Did: Do Y instead."
+        )
+        third = runs.record(CONVERSATION, "researcher-1#3")
+        assert (third.input, third.call_id) == ("Do Y instead.", "c3")
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_IDLE
+
+    async def test_a_message_blocks_no_event_loop(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            steered = await made.message(follow(message="Also Z.", call_id="c3"))
+            replaced = await made.message(follow(message="Y.", call_id="c4"), interrupt=True)
+            await running
+            return steered, replaced
+
+        with no_blocking_calls():
+            (steered, replaced), _ = await turned(work)
+
+        assert (steered.result["status"], replaced.result["run"]) == ("running", "researcher-1#3")
+
+    async def test_with_interrupt_an_idle_one_just_runs(self):
+        hook, _, _ = blocking()
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            return await made.message(follow(message="Go on."), interrupt=True)
+
+        result, _ = await turned(work)
+
+        assert (result.result["run"], result.result["result"]) == ("researcher-1#2", "Did: Go on.")
+
+    async def test_to_a_run_being_stopped_follows_it_up_once_it_has_ended(self):
+        """A run its parent has just stopped takes no more steps: the message
+        is not told as given to it, but starts the instance's next run."""
+        hook, working, _ = blocking("researcher-1#2")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            stopped_it = made.stop(CONVERSATION, None, "researcher-1")
+            told = await made.message(follow(message="Do Y instead.", call_id="c3"))
+            return stopped_it, told, await running
+
+        (stopped_it, told, ended), _ = await turned(work)
+
+        assert stopped_it["stopped"] == "researcher-1#2"
+        assert ended.result["status"] == RUN_CANCELLED
+        assert (told.result["run"], told.result["result"]) == (
+            "researcher-1#3", "Did: Do Y instead."
+        )
+        assert made._unread == {}
+
+    async def test_to_a_run_being_closed_is_refused_as_closed(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            made.stop(CONVERSATION, None, "researcher-1", close=True)
+            told = await made.message(follow(message="Do Y instead.", call_id="c3"))
+            await running
+            return told
+
+        told, _ = await turned(work)
+
+        assert told.result == {
+            "success": False, "error": "researcher-1 is closed; start a new one with task.",
+        }
+        assert made._unread == {}
+
+    async def test_to_a_run_whose_work_has_ended_follows_it_up_after_it(self):
+        """A run that said its work has ended (``finish``) takes no more steps:
+        it is not steered, and ``steer`` says so."""
+        release = asyncio.Event()
+        working = asyncio.Event()
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.run == "researcher-1#2":
+                run.control.finish()
+                working.set()
+                await release.wait()
+            return RunAnswer(text=f"Did: {run.message}")
+
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working.wait()
+            told = asyncio.create_task(made.message(follow(message="Y.", call_id="c3")))
+            steered = made.steer(CONVERSATION, "researcher-1#2", "Z.")
+            await asyncio.sleep(0)
+            release.set()
+            return steered, await running, await told
+
+        (steered, _, told), _ = await turned(work)
+
+        assert steered is False
+        assert (told.result["run"], told.result["result"]) == ("researcher-1#3", "Did: Y.")
+        assert made._unread == {}
+
+    async def test_to_a_run_being_closed_is_refused_at_once(self):
+        """The refusal is certain once its instance is closing: the sender is
+        not kept waiting for a run that nobody stopped."""
+        made: Delegations
+        working = {"leaf-1#2": asyncio.Event()}
+        made = delegations(with_a_leaf(lambda: made, working))
+
+        async def work():
+            await made.delegate(request(PLAN))
+            running = asyncio.create_task(made.message(users("leaf-1")))
+            await working["leaf-1#2"].wait()
+            made.stop(CONVERSATION, None, "middle-1", close=True)
+            told = await asyncio.wait_for(
+                made.message(users("leaf-1", "Y.")), 1
+            )
+            made.cancel("leaf-1#2", by="parent", error="enough")
+            await running
+            return told
+
+        told, _ = await turned(work)
+
+        assert told.result == {
+            "success": False, "error": "leaf-1 is closed; start a new one with task.",
+        }
+        assert made._unread == {}
+
+    async def test_an_interrupts_run_is_reserved_before_the_run_is_cancelled(self):
+        """A call in the same answer cannot take the turn's last run between the
+        check and the follow-up: the interrupt keeps its run, the other is refused."""
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=3))
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            replaced = asyncio.create_task(
+                made.message(follow(message="Y.", call_id="c3"), interrupt=True)
+            )
+            await asyncio.sleep(0)
+            other = await made.delegate(request(PLAN, call_id="c4"))
+            return await running, await replaced, other
+
+        (_, replaced, other), _ = await turned(work)
+
+        assert (replaced.result["run"], replaced.result["result"]) == ("researcher-1#3", "Did: Y.")
+        assert other.result == {"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=3)}
+
+    async def test_an_interrupts_reserved_run_is_given_back_when_it_is_refused(self):
+        """Reserved as the interrupt checked, refused when the instance closed
+        under it: the turn's count is what it was."""
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+        counts: list[int | None] = []
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            counts.append(runs_this_turn())
+            replaced = asyncio.create_task(
+                made.message(follow(message="Y.", call_id="c3"), interrupt=True)
+            )
+            await asyncio.sleep(0)
+            counts.append(runs_this_turn())  # reserved
+            made.stop(CONVERSATION, None, "researcher-1", close=True)
+            await running
+            told = await replaced
+            counts.append(runs_this_turn())
+            return told
+
+        told, _ = await turned(work)
+
+        assert counts == [2, 3, 2]
+        assert told.result["success"] is False
+
+    async def test_an_interrupts_reserved_run_is_given_back_when_its_call_is_cancelled(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+        counts: list[int | None] = []
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            replaced = asyncio.create_task(
+                made.message(follow(message="Y.", call_id="c3"), interrupt=True)
+            )
+            await asyncio.sleep(0)
+            counts.append(runs_this_turn())  # reserved, waiting for the old run's end
+            replaced.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await replaced
+            await running
+            counts.append(runs_this_turn())
+
+        await turned(work)
+
+        assert counts == [3, 2]
+
+    async def test_an_interrupt_that_cannot_start_a_follow_up_stops_nothing(self):
+        """A one-shot instance's run is not cancelled for a message it could
+        not be followed up with."""
+        hook, working, _ = blocking("checker-1#1")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=WITH_CHECKER)
+
+        async def work():
+            running = asyncio.create_task(made.delegate(request(CHECK)))
+            await working["checker-1#1"].wait()
+            told = await made.message(follow("checker-1", "Y."), interrupt=True)
+            still = runs.record(CONVERSATION, "checker-1#1").status
+            made.cancel("checker-1#1", by="parent", error="enough")
+            await running
+            return told, still
+
+        (told, still), _ = await turned(work)
+
+        assert told.result == {
+            "success": False, "error": "checker-1 is closed; start a new one with task.",
+        }
+        assert still == RUN_RUNNING
+
+    async def test_the_users_interrupt_is_the_users_stop(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(users()))
+            await working["researcher-1#2"].wait()
+            replaced = await made.message(users(message="Y instead."), interrupt=True)
+            return await running, replaced
+
+        (stopped_run, replaced), _ = await turned(work)
+
+        assert (stopped_run.result["cancelled_by"], stopped_run.result["error"]) == (
+            "user", "stopped by the user for a new message"
+        )
+        assert replaced.result["run"] == "researcher-1#3"
+
+    async def test_the_user_may_message_one_the_user_stopped(self):
+        hook, working = waiting()
+        made = delegations(hook)
+        await stopped(made, working, by="user", error="stopped by the user")
+        made._hook, _ = answering("Went on.")
+
+        result, _ = await turned(lambda: made.message(users()))
+
+        assert (result.result["run"], result.result["result"]) == ("researcher-1#2", "Went on.")
+
+
+class TestARefusedMessage:
+    """A message that can start no run and steer none is its error result."""
+
+    @staticmethod
+    async def refused(made: Delegations, asked: FollowUpRequest) -> str:
+        result, events = await turned(lambda: made.message(asked))
+        assert (result.run, result.state, events) == (None, {}, [])
+        assert result.result["success"] is False
+        return result.result["error"]
+
+    @pytest.mark.parametrize("message", ["", "  \n", None])
+    async def test_a_blank_one(self, message):
+        hook, _ = answering()
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request()))
+
+        assert await self.refused(made, follow(message=message)) == (
+            "message_agent needs a message."
+        )
+
+    async def test_to_one_not_yours(self):
+        hook, _ = answering()
+
+        assert await self.refused(delegations(hook), follow("researcher-1")) == (
+            "'researcher-1' is not one of your sub-agents. You have no sub-agents yet."
+        )
+
+    async def test_to_a_running_one_not_yours(self):
+        """Another agent's running child is neither steered nor run."""
+        leaf_working = asyncio.Event()
+        made: Delegations
+        refused: list[Any] = []
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                child = asyncio.create_task(made.delegate(request(
+                    {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                    caller=run.ref, caller_agent="middle", call_id="m1",
+                )))
+                await leaf_working.wait()
+                refused.append(await made.message(follow("leaf-1")))
+                child.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await child
+                return RunAnswer(text="Planned.")
+            leaf_working.set()
+            await asyncio.Event().wait()
+            return RunAnswer()  # pragma: no cover
+
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request(PLAN)))
+
+        (result,) = refused
+        assert result.result == {
+            "success": False,
+            "error": "'leaf-1' is not one of your sub-agents. Yours: middle-1.",
+        }
+
+    async def test_to_a_closed_one(self):
+        hook, _ = answering()
+        made = delegations(hook, types=WITH_CHECKER)
+        await turned(lambda: made.delegate(request(CHECK)))
+
+        assert await self.refused(made, follow("checker-1")) == (
+            "checker-1 is closed; start a new one with task."
+        )
+
+    async def test_to_one_the_user_stopped(self):
+        hook, working = waiting()
+        made = delegations(hook)
+        await stopped(made, working, by="user", error="stopped by the user")
+
+        assert await self.refused(made, follow()) == (
+            "researcher-1 was stopped by the user; only the user can continue it."
+        )
+
+    async def test_past_the_runs_of_its_turn(self):
+        hook, _ = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+
+        async def work():
+            await made.delegate(request())
+            return await made.message(follow())
+
+        result, _ = await turned(work)
+
+        assert result.result == {"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=1)}
+
+
+def stop_result(agent: str, status: str, stopped: str | None, closed: list[str]) -> dict:
+    return {"success": True, "agent": agent, "status": status, "stopped": stopped,
+            "closed": closed}
+
+
+def with_a_leaf(made: Callable[[], Delegations], working: dict[str, asyncio.Event]) -> Hook:
+    """A hook in which ``middle``'s first run delegates to ``leaf`` once; the
+    runs named in ``working`` work until cancelled; any other answers."""
+    async def hook(run: AgentRun) -> RunAnswer:
+        if run.ref.run in working:
+            working[run.ref.run].set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if not run.control.own_cancel():
+                    raise
+                return RunAnswer(text="Half way.")
+        if run.ref.run == "middle-1#1":
+            await made().delegate(request(
+                {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                caller=run.ref, caller_agent="middle", call_id="m1",
+            ))
+        return RunAnswer(text="Done.")
+
+    return hook
+
+
+class TestStop:
+    """``stop``, ``stop_agent``'s: a running instance's run cancelled by its
+    parent, the instance left idle; ``close`` closes it and its descendants
+    (a running one's at its run's end)."""
+
+    async def test_an_idle_one_has_nothing_to_stop(self):
+        hook, _ = answering()
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request()))
+
+        result, events = await turned(lambda: _now(made.stop(CONVERSATION, None, "researcher-1")))
+
+        assert result == stop_result("researcher-1", INSTANCE_IDLE, None, [])
+        assert events == []
+
+    async def test_close_closes_an_idle_one_and_its_descendants(self):
+        made: Delegations
+        runs = AgentRuns()
+        made = delegations(with_a_leaf(lambda: made, {}), runs=runs)
+        await turned(lambda: made.delegate(request(PLAN)))
+
+        result, events = await turned(
+            lambda: _now(made.stop(CONVERSATION, None, "middle-1", close=True))
+        )
+
+        assert result == stop_result("middle-1", INSTANCE_CLOSED, None, ["middle-1", "leaf-1"])
+        assert instance_events(events) == [
+            ("middle-1", INSTANCE_CLOSED, "closed by its parent"),
+            ("leaf-1", INSTANCE_CLOSED, "closed by its parent"),
+        ]
+
+    async def test_a_running_ones_run_is_cancelled_by_its_parent_and_it_stays_open(self):
+        hook, working, _ = blocking("researcher-1#2")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            result = made.stop(CONVERSATION, None, "researcher-1")
+            return result, await running
+
+        (result, ran), _ = await turned(work)
+
+        assert result == stop_result("researcher-1", INSTANCE_IDLE, "researcher-1#2", [])
+        assert (ran.result["status"], ran.result["cancelled_by"], ran.result["error"]) == (
+            RUN_CANCELLED, "parent", "stopped by its parent"
+        )
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_IDLE
+
+    async def test_with_close_a_running_one_is_closed_at_its_runs_end_with_its_descendants(self):
+        made: Delegations
+        runs = AgentRuns()
+        working = {"middle-1#2": asyncio.Event()}
+        made = delegations(with_a_leaf(lambda: made, working), runs=runs)
+
+        async def work():
+            await made.delegate(request(PLAN))
+            running = asyncio.create_task(made.message(follow("middle-1")))
+            await working["middle-1#2"].wait()
+            result = made.stop(CONVERSATION, None, "middle-1", close=True)
+            await running
+            return result
+
+        result, events = await turned(work)
+
+        assert result == stop_result("middle-1", INSTANCE_CLOSED, "middle-1#2",
+                                     ["middle-1", "leaf-1"])
+        ended = runs_of_status(events, RUN_CANCELLED)[-1]
+        assert (ended.run.run, ended.metadata["instance_status"]) == ("middle-1#2", INSTANCE_CLOSED)
+        assert instance_events(events) == [("leaf-1", INSTANCE_CLOSED, "closed by its parent")]
+        assert {i.instance: i.status for i in runs.instances(CONVERSATION)} == {
+            "middle-1": INSTANCE_CLOSED, "leaf-1": INSTANCE_CLOSED,
+        }
+
+    async def test_closing_an_idle_one_closes_a_running_descendant_at_its_runs_end(self):
+        """A descendant that works (the user's follow-up of it) when its
+        ancestor is closed is closed as its run ends, not left idle under a
+        closed parent."""
+        made: Delegations
+        runs = AgentRuns()
+        working = {"leaf-1#2": asyncio.Event()}
+        made = delegations(with_a_leaf(lambda: made, working), runs=runs)
+
+        async def work():
+            await made.delegate(request(PLAN))
+            running = asyncio.create_task(made.message(users("leaf-1")))
+            await working["leaf-1#2"].wait()
+            result = made.stop(CONVERSATION, None, "middle-1", close=True)
+            assert runs.instance(CONVERSATION, "leaf-1").status == INSTANCE_RUNNING
+            made.cancel("leaf-1#2", by="parent", error="enough")
+            await running
+            return result
+
+        result, events = await turned(work)
+
+        assert result == stop_result("middle-1", INSTANCE_CLOSED, None, ["middle-1", "leaf-1"])
+        ended = runs_of_status(events, RUN_CANCELLED)[-1]
+        assert (ended.run.run, ended.metadata["instance_status"]) == ("leaf-1#2", INSTANCE_CLOSED)
+        assert instance_events(events) == [("middle-1", INSTANCE_CLOSED, "closed by its parent")]
+        assert {i.instance: i.status for i in runs.instances(CONVERSATION)} == {
+            "middle-1": INSTANCE_CLOSED, "leaf-1": INSTANCE_CLOSED,
+        }
+        assert made._closing == {}
+
+    async def test_refusals(self):
+        hook, working = waiting()
+        made = delegations(hook, types=WITH_CHECKER)
+        await stopped(made, working, by="user", error="stopped by the user")
+        made._hook, _ = answering()
+        await turned(lambda: made.delegate(request(CHECK, call_id="c2")))
+
+        token = set_active_turn(CONVERSATION)
+        try:
+            refusals = [
+                made.stop(CONVERSATION, None, name)["error"]
+                for name in ("researcher-1", "checker-1", "writer-1")
+            ]
+        finally:
+            reset_active_turn(token)
+
+        assert refusals == [
+            "researcher-1 was stopped by the user; only the user can continue it.",
+            "checker-1 is closed; start a new one with task.",
+            "'writer-1' is not one of your sub-agents. Yours: researcher-1, checker-1.",
+        ]
+
+
+class TestCheck:
+    """``check``, ``check_agents``': the caller's sub-agents, newest first,
+    each its status, its last run and the tokens of all its runs."""
+
+    @staticmethod
+    def used(ledgers: UsageLedgers, tokens: tuple[int, int]) -> None:
+        """A model call of the run in progress that used ``tokens``."""
+        ledgers.record(llm_usage_event(
+            "anthropic:claude", UsageTotals(input=tokens[0], output=tokens[1], calls=1)
+        ))
+
+    async def test_the_callers_sub_agents_newest_first(self):
+        ledgers = UsageLedgers()
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            self.used(ledgers, (100, 10))
+            if run.ref.run == "middle-1#1":
+                await made.delegate(request(
+                    {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                    caller=run.ref, caller_agent="middle", call_id="m1",
+                ))
+            return RunAnswer(text=f"{run.ref.run} done.\nSecond line.\nThird.\nFourth.")
+
+        made = delegations(hook, ledgers=ledgers)
+
+        async def work():
+            await made.delegate(request())
+            await made.message(follow(message="Now find Y."))
+            await made.delegate(request(PLAN, call_id="c3"))
+            return made.check(CONVERSATION, None)
+
+        result, _ = await turned(work)
+
+        assert result == {"success": True, "agents": [
+            {"agent": "middle-1", "type": "middle", "status": INSTANCE_IDLE, "title": "Plan",
+             "run": "middle-1#1", "run_status": RUN_COMPLETED,
+             "result": "middle-1#1 done.\nSecond line.\nThird.",
+             "tokens": {"input": 100, "output": 10}},
+            {"agent": "researcher-1", "type": "researcher", "status": INSTANCE_IDLE,
+             "title": "Find X", "run": "researcher-1#2", "run_status": RUN_COMPLETED,
+             "result": "researcher-1#2 done.\nSecond line.\nThird.",
+             "tokens": {"input": 200, "output": 20}},
+        ]}
+
+    async def test_one_of_them(self):
+        hook, _ = answering()
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            await made.delegate(request(PLAN, call_id="c2"))
+            return made.check(CONVERSATION, None, "researcher-1")
+
+        result, _ = await turned(work)
+
+        assert [row["agent"] for row in result["agents"]] == ["researcher-1"]
+        assert result["agents"][0]["tokens"] == {"input": 0, "output": 0}
+
+    async def test_a_running_ones_run_says_so(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            result = made.check(CONVERSATION, None)
+            made.cancel("researcher-1#2", by="parent", error="enough")
+            await running
+            return result
+
+        result, _ = await turned(work)
+
+        (row,) = result["agents"]
+        assert (row["status"], row["run"], row["run_status"], row["result"]) == (
+            "running", "researcher-1#2", RUN_RUNNING, ""
+        )
+
+    async def test_a_running_ones_tokens_come_from_the_ledger(self):
+        ledgers = UsageLedgers()
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            self.used(ledgers, (100, 10) if run.ref.run == "researcher-1#1" else (50, 5))
+            if run.ref.run == "researcher-1#2":
+                working.set()
+                await asyncio.Event().wait()
+            return RunAnswer(text="Done.")
+
+        working = asyncio.Event()
+        made = delegations(hook, ledgers=ledgers)
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working.wait()
+            result = made.check(CONVERSATION, None)
+            made.cancel("researcher-1#2", by="parent", error="enough")
+            await running
+            return result
+
+        result, _ = await turned(work)
+
+        (row,) = result["agents"]
+        assert row["tokens"] == {"input": 150, "output": 15}
+
+    async def test_one_not_yours_and_none_yet(self):
+        hook, _ = answering()
+        made = delegations(hook)
+
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.check(CONVERSATION, None) == {"success": True, "agents": []}
+            assert made.check(CONVERSATION, None, "leaf-1") == {
+                "success": False,
+                "error": "'leaf-1' is not one of your sub-agents. You have no sub-agents yet.",
+            }
+        finally:
+            reset_active_turn(token)
+
+
+class TestSteerAndCancelByConversation:
+    async def test_a_working_run_is_steered_and_cancelled_from_outside_its_turn(self):
+        hook, working, asked = blocking("researcher-1#1")
+        made = delegations(hook)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(working["researcher-1#1"].wait(), 5)
+
+        assert get_active_turn() is None
+        assert made.steer(CONVERSATION, "researcher-1#1", "Also Z.") is True
+        assert asked[0].control.unstored() == ["Also Z."]
+        assert made.steer(CONVERSATION, "researcher-9#1", "Also Z.") is False
+        assert made.cancel(
+            "researcher-1#1", by="user", error="stopped by the user", conversation=CONVERSATION
+        ) is True
+        await asyncio.wait_for(turn.task, 5)
+
+        assert (turn.result.result["status"], turn.result.result["cancelled_by"]) == (
+            RUN_CANCELLED, "user"
+        )
+        assert made.steer(CONVERSATION, "researcher-1#1", "Too late.") is False
+
+    async def test_a_steered_message_is_text(self):
+        hook, working, _ = blocking("researcher-1#1")
+        made = delegations(hook)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(working["researcher-1#1"].wait(), 5)
+
+        with pytest.raises(ValueError, match="text"):
+            made.steer(CONVERSATION, "researcher-1#1", " ")
+        made.cancel("researcher-1#1", by="parent", error="enough", conversation=CONVERSATION)
+        await asyncio.wait_for(turn.task, 5)
+
+
+class TestASteeredMessageIsNeverLost:
+    """A message steered to a run that its transcript does not hold when the
+    run ends (never taken: no model call came after it; or taken by a call
+    the run was stopped in before storing it) is given to the instance's
+    next run, which takes it at its first model call."""
+
+    @staticmethod
+    def steering_hook(
+        first: Callable[[AgentRun], Awaitable[None]]
+    ) -> tuple[Hook, asyncio.Event, list[list[str]]]:
+        working = asyncio.Event()
+        later: list[list[str]] = []
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.run == "researcher-1#1":
+                working.set()
+                try:
+                    await first(run)
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    if not run.control.own_cancel():
+                        raise
+                    return RunAnswer(text="Half way.")
+            later.append(run.control.take_steering())
+            return RunAnswer(text="Went on.")
+
+        return hook, working, later
+
+    async def lost_and_given(
+        self, first: Callable[[AgentRun], Awaitable[None]], *, steer_after: bool
+    ) -> list[list[str]]:
+        hook, working, later = self.steering_hook(first)
+        made = delegations(hook)
+
+        async def work():
+            running = asyncio.create_task(made.delegate(request()))
+            await working.wait()
+            if steer_after:
+                made.steer(CONVERSATION, "researcher-1#1", "Also Z.")
+            await asyncio.sleep(0)
+            made.cancel("researcher-1#1", by="parent", error="enough")
+            await running
+            await made.message(follow(message="Go on."))
+
+        await turned(work)
+        return later
+
+    async def test_one_its_run_never_took_goes_to_its_next_run(self):
+        async def nothing(run: AgentRun) -> None:
+            pass
+
+        assert await self.lost_and_given(nothing, steer_after=True) == [["Also Z."]]
+
+    async def test_one_taken_and_not_stored_goes_to_its_next_run(self):
+        async def takes(run: AgentRun) -> None:
+            await until(lambda: bool(run.control.unstored()))
+            run.control.take_steering()  # a model call stopped before it stored them
+
+        assert await self.lost_and_given(takes, steer_after=True) == [["Also Z."]]
+
+    async def test_one_stored_does_not(self):
+        async def stores(run: AgentRun) -> None:
+            await until(lambda: bool(run.control.unstored()))
+            run.control.take_steering()
+            run.control.stored()
+
+        assert await self.lost_and_given(stores, steer_after=True) == [[]]
+
+    async def test_a_closed_instances_are_dropped(self, logged):
+        hook, working, _ = blocking("checker-1#1")
+        made = delegations(hook, types=WITH_CHECKER)
+
+        async def work():
+            running = asyncio.create_task(made.delegate(request(CHECK)))
+            await working["checker-1#1"].wait()
+            made.steer(CONVERSATION, "checker-1#1", "Also Z.")
+            made.cancel("checker-1#1", by="parent", error="enough")
+            await running
+
+        await turned(work)
+
+        assert made._unread == {}
+        assert {"event": "subagent_steering_dropped", "log_level": "info",
+                "instance": "checker-1", "messages": 1} in logged
+
+
+class TestOpenTasks:
+    """A run that did not complete fully names, in its envelope, the tasks
+    it left open (``open_tasks``), so its parent can continue it."""
+
+    TASKS = [
+        {"description": "find X", "status": "completed"},
+        {"description": "find Y", "status": "in_progress"},
+        {"description": "find Z", "status": "pending"},
+    ]
+
+    async def ended(self, answer: Callable[[AgentRun], Awaitable[RunAnswer]], **options: Any):
+        async def hook(run: AgentRun) -> RunAnswer:
+            return await answer(run)
+
+        return await delegated(delegations(hook, **options), request())
+
+    async def test_at_its_step_limit(self):
+        async def answer(run: AgentRun) -> RunAnswer:
+            run.control.model_call()
+            return RunAnswer(text="X is 42.", tasks=self.TASKS)
+
+        result, _ = await self.ended(
+            answer, policy=SubAgentPolicy(limits=AgentLimits(max_model_calls=1))
+        )
+
+        assert (result.result["partial"], result.result["open_tasks"]) == (
+            True, ["find Y", "find Z"]
+        )
+
+    async def test_cut_off(self):
+        async def answer(run: AgentRun) -> RunAnswer:
+            return RunAnswer(text="X is", outcome=CUT, tasks=self.TASKS)
+
+        result, _ = await self.ended(answer)
+
+        assert result.result["open_tasks"] == ["find Y", "find Z"]
+
+    async def test_failed(self):
+        async def answer(run: AgentRun) -> RunAnswer:
+            return RunAnswer(text="X is", error="overloaded", tasks=self.TASKS)
+
+        result, _ = await self.ended(answer)
+
+        assert (result.result["status"], result.result["open_tasks"]) == (
+            RUN_FAILED, ["find Y", "find Z"]
+        )
+
+    async def test_cancelled_it_keeps_its_plan_and_tasks(self):
+        working = asyncio.Event()
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            working.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if not run.control.own_cancel():
+                    raise
+                return RunAnswer(text="Half way.", plan="- [ ] find Y", tasks=self.TASKS)
+            return RunAnswer()  # pragma: no cover
+
+        runs = AgentRuns()
+        result, events, _ = await stopped(
+            delegations(hook, runs=runs), working, by="parent", error="enough"
+        )
+
+        assert result.result["open_tasks"] == ["find Y", "find Z"]
+        assert list(result.result)[-2:] == ["cancelled_by", "open_tasks"]
+        assert (events[-1].metadata["plan"], events[-1].metadata["tasks"]) == (
+            "- [ ] find Y", self.TASKS
+        )
+        (record,) = runs.records(CONVERSATION)
+        assert (record.plan, record.tasks) == ("- [ ] find Y", self.TASKS)
+
+    @pytest.mark.parametrize("outcome", [None, REFUSED])
+    async def test_none_for_a_run_that_completed_or_was_refused(self, outcome):
+        async def answer(run: AgentRun) -> RunAnswer:
+            return RunAnswer(text="X is 42.", outcome=outcome, tasks=self.TASKS)
+
+        result, _ = await self.ended(answer)
+
+        assert "open_tasks" not in result.result
+
+    async def test_none_when_every_task_is_done(self):
+        async def answer(run: AgentRun) -> RunAnswer:
+            run.control.model_call()
+            return RunAnswer(text="X is 42.", tasks=self.TASKS[:1])
+
+        result, _ = await self.ended(
+            answer, policy=SubAgentPolicy(limits=AgentLimits(max_model_calls=1))
+        )
+
+        assert result.result["partial"] is True and "open_tasks" not in result.result
+
+
+class TestWhyARunStopped:
+    """``stop_cause``: what stopped a working run, for a call it left at its
+    prompt: its own control's cancel, or its parent's run stopped."""
+
+    async def test_its_own_cancel_and_its_parents(self):
+        made: Delegations
+        seen: dict[str, Any] = {}
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                try:
+                    await asyncio.create_task(made.delegate(request(
+                        {"agent_type": "leaf", "title": "Look", "objective": "Look X up."},
+                        caller=run.ref, caller_agent="middle", call_id="m1",
+                    )))
+                except asyncio.CancelledError:
+                    seen["middle"] = made.stop_cause(run.ref)
+                    if not run.control.own_cancel():
+                        raise
+                    return RunAnswer(text="Planned half.")
+                return RunAnswer()  # pragma: no cover
+            seen["working"] = True
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                seen["leaf"] = made.stop_cause(run.ref)
+                raise
+            return RunAnswer()  # pragma: no cover
+
+        made = delegations(hook)
+        working = asyncio.Event()
+
+        async def started() -> None:
+            await until(lambda: seen.get("working", False))
+            working.set()
+
+        watcher = asyncio.create_task(started())
+        await stopped(made, working, by="limit", error=TIME_LIMIT_ERROR, asked=request(PLAN),
+                      run="middle-1#1")
+        await watcher
+
+        assert (seen["middle"], seen["leaf"]) == ("its time limit", "its parent")
+        token = set_active_turn(CONVERSATION)
+        try:
+            assert made.stop_cause(None) is None
+            assert made.stop_cause(RESEARCHER) is None  # no working run
+        finally:
+            reset_active_turn(token)

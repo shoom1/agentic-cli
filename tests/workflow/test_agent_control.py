@@ -3,7 +3,8 @@
 A ``RunControl`` holds a run's limits, cancels the run's own task (its
 parent's stop, the user's, a limit's), counts the run's model calls and
 tokens against its limits, and keeps the messages steered to it until its
-next model call. Driven here with a plain asyncio task for the run.
+next model call (and those its transcript does not hold yet, ``unstored``),
+and says what stopped it (``stop_cause``). Driven here with a plain asyncio task for the run.
 """
 
 from __future__ import annotations
@@ -12,7 +13,13 @@ import asyncio
 
 import pytest
 
-from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
+from agentic_cli.workflow.agents.control import (
+    PARENT_CAUSE,
+    STEP_LIMIT_NOTE,
+    TIME_LIMIT_CAUSE,
+    TOKEN_LIMIT_CAUSE,
+    RunControl,
+)
 from agentic_cli.workflow.agents.envelope import TIME_LIMIT_ERROR, TOKEN_LIMIT_ERROR
 from agentic_cli.workflow.agents.policy import AgentLimits
 from agentic_cli.workflow.sessions import RunRef
@@ -347,3 +354,65 @@ class TestSteering:
     def test_a_message_is_text(self, message):
         with pytest.raises(ValueError, match="text"):
             control().steer(message)
+
+    def test_until_stored_a_taken_message_is_unstored(self):
+        """A message the run's transcript does not hold yet: taken by a model
+        call whose backend has not stored it, or never taken."""
+        made = control()
+        made.steer("Also give Z.")
+        made.steer("In metric units.")
+        made.take_steering()
+        made.steer("And quickly.")
+
+        assert made.unstored() == ["Also give Z.", "In metric units.", "And quickly."]
+        made.stored(1)
+        assert made.unstored() == ["In metric units.", "And quickly."]
+        made.stored()  # every one taken
+        assert made.unstored() == ["And quickly."]
+        made.take_steering()
+        made.stored()
+        assert made.unstored() == []
+
+
+class TestWhyItStopped:
+    """What a call the run left at its prompt is told stopped the run
+    (``stop_cause``): its parent or one of its limits; None for the user."""
+
+    def test_nothing_while_it_runs(self):
+        assert control().stop_cause is None
+
+    @pytest.mark.parametrize("by, error, cause", [
+        ("parent", "no longer needed", "its parent"),
+        ("limit", TIME_LIMIT_ERROR, "its time limit"),
+        ("limit", TOKEN_LIMIT_ERROR, "its token limit"),
+        ("user", "stopped by the user", None),
+    ])
+    def test_who_cancelled_it(self, by, error, cause):
+        made = control()
+        made.cancel(by=by, error=error)
+
+        assert made.stop_cause == cause
+
+    def test_the_causes(self):
+        assert (PARENT_CAUSE, TIME_LIMIT_CAUSE, TOKEN_LIMIT_CAUSE) == (
+            "its parent", "its time limit", "its token limit",
+        )
+
+
+class TestStopping:
+    """A run that takes no more steps: cancelled, or its work has ended."""
+
+    def test_a_working_run_is_not(self):
+        assert control().stopping is False
+
+    def test_a_cancelled_one_is(self):
+        made = control()
+        made.cancel(by="parent", error="enough")
+
+        assert made.stopping is True
+
+    def test_one_whose_work_has_ended_is(self):
+        made = control()
+        made.finish()
+
+        assert made.stopping is True

@@ -13,7 +13,10 @@ test-only tool ``contract_follow_up(agent, message)`` (``follow``), which
 hands ``Delegations.follow_up`` what a parent's tool would: the instance, the
 message, the calling run and its call, and the conversation's
 outside-content mark; it answers with the envelope as JSON, as ``task``
-does. ``make_crew(..., store="sqlite")`` keeps the conversation in the
+does. With ``SubAgentPolicy(follow_ups=True)`` (``FOLLOWING``) a parent has
+its own tools for its sub-agents, the real ones: ``message_agent``
+(``message``), ``stop_agent`` (``stop``) and ``check_agents`` (``check``).
+``make_crew(..., store="sqlite")`` keeps the conversation in the
 default sqlite store, so a second crew is a restart; ``no_seals`` stops a
 turn without the abort signal and ``killed_mid_call`` leaves an ADK child
 session as a killed process does (ADK seals a cancelled run itself, as far
@@ -3067,7 +3070,7 @@ class TestTheTimeLimit:
 class TestALimitAtAPrompt:
     """A limit that fires while the run waits at a permission prompt (the
     user slow to answer): the prompt is withdrawn, the call is answered as
-    not run, the run ends cancelled by its limit, the turn goes on with its
+    not run by its time limit, the run ends cancelled by its limit, the turn goes on with its
     envelope, and the prompts after it still reach the user."""
 
     async def test_the_prompt_is_withdrawn_and_the_turn_goes_on(self, make_crew):
@@ -3110,7 +3113,9 @@ class TestALimitAtAPrompt:
             RUN_CANCELLED, "limit", TIME_LIMIT_ERROR, ""
         )
         (not_run,) = answered[0]
-        assert NOT_RUN in not_run
+        assert json.loads(not_run) == interrupted(
+            "Not run: its time limit stopped the run before this call ran."
+        )
         assert asked == ["contract_ask"]
         assert '"B"' in crew.results_read("coordinator", 2)["c2"]
         assert [e for e in events if e.type is EventType.ERROR] == []
@@ -4501,3 +4506,583 @@ class TestAFollowUpAfterAModelSwitch:
             ("researcher-1#1", RUN_COMPLETED), ("researcher-1#2", RUN_COMPLETED),
         ]
         assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+
+# -- a run's end: its open tasks, and a child stopped with its parent ------------------
+
+
+class TestOpenTasksInTheEnvelope:
+    """A run that did not complete fully names the tasks it left open, so its
+    parent can continue it (``message_agent``)."""
+
+    SAVED = [{"description": "find X", "status": "completed"},
+             {"description": "find Y", "status": "pending"}]
+
+    async def test_a_run_at_its_step_limit(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True,
+                   limits=AgentLimits(max_model_calls=2))],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED)), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": "X is 42.",
+            "error": STEP_LIMIT_ERROR, "open_tasks": ["find Y"],
+        }
+
+    async def test_a_cancelled_run_keeps_its_plan_and_tasks(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True, tools=(contract_block,))],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED), text="X is 42."),
+                        calls(use("contract_block", "r2"))],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+        events = await asyncio.wait_for(turn, 10)
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["cancelled_by"], read["open_tasks"]) == (
+            RUN_CANCELLED, "parent", ["find Y"]
+        )
+        (ended,) = runs_of(events, RUN_CANCELLED)
+        assert [task["description"] for task in ended.metadata["tasks"]] == ["find X", "find Y"]
+        (record,) = crew.records()
+        assert [task["description"] for task in record.tasks] == ["find X", "find Y"]
+
+    async def test_none_for_a_run_that_completed(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True)],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED)), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert "open_tasks" not in envelope_read(crew.results_read("coordinator")["c1"])
+
+
+def nested_team(**middle: Any) -> list[AgentConfig]:
+    """A coordinator, a middle agent that delegates, and its leaf, which may block."""
+    return [
+        agent("coordinator", sub_agents=("middle",)),
+        agent("middle", sub_agents=("leaf",), **middle),
+        agent("leaf", tools=(contract_block,)),
+    ]
+
+
+class TestAChildOfAStoppedRun:
+    """A run whose parent's run is cancelled by its control (its parent's
+    stop, a limit) ends cancelled by its parent, saying so, and its instance
+    stays idle; Ctrl+C still makes both the turn's, interrupted."""
+
+    SCRIPTS = dict(
+        coordinator=[calls(delegate("middle", "Plan X.", "c1")), says("Done.")],
+        middle=[calls(delegate("leaf", "Look X up.", "m1"))],
+        leaf=[calls(use("contract_block", "l1"))],
+    )
+
+    async def test_by_its_parents_stop(self, make_crew):
+        crew = make_crew(nested_team(), **self.SCRIPTS)
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("middle-1#1", by="parent", error="no longer needed") is True
+        await asyncio.wait_for(turn, 10)
+
+        assert [(r.ref.run, r.status, r.cancelled_by, r.error) for r in crew.records()] == [
+            ("middle-1#1", RUN_CANCELLED, "parent", "no longer needed"),
+            ("leaf-1#1", RUN_CANCELLED, "parent", "its parent's run was stopped"),
+        ]
+        assert crew.instances() == [("middle-1", INSTANCE_IDLE), ("leaf-1", INSTANCE_IDLE)]
+
+    async def test_by_its_parents_time_limit(self, make_crew):
+        crew = make_crew(nested_team(limits=AgentLimits(timeout=1.0)), **self.SCRIPTS)
+
+        await asyncio.wait_for(crew.turn(), 20)
+
+        assert [(r.ref.run, r.status, r.cancelled_by, r.error) for r in crew.records()] == [
+            ("middle-1#1", RUN_CANCELLED, "limit", TIME_LIMIT_ERROR),
+            ("leaf-1#1", RUN_CANCELLED, "parent", "its parent's run was stopped"),
+        ]
+
+    async def test_ctrl_c_makes_both_the_turns(self, make_crew):
+        crew = make_crew(nested_team(), **self.SCRIPTS)
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        await crew.stop(turn)
+
+        assert [(r.ref.run, r.status, r.cancelled_by) for r in crew.records()] == [
+            ("middle-1#1", RUN_INTERRUPTED, None), ("leaf-1#1", RUN_INTERRUPTED, None),
+        ]
+
+
+# -- the parent's tools: message_agent, stop_agent, check_agents ---------------------------
+
+#: A policy that gives every agent with sub-agents the parent's tools.
+FOLLOWING = SubAgentPolicy(follow_ups=True)
+STEERED = "Your message was given to its run before its next step."
+
+
+def message(instance: str, text: str | None, call_id: str, **args: Any) -> Call:
+    """A ``message_agent`` call to ``instance`` with ``text``."""
+    return use("message_agent", call_id, agent=instance, message=text, **args)
+
+
+def stop(instance: str, call_id: str, **args: Any) -> Call:
+    """A ``stop_agent`` call of ``instance``."""
+    return use("stop_agent", call_id, agent=instance, **args)
+
+
+def check(call_id: str, **args: Any) -> Call:
+    """A ``check_agents`` call."""
+    return use("check_agents", call_id, **args)
+
+
+def parent_team(**researcher: Any) -> list[AgentConfig]:
+    """A coordinator and its researcher, which may look up, block or hold."""
+    return [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_lookup, contract_block, contract_hold), **researcher),
+    ]
+
+
+def result_of(events: list[WorkflowEvent], call_id: str) -> WorkflowEvent:
+    """The ``TOOL_RESULT`` of the call ``call_id``."""
+    (found,) = [e for e in events if e.type is EventType.TOOL_RESULT
+                and e.metadata.get("tool_call_id") == call_id]
+    return found
+
+
+class TestTheParentsTools:
+    async def test_offered_with_follow_ups_to_every_agent_with_sub_agents(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=(contract_whoami,)),
+             agent("researcher", sub_agents=("checker",)),
+             agent("checker", tools=(contract_lookup,))],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[calls(delegate("checker", "Check X.", "r1")), says("X is 42.")],
+            checker=[says("Checked.")],
+        )
+
+        await crew.turn()
+
+        offered = ["task", "message_agent", "stop_agent", "check_agents"]
+        assert crew.tool_names("coordinator") == ["contract_whoami", *offered]
+        assert crew.tool_names("researcher") == offered
+        assert crew.tool_names("checker") == ["contract_lookup"]
+
+    async def test_message_agent_continues_an_idle_one_and_shows_as_a_delegation(
+        self, make_crew
+    ):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X")), says("X is 42."),
+                        says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c2"])
+        assert read == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_COMPLETED, "partial": False, "result": "Y is 7.", "error": None,
+        }
+        shown = result_of(events, "c2")
+        assert (shown.content, shown.metadata["result"]) == ("Y is 7.", read)
+        assert "X is 42." in crew.bodies("researcher")[2]
+        assert crew.last_message("researcher", 2) == "Now find Y."
+        assert [(r.ref.run, r.started_by, r.input) for r in crew.records()] == [
+            ("researcher-1#1", "agent:root", ""),
+            ("researcher-1#2", "agent:root", "Now find Y."),
+        ]
+
+    async def test_two_to_one_idle_one_in_one_answer_start_one_run_and_steer_the_other(
+        self, make_crew
+    ):
+        """One run per instance: the first claims it as it starts its run, the
+        second is steered into that run before its first model call, and
+        both calls get a result."""
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Find Y.", "c2"),
+                               message("researcher-1", "Find Z.", "c3")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7; Z is 9.")],
+        )
+
+        await crew.turn()
+
+        read = crew.results_read("coordinator")
+        answers = [json.loads(read[call]) for call in ("c2", "c3")]
+        (ran,) = [a for a in answers if a.get("status") == RUN_COMPLETED]
+        (steered,) = [a for a in answers if a.get("status") == "running"]
+        assert (ran["run"], ran["result"]) == ("researcher-1#2", "Y is 7; Z is 9.")
+        assert steered == {"success": True, "agent": "researcher-1", "run": "researcher-1#2",
+                           "status": "running", "note": STEERED}
+        first_request = crew.bodies("researcher")[1]
+        assert "Find Y." in first_request and "Find Z." in first_request
+        assert crew.requests("researcher") == 2
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1", "researcher-1#2"]
+
+    async def test_message_agent_with_interrupt_stops_its_run_and_starts_one_with_it(
+        self, make_crew
+    ):
+        """In one answer, a message that runs the idle instance and one that
+        interrupts that run: parallel calls start in their order, so the
+        first run is stopped before its first model call, and the second
+        message runs."""
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Go on.", "c2"),
+                               message("researcher-1", "Do Y instead.", "c3", interrupt=True)),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await asyncio.wait_for(crew.turn(), 20)
+
+        read = crew.results_read("coordinator")
+        assert envelope_read(read["c2"]) == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_CANCELLED, "partial": False, "result": "",
+            "error": "stopped by its parent for a new message", "cancelled_by": "parent",
+        }
+        assert (envelope_read(read["c3"])["run"], envelope_read(read["c3"])["result"]) == (
+            "researcher-1#3", "Y is 7."
+        )
+        assert crew.requests("researcher") == 2
+        assert crew.last_message("researcher", 1) == "Do Y instead."
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+    async def test_stop_agent_stops_a_running_one_and_leaves_it_idle(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Go on.", "c2"), stop("researcher-1", "c3")),
+                         says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await asyncio.wait_for(crew.turn(), 20)
+
+        read = crew.results_read("coordinator")
+        stopped = envelope_read(read["c2"])
+        assert (stopped["status"], stopped["cancelled_by"], stopped["error"]) == (
+            RUN_CANCELLED, "parent", "stopped by its parent"
+        )
+        assert json.loads(read["c3"]) == {
+            "success": True, "agent": "researcher-1", "status": INSTANCE_IDLE,
+            "stopped": "researcher-1#2", "closed": [],
+        }
+        shown = result_of(events, "c3")
+        assert shown.metadata["result"] == json.loads(read["c3"])
+        assert crew.requests("researcher") == 1  # stopped before its first model call
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+    async def test_stop_agent_with_close_closes_it_and_its_sub_agents(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", sub_agents=("checker",)), agent("checker")],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(stop("researcher-1", "c2", close=True)),
+                         calls(message("researcher-1", "Go on.", "c3")), says("Done.")],
+            researcher=[calls(delegate("checker", "Check X.", "r1")), says("X is 42.")],
+            checker=[says("Checked.")],
+        )
+
+        events = await crew.turn()
+
+        read = crew.results_read("coordinator")
+        assert json.loads(read["c2"]) == {
+            "success": True, "agent": "researcher-1", "status": INSTANCE_CLOSED,
+            "stopped": None, "closed": ["researcher-1", "checker-1"],
+        }
+        assert json.loads(read["c3"]) == {
+            "success": False, "error": "researcher-1 is closed; start a new one with task.",
+        }
+        assert instance_events(events) == [
+            ("researcher-1", INSTANCE_CLOSED), ("checker-1", INSTANCE_CLOSED),
+        ]
+
+    async def test_check_agents_names_its_sub_agents_newest_first(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher", "checker")),
+             agent("researcher"), agent("checker")],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("checker", "Check X.", "c2")),
+                         calls(check("c3"), check("c4", agent="checker-1")), says("Done.")],
+            researcher=[says("X is 42.\nFrom the handbook.", usage=(100, 20))],
+            checker=[says("Checked.", usage=(50, 5))],
+        )
+
+        events = await crew.turn()
+
+        read = crew.results_read("coordinator")
+        rows = {
+            "researcher-1": {"agent": "researcher-1", "type": "researcher", "status": "idle",
+                             "title": "Find X.", "run": "researcher-1#1",
+                             "run_status": RUN_COMPLETED,
+                             "result": "X is 42.\nFrom the handbook.",
+                             "tokens": {"input": 100, "output": 20}},
+            "checker-1": {"agent": "checker-1", "type": "checker", "status": "idle",
+                          "title": "Check X.", "run": "checker-1#1",
+                          "run_status": RUN_COMPLETED, "result": "Checked.",
+                          "tokens": {"input": 50, "output": 5}},
+        }
+        assert json.loads(read["c3"]) == {
+            "success": True, "agents": [rows["checker-1"], rows["researcher-1"]],
+        }
+        assert json.loads(read["c4"]) == {"success": True, "agents": [rows["checker-1"]]}
+        shown = result_of(events, "c4")
+        assert (shown.metadata["success"], shown.metadata["result"]) == (
+            True, {"success": True, "agents": [rows["checker-1"]]}
+        )
+
+    async def test_they_block_no_event_loop(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(message("researcher-1", "Go on.", "c2"),
+                               message("researcher-1", "And Z.", "c3")),
+                         calls(message("researcher-1", "Y instead.", "c4"),
+                               message("researcher-1", "Then W.", "c5", interrupt=True)),
+                         calls(check("c6"), stop("researcher-1", "c7", close=True)),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Went on."), says("W is 1.")],
+        )
+        await crew.turn()
+
+        with no_blocking_calls():
+            await crew.turn("Go on.")
+
+        read = crew.results_read("coordinator")
+        assert json.loads(read["c7"])["closed"] == ["researcher-1"]
+        assert envelope_read(read["c5"])["result"] == "W is 1."
+
+
+class TestTheParentsToolsRefuse:
+    """A call that cannot act is its error result: no run starts."""
+
+    async def test_what_is_not_yours_or_has_no_message(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", sub_agents=("checker",)), agent("checker")],
+            subagents=FOLLOWING,
+            coordinator=[calls(message("researcher-1", "Go on.", "c0")),
+                         calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", " ", "c2"),
+                               message("checker-1", "Go on.", "c3"),
+                               stop("checker-1", "c4"), check("c5", agent="checker-1")),
+                         says("Done.")],
+            researcher=[calls(delegate("checker", "Check X.", "r1")), says("X is 42.")],
+            checker=[says("Checked.")],
+        )
+
+        await crew.turn()
+
+        read = crew.results_read("coordinator")
+        not_yours = ("'checker-1' is not one of your sub-agents. Yours: researcher-1.")
+        assert [json.loads(read[call]) for call in ("c0", "c2", "c3", "c4", "c5")] == [
+            {"success": False, "error": "'researcher-1' is not one of your sub-agents. "
+                                        "You have no sub-agents yet."},
+            {"success": False, "error": "message_agent needs a message."},
+            {"success": False, "error": not_yours},
+            {"success": False, "error": not_yours},
+            {"success": False, "error": not_yours},
+        ]
+        assert crew.requests("checker") == 1
+
+    async def test_one_the_user_stopped(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Wait.", "c1")),
+                         calls(message("researcher-1", "Go on.", "c2"),
+                               stop("researcher-1", "c3", close=True)),
+                         says("Done.")],
+            researcher=[calls(use("contract_block", "r1"))],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("researcher-1#1", by="user", error="stopped by the user") is True
+        await asyncio.wait_for(turn, 10)
+
+        stopped = "researcher-1 was stopped by the user; only the user can continue it."
+        read = crew.results_read("coordinator")
+        assert [json.loads(read[call]) for call in ("c2", "c3")] == [
+            {"success": False, "error": stopped}, {"success": False, "error": stopped},
+        ]
+        assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+
+    async def test_past_the_runs_of_its_turn(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=SubAgentPolicy(follow_ups=True, max_runs_per_turn=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator")["c2"]) == {
+            "success": False,
+            "error": "This turn has already started 1 sub-agent runs, the most one turn may "
+                     "start. Answer with what you have.",
+        }
+
+
+class TestACallNotRunSaysWhy:
+    """A call left at its permission prompt when its run is stopped says what
+    stopped it: the user (``NOT_RUN``), or its parent (here), or a limit
+    (``TestALimitAtAPrompt``)."""
+
+    async def test_its_parents_stop(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), tools=(contract_ask,)),
+             agent("researcher", tools=("write_file",))],
+            coordinator=[calls(delegate("researcher", "Write a note.", "c1")),
+                         calls(use("contract_ask", "c2")), says("Done.")],
+            researcher=[calls(use("write_file", "r1", path="note.txt", content="hi"))],
+        )
+        answered: list[list[str]] = []
+
+        async def answer(request: UserInputRequest) -> str:
+            if request.run is not None:  # the researcher's permission prompt
+                crew.cancel(request.run.run, by="parent", error="no longer needed")
+                await asyncio.Event().wait()  # withdrawn with its run
+            answered.append(await crew.answers("researcher", "r1"))
+            return "B"
+
+        crew.answer_with(answer)
+        await asyncio.wait_for(crew.turn(), 20)
+
+        (not_run,) = answered[0]
+        assert json.loads(not_run) == interrupted(
+            "Not run: its parent stopped the run before this call ran."
+        )
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_CANCELLED, "parent")
+
+
+class TestASteeredMessageIsNeverLost:
+    """A message steered to a run that its transcript does not hold when the
+    run ends (here: no model call came after it, the run stopped by its
+    parent) reaches the instance's next run: its first request holds it,
+    after the follow-up's own message."""
+
+    async def test_it_reaches_the_instances_next_run(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Stopped."),
+                         calls(message("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("Went on, Z too.")],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        assert crew.manager._delegations.steer(crew.conversation, "researcher-1#1", "Also Z.")
+        assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+        await asyncio.wait_for(turn, 10)
+        assert "Also Z." not in "".join(crew.bodies("researcher"))
+
+        await crew.turn("Go on.")
+
+        sent = crew.bodies("researcher")[1]
+        assert sent.index("Go on.") < sent.index("Also Z.")
+        assert sent.count("Also Z.") == 1
+
+    async def test_one_stored_in_its_transcript_is_not_given_again(self, make_crew):
+        """A message the run's model call took and stored is in the transcript
+        once: the instance's next run does not take it a second time."""
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(message("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_hold", "r1")), says("X is 42."), says("Went on.")],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        assert crew.manager._delegations.steer(crew.conversation, "researcher-1#1", "Also Z.")
+        HELD["go"].set()
+        await asyncio.wait_for(turn, 10)
+        await crew.turn("Go on.")
+
+        assert crew.requests("researcher") == 3
+        assert crew.bodies("researcher")[2].count("Also Z.") == 1
+
+
+class TestTheMarkComesBackThroughTheParentsTools:
+    """The outside-content mark a follow-up run sets reaches its caller's
+    state, as ``task``'s does: a security mark (memory writes in a marked
+    conversation are approved per call), which a restart must keep."""
+
+    async def test_the_roots_follow_up(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_bring_outside_content,))],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(message("researcher-1", "Read the page.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_bring_outside_content", "r1")),
+                        says("Read it.")],
+        )
+
+        await crew.turn()
+
+        assert (await crew.marked()) is True
+        if crew.backend == "adk":
+            # The write-back itself: the mark rides on the response of the call.
+            session = await crew.manager._session_service.get_session(
+                app_name=crew.manager.session_ref(SESSION, USER).app_name,
+                user_id=USER, session_id=SESSION,
+            )
+            written = [
+                e for e in session.events
+                if any(r.name == "message_agent" for r in e.get_function_responses())
+                and OUTSIDE_CONTENT_KEY in (e.actions.state_delta or {})
+            ]
+            assert len(written) == 1
+
+    async def test_a_sub_agents_follow_up_of_its_own_child(self, make_crew):
+        """A middle agent uses the tools on its own children: the follow-up is
+        its run's (``started_by``, ``parent_run``, its call), and the mark
+        reaches the middle agent's transcript."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("middle",)),
+             agent("middle", sub_agents=("leaf",)),
+             agent("leaf", tools=(contract_bring_outside_content,))],
+            subagents=FOLLOWING,
+            coordinator=[calls(delegate("middle", "Plan X.", "c1")), says("Done.")],
+            middle=[calls(delegate("leaf", "Look X up.", "m1")),
+                    calls(message("leaf-1", "Read the page.", "m2")), says("Planned.")],
+            leaf=[says("X."), calls(use("contract_bring_outside_content", "l1")),
+                  says("Read it.")],
+        )
+
+        await crew.turn()
+
+        record = next(r for r in crew.records() if r.ref.run == "leaf-1#2")
+        assert (record.started_by, record.ref.parent_run, record.call_id) == (
+            "agent:middle-1", "middle-1#1", "m2"
+        )
+        assert await crew.instance_mark("middle-1") == "contract_bring_outside_content"
+        assert (await crew.marked()) is True

@@ -7,7 +7,9 @@ caller may start, and a brief that cannot start a run is a ``BriefError``
 whose text is the call's error result. The task message lays the filled
 fields out under one heading each, and an inheriting type's ends with
 ``INHERITED_CONTEXT_NOTE``. ``task_parameters`` and ``task_description`` are
-the tool's schema and description, which both backends build ``task`` from.
+the tool's schema and description, which both backends build ``task`` from;
+``follow_up_parameters`` and ``follow_up_description`` are the parent's other
+tools'.
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from agentic_cli.workflow.agents.brief import (
     INHERITED_CONTEXT_NOTE,
     Brief,
     BriefError,
+    follow_up_description,
+    follow_up_parameters,
     read_brief,
     task_description,
     task_message,
@@ -331,3 +335,85 @@ class TestTaskDescription:
         assert paragraphs[2] == "At most 2 at once. One more limit."
         assert paragraphs[3].startswith("The agents you can hand a task to:")
         assert seen == [policy]
+
+
+AGENT_ID = "The sub-agent's id, such as researcher-2."
+
+
+class TestTheParentsTools:
+    """``message_agent``, ``stop_agent`` and ``check_agents``: their
+    descriptions and schemas, which both backends build the tools from."""
+
+    def test_the_descriptions(self):
+        assert follow_up_description("message_agent") == (
+            "Send a message to one of your sub-agents that already ran (its id, such as "
+            "researcher-2, is in the result task gave you, or in check_agents). An idle one "
+            "starts a new run with your message as its input, keeping everything it did "
+            "before, and you get its result as task gives it. A running one gets your "
+            "message before its next step; interrupt=true stops its run and starts a new one "
+            "with your message. One the user stopped or a closed one cannot be messaged."
+        )
+        assert follow_up_description("stop_agent") == (
+            "Stop the running run of one of your sub-agents. close=true also closes it and "
+            "its own sub-agents: a closed agent cannot be messaged again, and its work stays "
+            "readable to the user."
+        )
+        assert follow_up_description("check_agents") == (
+            "The state of your sub-agents, or of one: each one's status, its current or last "
+            "run, the first lines of its last result and the tokens it used. A run's result "
+            "comes back to you on its own: do not call this to wait for one."
+        )
+
+    def test_message_agents_schema(self):
+        assert follow_up_parameters("message_agent") == {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": AGENT_ID},
+                "message": {"type": "string", "description": "What to tell it."},
+                "interrupt": {
+                    "type": "boolean",
+                    "description": (
+                        "For a running one: stop its run and start a new one with your "
+                        "message, rather than give it the message before its next step."
+                    ),
+                },
+            },
+            "required": ["agent", "message"],
+        }
+
+    def test_stop_agents_schema(self):
+        assert follow_up_parameters("stop_agent") == {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": AGENT_ID},
+                "close": {
+                    "type": "boolean",
+                    "description": "Also close it and its own sub-agents.",
+                },
+            },
+            "required": ["agent"],
+        }
+
+    def test_check_agents_schema(self):
+        assert follow_up_parameters("check_agents") == {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "One sub-agent's id; all of yours when left out.",
+                },
+            },
+            "required": [],
+        }
+
+    def test_each_schema_is_a_copy(self):
+        schema = follow_up_parameters("stop_agent")
+        schema["properties"].clear()
+
+        assert follow_up_parameters("stop_agent")["properties"]
+
+    def test_no_other_tool_has_one(self):
+        with pytest.raises(KeyError):
+            follow_up_parameters("task")
+        with pytest.raises(KeyError):
+            follow_up_description("task")

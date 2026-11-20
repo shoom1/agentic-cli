@@ -9,14 +9,16 @@ A blocking delegation's tool result is its run's envelope::
 (``failed``, ``refused``, ``cancelled``, ``interrupted``) has a one-line
 ``error`` and whatever text the run produced in ``result``, and a cancelled
 run's also says who cancelled it (``cancelled_by``: ``parent``, ``user`` or
-``limit``). ``read_envelope`` finds an envelope in a delegation's result as
+``limit``). A run that did not complete fully (partial, failed, cancelled,
+interrupted) also names the tasks it left open, so its parent can continue it.
+``read_envelope`` finds an envelope in a delegation's result as
 either backend's ``TOOL_RESULT`` carries it.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agentic_cli.workflow.agents.runs import RUN_CANCELLED, RUN_COMPLETED, RUN_END_STATUSES
@@ -45,11 +47,13 @@ def envelope(
     partial: bool = False,
     error: str | None = None,
     cancelled_by: str | None = None,
+    open_tasks: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """The envelope of the run ``ref``, ended with ``status``.
 
     ``error`` is made one line (its whitespace runs, line breaks among them,
-    each one space). ``cancelled_by`` is given exactly when ``status`` is
+    each one space). ``open_tasks``, when it holds any, ends the envelope as
+    its ``open_tasks`` key. ``cancelled_by`` is given exactly when ``status`` is
     ``cancelled``.
 
     Raises:
@@ -84,7 +88,22 @@ def envelope(
     }
     if cancelled_by is not None:
         value["cancelled_by"] = cancelled_by
+    if open_tasks:
+        value["open_tasks"] = list(open_tasks)
     return value
+
+
+def open_task_descriptions(tasks: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The descriptions of the tasks whose status is not ``completed``, in their order.
+
+    A task without a status is pending; one the agent marked ``cancelled``
+    counts as open; one without a text description is left out.
+    """
+    return [
+        task["description"]
+        for task in tasks
+        if isinstance(task.get("description"), str) and task.get("status", "pending") != "completed"
+    ]
 
 
 def read_envelope(value: Any) -> dict[str, Any] | None:

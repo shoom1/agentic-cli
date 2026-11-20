@@ -23,8 +23,9 @@ finished message, no tokens. Only the agent's own nodes speak:
   included (its prompt holds the conversation, but it is not the main
   agent's context);
 - a ``tools`` update's ``ToolMessage``s, including those a ``Command`` carried
-  (the state tools, ``task``): ``TOOL_RESULT``, a JSON dict parsed back, a
-  ``task`` call's shown from its envelope (``agents/runs.py::show_as_delegation``);
+  (the state tools, ``task``, the parent's tools): ``TOOL_RESULT``, a JSON dict
+  parsed back, a ``task`` call's (or a ``message_agent`` call's run) shown from
+  its envelope (``agents/runs.py::show_as_delegation``);
   and, for the root, its ``tasks``, when they changed: ``TASK_PROGRESS``, in
   the same step (a sub-agent's list is its own, kept with its run's record:
   the root reports only its own).
@@ -58,7 +59,7 @@ from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 from agentic_cli.constants import truncate
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import ENVELOPE_TOOLS
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.agents.envelope import read_envelope
 from agentic_cli.workflow.agents.runs import show_as_delegation
@@ -235,7 +236,7 @@ class DeepAgentsEventProcessor:
         result, success, error = _result_of(message)
         event = WorkflowEvent.tool_result(name, result, success=success, error=error)
         event.metadata["tool_call_id"] = message.tool_call_id
-        found = read_envelope(result) if name == TASK_TOOL else None
+        found = read_envelope(result) if name in ENVELOPE_TOOLS else None
         if found is not None:
             show_as_delegation(event, found)
         return event
