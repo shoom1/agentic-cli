@@ -109,6 +109,10 @@ class AgentView:
         #: The prompt the app had: put back by ``/back``.
         self.prompt_before: Any = None
         self._runs: set[asyncio.Task[None]] = set()
+        # The run started last: a line typed before it ends is the next run,
+        # which waits for it here (and not for the turn lock, where a Ctrl+C
+        # would make it say "Operation cancelled..." once more).
+        self._last: asyncio.Task[None] | None = None
 
     # -- what it shows ---------------------------------------------------------------
 
@@ -234,14 +238,21 @@ class AgentView:
         ):
             app.session.add_message("system", STEERED.format(instance=self.instance))
             return
-        run = asyncio.create_task(self._run(line), name=f"view run of {self.instance}")
+        run = asyncio.create_task(
+            self._run(line, self._last), name=f"view run of {self.instance}"
+        )
+        self._last = run
         self._runs.add(run)
         run.add_done_callback(self._ended)
 
-    async def _run(self, line: str) -> None:
-        """The instance's next run on ``line``: a write to the conversation
-        under its turn lock (``ConversationCore.run_instance``)."""
+    async def _run(self, line: str, after: "asyncio.Task[None] | None") -> None:
+        """The instance's next run on ``line``, once the run before it ended: a
+        write to the conversation under its turn lock
+        (``ConversationCore.run_instance``). A stop while it waits is silent:
+        the run that works says it."""
         app = self.app
+        if after is not None:
+            await asyncio.wait({after})
         parts = dataclasses.replace(app._turn_parts(), processor=self.processor)
         try:
             await app._conversation.run_instance(self.instance, line, parts)

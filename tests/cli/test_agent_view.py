@@ -106,6 +106,17 @@ async def typed(app: BaseCLIApp, *lines: str) -> None:
             await asyncio.wait_for(app.agent_view.settled(), 10)
 
 
+async def settled_or_fail(app: BaseCLIApp) -> None:
+    """Wait for the view's run to end; one that does not is the test's failure
+    (its tasks are cancelled so that teardown does not wait for them)."""
+    try:
+        await asyncio.wait_for(app.agent_view.settled(), 10)
+    except asyncio.TimeoutError:
+        for run in list(app.agent_view._runs):
+            run.cancel()
+        raise AssertionError("the run in view did not end within 10 s") from None
+
+
 async def in_a_view(
     make_crew, *, researcher=(), coordinator=(), team=None, **crew_args
 ) -> tuple[Crew, BaseCLIApp]:
@@ -259,7 +270,7 @@ class TestALineTyped:
         await app.process_input("Wait here.")
         await asyncio.wait_for(BLOCKING["started"].wait(), 10)
         assert app.agent_view.stop() is True
-        await asyncio.wait_for(app.agent_view.settled(), 10)
+        await settled_or_fail(app)
 
         second = crew.records()[-1]
         assert (second.ref.run, second.status, second.cancelled_by) == (
@@ -272,6 +283,20 @@ class TestALineTyped:
         await typed(app, "Go on.")
         assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
         assert said(app.session, "add_response")[-1] == "Went on."
+
+    async def test_ctrl_c_with_a_second_line_waiting_says_so_once(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew, researcher=[calls(use("contract_block", "r1")), says("Went on.")],
+        )
+
+        await app.process_input("Wait here.")
+        await app.process_input("And then this.")  # waits for the first run
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert app.agent_view.stop() is True
+        await settled_or_fail(app)
+
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1", "researcher-1#2"]
 
     async def test_after_a_model_switch_in_a_view_a_line_runs_on_the_new_model(self, make_crew):
         crew, app = await in_a_view(make_crew, researcher=[says("Y is 7.")])
