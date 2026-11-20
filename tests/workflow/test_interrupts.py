@@ -30,6 +30,7 @@ from agentic_cli.workflow.interrupts import (
     interrupted,
     job_for_call,
     job_started,
+    not_run,
     unrecorded,
 )
 from agentic_cli.workflow.service_registry import JOB_MANAGER, set_service_registry
@@ -410,3 +411,65 @@ class TestAnInstancesCallsOutliveItsRun:
                 assert calls.answer("r2", by_user=True) == interrupted(NOT_RUN)
         calls.clear(ref("a"))  # its next run took the stop: they go now
         assert calls._finished == {} and calls._asking == {}
+
+
+class TestACallNotRunSaysWhy:
+    """A call left at its prompt when its run was stopped is told what
+    stopped the run: the user (``NOT_RUN``, as before), or its parent, its
+    time limit or its token limit (``not_run``)."""
+
+    def test_the_texts(self):
+        assert NOT_RUN == "Not run: the user cancelled it."
+        assert not_run(None) == NOT_RUN
+        assert not_run("its parent") == "Not run: its parent stopped the run before this call ran."
+        assert not_run("its time limit") == (
+            "Not run: its time limit stopped the run before this call ran."
+        )
+        assert not_run("its token limit") == (
+            "Not run: its token limit stopped the run before this call ran."
+        )
+
+    def test_the_cause_given_is_the_answer(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                cancelled_at_its_prompt(calls, "r1")
+                calls.finished("r2", "the lookup")
+
+                assert calls.answer("r1", by_user=True, cause="its parent") == interrupted(
+                    "Not run: its parent stopped the run before this call ran."
+                )
+                # A finished call keeps its result, whatever stopped the run.
+                assert calls.answer("r2", by_user=True, cause="its parent") == "the lookup"
+
+    def test_a_stopped_instances_cause_is_kept_for_its_next_run(self):
+        """Deep Agents answers at the instance's next run, turns later maybe:
+        the cause is recorded with the instance's stop."""
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                cancelled_at_its_prompt(calls, "r1")
+        calls.cancelled(ref("a"), instance="researcher-1", cause="its time limit")
+        calls.clear(ref("a"))
+
+        with turn_of(ref("a")):
+            with run_as(SECOND):
+                assert calls.take_cancel(ref("a"), instance="researcher-1") is True
+                assert calls.answer("r1", by_user=True) == interrupted(
+                    "Not run: its time limit stopped the run before this call ran."
+                )
+            with run_as(OTHER):
+                cancelled_at_its_prompt(calls, "r1")
+                assert calls.answer("r1", by_user=True) == interrupted(NOT_RUN)
+        calls.clear(ref("a"))
+        assert calls._causes == {}
+
+    def test_a_stop_by_the_user_leaves_no_cause(self):
+        calls = OpenCalls()
+        calls.cancelled(ref("a"), instance="researcher-1", cause="its parent")
+        calls.cancelled(ref("a"), instance="researcher-1")  # stopped again, by the user
+
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                cancelled_at_its_prompt(calls, "r1")
+                assert calls.answer("r1", by_user=True) == interrupted(NOT_RUN)

@@ -11,7 +11,9 @@ knows what happened rather than running a side effect again blindly:
 - a running call, or a delegation, is answered ``INTERRUPTED_BY_USER``;
 - a call waiting at its permission prompt (both gates mark it) or at a
   question it asked (``BaseWorkflowManager.request_user_input``, by the
-  active tool call) is ``NOT_RUN``;
+  active tool call) is ``NOT_RUN``, or, in a sub-agent run its parent or a
+  limit stopped, ``Not run: <cause> stopped the run before this call ran.``
+  (``not_run``);
 - a cancel with no call open (during the first model call, or one after
   tool results) leaves ``MARKER`` as the main agent's reply, so the next
   turn answers the new message rather than resuming the old one;
@@ -74,6 +76,8 @@ INTERRUPTED = (
 )
 #: A call the user cancelled at its permission prompt.
 NOT_RUN = "Not run: the user cancelled it."
+#: A call left at its prompt when its run was stopped by something else.
+NOT_RUN_BY = "Not run: {cause} stopped the run before this call ran."
 #: The main agent's reply to a turn cancelled with no call open.
 MARKER = "(Interrupted by the user.)"
 
@@ -81,6 +85,12 @@ MARKER = "(Interrupted by the user.)"
 def interrupted(text: str) -> dict[str, Any]:
     """A call's result that says why it has none."""
     return {"success": False, "error": text}
+
+
+def not_run(cause: str | None) -> str:
+    """What a call left at its prompt is told: ``NOT_RUN`` for the user's stop, else
+    ``NOT_RUN_BY`` naming ``cause`` (``its parent``, ``its time limit``, ``its token limit``)."""
+    return NOT_RUN if cause is None else NOT_RUN_BY.format(cause=cause)
 
 
 #: The longest call id ``fresh_call_id`` makes: OpenAI's Chat Completions
@@ -226,6 +236,8 @@ class OpenCalls:
         # instance) pairs whose run was stopped.
         self._cancelled: set[Any] = set()
         self._stopped: set[tuple[Any, str]] = set()
+        # What stopped an instance's run (not the user), by (conversation, instance).
+        self._causes: dict[tuple[Any, str], str] = {}
 
     def finished(
         self, call_id: str | None, result: Any, *, run: str | None | _Active = ACTIVE_RUN
@@ -267,7 +279,12 @@ class OpenCalls:
         self._unmark(key, mark)
 
     def answer(
-        self, call_id: str | None, *, by_user: bool, run: str | None | _Active = ACTIVE_RUN
+        self,
+        call_id: str | None,
+        *,
+        by_user: bool,
+        run: str | None | _Active = ACTIVE_RUN,
+        cause: str | None = None,
     ) -> Any:
         """An open call's result: what it returned if it finished, else why it has none.
 
@@ -284,6 +301,9 @@ class OpenCalls:
             run: The run that made the call: by default the run in progress.
                 A job answers the call only when that run's instance
                 submitted it (``job_for_call``).
+            cause: What stopped the run, for a call at its prompt
+                (``not_run``); None: the one recorded with the instance's
+                stop (``cancelled(cause=)``), else the user's.
         """
         if call_id:
             key = get_active_turn()
@@ -292,17 +312,31 @@ class OpenCalls:
             if mark in finished:
                 return finished[mark]
             if mark in self._asking.get(key, ()):
-                return interrupted(NOT_RUN)
+                if cause is None and mark[0] is not None:
+                    cause = self._causes.get((key, mark[0]))
+                return interrupted(not_run(cause))
         # Its job, if it submitted one: the job of the run it was given.
         return unrecorded(call_id, by_user=by_user, started_by=_instance(run))
 
-    def cancelled(self, key: Any, *, instance: str | None = None) -> None:
+    def cancelled(
+        self, key: Any, *, instance: str | None = None, cause: str | None = None
+    ) -> None:
         """The user stopped the turn of conversation ``key``, or, with ``instance``,
-        a run of that instance of it."""
+        a run of that instance of it.
+
+        ``cause`` is what stopped that run when it was not the user (its
+        parent, a limit: ``not_run``), kept for the call it left at its
+        prompt, which the instance's next run answers; None (a stop by the
+        user) forgets an earlier one.
+        """
         if instance is None:
             self._cancelled.add(key)
+            return
+        self._stopped.add((key, instance))
+        if cause is None:
+            self._causes.pop((key, instance), None)
         else:
-            self._stopped.add((key, instance))
+            self._causes[(key, instance)] = cause
 
     def take_cancel(self, key: Any, *, instance: str | None = None) -> bool:
         """Whether the turn of ``key`` (or a run of its ``instance``) was stopped;
@@ -322,6 +356,10 @@ class OpenCalls:
         answers them.
         """
         self._forget(key, self._finished, self._asking)
+        kept = self._stopped
+        self._causes = {
+            k: v for k, v in self._causes.items() if k[0] != key or k in kept
+        }
 
     def failed(self, key: Any) -> None:
         """The turn of conversation ``key`` failed: its next turn answers its calls.
