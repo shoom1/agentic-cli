@@ -7,11 +7,15 @@ numbers its call ids repeats them each turn). ``observe`` records a run from
 its ``AGENT_RUN`` events, under the turn they are reported in;
 ``interrupt_open`` ends the runs a stopped or failed turn left open. A
 manager's ``agent_runs`` is its registry, and its turn entry (``_turn``)
-ends the runs a turn leaves open.
+ends the runs a turn leaves open. ``export`` and ``restore`` are a
+conversation's records as its store keeps them, and ``on_change`` is told
+each change.
 """
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import Any, Callable
 
 import pytest
@@ -36,7 +40,8 @@ from agentic_cli.workflow.agents import (
     result_head,
     run_title,
 )
-from agentic_cli.workflow.agents.runs import run_instance
+from agentic_cli.workflow.agents.envelope import INTERRUPTED_ERROR
+from agentic_cli.workflow.agents.runs import RECORDS_VERSION, run_instance, stored_instance_ids
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import WorkflowEvent
@@ -673,3 +678,222 @@ class TestTheTurnEndsItsOpenRuns:
 
         (record,) = manager.agent_runs.records(manager.session_ref("s", "u"))
         assert (record.status, record.title, record.result) == (RUN_COMPLETED, "Find X.", "done")
+
+
+# -- the records a conversation keeps beside it: export, restore, and each change told ------
+
+
+def a_conversation(runs: AgentRuns) -> None:
+    """ONE's records: researcher-1 ran twice (a brief, then a follow-up that
+    was cut and left a plan and tasks), writer-1 still works (queued), and
+    checker-1 was closed when its one run ended; TWO has a run of its own."""
+    first = runs.run_for(ONE, None, "c1", "researcher")
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        first, RUN_STARTED, title="Find X.", call_id="c1", brief={"title": "Find X.",
+        "objective": "Find X."}, started_by="agent:root", mode="blocking",
+        inherit_context=False, continuable=True,
+    )))
+    ended(runs, ONE, first, usage={"m": {"input": 120, "output": 30}}, instance_status="idle")
+    second = runs.next_run(ONE, "researcher-1", parent_run=None)
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        second, RUN_STARTED, title="Go on.", call_id="c2", started_by="user",
+        mode="blocking", input="Go on.\nAnd on.",
+    )))
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        second, "cancelled", call_id="c2", result="Half.", error="stopped by the user",
+        partial=True, cancelled_by="user", plan="1. Look", usage={"m": {"input": 7, "output": 2}},
+        tasks=[{"description": "Look", "status": "completed"}], instance_status="stopped",
+    )))
+    writer = started(runs, ONE, "c3", "writer")
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(writer, RUN_QUEUED, call_id="c3")))
+    checker = started(runs, ONE, "c4", "checker")
+    ended(runs, ONE, checker, instance_status="closed")
+    started(runs, TWO, "c1", "researcher")
+
+
+class TestExportAndRestore:
+    """``export`` gives a conversation's records as JSON-safe data (every
+    instance, every run's record, the id counters, ``RECORDS_VERSION``), and
+    ``restore`` reads it back into another registry: what a conversation's
+    store keeps beside it, and what a new manager loads."""
+
+    def test_the_version(self):
+        assert RECORDS_VERSION == 1
+
+    def test_a_restore_reads_back_what_an_export_wrote(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            runs.record(ONE, "writer-1#1").ref, RUN_COMPLETED, call_id="c3", result="ok",
+        )))
+        again = AgentRuns()
+
+        interrupted = again.restore(ONE, json.loads(json.dumps(runs.export(ONE))))
+
+        assert interrupted == []
+        assert again.records(ONE) == runs.records(ONE)
+        assert again.instances(ONE) == runs.instances(ONE)
+        assert again.records(TWO) == []
+        # The counters come back: the next instance of each type is numbered past them.
+        assert again.run_for(ONE, None, "c9", "researcher").instance == "researcher-2"
+        assert again.run_for(ONE, None, "c10", "checker").instance == "checker-2"
+
+    def test_its_shape(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        ended(runs, ONE, ref, usage={"m": {"input": 120, "output": 30}})
+        record = runs.record(ONE, "researcher-1#1")
+
+        data = runs.export(ONE)
+
+        assert data == {
+            "v": RECORDS_VERSION,
+            "saved": data["saved"],
+            "numbered": {"researcher": 1},
+            "instances": [{
+                "instance": "researcher-1", "agent": "researcher", "parent": "root",
+                "depth": 1, "inherit_context": False, "title": "researcher work",
+                "status": INSTANCE_IDLE, "runs": ["researcher-1#1"], "continuable": True,
+            }],
+            "runs": [{
+                "run": "researcher-1#1", "agent": "researcher", "instance": "researcher-1",
+                "parent_run": None, "depth": 1, "call_id": "c1", "title": "researcher work",
+                "status": RUN_COMPLETED, "started": record.started.isoformat(),
+                "ended": record.ended.isoformat(), "result": "ok", "error": None,
+                "partial": False, "usage": {"m": {"input": 120, "output": 30}}, "brief": {},
+                "started_by": None, "mode": "blocking", "cancelled_by": None, "plan": "",
+                "tasks": [], "input": "",
+            }],
+        }
+        assert datetime.fromisoformat(data["saved"]) >= record.ended
+
+    def test_a_run_found_working_ends_interrupted_and_its_instance_is_idle(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+        data = runs.export(ONE)
+        again = AgentRuns()
+
+        interrupted = again.restore(ONE, data)
+
+        assert interrupted == ["writer-1#1"]
+        writer = again.record(ONE, "writer-1#1")
+        assert (writer.status, writer.error) == (RUN_INTERRUPTED, INTERRUPTED_ERROR)
+        # It ended when its records were last saved: it was working then.
+        assert writer.ended == datetime.fromisoformat(data["saved"])
+        assert [(i.instance, i.status) for i in again.instances(ONE)] == [
+            ("researcher-1", INSTANCE_STOPPED), ("writer-1", INSTANCE_IDLE),
+            ("checker-1", INSTANCE_CLOSED),
+        ]
+        # The other runs are as they were.
+        assert again.records(ONE)[:2] == runs.records(ONE)[:2]
+
+    @pytest.mark.parametrize("status", [RUN_STARTED, RUN_RUNNING, RUN_INPUT_REQUIRED])
+    def test_each_working_status_is_found_interrupted(self, status):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        if status != RUN_RUNNING:
+            runs.records(ONE)[0].status = status
+        again = AgentRuns()
+
+        assert again.restore(ONE, runs.export(ONE)) == [ref.run]
+        assert again.record(ONE, ref.run).status == RUN_INTERRUPTED
+
+    def test_it_replaces_its_conversations_records_alone(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+        other = AgentRuns()
+        started(other, ONE, "c1", "writer")
+        started(other, ONE, "c2", "writer")
+        started(other, TWO, "c1", "writer")
+
+        other.restore(ONE, runs.export(ONE))
+
+        assert [r.ref.run for r in other.records(ONE)] == [
+            "researcher-1#1", "researcher-1#2", "writer-1#1", "checker-1#1",
+        ]
+        assert [r.ref.run for r in other.records(TWO)] == ["writer-1#1"]
+        # Its counters are the records', not the ones replaced.
+        assert other.run_for(ONE, None, "c9", "writer").instance == "writer-2"
+
+    def test_the_counters_never_fall_below_the_instances_kept(self):
+        runs = AgentRuns()
+        for call_id in ("c1", "c2", "c3"):
+            started(runs, ONE, call_id, "researcher")
+        data = {**runs.export(ONE), "numbered": {}}
+        again = AgentRuns()
+
+        again.restore(ONE, data)
+
+        assert again.run_for(ONE, None, "c9", "researcher").instance == "researcher-4"
+
+    @pytest.mark.parametrize("data", [
+        None,
+        "records",
+        {},
+        {"v": 2, "saved": "2026-11-19T10:00:00", "numbered": {}, "instances": [], "runs": []},
+        {"v": 1, "saved": "2026-11-19T10:00:00", "numbered": {"a": "1"}, "instances": [],
+         "runs": []},
+        {"v": 1, "saved": "2026-11-19T10:00:00", "numbered": {}, "instances": [{"instance": 1}],
+         "runs": []},
+        {"v": 1, "saved": "2026-11-19T10:00:00", "numbered": {}, "instances": [],
+         "runs": [{"run": "researcher-1#1"}]},
+    ], ids=["none", "text", "empty", "another-version", "a-counter", "an-instance", "a-run"])
+    def test_records_it_cannot_read_change_nothing(self, data):
+        runs = AgentRuns()
+        started(runs, ONE, "c1", "writer")
+        before = (runs.records(ONE), runs.instances(ONE))
+
+        with pytest.raises(ValueError):
+            runs.restore(ONE, data)
+
+        assert (runs.records(ONE), runs.instances(ONE)) == before
+
+    def test_the_instances_records_name(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+
+        assert stored_instance_ids(runs.export(ONE)) == ["researcher-1", "writer-1", "checker-1"]
+        assert stored_instance_ids({"v": 2, "instances": []}) is None
+        assert stored_instance_ids("records") is None
+
+
+class TestEachChangeIsTold:
+    """``on_change`` is told the conversation each time its records change
+    (what a store's writes follow), and not for an event that changes
+    nothing."""
+
+    def test_a_change_and_no_change(self):
+        told: list[SessionRef | None] = []
+        runs = AgentRuns(on_change=told.append)
+
+        ref = started(runs, ONE, "c1", "researcher")
+        assert told == [ONE]
+        for status, changes in [(RUN_RUNNING, False), (RUN_QUEUED, True), (RUN_QUEUED, False)]:
+            in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(ref, status, call_id="c1")))
+            assert len(told) == 1 + changes
+            told[:] = [ONE]
+        ended(runs, ONE, ref)
+        assert told == [ONE, ONE]
+        for _ in range(2):
+            in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_instance(ref, INSTANCE_CLOSED)))
+        assert told == [ONE, ONE, ONE]
+
+    def test_interrupt_open_tells_when_it_ends_one(self):
+        told: list[SessionRef | None] = []
+        runs = AgentRuns(on_change=told.append)
+        assert runs.interrupt_open(ONE) == [] and told == []
+        started(runs, ONE, "c1", "researcher")
+        told.clear()
+
+        runs.interrupt_open(ONE)
+
+        assert told == [ONE]
+
+    def test_a_restore_tells_nothing(self):
+        told: list[SessionRef | None] = []
+        source = AgentRuns()
+        started(source, ONE, "c1", "researcher")
+
+        AgentRuns(on_change=told.append).restore(ONE, source.export(ONE))
+
+        assert told == []

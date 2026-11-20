@@ -19,15 +19,23 @@ leaves its instance in; ``AGENT_INSTANCE`` a change without a run), which
 are reported in. The one other writer is ``interrupt_open``, for the runs a
 turn leaves open when it is stopped or fails, when no event can reach its
 consumer any more. A conversation is a ``SessionRef``, or None for runs
-started outside a manager's turn. All of it is in memory, for as long as
-its manager lives: a backend switch builds a new manager, and the runs
-recorded before it do not follow (as with its usage ledgers).
+started outside a manager's turn.
+
+The registry is in memory; a conversation's records are kept beside it in
+its store as well (``BaseWorkflowManager``'s store hooks): ``on_change`` is
+told each time a conversation's records change, ``export`` gives them as
+JSON-safe data (every instance, every run's record, the id counters,
+``RECORDS_VERSION``) and ``restore`` reads that back when the conversation
+is loaded again (after a restart, or by another manager); a run found still
+working ends ``interrupted``, since the conversation's lock means the
+process that ran it is gone.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -65,6 +73,10 @@ INSTANCE_CLOSED = "closed"
 INSTANCE_STATUSES = frozenset(
     {INSTANCE_RUNNING, INSTANCE_IDLE, INSTANCE_STOPPED, INSTANCE_CLOSED}
 )
+
+#: The format of a conversation's records as ``AgentRuns.export`` writes them
+#: (their ``v``); records of another are not read (``restore``).
+RECORDS_VERSION = 1
 
 #: The longest title a run gets: the first line of its brief's title.
 TITLE_MAX = 80
@@ -240,9 +252,16 @@ def run_number(run: str) -> str:
 
 
 class AgentRuns:
-    """A manager's sub-agent runs, kept by conversation, in memory for the manager's life."""
+    """A manager's sub-agent runs, kept by conversation, in memory, and beside the conversation in its store.
 
-    def __init__(self) -> None:
+    Args:
+        on_change: Told the conversation each time its records change (a
+            run's event that changes them, ``interrupt_open``), never by
+            ``restore``: what a store's writes follow. None: nobody is told.
+    """
+
+    def __init__(self, *, on_change: Callable[[SessionRef | None], None] | None = None) -> None:
+        self._on_change = on_change
         # (conversation, parent run, call id) -> the run that call started.
         self._runs: dict[tuple[Any, str | None, str], RunRef] = {}
         # (conversation, agent) -> how many instances of it are numbered.
@@ -350,8 +369,12 @@ class AgentRuns:
         metadata = event.metadata
         if event.type is EventType.AGENT_INSTANCE:
             known = self._instances.get(conversation, {}).get(ref.instance)
-            if known is not None and metadata.get("status") in INSTANCE_STATUSES:
+            if (
+                known is not None and metadata.get("status") in INSTANCE_STATUSES
+                and known.status != metadata["status"]
+            ):
                 known.status = metadata["status"]
+                self._changed(conversation)
             return
         if event.type is not EventType.AGENT_RUN:
             return
@@ -373,11 +396,16 @@ class AgentRuns:
             if ref.run not in instance.runs:
                 instance.runs.append(ref.run)
             instance.status = INSTANCE_RUNNING
+            self._changed(conversation)
             return
         if status in RUN_WORKING_STATUSES:
             working = records.get(ref.run)
-            if working is not None and working.status not in RUN_END_STATUSES:
+            if (
+                working is not None and working.status not in RUN_END_STATUSES
+                and working.status != status
+            ):
                 working.status = status
+                self._changed(conversation)
             return
         if status not in RUN_END_STATUSES:
             return
@@ -404,6 +432,7 @@ class AgentRuns:
             instance.runs.append(ref.run)
         left = metadata.get("instance_status")
         instance.status = left if left in INSTANCE_STATUSES else INSTANCE_IDLE
+        self._changed(conversation)
 
     def end_order(self, conversation: SessionRef | None, run: str) -> int:
         """Where ``run``'s end was recorded in ``conversation``: 1 for the first, 0 for none yet.
@@ -452,7 +481,88 @@ class AgentRuns:
                 if usage is not None and record.ref.run is not None:
                     record.usage = usage(record.ref.run)
                 ended.append(record.ref)
+        if ended:
+            self._changed(conversation)
         return ended
+
+    def export(self, conversation: SessionRef | None) -> dict[str, Any]:
+        """``conversation``'s records as JSON-safe data, for its store.
+
+        ``{"v": RECORDS_VERSION, "saved": <now, ISO>, "numbered": {type: n},
+        "instances": [...], "runs": [...]}``: each instance's fields
+        (``InstanceRecord``) and each run's (``RunRecord``, its ``ref``'s
+        fields first, its times as ISO text), in the order they started, and
+        the highest instance number of each type. ``saved`` is when this was
+        taken: a run still working then is restored as ended at that time.
+        """
+        return {
+            "v": RECORDS_VERSION,
+            "saved": datetime.now().isoformat(),
+            "numbered": {
+                agent: count for (owner, agent), count in self._numbered.items()
+                if owner == conversation
+            },
+            "instances": [asdict(one) for one in self.instances(conversation)],
+            "runs": [_run_value(record) for record in self.records(conversation)],
+        }
+
+    def restore(self, conversation: SessionRef | None, data: Mapping[str, Any]) -> list[str]:
+        """Replace ``conversation``'s records with what ``data`` (an ``export``) holds.
+
+        A run found working (``queued``, ``running``, ``input_required``, or
+        never past ``started``) ends ``interrupted`` (``INTERRUPTED_ERROR``)
+        at the time ``data`` was saved, and an instance found ``running``
+        becomes ``idle``: the process that ran them is gone. The counters
+        are the records', never below an instance they keep. Nobody is told
+        (``on_change``): this is no run's change. Other conversations'
+        records are left as they are.
+
+        Returns:
+            The runs it found working, in the order they started.
+
+        Raises:
+            ValueError: ``data`` is no records of ``RECORDS_VERSION`` (another
+                version, or one that does not read): nothing is changed.
+        """
+        from agentic_cli.workflow.agents.envelope import INTERRUPTED_ERROR
+
+        if not isinstance(data, Mapping) or data.get("v") != RECORDS_VERSION:
+            version = data.get("v") if isinstance(data, Mapping) else None
+            raise ValueError(
+                f"Sub-agent records of version {version!r}; this version reads {RECORDS_VERSION}."
+            )
+        try:
+            saved = _time(data.get("saved"))
+            numbered = _counts(data.get("numbered"))
+            instances = [_instance_from(value) for value in _list(data.get("instances"))]
+            records = [_run_from(value) for value in _list(data.get("runs"))]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Sub-agent records that do not read: {error}") from None
+        interrupted: list[str] = []
+        for record in records:
+            if record.status not in RUN_END_STATUSES:
+                record.status = RUN_INTERRUPTED
+                record.error = INTERRUPTED_ERROR
+                record.ended = max(record.started, saved)
+                interrupted.append(record.ref.run or "")
+        for instance in instances:
+            if instance.status == INSTANCE_RUNNING:
+                instance.status = INSTANCE_IDLE
+            agent, _, number = instance.instance.rpartition("-")
+            if agent == instance.agent and number.isascii() and number.isdigit():
+                numbered[agent] = max(numbered.get(agent, 0), int(number))
+        self.forget(conversation)
+        self._records[conversation] = {record.ref.run or "": record for record in records}
+        self._instances[conversation] = {instance.instance: instance for instance in instances}
+        for agent, count in numbered.items():
+            self._numbered[(conversation, agent)] = count
+        # The ends are numbered by when they happened: what ranks instances
+        # by their last run's end.
+        for record in sorted(
+            (r for r in records if r.ended is not None), key=lambda r: r.ended or r.started
+        ):
+            self._number_end(conversation, record.ref.run or "")
+        return interrupted
 
     def forget(self, conversation: SessionRef | None) -> None:
         """Drop ``conversation``'s runs, records, instances and numbering."""
@@ -491,6 +601,148 @@ class AgentRuns:
             )
         return record
 
+    def _changed(self, conversation: SessionRef | None) -> None:
+        if self._on_change is not None:
+            self._on_change(conversation)
+
     def _ended(self, conversation: SessionRef | None, ref: RunRef) -> bool:
         record = self._records.get(conversation, {}).get(ref.run or "")
         return record is not None and record.status in RUN_END_STATUSES
+
+
+def stored_instance_ids(data: Any) -> list[str] | None:
+    """The instance ids a conversation's stored records name (an ``export``), in
+    the order they started; None for data that is no records of
+    ``RECORDS_VERSION``. What a store reads to find the conversation's
+    transcripts without listing every session it keeps."""
+    if not isinstance(data, Mapping) or data.get("v") != RECORDS_VERSION:
+        return None
+    instances = data.get("instances")
+    if not isinstance(instances, list):
+        return None
+    return [
+        value["instance"] for value in instances
+        if isinstance(value, Mapping) and isinstance(value.get("instance"), str)
+    ]
+
+
+def _run_value(record: RunRecord) -> dict[str, Any]:
+    """A run's record as ``export`` writes it: JSON-safe."""
+    ref = record.ref
+    return {
+        "run": ref.run,
+        "agent": ref.agent,
+        "instance": ref.instance,
+        "parent_run": ref.parent_run,
+        "depth": ref.depth,
+        "call_id": record.call_id,
+        "title": record.title,
+        "status": record.status,
+        "started": record.started.isoformat(),
+        "ended": record.ended.isoformat() if record.ended is not None else None,
+        "result": record.result,
+        "error": record.error,
+        "partial": record.partial,
+        "usage": {model: dict(totals) for model, totals in record.usage.items()},
+        "brief": dict(record.brief),
+        "started_by": record.started_by,
+        "mode": record.mode,
+        "cancelled_by": record.cancelled_by,
+        "plan": record.plan,
+        # An app's tool may write any value in a task: kept as JSON says it.
+        "tasks": json.loads(json.dumps(record.tasks, default=str)),
+        "input": record.input,
+    }
+
+
+_NONE = type(None)
+
+
+def _get(value: Mapping[str, Any], name: str, *kinds: type) -> Any:
+    """``value[name]``, which must be of one of ``kinds`` exactly (no bool for an int)."""
+    found = value[name]
+    if type(found) not in kinds:
+        raise TypeError(f"{name} is {type(found).__name__}")
+    return found
+
+
+def _list(value: Any) -> list[Any]:
+    if type(value) is not list:
+        raise TypeError("not a list")
+    return value
+
+
+def _time(value: Any) -> datetime:
+    if type(value) is not str:
+        raise TypeError("a time that is not text")
+    return datetime.fromisoformat(value)
+
+
+def _counts(value: Any) -> dict[str, int]:
+    if type(value) is not dict or not all(
+        type(key) is str and type(count) is int for key, count in value.items()
+    ):
+        raise TypeError("counters that are not numbers by type")
+    return dict(value)
+
+
+def _instance_from(value: Any) -> InstanceRecord:
+    if not isinstance(value, Mapping):
+        raise TypeError("an instance that is not an object")
+    status = _get(value, "status", str)
+    runs = _list(value["runs"])
+    if status not in INSTANCE_STATUSES or not all(type(run) is str for run in runs):
+        raise ValueError(f"an instance's status {status!r} or runs")
+    return InstanceRecord(
+        instance=_get(value, "instance", str),
+        agent=_get(value, "agent", str),
+        parent=_get(value, "parent", str),
+        depth=_get(value, "depth", int),
+        inherit_context=_get(value, "inherit_context", bool),
+        title=_get(value, "title", str),
+        status=status,
+        runs=list(runs),
+        continuable=_get(value, "continuable", bool),
+    )
+
+
+def _run_from(value: Any) -> RunRecord:
+    if not isinstance(value, Mapping):
+        raise TypeError("a run that is not an object")
+    usage = _get(value, "usage", dict)
+    brief = _get(value, "brief", dict)
+    tasks = _list(value["tasks"])
+    if not all(
+        type(model) is str and type(totals) is dict
+        and all(type(k) is str and type(n) is int for k, n in totals.items())
+        for model, totals in usage.items()
+    ) or not all(type(k) is str and type(v) is str for k, v in brief.items()) or not all(
+        type(task) is dict for task in tasks
+    ):
+        raise TypeError("a run's usage, brief or tasks")
+    ended = _get(value, "ended", str, _NONE)
+    return RunRecord(
+        ref=RunRef(
+            agent=_get(value, "agent", str),
+            instance=_get(value, "instance", str),
+            run=_get(value, "run", str),
+            parent_run=_get(value, "parent_run", str, _NONE),
+            depth=_get(value, "depth", int),
+        ),
+        call_id=_get(value, "call_id", str, _NONE),
+        title=_get(value, "title", str),
+        status=_get(value, "status", str),
+        started=_time(value["started"]),
+        ended=_time(ended) if ended is not None else None,
+        result=_get(value, "result", str),
+        error=_get(value, "error", str, _NONE),
+        partial=_get(value, "partial", bool),
+        usage={model: dict(totals) for model, totals in usage.items()},
+        brief=dict(brief),
+        started_by=_get(value, "started_by", str, _NONE),
+        mode=_get(value, "mode", str),
+        cancelled_by=_get(value, "cancelled_by", str, _NONE),
+        plan=_get(value, "plan", str),
+        tasks=[dict(task) for task in tasks],
+        input=_get(value, "input", str),
+    )
