@@ -9,11 +9,14 @@ start a run is a ``BriefError``, whose text is the call's error result.
 ``task_message`` lays a brief out as the first message of the run it starts
 (the system prompt stays the type's own); an inheriting type's ends with
 ``INHERITED_CONTEXT_NOTE``. ``task_parameters`` and ``task_description`` are
-``task``'s schema and description, the same for both backends.
+``task``'s schema and description, the same for both backends;
+``follow_up_parameters`` and ``follow_up_description`` are the parent's other
+tools' (``message_agent``, ``stop_agent``, ``check_agents``).
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -58,6 +61,70 @@ _WHAT_IT_SEES = (
     "A sub-agent sees only the brief you write, unless its line below says it sees "
     "this conversation: put in the brief everything it needs to know."
 )
+
+#: The parent's other tools' descriptions, by tool name.
+_FOLLOW_UP_DESCRIPTIONS = {
+    "message_agent": (
+        "Send a message to one of your sub-agents that already ran (its id, such as "
+        "researcher-2, is in the result task gave you, or in check_agents). An idle one "
+        "starts a new run with your message as its input, keeping everything it did "
+        "before, and you get its result as task gives it. A running one gets your "
+        "message before its next step; interrupt=true stops its run and starts a new one "
+        "with your message. One the user stopped or a closed one cannot be messaged."
+    ),
+    "stop_agent": (
+        "Stop the running run of one of your sub-agents. close=true also closes it and "
+        "its own sub-agents: a closed agent cannot be messaged again, and its work stays "
+        "readable to the user."
+    ),
+    "check_agents": (
+        "The state of your sub-agents, or of one: each one's status, its current or last "
+        "run, the first lines of its last result and the tokens it used. A run's result "
+        "comes back to you on its own: do not call this to wait for one."
+    ),
+}
+
+_AGENT_ID = {"type": "string", "description": "The sub-agent's id, such as researcher-2."}
+
+#: The parent's other tools' schemas, by tool name.
+_FOLLOW_UP_PARAMETERS: dict[str, dict[str, Any]] = {
+    "message_agent": {
+        "type": "object",
+        "properties": {
+            "agent": _AGENT_ID,
+            "message": {"type": "string", "description": "What to tell it."},
+            "interrupt": {
+                "type": "boolean",
+                "description": (
+                    "For a running one: stop its run and start a new one with your "
+                    "message, rather than give it the message before its next step."
+                ),
+            },
+        },
+        "required": ["agent", "message"],
+    },
+    "stop_agent": {
+        "type": "object",
+        "properties": {
+            "agent": _AGENT_ID,
+            "close": {
+                "type": "boolean",
+                "description": "Also close it and its own sub-agents.",
+            },
+        },
+        "required": ["agent"],
+    },
+    "check_agents": {
+        "type": "object",
+        "properties": {
+            "agent": {
+                "type": "string",
+                "description": "One sub-agent's id; all of yours when left out.",
+            },
+        },
+        "required": [],
+    },
+}
 
 #: The heading of each field's section in a task message.
 _HEADINGS = {
@@ -228,6 +295,25 @@ def task_description(types: Mapping[str, AgentConfig], policy: SubAgentPolicy) -
     lines = "\n".join(_type_line(name, config, warn=True) for name, config in types.items())
     paragraphs.append(f"The agents you can hand a task to:\n{lines}")
     return "\n\n".join(paragraphs)
+
+
+def follow_up_description(name: str) -> str:
+    """The description of the parent's tool ``name`` (``message_agent``,
+    ``stop_agent`` or ``check_agents``), the same for both backends.
+
+    Raises:
+        KeyError: ``name`` is not one of them.
+    """
+    return _FOLLOW_UP_DESCRIPTIONS[name]
+
+
+def follow_up_parameters(name: str) -> dict[str, Any]:
+    """The JSON schema of the parent's tool ``name``'s arguments: a copy each call.
+
+    Raises:
+        KeyError: ``name`` is not one of the parent's tools.
+    """
+    return copy.deepcopy(_FOLLOW_UP_PARAMETERS[name])
 
 
 def limit_sentences(policy: SubAgentPolicy) -> list[str]:
