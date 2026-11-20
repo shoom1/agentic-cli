@@ -491,8 +491,9 @@ class AgentRuns:
         ``{"v": RECORDS_VERSION, "saved": <now, ISO>, "numbered": {type: n},
         "instances": [...], "runs": [...]}``: each instance's fields
         (``InstanceRecord``) and each run's (``RunRecord``, its ``ref``'s
-        fields first, its times as ISO text), in the order they started, and
-        the highest instance number of each type. ``saved`` is when this was
+        fields first, its times as ISO text, and ``end``: where its end was
+        recorded, 0 for none yet), in the order they started, and the
+        highest instance number of each type. ``saved`` is when this was
         taken: a run still working then is restored as ended at that time.
         """
         return {
@@ -503,7 +504,10 @@ class AgentRuns:
                 if owner == conversation
             },
             "instances": [asdict(one) for one in self.instances(conversation)],
-            "runs": [_run_value(record) for record in self.records(conversation)],
+            "runs": [
+                _run_value(record, self.end_order(conversation, record.ref.run or ""))
+                for record in self.records(conversation)
+            ],
         }
 
     def restore(self, conversation: SessionRef | None, data: Mapping[str, Any]) -> list[str]:
@@ -511,8 +515,10 @@ class AgentRuns:
 
         A run found working (``queued``, ``running``, ``input_required``, or
         never past ``started``) ends ``interrupted`` (``INTERRUPTED_ERROR``)
-        at the time ``data`` was saved, and an instance found ``running``
-        becomes ``idle``: the process that ran them is gone. The counters
+        at the later of its start and the time ``data`` was saved, and an
+        instance found ``running`` becomes ``idle`` (``closed`` for a type
+        that is not continuable, as ``interrupt_open`` leaves it): the
+        process that ran them is gone. The counters
         are the records', never below an instance they keep. Nobody is told
         (``on_change``): this is no run's change. Other conversations'
         records are left as they are.
@@ -535,19 +541,24 @@ class AgentRuns:
             saved = _time(data.get("saved"))
             numbered = _counts(data.get("numbered"))
             instances = [_instance_from(value) for value in _list(data.get("instances"))]
-            records = [_run_from(value) for value in _list(data.get("runs"))]
+            ends = {}
+            records = []
+            for value in _list(data.get("runs")):
+                record = _run_from(value)
+                records.append(record)
+                ends[record.ref.run or ""] = _get(value, "end", int)
+            interrupted: list[str] = []
+            for record in records:
+                if record.status not in RUN_END_STATUSES:
+                    record.status = RUN_INTERRUPTED
+                    record.error = INTERRUPTED_ERROR
+                    record.ended = max(record.started, saved)
+                    interrupted.append(record.ref.run or "")
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"Sub-agent records that do not read: {error}") from None
-        interrupted: list[str] = []
-        for record in records:
-            if record.status not in RUN_END_STATUSES:
-                record.status = RUN_INTERRUPTED
-                record.error = INTERRUPTED_ERROR
-                record.ended = max(record.started, saved)
-                interrupted.append(record.ref.run or "")
         for instance in instances:
             if instance.status == INSTANCE_RUNNING:
-                instance.status = INSTANCE_IDLE
+                instance.status = INSTANCE_IDLE if instance.continuable else INSTANCE_CLOSED
             agent, _, number = instance.instance.rpartition("-")
             if agent == instance.agent and number.isascii() and number.isdigit():
                 numbered[agent] = max(numbered.get(agent, 0), int(number))
@@ -556,11 +567,14 @@ class AgentRuns:
         self._instances[conversation] = {instance.instance: instance for instance in instances}
         for agent, count in numbered.items():
             self._numbered[(conversation, agent)] = count
-        # The ends are numbered by when they happened: what ranks instances
-        # by their last run's end.
-        for record in sorted(
-            (r for r in records if r.ended is not None), key=lambda r: r.ended or r.started
-        ):
+        # The ends are numbered as they were recorded (a run found working
+        # ends after them, in start order): what ranks instances by their last
+        # run's end, which the clock may not tell.
+        recorded = sorted(
+            (r for r in records if ends[r.ref.run or ""] > 0),
+            key=lambda r: ends[r.ref.run or ""],
+        )
+        for record in [*recorded, *(r for r in records if r.ref.run in interrupted)]:
             self._number_end(conversation, record.ref.run or "")
         return interrupted
 
@@ -626,8 +640,8 @@ def stored_instance_ids(data: Any) -> list[str] | None:
     ]
 
 
-def _run_value(record: RunRecord) -> dict[str, Any]:
-    """A run's record as ``export`` writes it: JSON-safe."""
+def _run_value(record: RunRecord, end: int) -> dict[str, Any]:
+    """A run's record as ``export`` writes it: JSON-safe, ``end`` where its end was recorded."""
     ref = record.ref
     return {
         "run": ref.run,
@@ -652,6 +666,7 @@ def _run_value(record: RunRecord) -> dict[str, Any]:
         # An app's tool may write any value in a task: kept as JSON says it.
         "tasks": json.loads(json.dumps(record.tasks, default=str)),
         "input": record.input,
+        "end": end,
     }
 
 

@@ -79,7 +79,7 @@ class AgentsCommand(Command):
             await workflow.load_agents(conversation)
         except Exception as error:  # noqa: BLE001 - the runs held are shown all the same
             app.session.add_warning(
-                f"Sub-agent records not read from the store: {error or type(error).__name__}"
+                f"Sub-agent records not read from the store: {str(error) or type(error).__name__}"
             )
         runs = workflow.agent_runs
         records = runs.records(conversation)

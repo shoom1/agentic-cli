@@ -52,6 +52,9 @@ class RecordsWriter:
         self._writing: dict[SessionRef, asyncio.Task[None]] = {}
         # The conversations a failed write was warned of.
         self._warned: set[SessionRef] = set()
+        # The conversations whose latest write failed: what the store keeps
+        # lacks what the manager holds.
+        self._unsaved: set[SessionRef] = set()
 
     def changed(self, conversation: SessionRef) -> None:
         """``conversation``'s records changed: write them, after the write under way.
@@ -70,6 +73,10 @@ class RecordsWriter:
         self._writing[conversation] = loop.create_task(
             self._write(conversation), name=f"sub-agent records {conversation.session_id}"
         )
+
+    def unsaved(self, conversation: SessionRef) -> bool:
+        """Whether ``conversation``'s latest write failed (the store lacks its latest records)."""
+        return conversation in self._unsaved
 
     async def flush(self, conversation: SessionRef) -> None:
         """Wait until ``conversation``'s records are written. Never raises.
@@ -92,6 +99,7 @@ class RecordsWriter:
         self._dirty.discard(conversation)
         await self.flush(conversation)
         self._warned.discard(conversation)
+        self._unsaved.discard(conversation)
 
     async def _write(self, conversation: SessionRef) -> None:
         try:
@@ -101,6 +109,8 @@ class RecordsWriter:
                     await self._save(conversation, self._export(conversation))
                 except Exception as error:  # noqa: BLE001 - a run is not its records' to fail
                     self._failed(conversation, error)
+                else:
+                    self._unsaved.discard(conversation)
         finally:
             # Nothing awaits between the last look and this: a change made
             # after it starts a write of its own.
@@ -108,6 +118,7 @@ class RecordsWriter:
                 del self._writing[conversation]
 
     def _failed(self, conversation: SessionRef, error: Exception) -> None:
+        self._unsaved.add(conversation)
         if conversation in self._warned:
             logger.debug(
                 "subagent_records_not_saved", session_id=conversation.session_id, exc_info=error

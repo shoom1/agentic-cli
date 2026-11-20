@@ -428,6 +428,17 @@ class TestAfterARestart:
         assert len(rows_of(table)) == 5
 
 
+    async def test_an_error_without_a_message_is_named_by_its_type(self, manager, monkeypatch):
+        async def unreadable(conversation: SessionRef) -> None:
+            raise TimeoutError()
+
+        monkeypatch.setattr(manager, "load_agents", unreadable)
+        session = await agents(manager)
+
+        session.add_warning.assert_called_once_with(
+            "Sub-agent records not read from the store: TimeoutError"
+        )
+
 class _Down:
     """An app whose workflow is not running."""
 

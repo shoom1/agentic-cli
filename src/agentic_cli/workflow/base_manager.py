@@ -57,7 +57,7 @@ from agentic_cli.workflow.agents.delegate import (
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.records import RecordsWriter
-from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, AgentRuns
+from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, RUN_END_STATUSES, AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -679,7 +679,9 @@ class BaseWorkflowManager(ABC):
         """Load ``conversation``'s sub-agent records from its store, once (provisional).
 
         ``load_session`` and each turn's start call it; a call after the
-        first that loaded does nothing, and so does one before the manager
+        first that loaded does nothing (a conversation is marked loaded once
+        its records were read into it, or ignored as unreadable: one whose
+        restore failed some other way is read again), and so does one before the manager
         is initialized (its store is not open: the turn's start loads). The
         stored records replace what this manager holds of the conversation
         (``AgentRuns.restore``): a run found working is ended
@@ -702,23 +704,28 @@ class BaseWorkflowManager(ABC):
             if conversation in loaded:
                 return
             data = await self._load_agent_records(conversation)
-            loaded.add(conversation)
             if data is None:
+                loaded.add(conversation)
                 return
             try:
                 interrupted = self.agent_runs.restore(conversation, data)
             except ValueError as error:
+                loaded.add(conversation)
                 logger.warning(
                     "subagent_records_ignored", session_id=conversation.session_id,
                     error=str(error),
                 )
                 return
+            loaded.add(conversation)
             logger.info(
                 "subagent_records_loaded", session_id=conversation.session_id,
                 runs=len(self.agent_runs.records(conversation)), interrupted=len(interrupted),
             )
             if interrupted:
+                # Written back before the load returns: a release that follows
+                # at once finds the store open.
                 self._agent_records.changed(conversation)
+                await self._agent_records.flush(conversation)
 
     @property
     def _agents_loaded(self) -> set[SessionRef]:
@@ -749,6 +756,20 @@ class BaseWorkflowManager(ABC):
         if conversation is not None and conversation in self._agents_loaded:
             self._agent_records.changed(conversation)
 
+    def _holds_unsaved_agents(self, conversation: SessionRef) -> bool:
+        """Whether this manager holds what the store lacks of ``conversation``'s records.
+
+        Its latest write failed, or one of its runs still works (its end is
+        not in any store yet): reading the store again would replace them.
+        """
+        writer = self.__dict__.get("_records_writer")
+        if writer is not None and writer.unsaved(conversation):
+            return True
+        return any(
+            record.status not in RUN_END_STATUSES
+            for record in self.agent_runs.records(conversation)
+        )
+
     async def _agent_records_written(self, conversation: SessionRef) -> None:
         """Wait until ``conversation``'s records are written. Never raises."""
         writer = self.__dict__.get("_records_writer")
@@ -760,18 +781,27 @@ class BaseWorkflowManager(ABC):
         """The block deletes ``conversation`` from the store; this manager then forgets it.
 
         Before the block, nothing more of its records is written (a write
-        under way is waited for, so none lands after the delete). After it,
+        under way is waited for, so none lands after the delete, and a change
+        made during it, by a run still going, writes nothing: the
+        conversation is unmarked until the block ends; a block that raises
+        marks it again). After it,
         unless it raised: its sub-agent records and their loading
         (``agent_runs``), the calls it recorded (``OpenCalls``: a failed
         turn's too), its usage ledger and its numbering (``Delegations``), so
         a conversation of the same id starts as a new one.
         """
         writer = self.__dict__.get("_records_writer")
+        was_loaded = conversation in self._agents_loaded
+        self._agents_loaded.discard(conversation)
         if writer is not None:
             await writer.discard(conversation)
-        yield
+        try:
+            yield
+        except BaseException:
+            if was_loaded:
+                self._agents_loaded.add(conversation)
+            raise
         self.agent_runs.forget(conversation)
-        self._agents_loaded.discard(conversation)
         open_calls = getattr(self, "_open_calls", None)  # a manager made without __init__ has none
         if open_calls is not None:
             open_calls.forget(conversation)
@@ -2925,7 +2955,9 @@ class BaseWorkflowManager(ABC):
         records load with it (``load_agents``), read again from the store
         whenever the conversation is opened (another process may have had it
         in between); records that cannot be read now are warned of and read
-        again at its next turn's start.
+        again at its next turn's start. A conversation this manager holds
+        what its store lacks of (a failed write, a run still working) is not
+        read again.
 
         Args:
             session_id: Session to adopt.
@@ -2951,9 +2983,11 @@ class BaseWorkflowManager(ABC):
         logger.info("session_adopted", session_id=session_id, resumed=exists)
         # Its sub-agent records load with it, read again from the store
         # (another process may have had the conversation since this manager
-        # last did: its own writes land first).
+        # last did: its own writes land first), unless this manager holds what
+        # the store lacks: a write that failed, or a run of it still working.
         await self._agent_records_written(ref)
-        self._agents_loaded.discard(ref)
+        if not self._holds_unsaved_agents(ref):
+            self._agents_loaded.discard(ref)
         try:
             await self.load_agents(ref)
         except Exception as error:  # noqa: BLE001 - the conversation is adopted all the same

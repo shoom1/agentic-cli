@@ -762,7 +762,7 @@ class TestExportAndRestore:
                 "ended": record.ended.isoformat(), "result": "ok", "error": None,
                 "partial": False, "usage": {"m": {"input": 120, "output": 30}}, "brief": {},
                 "started_by": None, "mode": "blocking", "cancelled_by": None, "plan": "",
-                "tasks": [], "input": "",
+                "tasks": [], "input": "", "end": 1,
             }],
         }
         assert datetime.fromisoformat(data["saved"]) >= record.ended
@@ -855,6 +855,92 @@ class TestExportAndRestore:
         assert stored_instance_ids(runs.export(ONE)) == ["researcher-1", "writer-1", "checker-1"]
         assert stored_instance_ids({"v": 2, "instances": []}) is None
         assert stored_instance_ids("records") is None
+
+
+def a_nested_conversation(runs: AgentRuns, *, working: bool) -> None:
+    """ONE's records with every non-default value: an inheriting analyst, its
+    helper (depth 2, a ``parent_run``), and a one-shot scribe (not
+    continuable). ``working``: the analyst and the scribe are still working."""
+    analyst = runs.run_for(ONE, None, "c1", "analyst")
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        analyst, RUN_STARTED, title="Analyse.", call_id="c1", inherit_context=True,
+        continuable=True, started_by="agent:root",
+    )))
+    helper = runs.run_for(ONE, analyst, "n1", "helper")
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        helper, RUN_STARTED, title="Help.", call_id="n1", started_by="agent:analyst-1",
+    )))
+    ended(runs, ONE, helper, instance_status="idle")
+    scribe = runs.run_for(ONE, None, "c2", "scribe")
+    in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+        scribe, RUN_STARTED, title="Write.", call_id="c2", continuable=False,
+    )))
+    if not working:
+        ended(runs, ONE, scribe, instance_status="closed")
+        ended(runs, ONE, analyst, instance_status="idle")
+
+
+class TestEveryFieldRoundTrips:
+    """Each field of every instance and run comes back as it was, the
+    non-default values too (an inheriting instance, a one-shot type, a nested
+    run's parent and depth)."""
+
+    def test_an_export_restores_to_equal_records(self):
+        runs = AgentRuns()
+        a_nested_conversation(runs, working=False)
+        again = AgentRuns()
+
+        again.restore(ONE, json.loads(json.dumps(runs.export(ONE))))
+
+        assert again.instances(ONE) == runs.instances(ONE)
+        assert again.records(ONE) == runs.records(ONE)
+        analyst, helper, scribe = again.instances(ONE)
+        assert (analyst.inherit_context, analyst.continuable) == (True, True)
+        assert (scribe.inherit_context, scribe.continuable) == (False, False)
+        assert (helper.parent, helper.depth) == ("analyst-1", 2)
+        nested = again.record(ONE, "helper-1#1")
+        assert nested.ref.parent_run == "analyst-1#1" and nested.ref.depth == 2
+
+    def test_a_one_shot_instance_found_working_is_closed_not_idle(self):
+        runs = AgentRuns()
+        a_nested_conversation(runs, working=True)
+        again = AgentRuns()
+
+        interrupted = again.restore(ONE, runs.export(ONE))
+
+        assert interrupted == ["analyst-1#1", "scribe-1#1"]
+        assert [(i.instance, i.status) for i in again.instances(ONE)] == [
+            ("analyst-1", INSTANCE_IDLE), ("helper-1", INSTANCE_IDLE),
+            ("scribe-1", INSTANCE_CLOSED),
+        ]
+
+    def test_the_order_runs_ended_in_survives_equal_times(self):
+        runs = AgentRuns()
+        first = started(runs, ONE, "c1", "researcher")
+        second = started(runs, ONE, "c2", "writer")
+        moment = datetime(2026, 11, 19, 10, 0, 0)
+        for ref, call in ((second, "c2"), (first, "c1")):  # the later-started ends first
+            event = WorkflowEvent.agent_run(ref, RUN_COMPLETED, call_id=call, result="ok")
+            event.timestamp = moment
+            in_turn(ONE, lambda: runs.observe(event))
+        again = AgentRuns()
+
+        again.restore(ONE, runs.export(ONE))
+
+        assert again.end_order(ONE, "writer-1#1") == 1
+        assert again.end_order(ONE, "researcher-1#1") == 2
+
+    def test_a_time_with_a_zone_is_records_it_cannot_read(self):
+        runs = AgentRuns()
+        started(runs, ONE, "c1", "researcher")
+        data = runs.export(ONE)
+        data["saved"] = "2026-11-19T10:00:00+02:00"
+        before = runs.records(ONE)
+
+        with pytest.raises(ValueError):
+            runs.restore(ONE, data)
+
+        assert runs.records(ONE) == before
 
 
 class TestEachChangeIsTold:

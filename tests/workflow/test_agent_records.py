@@ -212,6 +212,20 @@ class TestRecordsWriter:
 
         assert store.saved == [(ONE, 1)]
 
+    async def test_a_conversation_whose_last_write_failed_is_unsaved_until_one_lands(self):
+        store, records = Store(), {ONE: 1}
+        store.fails = OSError("disk full")
+        writer = writer_over(store, records)
+
+        writer.changed(ONE)
+        await writer.flush(ONE)
+        failed = writer.unsaved(ONE)
+        store.fails = None
+        writer.changed(ONE)
+        await writer.flush(ONE)
+
+        assert (failed, writer.unsaved(ONE), writer.unsaved(TWO)) == (True, False, False)
+
     def test_outside_an_event_loop_nothing_is_written(self):
         store = Store.__new__(Store)  # no event loop to make its events on
         store.saved = []
@@ -521,6 +535,95 @@ class TestAManagersRecords:
         assert runs_in(stored, ref) == runs_of(one, ref)
 
 
+class TestLoadingIsCarefulWithWhatItHolds:
+    async def test_records_with_a_time_that_has_a_zone_are_ignored_with_one_warning(
+        self, kept, logged
+    ):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        stored = copy.deepcopy(manager.stored[ref])
+        stored["saved"] = "2026-11-19T10:00:00+02:00"
+        stored["runs"][0].update(status=RUN_RUNNING, ended=None)  # found working: saved is read
+        second = kept({ref: stored})
+
+        await turn(second, "Find Y.")
+
+        assert warned(logged) == [("subagent_records_ignored", "s")]
+        assert runs_of(second, ref) == [("researcher-1#1", RUN_COMPLETED)]
+
+    async def test_a_conversation_is_loaded_only_once_its_records_were_read_into_it(self, kept):
+        stored: dict[SessionRef, Any] = {}
+        await turn(kept(stored))
+        manager = kept(stored)
+        ref = manager.session_ref("s", "u")
+        await manager.initialize_services()
+
+        def unexpected(*args: Any) -> None:
+            raise RuntimeError("not records")
+
+        real = manager.agent_runs.restore
+        manager.agent_runs.restore = unexpected
+        with pytest.raises(RuntimeError):
+            await turn(manager)
+        manager.agent_runs.restore = real
+        await turn(manager, "Find Y.")
+
+        assert manager.loads == [ref, ref]
+        assert [run for run, _ in runs_of(manager, ref)] == ["researcher-1#1", "researcher-2#1"]
+
+    async def test_the_write_back_of_an_interrupted_run_lands_before_opening_returns(self, kept):
+        stored: dict[SessionRef, Any] = {}
+        first = kept(stored)
+        first.hold = asyncio.Event()
+        ref = first.session_ref("s", "u")
+        running = asyncio.ensure_future(turn(first))
+        try:
+            await until(lambda: ref in stored)
+            killed = copy.deepcopy(stored)
+        finally:
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
+        second = kept(killed)
+        await second.initialize_services()
+
+        await second.load_session("s", user_id="u")
+
+        assert runs_in(killed, ref) == [("researcher-1#1", RUN_INTERRUPTED)]
+
+    async def test_opening_again_keeps_what_could_not_be_saved(self, kept, logged):
+        stored: dict[SessionRef, Any] = {}
+        manager = kept(stored)
+        ref = manager.session_ref("s", "u")
+        manager.save_fails = OSError("disk full")
+        await turn(manager)
+        manager.save_fails = None
+        await manager.initialize_services()
+
+        await manager.load_session("s", user_id="u")
+
+        assert manager.loads == [ref]  # not read again: the store lacks what it holds
+        assert runs_of(manager, ref) == [("researcher-1#1", RUN_COMPLETED)]
+
+    async def test_opening_again_leaves_a_working_run_alone(self, kept):
+        manager = kept({})
+        manager.hold = asyncio.Event()
+        ref = manager.session_ref("s", "u")
+        running = asyncio.ensure_future(turn(manager))
+        try:
+            await until(lambda: runs_of(manager, ref) == [("researcher-1#1", RUN_RUNNING)])
+            await manager._agent_records_written(ref)
+
+            await manager.load_session("s", user_id="u")
+
+            assert runs_of(manager, ref) == [("researcher-1#1", RUN_RUNNING)]
+        finally:
+            manager.hold.set()
+            await asyncio.wait_for(running, 5)
+        assert runs_of(manager, ref) == [("researcher-1#1", RUN_COMPLETED)]
+
+
 class TestADeletedConversation:
     """Deleting a conversation writes nothing of it after the delete, and the
     manager forgets it: its records, the calls it recorded, its usage, its
@@ -560,3 +663,24 @@ class TestADeletedConversation:
 
         assert waited
         assert ref not in stored
+
+    async def test_a_change_during_the_delete_writes_nothing_and_a_failed_delete_keeps_it_loaded(
+        self, kept
+    ):
+        stored: dict[SessionRef, Any] = {}
+        manager = kept(stored)
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+
+        async with manager._deleting(ref):
+            stored.pop(ref)
+            manager._agent_records_changed(ref)  # a run still going: no write lands
+            await asyncio.sleep(0.01)
+        assert ref not in stored
+
+        again = kept(stored)
+        await turn(again)
+        with pytest.raises(RuntimeError):
+            async with again._deleting(ref):
+                raise RuntimeError("delete failed")
+        assert ref in again._agents_loaded
