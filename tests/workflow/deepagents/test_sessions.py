@@ -278,14 +278,16 @@ class TestStoredInstances:
 
         assert await CheckpointSessions(saver, store).stored_instances(ref()) == {}
 
-    async def test_with_records_the_counters_come_from_them_and_no_thread_is_read(
+    async def test_the_threads_are_the_floor_under_the_records_and_read_cheaply(
         self, saver, store, monkeypatch
     ):
-        """A conversation's records name its instances and hold its counters:
-        the numbering reads that one item, not every instance input
-        checkpoint (each unpickled on the event loop)."""
+        """The records' counters and ids number past what they hold, and the
+        threads past what the records never named (a start write that was
+        lost): each thread's first checkpoint says so, which holds no
+        messages, so no transcript is unpickled on the event loop."""
         await say(saver, ref())
-        await instance_ran(saver, ref(), "researcher-1")
+        await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
+        await instance_ran(saver, ref(), "researcher-6", "Lost.", "Lost again.")  # unnamed
         sessions = CheckpointSessions(saver, store)
         await sessions.save_agent_records(ref(), {
             **records_of(), "numbered": {"researcher": 5, "writer": 2},
@@ -293,19 +295,23 @@ class TestStoredInstances:
                 {"instance": "researcher-1"}, {"instance": "writer-2"}, {"instance": "notes"},
             ],
         })
-        looked: list[object] = []
+        decoded: list[int] = []
         alist = saver.alist
 
-        def listing(*args, **kwargs):
-            looked.append(args)
-            return alist(*args, **kwargs)
+        async def listing(*args, **kwargs):
+            async for item in alist(*args, **kwargs):
+                decoded.append(len(item.checkpoint["channel_values"].get("messages", ())))
+                yield item
 
         monkeypatch.setattr(saver, "alist", listing)
 
         counts = await sessions.stored_instances(ref())
 
-        assert counts == {"researcher": 5, "writer": 2}
-        assert looked == []
+        assert counts == {"researcher": 6, "writer": 2}
+        assert decoded == [0, 0]  # one empty first checkpoint a thread, none of the later ones
+        decoded.clear()
+        assert await sessions.instances(ref()) == ["researcher-1", "researcher-6"]
+        assert decoded == [0, 0]
 
     async def test_records_that_name_no_instance_read_the_threads(self, saver, store):
         await instance_ran(saver, ref(), "researcher-4")

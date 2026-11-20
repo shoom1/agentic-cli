@@ -86,6 +86,7 @@ from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.sessions import (
     CheckpointSessions,
     instance_run_config,
+    instance_thread_id,
     job_notification,
     run_config,
 )
@@ -767,6 +768,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window, still
                 after its summary (``subagent_overflow_message``), with the
                 last text it wrote.
+            RunFailed: A first run whose instance's thread the store already
+                keeps: a stored transcript is never another run's.
             RuntimeError: The run has no conversation (its thread needs one).
         """
         conversation = run.conversation
@@ -774,6 +777,21 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
         graph = self._agent_graphs[run.ref.agent]
         task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
+        if not run.follow_up and self._checkpointer is not None:
+            # A first run never continues a thread the store already keeps
+            # (as ADK refuses to make an existing session): whatever numbered
+            # it, a stored transcript is never another run's.
+            kept = await self._checkpointer.aget_tuple(
+                {"configurable": {
+                    "thread_id": instance_thread_id(conversation, run.ref.instance),
+                    "checkpoint_ns": "",
+                }}
+            )
+            if kept is not None:
+                raise RunFailed(
+                    f"The thread of sub-agent {run.ref.instance} already exists.",
+                    code="THREAD_EXISTS",
+                )
         if run.follow_up:
             inputs: dict[str, Any] = {
                 **{k: v for k, v in run.state.items() if k in SHARED_KEYS and v},

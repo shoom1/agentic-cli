@@ -5219,6 +5219,82 @@ class TestARestart:
         assert [e for e in events if e.type is EventType.ERROR] == []
 
 
+class TestATranscriptTheRecordsNeverNamed:
+    """A run's start write can be lost (the store failed, the process was
+    killed first) while its transcript exists. The records then miss an
+    instance: a new instance never continues it, and a delete still removes
+    it."""
+
+    @staticmethod
+    async def lost_start_write(make_crew, monkeypatch):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        await first.turn("Find X.")
+        monkeypatch.setattr(first.manager, "_save_agent_records", written_no_more)
+        await first.turn("Find Y.")
+        assert await transcripts(first) == ["researcher-1", "researcher-2"]
+        await first.manager.cleanup()
+
+    async def test_a_new_instance_never_continues_it(self, make_crew, monkeypatch):
+        await self.lost_start_write(make_crew, monkeypatch)
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
+            researcher=[says("Z is 3.")],
+        )
+
+        await second.turn("Find Z.")
+
+        assert "researcher-2" not in [
+            r.ref.instance for r in second.records() if r.status == RUN_COMPLETED
+        ]
+        assert "Find Y." not in "".join(second.bodies("researcher"))
+        assert "researcher-2" in await transcripts(second)  # as it was
+
+    async def test_a_first_run_onto_a_stored_transcript_fails_rather_than_continue_it(
+        self, make_crew, monkeypatch
+    ):
+        """Whatever numbered it: here a store that could tell nothing of what
+        it keeps."""
+        await self.lost_start_write(make_crew, monkeypatch)
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
+            researcher=[says("Z is 3.")],
+        )
+
+        async def keeps_none(conversation: SessionRef) -> dict[str, int]:
+            return {}
+
+        async def reads_none(conversation: SessionRef) -> None:
+            return None
+
+        second.manager._stored_instances = keeps_none
+        second.manager._load_agent_records = reads_none
+        await second.turn("Find Z.")
+
+        (record,) = second.records()
+        assert (record.ref.instance, record.status) == ("researcher-1", RUN_FAILED)
+        assert "Find X." not in "".join(second.bodies("researcher"))
+        assert await transcripts(second) == ["researcher-1", "researcher-2"]
+
+    async def test_a_delete_removes_it_too(self, make_crew, monkeypatch):
+        await self.lost_start_write(make_crew, monkeypatch)
+        second = make_crew(
+            follow_team(), store="sqlite", coordinator=[says("Hi.")], researcher=[],
+        )
+        await second.turn("Hi.")
+
+        assert await second.manager.delete_session(SESSION, user_id=USER) is True
+
+        assert await transcripts(second) == []
+        assert await second.manager._load_agent_records(second.conversation) is None
+
+
 class TestADeletedConversation:
     """Deleting a conversation removes its records and every instance's
     transcript (the transcripts first, then the records, then the

@@ -38,21 +38,10 @@ that changes them, never a row of the index. ``delete`` deletes the
 instances' threads first, then the records, then the conversation's thread
 and row, so a delete cut short leaves the conversation, by which the rest is
 found again. The instances a conversation keeps, which number a new
-manager's next ones (``stored_instances``), are read from its records when
-they name any: one item, where the threads' input checkpoints are each
-unpickled; a conversation without records, or whose records name none, is
-read from its threads.
-
-A finished job reports to the conversation in a ``HumanMessage`` of its own
-(``job_notification``), marked in its ``response_metadata``, which no
-provider adapter sends. The model reads it as the rest of the conversation;
-``recent`` leaves it out, because the user did not write it, and so does a
-conversation's row: its title is the first prompt the user typed, its turns
-how many they typed.
-
-``open_sessions`` opens a store's conversations from the settings, without
-the manager, for ``workflow/session_readers.py``: the checkpointer and the
-index the manager would open, read through ``CheckpointSessions``.
+manager's next ones (``stored_instances``), are the records' ids and
+counters and the threads', read cheaply (each thread's first checkpoint
+holds no message), so an instance whose start write was lost is numbered
+past too.
 """
 
 from __future__ import annotations
@@ -305,32 +294,18 @@ class CheckpointSessions:
         return listed if limit is None else listed[:limit]
 
     async def instances(self, ref: SessionRef) -> list[str]:
-        """The sub-agent instances ``ref``'s conversation keeps, sorted.
-
-        The instances its stored records name when they name any (one item:
-        ``stored_instance_ids``); otherwise those whose threads it keeps
-        (``_threads_of``: a conversation without records, or from before
-        them).
-        """
-        named = stored_instance_ids(await self.agent_records(ref))
-        if named:
-            return sorted(set(named))
-        return await self._threads_of(ref)
-
-    async def _threads_of(self, ref: SessionRef) -> list[str]:
         """The sub-agent instances whose transcript thread ``ref``'s conversation keeps, sorted.
 
-        Read from the instance runs' input checkpoints, by their metadata:
-        one per run, never the root's checkpoints (each holds the whole
-        conversation). A thread whose id does not name this conversation and
-        an instance is left out, whatever its metadata says. The saver
-        unpickles each checkpoint it returns, which its filter (a metadata
-        equality) cannot spare: the records are read first when they name
-        instances (``instances``).
+        Read from the instance runs' first input checkpoints, by their
+        metadata (``source`` ``input``, ``step`` -1): one per thread, which
+        holds no message yet, never a checkpoint that holds a transcript (the
+        saver unpickles every checkpoint it returns, and its filter is a
+        metadata equality). A thread whose id does not name this conversation
+        and an instance is left out, whatever its metadata says.
         """
         wanted = {
             "app_name": ref.app_name, "user_id": ref.user_id, "session_id": ref.session_id,
-            "thread_kind": _INSTANCE_THREAD, "source": "input",
+            "thread_kind": _INSTANCE_THREAD, "source": "input", "step": -1,
         }
         found: set[str] = set()
         async for item in self._saver.alist(None, filter=wanted):
@@ -352,14 +327,15 @@ class CheckpointSessions:
         Read from the instances' ids (``<type>-<n>``, ``AgentRuns``'
         instance ids), as ``adk/sessions.py::stored_instances`` reads ADK's:
         what another manager ran there, which this one numbers past. An
-        instance that names no such number is left out. When the stored
-        records name instances their counters count too (they never fall
-        below an instance kept), and no thread is read.
+        instance that names no such number is left out. The threads are the
+        floor (``instances``: a thread a start write never named is numbered
+        past too), and the stored records' ids and counters count with them:
+        the counters never fall below an instance kept.
         """
         counts: dict[str, int] = {}
         records = await self.agent_records(ref)
-        named = stored_instance_ids(records)
-        for instance in sorted(set(named)) if named else await self._threads_of(ref):
+        named = stored_instance_ids(records) or []
+        for instance in sorted({*named, *await self.instances(ref)}):
             agent, _, number = instance.rpartition("-")
             if agent and number.isascii() and number.isdigit():
                 counts[agent] = max(counts.get(agent, 0), int(number))
@@ -380,7 +356,7 @@ class CheckpointSessions:
         thread the records never named goes too. The thread goes with any
         sub-agent checkpoints an older version stored in it.
         """
-        for instance in await self._threads_of(ref):
+        for instance in await self.instances(ref):
             await self._saver.adelete_thread(instance_thread_id(ref, instance))
         await self.delete_agent_records(ref)
         namespace = _rows_of(ref.app_name, ref.user_id)

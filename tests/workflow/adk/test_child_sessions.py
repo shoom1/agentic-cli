@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sqlite3
 
 import anthropic
@@ -187,7 +188,7 @@ class TestTheRecordsSession:
         await adk_sessions.save_records(service, conversation, records_naming("researcher-2"))
 
         session = await service.get_session(app_name=child_app(APP), user_id="u", session_id="s")
-        assert session.state[RECORDS_KEY] == records_naming("researcher-2")
+        assert RECORDS_KEY in session.state
         assert await adk_sessions.load_records(service, conversation) == records_naming("researcher-2")
         assert await adk_sessions.load_records(service, SessionRef(APP, "u", "t")) is None
         assert await stored_ids(service, APP) == []
@@ -200,6 +201,55 @@ class TestTheRecordsSession:
         await adk_sessions.delete_records(service, conversation)  # none: nothing to do
 
         assert await stored_ids(service, child_app(APP)) == []
+
+    async def test_a_write_holds_only_what_changed_and_growth_is_linear(self, service, monkeypatch):
+        """Each run is a state key of its own, so a write's event holds the
+        run that changed (and the header), not every run so far."""
+        conversation = SessionRef(APP, "u", "s")
+        sizes: list[int] = []
+        append = service.append_event
+
+        async def measuring(session, event):
+            sizes.append(len(json.dumps(event.actions.state_delta)))
+            return await append(session, event)
+
+        monkeypatch.setattr(service, "append_event", measuring)
+        names: list[str] = []
+        data = records_naming()
+        for number in range(1, 61):
+            names.append(f"researcher-{number}")
+            data = records_naming(*names)
+            data["runs"].append({"run": f"researcher-{number}#1", "brief": "x" * 1_000})
+            await adk_sessions.save_records(service, conversation, data)
+
+        assert sizes[-1] < 2 * sizes[1]  # the 60th write is no bigger than the 2nd
+        monkeypatch.undo()
+        loaded = await adk_sessions.load_records(service, conversation)
+        assert loaded["instances"] == data["instances"] and loaded["runs"] == data["runs"]
+        assert {k: v for k, v in loaded.items() if k not in ("instances", "runs")} == {
+            k: v for k, v in data.items() if k not in ("instances", "runs")
+        }
+
+    async def test_a_shorter_write_forgets_what_it_no_longer_holds(self, service):
+        conversation = SessionRef(APP, "u", "s")
+        await adk_sessions.save_records(
+            service, conversation, records_naming("researcher-1", "researcher-2")
+        )
+        await adk_sessions.save_records(service, conversation, records_naming("writer-1"))
+
+        loaded = await adk_sessions.load_records(service, conversation)
+
+        assert [i["instance"] for i in loaded["instances"]] == ["writer-1"]
+
+    async def test_a_records_id_too_long_for_adk_is_refused_and_a_delete_goes_on(self, service):
+        conversation = "/" * 50  # a storable id that encodes to 150 characters
+        with pytest.raises(ValueError):
+            adk_sessions.records_session_id(conversation)
+        ref = SessionRef(APP, "u", conversation)
+
+        assert await adk_sessions.load_records(service, ref) is None
+        await adk_sessions.delete_records(service, ref)
+        assert await adk_sessions.ServiceSessions(service).delete(ref) is False
 
     def test_the_ids_encode_a_conversations_percent_and_slash(self):
         assert adk_sessions.child_session_id("s", "researcher-1") == "s/researcher-1"
@@ -318,11 +368,27 @@ class TestTheChildrenRecordsName:
         monkeypatch.setattr(service, "list_sessions", listing)
 
         counts = await adk_sessions.stored_instances(service, APP, "u", "s")
+
+        assert (counts, listed) == ({"researcher": 2}, [])
+        monkeypatch.undo()
+        assert await adk_sessions.delete_children(service, APP, "u", "s") == 2
+        assert await stored_ids(service, child_app(APP)) == ["s"]
+
+    async def test_a_delete_also_removes_what_the_records_never_named(self, service):
+        """A start write can be lost: the records miss a transcript that exists,
+        which numbering leaves to the store's refusal and a delete must not."""
+        conversation = SessionRef(APP, "u", "s")
+        for session_id in ("s/researcher-1", "s/researcher-2", "t/researcher-1"):
+            await service.create_session(
+                app_name=child_app(APP), user_id="u", session_id=session_id
+            )
+        await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+
+        counts = await adk_sessions.stored_instances(service, APP, "u", "s")
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
-        assert (counts, deleted, listed) == ({"researcher": 2}, 2, [])
-        monkeypatch.undo()
-        assert await stored_ids(service, child_app(APP)) == ["s"]
+        assert (counts, deleted) == ({"researcher": 1}, 2)
+        assert await stored_ids(service, child_app(APP)) == ["s", "t/researcher-1"]
 
     async def test_records_of_another_version_are_no_list(self, service):
         await service.create_session(
@@ -331,6 +397,7 @@ class TestTheChildrenRecordsName:
         await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
 
         assert await adk_sessions.stored_instances(service, APP, "u", "s") == {"researcher": 1}
+        assert await adk_sessions.delete_children(service, APP, "u", "s") == 1
 
 
 class TestDeletingTheConversation:
