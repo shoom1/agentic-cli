@@ -186,7 +186,8 @@ def lines(body: dict) -> list[str]:
 
 class Team:
     """Claude for a team: each agent answers from its own script, told apart by
-    its system prompt; every request is recorded under its agent."""
+    its system prompt; every request is recorded under its agent. A script's
+    entry is an answer, or a function of the request's body that gives one."""
 
     def __init__(self, **scripts: list[dict]) -> None:
         self.scripts = {name: list(script) for name, script in scripts.items()}
@@ -198,7 +199,10 @@ class Team:
         agent = next(name for name, prompt in PROMPTS.items() if system.startswith(prompt))
         self.sent.append((agent, body))
         script = self.scripts.get(agent) or []
-        return script.pop(0) if script else says(f"[{agent} has no scripted answer]")
+        if not script:
+            return says(f"[{agent} has no scripted answer]")
+        answer = script.pop(0)
+        return answer(body) if callable(answer) else answer
 
     @property
     def agents(self) -> list[str]:
@@ -465,8 +469,13 @@ class TestDelegation:
              "input": {"agent_type": "researcher", "title": "Z", "objective": "Z?"}},
         )
         both["stop_reason"] = "tool_use"
-        answers = Team(coordinator=[both, says("Both.")],
-                       researcher=[says("X is 42."), says("Z is 7.")])
+
+        def researcher(body: dict) -> dict:
+            # Which of the two parallel runs asks first is a race: each run
+            # answers its own task.
+            return says("X is 42." if "X?" in lines(body)[-1] else "Z is 7.")
+
+        answers = Team(coordinator=[both, says("Both.")], researcher=[researcher, researcher])
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(answers))
         manager = manager_for(team())
         try:
@@ -478,10 +487,20 @@ class TestDelegation:
         assert sorted(lines(b)[-1] for b in answers.bodies("researcher")) == [
             f"user: {message_of('X?', title='X')}", f"user: {message_of('Z?', title='Z')}",
         ]
-        read = [result_of(line) for line in lines(answers.bodies("coordinator")[1])[-2:]]
-        assert sorted((r["agent"], r["result"]) for r in read) == [
-            ("researcher-1", "X is 42."), ("researcher-2", "Z is 7."),
-        ]
+        read = {
+            block["tool_use_id"]: read_envelope(
+                block["content"] if isinstance(block["content"], str)
+                else "".join(part.get("text", "") for part in block["content"])
+            )
+            for message in answers.bodies("coordinator")[1]["messages"]
+            if isinstance(message["content"], list)
+            for block in message["content"] if block["type"] == "tool_result"
+        }
+        # Each call reads its own run's answer; the two runs are two instances.
+        assert {call: r["result"] for call, r in read.items()} == {
+            "toolu_a": "X is 42.", "toolu_b": "Z is 7.",
+        }
+        assert sorted(r["agent"] for r in read.values()) == ["researcher-1", "researcher-2"]
         assert texts(events)[-1] == "Both."
 
     async def test_a_sub_agents_long_answer_is_capped(self, project, monkeypatch):

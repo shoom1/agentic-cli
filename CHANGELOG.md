@@ -3036,6 +3036,24 @@ step; each entry says what to use instead.
 
 ### Fixed
 
+- **google-adk 2.15: a Claude refusal reads as before, Deep Agents'
+  `load_skill` answers as ADK's, and Ctrl+C during a tool call warns of
+  nothing.** From 2.15, ADK's Claude adapter gives a reply with nothing in
+  it (a refusal, or one cut at its token limit) an error code and words of
+  its own ("Claude stopped with SAFETY ('refusal') and no content."), which
+  the turn's `ERROR` repeated after "<model> returned no answer"; they say
+  no more than the code, so they are left out (`ADK_CLAUDE_NO_CONTENT`), as
+  ADK's words for an empty STOP reply are. Its words for another stop are
+  kept: an empty reply whose context window filled up
+  (`model_context_window_exceeded`) says so. ADK's `load_skill` also lists
+  the skill's resources (`resources`), which the Deep Agents skill tool now
+  does with ADK's own function on an ADK that lists them, so both backends
+  answer alike on every ADK. And ADK hands a cancelled tool call's
+  `CancelledError` to every tool-error callback for cleanup, which
+  `ToolErrorPlugin` took for a tool that raised: each Ctrl+C during a tool
+  call printed a `tool_raised` warning and its traceback over the prompt. A
+  cancel is now no failure (`tool_cancelled`, at debug).
+
 - **A provider that reuses tool-call ids no longer leaves a stopped or failed
   call unanswered.** A provider that numbers its call ids per response
   (`call_0` in every one) reuses an id the conversation already holds, and
