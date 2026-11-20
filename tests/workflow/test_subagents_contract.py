@@ -4066,9 +4066,11 @@ def instance_events(events: list[WorkflowEvent]) -> list[tuple[str, str]]:
 
 @contextlib.contextmanager
 def no_seals(monkeypatch):
-    """In the block, a stopped turn leaves its calls as a killed process does:
-    ADK's runners never get their abort signal, so ADK seals nothing (Deep
-    Agents never seals: it answers at the next run)."""
+    """In the block, a stopped turn's runners never get their abort signal.
+
+    ADK 2.12 then seals nothing; ADK 2.15 seals a cancelled run itself all the
+    same, which ``killed_mid_call`` undoes. Deep Agents never seals: it
+    answers at the next run."""
     real = live_events.merged
 
     def merged(source, live, *, on_stop=None):
@@ -4079,30 +4081,41 @@ def no_seals(monkeypatch):
         yield
 
 
-async def killed_mid_call(crew: Crew, instance: str = "researcher-1") -> None:
-    """On ADK, leave ``instance``'s child session as a process killed mid-call
-    leaves it: the events up to the model's first call, and none after it (no
-    result, no seal, however ADK's version seals a cancelled run). Deep Agents
-    needs nothing: its checkpoint is what a killed process leaves."""
-    if crew.backend != "adk":
-        return
-    from agentic_cli.workflow.adk.sessions import child_app
-
-    service = crew.manager._session_service
-    where = dict(
-        app_name=child_app(crew.conversation.app_name), user_id=USER,
-        session_id=f"{SESSION}/{instance}",
-    )
+async def _cut_after_first_call(service, where: dict[str, str], author: str) -> None:
+    """Rewrite the session ``where`` names to its events up to ``author``'s
+    first call, and none after it."""
     session = await service.get_session(**where)
     kept = []
     for event in session.events:
         kept.append(event)
-        if event.author == instance.rpartition("-")[0] and event.get_function_calls():
+        if event.author == author and event.get_function_calls():
             break
     await service.delete_session(**where)
     fresh = await service.create_session(**where, state=dict(session.state))
     for event in kept:
         await service.append_event(fresh, event)
+
+
+async def killed_mid_call(crew: Crew, instance: str = "researcher-1") -> None:
+    """On ADK, leave the conversation's session and ``instance``'s child session
+    as a process killed mid-call leaves them: the events up to the model's
+    first call, and none after it (no result, no seal, however ADK's version
+    seals a cancelled run). Deep Agents needs nothing: its checkpoints are
+    what a killed process leaves."""
+    if crew.backend != "adk":
+        return
+    from agentic_cli.workflow.adk.sessions import child_app
+
+    service = crew.manager._session_service
+    app = crew.conversation.app_name
+    await _cut_after_first_call(
+        service, dict(app_name=app, user_id=USER, session_id=SESSION), crew.manager._root_agent_name
+    )
+    await _cut_after_first_call(
+        service,
+        dict(app_name=child_app(app), user_id=USER, session_id=f"{SESSION}/{instance}"),
+        instance.rpartition("-")[0],
+    )
 
 
 def carried_over(crew: Crew, earlier: Crew) -> None:
@@ -4457,6 +4470,11 @@ class TestAFollowUpAfterAStop:
         answers = self.answered_once(second, 0)
         assert list(answers) == ["r1", "r2"]
         assert all(INTERRUPTED in answer for answer in answers.values())
+        assert second.last_message("researcher", 0) == "Go on."
+        # The conversation's own call the crash left open is answered too.
+        assert [(call_id, len(held)) for call_id, held in second.call_results("coordinator", 0)
+                if call_id == "c1"] == [("c1", 1)]
+        assert INTERRUPTED in second.results_read("coordinator", 0)["c1"]
         assert envelope_read(second.results_read("coordinator")["c2"])["result"] == "Went on."
         assert [(r.ref.run, r.status) for r in second.records()][-1] == (
             "researcher-1#2", RUN_COMPLETED,
