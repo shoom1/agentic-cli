@@ -575,6 +575,29 @@ the start of the entry's title.
 
 ### Added
 
+- **The user's control of sub-agents: `/agent stop`, `/agent close`, and the
+  manager's entry points.** `/agent stop <id>` stops one of the
+  conversation's sub-agents: its run, if one works, is cancelled by the user
+  (`cancelled_by: user`), and the instance is `stopped` (an idle one at once):
+  its parent's `message_agent` is refused, and only the user may start its
+  next run. `/agent close <id>` closes it and its own sub-agents: no more
+  runs, its work still shown by `/agents <id>`. `/agent <id>` shows it. Each
+  says what it did, or why not. The manager's entry points (provisional; the
+  open conversation, or the one `session_id`/`user_id` name, any of its
+  instances): `run_instance(instance, message)`, the user's follow-up as a
+  turn of its own (`started_by: user`, counted toward no turn's runs, from the
+  conversation's outside-content mark; stopping its stream, Ctrl+C, is the
+  user's stop of the run, which ends `cancelled` and leaves the instance
+  `stopped`), `stop_instance`, `close_instance` (both written to the store
+  before they return), `steer_instance(instance, message)` (the user's message
+  to a running run, before its next step), `instance_result` (the envelope of
+  the latest run the user started) and `tell_root(text)`, a turn of the root
+  on a notice the user did not type (marked as a job's notice is, so fact
+  extraction and the conversation's title and turns leave it out; the
+  outside-content mark a user's run brought is written with it), whose notice
+  after the user worked with a sub-agent is
+  `agents/envelope.py::view_notice`: "The user worked with <id> directly; its
+  latest result: <envelope as JSON>". On both backends, contract-tested.
 - **The main agent's requests list its open sub-agents, when it can continue
   them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
   (it has `message_agent`) is told which of its own sub-agents are open: a
@@ -846,19 +869,18 @@ the start of the entry's title.
   user's answer in the dialog approves: a brief, a tool result or a message
   saying the user approved changes nothing, and a sub-agent's question goes
   to the user, never to its parent (contract-tested on both backends).
-- **`/agents`: the conversation's sub-agent runs.** A table of the open
-  conversation's sub-agent runs, each followed by the runs it started:
-  instance, type, status (`running`, `queued` waiting for a free working
-  slot, `needs you` waiting on the user, `completed`, `completed (partial)`
-  for an answer cut at its output limit, `refused`, `failed`, `cancelled`,
-  `interrupted`),
-  run, title, tokens in/out (from the usage ledger, so a run still going
-  shows what it has used so far) and time, a row for each run of an
-  instance (its first and each follow-up, titled by its message's first
-  line). `/agents <id>` shows one instance (`researcher-2`: every run of it)
-  or run (`researcher-2#1`): its type, parent and title, then each run's
-  status and time, the other fields of its brief (a follow-up's message), the
-  first lines of its result, its error and its tokens by model. The runs are the conversation's records, kept
+- **`/agents`: the conversation's sub-agents.** A picker of the open
+  conversation's sub-agent instances, each followed by the ones it started:
+  id, type, status (`running`, `idle`, `stopped`, `closed`) and title; Enter
+  shows the one picked. `/agents <id>` shows one instance (`researcher-2`:
+  every run of it, its first and each follow-up) or run (`researcher-2#1`):
+  its type, parent and title, then each run's status (`running`, `queued`
+  waiting for a free working slot, `needs you` waiting on the user,
+  `completed`, `completed (partial)` for an answer cut at its output limit,
+  `refused`, `failed`, `cancelled`, `interrupted`) and time, the other fields
+  of its brief (a follow-up's message), the first lines of its result, its
+  error and its tokens by model (from the usage ledger, so a run still going
+  shows what it has used so far). The runs are the conversation's records, kept
   beside it in its store and loaded with it, so a conversation resumed from
   an earlier run of the app lists its runs, each with the tokens its record
   keeps. During a turn each line of the events
