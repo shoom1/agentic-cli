@@ -75,6 +75,7 @@ from agentic_cli.workflow.sessions import (
     open_turn_scope,
     reset_active_tool_call,
     reset_active_turn,
+    runs_this_turn,
     set_active_tool_call,
     set_active_turn,
 )
@@ -2742,6 +2743,58 @@ class TestAMessage:
 
         assert (replaced.result["run"], replaced.result["result"]) == ("researcher-1#3", "Did: Y.")
         assert other.result == {"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=3)}
+
+    async def test_an_interrupts_reserved_run_is_given_back_when_it_is_refused(self):
+        """Reserved as the interrupt checked, refused when the instance closed
+        under it: the turn's count is what it was."""
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+        counts: list[int | None] = []
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            counts.append(runs_this_turn())
+            replaced = asyncio.create_task(
+                made.message(follow(message="Y.", call_id="c3"), interrupt=True)
+            )
+            await asyncio.sleep(0)
+            counts.append(runs_this_turn())  # reserved
+            made.stop(CONVERSATION, None, "researcher-1", close=True)
+            await running
+            told = await replaced
+            counts.append(runs_this_turn())
+            return told
+
+        told, _ = await turned(work)
+
+        assert counts == [2, 3, 2]
+        assert told.result["success"] is False
+
+    async def test_an_interrupts_reserved_run_is_given_back_when_its_call_is_cancelled(self):
+        hook, working, _ = blocking("researcher-1#2")
+        made = delegations(hook)
+        counts: list[int | None] = []
+
+        async def work():
+            await made.delegate(request())
+            running = asyncio.create_task(made.message(follow()))
+            await working["researcher-1#2"].wait()
+            replaced = asyncio.create_task(
+                made.message(follow(message="Y.", call_id="c3"), interrupt=True)
+            )
+            await asyncio.sleep(0)
+            counts.append(runs_this_turn())  # reserved, waiting for the old run's end
+            replaced.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await replaced
+            await running
+            counts.append(runs_this_turn())
+
+        await turned(work)
+
+        assert counts == [3, 2]
 
     async def test_an_interrupt_that_cannot_start_a_follow_up_stops_nothing(self):
         """A one-shot instance's run is not cancelled for a message it could

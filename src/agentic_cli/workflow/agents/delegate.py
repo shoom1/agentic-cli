@@ -585,7 +585,9 @@ class Delegations:
             history=request.history if config.inherit_context else None,
         )
 
-    async def follow_up(self, request: FollowUpRequest, *, _reserved: bool = False) -> Delegated:
+    async def follow_up(
+        self, request: FollowUpRequest, *, _reserved: list[bool] | None = None
+    ) -> Delegated:
         """Run the instance ``request`` names once more, to its end; its envelope.
 
         The instance's next run (``AgentRuns.next_run``), through the same
@@ -610,11 +612,14 @@ class Delegations:
             instance = self._runs.instance(conversation, request.instance)
             assert instance is not None
             config = self._types[instance.agent]
-            if request.started_by != USER and not _reserved:
-                refused = self._past_runs_per_turn(instance.agent)
-                if refused is not None:
-                    return refused
-                count_run_this_turn()
+            if request.started_by != USER:
+                if _reserved is None:
+                    refused = self._past_runs_per_turn(instance.agent)
+                    if refused is not None:
+                        return refused
+                    count_run_this_turn()
+                else:
+                    _reserved[0] = False  # the reserved run starts now
             caller = request.caller
             ref = self._runs.next_run(
                 conversation, request.instance,
@@ -657,7 +662,11 @@ class Delegations:
             return closed
 
     async def message(
-        self, request: FollowUpRequest, *, interrupt: bool = False, _reserved: bool = False
+        self,
+        request: FollowUpRequest,
+        *,
+        interrupt: bool = False,
+        _reserved: list[bool] | None = None,
     ) -> Delegated:
         """Send a message to a sub-agent instance: ``message_agent``'s.
 
@@ -676,7 +685,8 @@ class Delegations:
         being closed it is refused as closed at once, since the answer is
         known. An interrupt of an agent's keeps the turn's run it checked
         for: the run is counted as the check is made, so no call in the same
-        answer can take it before the follow-up starts. A blank message,
+        answer can take it before the follow-up starts (it is given back when
+        no run starts from it, whatever stops the call). A blank message,
         and anything ``follow_up`` refuses (``interrupt`` included: nothing is
         cancelled for a message that cannot start a run), is the error result
         and nothing else happens. The sender's interrupt is its own stop: the
@@ -716,20 +726,21 @@ class Delegations:
                     error = refused.result["error"] if refused is not None else None
                 if error is not None:
                     return _refused(error)
-                if request.started_by != USER and not _reserved:
+                if request.started_by != USER and _reserved is None:
                     count_run_this_turn()
-                    _reserved = made_here = True
+                    _reserved, made_here = [True], True
                 by, why = (USER, REPLACED_BY_USER_ERROR) if request.started_by == USER else (
                     PARENT, REPLACED_ERROR
                 )
                 self.cancel(ref.run or "", by=by, error=why, conversation=conversation)
-        await ended.wait()
-        # Idle now: its follow-up (or, should another run have started
-        # meanwhile, a steer of that one).
-        answer = await self.message(request, _reserved=_reserved)
-        if made_here and (answer.run is None or "note" in answer.result):
-            release_run_this_turn()  # no run started: give its place back
-        return answer
+        try:
+            await ended.wait()
+            # Idle now: its follow-up (or, should another run have started
+            # meanwhile, a steer of that one).
+            return await self.message(request, _reserved=_reserved)
+        finally:
+            if made_here and _reserved is not None and _reserved[0]:
+                release_run_this_turn()  # no run started from it: give its place back
 
     def stop(
         self,
