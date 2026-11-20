@@ -90,11 +90,28 @@ class RecordsWriter:
     async def flush_all(self, *, timeout: float | None = None) -> None:
         """Wait until every conversation's records are written. Never raises.
 
-        ``timeout`` bounds the wait (seconds): a store that hangs is left
-        with its write, which goes on."""
+        ``timeout`` bounds the wait (seconds): the writes a store has not
+        finished by then are abandoned (``abandon``), so none lands after the
+        store was closed.
+        """
         tasks = [task for task in self._writing.values() if not task.done()]
-        if tasks:
-            await asyncio.wait(tasks, timeout=timeout)
+        if not tasks:
+            return
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            self.abandon()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def abandon(self) -> None:
+        """Cancel every write under way and drop what waits: the store is going.
+
+        Each conversation whose write was cut is warned of as a failed write
+        is (``subagent_records_not_saved``)."""
+        for conversation, task in list(self._writing.items()):
+            self._dirty.discard(conversation)
+            if not task.done():
+                task.cancel()
+                self._failed(conversation, TimeoutError("the store did not answer before it closed"))
 
     async def discard(self, conversation: SessionRef) -> None:
         """Write nothing more of ``conversation`` (it is being deleted): what

@@ -2435,6 +2435,9 @@ class BaseWorkflowManager(ABC):
         it, and a backend takes part through two hooks rather than an
         override. In order:
 
+        0. A release that detaches the store first waits for the sub-agent
+           records still being written, up to ``RECORDS_RELEASE_WAIT``, and
+           abandons what the store does not answer (``RecordsWriter``).
         1. The base's state, at once: ``is_initialized`` False, the context
            budgets and the memory index snapshots dropped, the catalog
            detached.
@@ -2449,9 +2452,7 @@ class BaseWorkflowManager(ABC):
            closes started on a worker thread
            (:meth:`_start_closing_services`): they block, and on the event
            loop they froze the app.
-        4. The closers, in one task of its own (first the sub-agent records
-           still being written are waited for, up to ``RECORDS_RELEASE_WAIT``,
-           before anything is detached), in a fixed order: the
+        4. The closers, in one task of its own, in a fixed order: the
            backend's, the store's and the catalog's, while the services
            close on their thread, then the services' closes waited for,
            last and under a shield of their own, so a service close that
@@ -2497,45 +2498,57 @@ class BaseWorkflowManager(ABC):
             )
         keep_store = self._keeping_store or keep_session_service or keep_checkpointer
 
+        # A store about to be detached first takes the sub-agent records still
+        # being written (a write looks it up as it starts, so one queued behind
+        # another would find it detached): waited for, bounded, before the
+        # release's synchronous part, so nothing is detached behind an await.
+        # A cancel here stops only the wait: the writes still running are
+        # abandoned and the release goes on, then re-raises it.
+        cancelled: asyncio.CancelledError | None = None
+        writer = self.__dict__.get("_records_writer")
+        if writer is not None and not keep_store:
+            flushing = asyncio.ensure_future(
+                writer.flush_all(timeout=RECORDS_RELEASE_WAIT)
+            )
+            try:
+                await asyncio.shield(flushing)
+            except asyncio.CancelledError as error:
+                cancelled = error
+                flushing.cancel()
+                writer.abandon()
+
         self._initialized = False
         self._budgets = {}
         self._memory_index.clear()
         catalog, self._catalog = self._catalog, None
 
         not_synchronous: list[TypeError] = []
+        closers = self._detached(self._detach_backend, not_synchronous)
+        if not keep_store:
+            closers += self._detached(self._detach_store, not_synchronous)
+        closers.append((
+            "model_catalog",
+            functools.partial(self._aclose_owned, catalog, "model_catalog"),
+        ))
 
-        async def release() -> None:
-            # The sub-agent records still being written finish first, while
-            # the store is attached: a write looks it up as it starts, so one
-            # queued behind another would find it detached.
-            writer = self.__dict__.get("_records_writer")
-            if writer is not None:
-                await writer.flush_all(timeout=RECORDS_RELEASE_WAIT)
-            closers = self._detached(self._detach_backend, not_synchronous)
-            if not keep_store:
-                closers += self._detached(self._detach_store, not_synchronous)
-            closers.append((
-                "model_catalog",
-                functools.partial(self._aclose_owned, catalog, "model_catalog"),
-            ))
+        # The services' hook: their closes start on worker threads now.
+        services: list[asyncio.Future[None]] = []
+        self._services_closing = services
+        try:
+            self._cleanup_managers()
+        finally:
+            self._services_closing = None
+        if services:
+            closers.append(
+                ("services", lambda: asyncio.shield(asyncio.gather(*services)))
+            )
 
-            # The services' hook: their closes start on worker threads now.
-            services: list[asyncio.Future[None]] = []
-            self._services_closing = services
-            try:
-                self._cleanup_managers()
-            finally:
-                self._services_closing = None
-            if services:
-                closers.append(
-                    ("services", lambda: asyncio.shield(asyncio.gather(*services)))
-                )
-            await self._close_in_order(closers)
-
-        closing = asyncio.ensure_future(release())
+        closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)
         closing.add_done_callback(_CLOSING.discard)
         await asyncio.shield(closing)
+        if cancelled is not None:
+            raise cancelled
         logger.info("workflow_manager_cleaned_up")
         if not_synchronous:
             raise not_synchronous[0]

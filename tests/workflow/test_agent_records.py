@@ -727,6 +727,114 @@ class TestTheReleaseWritesBeforeItDetaches:
         await asyncio.wait_for(manager.cleanup(), 5)
 
 
+class _Service:
+    """A service a conversation owns, which a model switch carries."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def cleanup(self) -> None:
+        self.closed = True
+
+
+class _Generations(_Kept):
+    """A backend that builds a new handle at each initialization and detaches the one it holds."""
+
+    count = 0
+    backend: str | None = None
+
+    async def _do_initialize(self) -> None:
+        type(self).count += 1
+        self.backend = f"backend-{type(self).count}"
+
+    def _detach_backend(self) -> list:
+        self.detached.append(self.backend)
+        self.backend = None
+        return []
+
+    detached: list = []
+
+
+class TestACancelledReleaseWaitingOnAWrite:
+    """A release that waits for a write under way is cancelled in that wait
+    (Ctrl+C during a model switch, an exit): it still releases once and only
+    what it was to release."""
+
+    async def test_a_model_switch_keeps_the_services_it_carries(self, context):
+        from agentic_cli.workflow.services import SANDBOX_MANAGER
+
+        manager = _Kept(TEAM, settings=context.settings, stored={})
+        await turn(manager)
+        ref = manager.session_ref("s", "u")
+        carried = _Service()
+        manager._service_set.services[SANDBOX_MANAGER] = carried
+        manager.save_gate = asyncio.Event()
+        manager._agent_records_changed(ref)  # a write under way at the switch
+        await asyncio.sleep(0)
+
+        switching = asyncio.ensure_future(manager.reinitialize(preserve_sessions=True))
+        await asyncio.sleep(0.05)
+        switching.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await switching
+        manager.save_gate.set()
+        for closing in list(base_manager_module._CLOSING):
+            await closing
+        await asyncio.sleep(0.1)
+
+        assert SANDBOX_MANAGER in manager._service_set.services
+        assert carried.closed is False
+        manager.save_gate = None
+        await manager.cleanup()
+
+    async def test_the_old_release_never_detaches_the_next_initializations_backend(self, context):
+        _Generations.detached = []
+        manager = _Generations(TEAM, settings=context.settings, stored={})
+        await turn(manager)
+        first = manager.backend
+        ref = manager.session_ref("s", "u")
+        manager.save_gate = asyncio.Event()
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+
+        cleaning = asyncio.ensure_future(manager.cleanup())
+        await asyncio.sleep(0.05)
+        cleaning.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleaning
+        await manager.initialize_services()
+        second = manager.backend
+        manager.save_gate.set()
+        for closing in list(base_manager_module._CLOSING):
+            await closing
+
+        assert _Generations.detached == [first]
+        assert manager.backend == second and manager._initialized
+        manager.save_gate = None
+        await manager.cleanup()
+
+    async def test_a_write_left_behind_by_the_bound_never_lands_after_the_store_closed(
+        self, context, monkeypatch, logged
+    ):
+        monkeypatch.setattr(base_manager_module, "RECORDS_RELEASE_WAIT", 0.05)
+        stored: dict[SessionRef, Any] = {}
+        manager = _Detaching(TEAM, settings=context.settings, stored=stored)
+        await turn(manager)
+        ref = manager.session_ref("s", "u")
+        manager.agent_runs.records(ref)[0].title = "Late."
+        manager.save_gate = asyncio.Event()  # a store that hangs
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+
+        await manager.cleanup()
+        manager.save_gate.set()  # the store answers at last
+        await asyncio.sleep(0.05)
+
+        assert stored[ref]["runs"][0]["title"] != "Late."
+        assert manager._agent_records._writing == {}
+        assert warned(logged) == [("subagent_records_not_saved", "s")]
+
+
 class TestADeletedConversation:
     """Deleting a conversation writes nothing of it after the delete, and the
     manager forgets it: its records, the calls it recorded, its usage, its
