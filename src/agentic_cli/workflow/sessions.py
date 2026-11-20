@@ -203,6 +203,13 @@ def count_run_this_turn() -> None:
         scope.runs += 1
 
 
+def release_run_this_turn() -> None:
+    """Give back a run ``count_run_this_turn`` counted that did not start."""
+    scope = _turn_scope.get()
+    if scope is not None and scope.runs > 0:
+        scope.runs -= 1
+
+
 def turn_has_ended() -> bool:
     """Whether this context belongs to a turn that has ended.
 

@@ -150,6 +150,7 @@ from agentic_cli.workflow.sessions import (
     count_run_this_turn,
     current_turn_scope,
     get_active_turn,
+    release_run_this_turn,
     reset_active_turn,
     runs_this_turn,
     set_active_run,
@@ -584,7 +585,7 @@ class Delegations:
             history=request.history if config.inherit_context else None,
         )
 
-    async def follow_up(self, request: FollowUpRequest) -> Delegated:
+    async def follow_up(self, request: FollowUpRequest, *, _reserved: bool = False) -> Delegated:
         """Run the instance ``request`` names once more, to its end; its envelope.
 
         The instance's next run (``AgentRuns.next_run``), through the same
@@ -609,7 +610,7 @@ class Delegations:
             instance = self._runs.instance(conversation, request.instance)
             assert instance is not None
             config = self._types[instance.agent]
-            if request.started_by != USER:
+            if request.started_by != USER and not _reserved:
                 refused = self._past_runs_per_turn(instance.agent)
                 if refused is not None:
                     return refused
@@ -655,7 +656,9 @@ class Delegations:
             self._close_at_end(conversation, below, reason)
             return closed
 
-    async def message(self, request: FollowUpRequest, *, interrupt: bool = False) -> Delegated:
+    async def message(
+        self, request: FollowUpRequest, *, interrupt: bool = False, _reserved: bool = False
+    ) -> Delegated:
         """Send a message to a sub-agent instance: ``message_agent``'s.
 
         An idle instance runs it as a follow-up (``follow_up``). A running
@@ -669,7 +672,11 @@ class Delegations:
         A run that takes no more steps (cancelled, its work ended, or an
         instance its parent is closing) is not steered: its end is waited for,
         and the message then follows up the idle instance or is refused as
-        ``follow_up`` refuses (closed, stopped by the user). A blank message,
+        ``follow_up`` refuses (closed, stopped by the user); to an instance
+        being closed it is refused as closed at once, since the answer is
+        known. An interrupt of an agent's keeps the turn's run it checked
+        for: the run is counted as the check is made, so no call in the same
+        answer can take it before the follow-up starts. A blank message,
         and anything ``follow_up`` refuses (``interrupt`` included: nothing is
         cancelled for a message that cannot start a run), is the error result
         and nothing else happens. The sender's interrupt is its own stop: the
@@ -687,9 +694,11 @@ class Delegations:
                 return _refused(MESSAGE_NEEDED_ERROR)
             control = self._working_control(conversation, request)
             if control is None:
-                return await self.follow_up(request)
+                return await self.follow_up(request, _reserved=_reserved)
             ref = control.ref
-            stopping = control.stopping or (conversation, ref.instance) in self._closing
+            if (conversation, ref.instance) in self._closing:
+                return _refused(CLOSED_ERROR.format(instance=ref.instance))
+            stopping = control.stopping
             if not interrupt and not stopping:
                 control.steer(request.message)
                 logger.info("subagent_steered", run=ref.run, started_by=request.started_by)
@@ -699,6 +708,7 @@ class Delegations:
                     state={}, run=ref,
                 )
             ended = self._ends[(conversation, ref.run or "")]
+            made_here = False
             if interrupt and not stopping:
                 error = self._follow_up_refused(conversation, request, running_ok=True)
                 if error is None and request.started_by != USER:
@@ -706,6 +716,9 @@ class Delegations:
                     error = refused.result["error"] if refused is not None else None
                 if error is not None:
                     return _refused(error)
+                if request.started_by != USER and not _reserved:
+                    count_run_this_turn()
+                    _reserved = made_here = True
                 by, why = (USER, REPLACED_BY_USER_ERROR) if request.started_by == USER else (
                     PARENT, REPLACED_ERROR
                 )
@@ -713,7 +726,10 @@ class Delegations:
         await ended.wait()
         # Idle now: its follow-up (or, should another run have started
         # meanwhile, a steer of that one).
-        return await self.message(request)
+        answer = await self.message(request, _reserved=_reserved)
+        if made_here and (answer.run is None or "note" in answer.result):
+            release_run_this_turn()  # no run started: give its place back
+        return answer
 
     def stop(
         self,

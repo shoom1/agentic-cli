@@ -397,3 +397,22 @@ class TestWhyItStopped:
         assert (PARENT_CAUSE, TIME_LIMIT_CAUSE, TOKEN_LIMIT_CAUSE) == (
             "its parent", "its time limit", "its token limit",
         )
+
+
+class TestStopping:
+    """A run that takes no more steps: cancelled, or its work has ended."""
+
+    def test_a_working_run_is_not(self):
+        assert control().stopping is False
+
+    def test_a_cancelled_one_is(self):
+        made = control()
+        made.cancel(by="parent", error="enough")
+
+        assert made.stopping is True
+
+    def test_one_whose_work_has_ended_is(self):
+        made = control()
+        made.finish()
+
+        assert made.stopping is True

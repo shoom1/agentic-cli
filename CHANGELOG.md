@@ -607,8 +607,9 @@ the start of the entry's title.
   a closed one and one the user stopped, and `message_agent` a blank
   message (`message_agent needs a message.`); `check_agents` lists closed
   and stopped ones with their status. A message to a run that takes no more
-  steps (just stopped, or being closed) waits for the run to end and then
-  follows the instance up, or is refused as closed.
+  steps (just stopped, or its work ended) waits for the run to end and then
+  follows the instance up; one to an instance being closed is refused as
+  closed at once.
   The manager's delegations gain `message(FollowUpRequest, interrupt=)`,
   `stop(ref, caller, instance, close=)`, `check(ref, caller, instance=)`,
   `steer(ref, run_id, message)` and `cancel(..., conversation=)`
