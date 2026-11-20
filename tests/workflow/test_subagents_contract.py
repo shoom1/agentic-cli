@@ -5449,6 +5449,30 @@ class TestTheRoster:
         assert crew.opening("coordinator", -2) == [listed, "Go."]
         assert crew.opening("coordinator", -1) == [listed, "Go."]
 
+    async def test_a_summary_retakes_it(self, make_crew):
+        """A coordinator whose long conversation outgrows its small model is
+        summarized; the request that carries the summary carries a new
+        roster, which lists the instance the earlier requests' snapshot,
+        taken before it ran, did not."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), model=SMALL_MODEL),
+             agent("researcher")],
+            subagents=FOLLOWING, models=SMALL_ENTRY,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("Asked.", usage=(15_000, 10)), says("Done.")],
+            researcher=[says("X is 42.")],
+            summaries=[says("The first turn was read.")],
+        )
+        await crew.turn("Find X: " + "word " * 8_000)
+        with no_blocking_calls():
+            events = await crew.turn("And now? " + "word " * 4_000)
+
+        assert [e.metadata["agent"] for e in events
+                if e.type is EventType.CONTEXT_TRIMMED] == ["coordinator"]
+        listed = roster("- researcher-1 (researcher, idle): Find X. — X is 42.")
+        assert not any(ROSTER_OPEN in block for block in crew.opening("coordinator", -2))
+        assert crew.opening("coordinator", -1)[0] == listed
+
     async def test_none_with_the_policys_defaults(self, make_crew):
         crew = make_crew(
             parent_team(),
