@@ -28,6 +28,7 @@ from agentic_cli.workflow.interrupts import (
     OpenCalls,
     fresh_call_id,
     interrupted,
+    interrupted_by,
     job_for_call,
     job_started,
     not_run,
@@ -473,6 +474,79 @@ class TestACallNotRunSaysWhy:
             with run_as(RESEARCHER):
                 cancelled_at_its_prompt(calls, "r1")
                 assert calls.answer("r1", by_user=True) == interrupted(NOT_RUN)
+
+
+class TestARunningCallSaysWhy:
+    """A call that was running when its run was stopped is told what stopped
+    the run, as a call at its prompt is: the user (``INTERRUPTED_BY_USER``, as
+    before), or its parent, its time limit or its token limit
+    (``interrupted_by``). A call no stop answers (a crash's) is ``INTERRUPTED``."""
+
+    def test_the_texts(self):
+        assert interrupted_by(None) == INTERRUPTED_BY_USER
+        assert interrupted_by("its parent") == (
+            "Interrupted: its parent stopped the run before this call finished; "
+            "it may have partly run. Check before running it again."
+        )
+        assert interrupted_by("its time limit") == (
+            "Interrupted: its time limit stopped the run before this call finished; "
+            "it may have partly run. Check before running it again."
+        )
+        assert interrupted_by("its token limit") == (
+            "Interrupted: its token limit stopped the run before this call finished; "
+            "it may have partly run. Check before running it again."
+        )
+
+    def test_the_cause_given_is_the_answer(self):
+        """ADK's seal names the cause as the run stops."""
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                calls.finished("r1", "the lookup")
+
+                assert calls.answer("r2", by_user=True, cause="its parent") == interrupted(
+                    interrupted_by("its parent")
+                )
+                assert calls.answer("r1", by_user=True, cause="its parent") == "the lookup"
+
+    def test_a_stopped_instances_cause_is_kept_for_its_next_run(self):
+        """Deep Agents answers at the instance's next run: the cause recorded
+        with the instance's stop words its running calls too."""
+        calls = OpenCalls()
+        calls.cancelled(ref("a"), instance="researcher-1", cause="its token limit")
+        calls.clear(ref("a"))
+
+        with turn_of(ref("a")):
+            with run_as(SECOND):
+                assert calls.take_cancel(ref("a"), instance="researcher-1") is True
+                assert calls.answer("r2", by_user=True) == interrupted(
+                    interrupted_by("its token limit")
+                )
+            with run_as(OTHER):  # another instance: no cause of its own
+                assert calls.answer("r2", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+
+    def test_a_stop_by_the_user_or_none_seen_says_so(self):
+        calls = OpenCalls()
+        calls.cancelled(ref("a"), instance="researcher-1", cause="its parent")
+        calls.cancelled(ref("a"), instance="researcher-1")  # stopped again, by the user
+
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                assert calls.answer("r2", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+                # No stop this process saw (a crash): the cause given says nothing.
+                assert calls.answer("r2", by_user=False, cause="its parent") == interrupted(
+                    INTERRUPTED
+                )
+
+    def test_unrecorded_names_the_cause(self):
+        with turn_of(ref("a")):
+            assert unrecorded("r2", by_user=True, cause="its time limit") == interrupted(
+                interrupted_by("its time limit")
+            )
+            assert unrecorded("r2", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            assert unrecorded("r2", by_user=False, cause="its time limit") == interrupted(
+                INTERRUPTED
+            )
 
 
 class TestADeletedConversation:

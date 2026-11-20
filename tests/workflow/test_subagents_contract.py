@@ -102,6 +102,7 @@ from agentic_cli.workflow.interrupts import (
     INTERRUPTED_BY_USER,
     NOT_RUN,
     interrupted,
+    interrupted_by,
 )
 from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
 from agentic_cli.workflow.permissions import EXEMPT, Capability, PermissionEngine
@@ -4474,19 +4475,27 @@ class TestAFollowUpAfterAStop:
             ("researcher-1#1", RUN_INTERRUPTED), ("researcher-1#2", RUN_COMPLETED),
         ]
 
-    async def test_after_its_parent_stopped_it_and_the_turn_ended(self, make_crew):
+    @pytest.mark.parametrize(("by", "error", "cause"), [
+        ("parent", "no longer needed", "its parent"),
+        ("limit", TIME_LIMIT_ERROR, "its time limit"),
+    ])
+    async def test_after_its_parent_or_a_limit_stopped_it_and_the_turn_ended(
+        self, make_crew, by, error, cause
+    ):
+        """The call that was running says what stopped the run, not the user."""
         crew = self.stopping(make_crew, between=[says("Stopped it.")])
 
         turn = crew.start()
         await asyncio.wait_for(BLOCKING["started"].wait(), 10)
         await until(lambda: crew.recorded("r1", "researcher-1#1"))
-        assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+        assert crew.cancel("researcher-1#1", by=by, error=error) is True
         await asyncio.wait_for(turn, 10)
         await crew.turn("Go on.")
 
         answers = self.answered_once(crew, 1)
         assert json.loads(answers["r1"]) == {"success": True, "value": 42}
-        assert INTERRUPTED_BY_USER in answers["r2"]
+        assert json.loads(answers["r2"]) == interrupted(interrupted_by(cause))
+        assert INTERRUPTED_BY_USER not in answers["r2"]
         assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
 
     async def test_after_a_crash_in_a_new_process(self, make_crew, monkeypatch):
@@ -5659,6 +5668,42 @@ class TestTheUsersFollowUp:
         assert runs_of(events)[-1].metadata["status"] == RUN_COMPLETED
         assert [call for call, _ in crew.call_results("researcher", -1)] == ["r1"]
         assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+    async def test_an_interrupt_ends_its_run_as_a_turns_cancel_and_the_instance_idle(
+        self, make_crew
+    ):
+        """``interrupt_instance`` (a process exit): no stop of the user's."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_block", "r1")), says("Went on.")],
+        )
+        await crew.turn()
+        assert crew.manager.interrupt_instance("researcher-1") is False  # none works
+
+        async def view() -> None:
+            async for _ in crew.manager.run_instance("researcher-1", "Wait here."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.manager.interrupt_instance("researcher-1") is True
+        done, _ = await asyncio.wait({viewing}, timeout=10)
+        if not done:
+            await Crew.stop(viewing)
+        assert done, "the interrupted run did not end"
+        assert viewing.cancelled()
+
+        second = crew.records()[-1]
+        assert (second.ref.run, second.status, second.cancelled_by) == (
+            "researcher-1#2", RUN_INTERRUPTED, None,
+        )
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+        assert crew.manager.interrupt_instance("researcher-1") is False
+        # Its parent continues it.
+        await crew.turn("Go on.")
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
 
     async def test_one_that_cannot_run_is_one_error_and_nothing_runs(self, make_crew):
         crew = make_crew(

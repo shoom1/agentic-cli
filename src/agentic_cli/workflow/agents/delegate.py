@@ -940,7 +940,8 @@ class Delegations:
             self._emit(WorkflowEvent.agent_instance(last.ref, status, reason=reason))
 
     def stop_cause(self, run: RunRef | None, *, conversation: SessionRef | None = None) -> str | None:
-        """What stopped ``run``, for a call it left at its prompt (``interrupts.not_run``).
+        """What stopped ``run``, for a call it left at its prompt or running
+        (``interrupts.not_run``, ``interrupts.interrupted_by``).
 
         Its own control's cancel (``RunControl.stop_cause``: its parent, its
         time limit, its token limit), else ``its parent`` when a run above

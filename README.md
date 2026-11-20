@@ -283,6 +283,16 @@ before `super().__init__()`, as `self.verbose` is above. A command
 registered later (`app.command_registry.register(...)`) completes and is
 listed by `/help` too.
 
+The session's six dialog methods (`show_dialog`, `yes_no_dialog`,
+`message_dialog`, `choice_dialog`, `dropdown_dialog`, `checklist_dialog`)
+take one lock, wrapped as the session is assigned, so one dialog opens at a
+time: a command's dialog and a question of a run in a sub-agent's view wait
+for each other, where thinking-prompt raises on a second, and a task may open
+one inside its own (a dialog that waits on one it opened from another task
+waits for ever). An app keeps that by assigning a session of its own through
+`self.session`, not as a class attribute with a value, which replaces the
+property and leaves its dialogs unwrapped.
+
 The session draws in `get_theme(name)` for the user's `ui_theme` (see
 [Theme and dialog placement](#theme-and-dialog-placement)): `dark` unless they
 chose another, which is thinking-prompt's dark theme in agentic-cli's colors.
@@ -1436,7 +1446,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   manager's entry points (provisional, on the open conversation, any of its
   sub-agents): `run_instance(id, message)` (a turn of its own, counted toward
   no turn's runs; stopping the stream is your stop of the run),
-  `stop_instance(id)`, `close_instance(id)`, `steer_instance(id, message)`,
+  `interrupt_instance(id)` (that run ends `interrupted`, as at a process
+  exit, not your stop), `stop_instance(id)`, `close_instance(id)`,
+  `steer_instance(id, message)`,
   `instance_result(id)`, `tell_root(text)` (with `view_notice(id,
   envelope)`'s text, left out of fact extraction and of the conversation's
   title and turns, as a job's notice is).
@@ -1447,12 +1459,16 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   status, its own `ctx` and tokens (the jobs segment kept). A line you type is
   its next run, streamed as a turn, its text the reply; a line typed while
   that run works is given to it before its next model step. Ctrl+C stops the
-  run (it is then `stopped`; your next line continues it). `/back` prints
+  run (it is then `stopped`; your next line continues it); `/exit` while it
+  works interrupts it, as quitting the app does, and leaves it `idle`, its
+  parent free to continue it. `/back` prints
   `── back to main ──` and, when a run you started there ended, tells the main
   agent its latest result in one notice turn; finished jobs wait while you are
   in a view (`↻N`) and are told after `/back`. In a view `/status` shows the
   sub-agent's context, `/compact` is refused, and `/new` and `/resume` leave
   the view first; a closed sub-agent's view has no prompt (`/back` only).
+  The run's questions and a command's dialogs open one at a time, each
+  waiting for the other ([Customizing the CLI](#customizing-the-cli)).
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task` (nor, with

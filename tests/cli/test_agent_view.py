@@ -19,6 +19,7 @@ view is read-only.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -48,12 +49,14 @@ from agentic_cli.workflow.agents import (
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_INPUT_REQUIRED,
+    RUN_INTERRUPTED,
 )
 from agentic_cli.workflow.agents.envelope import view_notice
 from tests.cli.dialog_fakes import autospec_session, opening_boxes
 from tests.loop_guard import no_blocking_calls
 from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     BLOCKING,
+    FOLLOWING,
     HELD,
     SESSION,
     USER,
@@ -65,8 +68,10 @@ from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     contract_hold,
     contract_start_job,
     delegate,
+    envelope_read,
     follow_team,
     make_crew,
+    message,
     parent_team,
     project,
     says,
@@ -394,6 +399,32 @@ class TestTheMainAgentIsTold:
         await typed(app, "/agent researcher-1", "/back")
         assert crew.requests("coordinator") == 3
 
+    async def test_a_result_over_the_cap_is_told_cut_with_its_note(self, make_crew):
+        """The envelope the notice carries passes the tool result cap, as a
+        ``task`` result does: cut to ``tool_result_max_chars``, with the note
+        that names its full output, saved for ``read_file``."""
+        crew, app = await in_a_view(
+            make_crew, coordinator=[says("Noted.")], researcher=[says("Y is 7. " * 1_000)],
+        )
+        crew.manager.settings.tool_result_max_chars = 2_000
+
+        await typed(app, "Now find Y.", "/back")
+
+        notice = crew.last_message("coordinator")
+        frame = view_notice("researcher-1", {})[: -len("{}")]
+        assert notice.startswith(frame), notice[:200]
+        sent = notice[len(frame):]
+        assert len(sent) <= 2_000, len(sent)
+        read = json.loads(sent)
+        assert (read["run"], read["status"], read["success"]) == (
+            "researcher-1#2", RUN_COMPLETED, True,
+        )
+        assert read["result"].startswith("Y is 7.") and "characters cut]" in read["result"]
+        assert read["truncated"].startswith("Cut: ") and "tool-output/researcher-1-" in (
+            read["truncated"]
+        )
+        assert crew.manager.instance_result("researcher-1", session_id=SESSION) == read
+
     async def test_without_a_run_of_yours_nothing_is_told(self, make_crew):
         crew, app = await in_a_view(make_crew)
 
@@ -562,11 +593,14 @@ class TestCtrlCInAView:
 
 
 class TestExitInAView:
-    async def test_a_run_still_working_at_exit_is_the_users_stop(self, make_crew, monkeypatch):
-        """``/exit`` while the run in view works: the run is the user's to
-        stop, and is, before the workflow goes (whose cleanup waits for it)."""
+    async def test_a_run_still_working_at_exit_is_interrupted(self, make_crew, monkeypatch):
+        """``/exit`` while the run in view works: the process exit interrupts
+        the run, as it would any run (only Ctrl+C in a view is the user's
+        stop), before the workflow goes (whose cleanup waits for it). The run
+        ends ``interrupted`` and the sub-agent stays ``idle``, so after a
+        restart its parent continues it."""
         crew = make_crew(
-            follow_team(),
+            follow_team(), store="sqlite",
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
             researcher=[says("X is 42."), calls(use("contract_block", "r1"))],
         )
@@ -607,9 +641,21 @@ class TestExitInAView:
         assert exited, "the app did not exit: the run in view was still working"
         last = crew.records()[-1]
         assert (last.ref.run, last.status, last.cancelled_by) == (
-            "researcher-1#2", RUN_CANCELLED, "user",
+            "researcher-1#2", RUN_INTERRUPTED, None,
         )
-        assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+        restarted = make_crew(
+            follow_team(), store="sqlite", subagents=FOLLOWING,
+            coordinator=[calls(message("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("Went on.")],
+        )
+        await asyncio.wait_for(restarted.turn("Go on."), 20)
+
+        read = envelope_read(restarted.results_read("coordinator")["c2"])
+        assert (read["run"], read["status"], read["result"]) == (
+            "researcher-1#3", RUN_COMPLETED, "Went on.",
+        )
 
 
 class TestCtrlCNotBound:

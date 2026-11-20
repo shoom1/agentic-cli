@@ -630,10 +630,14 @@ the start of the entry's title.
   turn of its own (`started_by: user`, counted toward no turn's runs, from the
   conversation's outside-content mark; stopping its stream, Ctrl+C, is the
   user's stop of the run, which ends `cancelled` and leaves the instance
-  `stopped`), `stop_instance`, `close_instance` (both written to the store
+  `stopped`), `interrupt_instance(instance)` (that run ends as a turn's
+  cancel ends its runs, `interrupted`, the instance `idle`, as at a process
+  exit; its stream raises `asyncio.CancelledError`), `stop_instance`,
+  `close_instance` (both written to the store
   before they return), `steer_instance(instance, message)` (the user's message
   to a running run, before its next step), `instance_result` (the envelope of
-  the latest run the user started) and `tell_root(text)`, a turn of the root
+  the latest run the user started, through the tool result cap) and
+  `tell_root(text)`, a turn of the root
   on a notice the user did not type (marked as a job's notice is, so fact
   extraction and the conversation's title and turns leave it out; the
   outside-content mark a user's run brought is written with it), whose notice
@@ -651,7 +655,9 @@ the start of the entry's title.
   next model step (`steer_instance`), not queued. The run works outside the
   input handler, so the prompt stays open to steer it, and Ctrl+C stops it (a
   key binding of the view's own, active only while its run works: the user's
-  stop, the sub-agent `stopped`). `/back` waits for a run still working,
+  stop, the sub-agent `stopped`); `/exit` while it works interrupts it, as a
+  process exit does (`interrupted`, the sub-agent `idle`, so its parent may
+  continue it). `/back` waits for a run still working,
   prints `── back to main ──`, and, when a run you started there ended, the
   main agent gets one notice turn with its latest envelope (`tell_root`),
   drawn as a job's notice is; the main agent's notices (finished jobs) wait
@@ -660,7 +666,13 @@ the start of the entry's title.
   `/compact` is refused, `/new` and `/resume` leave it first; a closed
   sub-agent's view is read-only (no prompt). The app's `agent_view`,
   `open_agent_view(id)` and `leave_agent_view()` (provisional) are what the
-  commands call.
+  commands call. The app's session (`BaseCLIApp.session`) has its six
+  dialog methods (`show_dialog`, `yes_no_dialog`, `message_dialog`,
+  `choice_dialog`, `dropdown_dialog`, `checklist_dialog`) wrapped as it is
+  assigned, so one dialog opens at a time: a command's dialog and a run's
+  question wait for each other, where thinking-prompt raises on a second
+  (a task may open one inside its own). An app keeps that by assigning its
+  session through `self.session`, not as a class attribute with a value.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
   `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them
@@ -721,8 +733,10 @@ the start of the entry's title.
   working (the app was killed in it) reads `interrupted` and its instance
   `idle` (`closed` for a type that is not continuable), so a follow-up
   continues it, new instances are numbered past them (on Deep Agents past the
-  records' counters and ids and the checkpointer's instance threads, whose
-  first checkpoint holds no message, and a first run whose thread the store
+  records' counters and ids and the checkpointer's instance threads, read
+  from each thread's first checkpoint, which holds its first run's input:
+  the brief, and an inheriting instance's copy of its parent's
+  conversation; and a first run whose thread the store
   keeps all the same fails rather than continue it), and records of another
   version, or that do not read, are ignored with one warning
   (`subagent_records_ignored`) and never written over: that conversation's
@@ -775,8 +789,9 @@ the start of the entry's title.
   transcript is a checkpointer thread of its own (`[app, user, session,
   "<instance>"]`), which its follow-ups continue, the calls an earlier run
   left open answered as its next run starts: from the record when one
-  returned, as the user's when the run was stopped, `INTERRUPTED` after a
-  crash. A model switch keeps the instances, their transcripts and their
+  returned, with what stopped the run when it was stopped (the user, its
+  parent, a limit), `INTERRUPTED` after a crash. A model switch keeps the
+  instances, their transcripts and their
   records.
 - **`SubAgentPolicy` and `AgentLimits`: an app's sub-agent policy and a
   run's limits, enforced on both backends** (`agentic_cli.workflow`, and
@@ -868,11 +883,27 @@ the start of the entry's title.
   on, and its parent reads `{"status": "cancelled", "cancelled_by": ...,
   "error": ..., "partial": <it wrote any text>, "result": "<what it wrote
   so far>"}`; the run's record and its `AGENT_RUN` end say who cancelled it
-  (`cancelled_by`). Ctrl+C still stops the whole turn, every run
+  (`cancelled_by`). A run working below a run cancelled so (one it
+  started, at any depth) ends `cancelled`, `cancelled_by: "parent"`,
+  `error: "its parent's run was stopped"`, its instance idle. A call a
+  stopped run left says what stopped it, on both backends: one at its
+  permission prompt `Not run: its parent stopped the run before this call
+  ran.` (or `its time limit`, `its token limit`), the user's stop `Not run:
+  the user cancelled it.`; one that was running `Interrupted: its parent
+  stopped the run before this call finished; it may have partly run. Check
+  before running it again.` (`interrupts.interrupted_by`, `INTERRUPTED_BY`),
+  the user's stop `Interrupted by the user before it finished; …`. Ctrl+C
+  still stops the whole turn, every run
   `interrupted`. `steer(message)` gives a working run a message, added
   after its last message, as the user's, before its next model call, where
-  it stays (ADK: in its child session). A sub-agent's dialog is withdrawn
-  when its run is stopped, and the turn goes on with its events box.
+  it stays (ADK: in its child session). A steered message is never lost:
+  one the run's transcript does not hold when the run ends (no model call
+  came after it, or the run was stopped before it was stored) goes to the
+  instance's next run, which takes it at its first model call, after its
+  own message; a closed instance's are dropped (logged). ADK counts each
+  one stored as its child session's append returns, Deep Agents once the
+  model call after it holds it. A sub-agent's dialog is withdrawn when its
+  run is stopped, and the turn goes on with its events box.
 - **A sub-agent's questions and permission prompts name it, on both
   backends.** `UserInputRequest.run` is the sub-agent run that asks (a
   `RunRef`; None for the root's own), filled by `request_user_input` from
@@ -1534,9 +1565,11 @@ the start of the entry's title.
   and the log warns once per folder. Reading a saved output back cuts it
   again without a second file. Every result is covered: registered, MCP and
   skill tools, `job_result`, and a sub-agent run's envelope (`task`'s
-  result, on both backends). A string that holds a JSON object (the
-  envelope, a framework tool's dict in a Deep Agents `ToolMessage`) is cut
-  as that dict and given back as JSON, so its parent reads JSON still. ADK's
+  result, on both backends, and the one the notice after a sub-agent's
+  view carries, saved under the instance's name). A string that holds a
+  JSON object (the envelope, a framework tool's dict in a Deep Agents
+  `ToolMessage`) is cut as that dict and given back as JSON, so its parent
+  reads JSON still. ADK's
   `ToolResultCapPlugin` caps every agent but one with `after_tool_callback`s
   of its own (a native ADK YAML app's), which ADK would skip once it cut;
   Deep Agents' `ToolResultCapMiddleware` sits between the permission gate
@@ -1822,18 +1855,11 @@ the start of the entry's title.
 
 ### Changed
 
-- **A sub-agent run that did not complete fully names its open tasks.** The
-  envelope of a run that ended partial (its step limit, a cut answer),
-  failed or cancelled ends with `"open_tasks"`: the descriptions of its own
-  tasks whose status is not `completed`, in its list's order, when it has
-  any (`envelope(open_tasks=)`, `open_task_descriptions`), so its parent can
-  continue it with `message_agent`. A cancelled run's end keeps its plan
-  and tasks, on its `AGENT_RUN` and its record, as any other end does.
-
 - **A sub-agent's plan and task list are its own, on both backends.** An
   instance's first run starts with no plan and no tasks (its follow-ups
-  continue its own), keeps what it saves (its last plan and
-  tasks are on its record, and `/agents <id>` shows them after its result),
+  continue its own), keeps what it saves (its last plan and tasks are on
+  its record and its `AGENT_RUN` end, a cancelled run's too, and `/agents
+  <id>` shows them after its result),
   and writes nothing of them to its caller: the conversation's plan and task
   list, and the status bar's task box, are the coordinator's alone, and two
   runs at once no longer overwrite each other's. Only the outside-content
@@ -1848,15 +1874,23 @@ the start of the entry's title.
   "<instance>"]`; every sub-agent is compiled on the manager's checkpointer,
   where it had none), which its follow-ups continue and no conversation
   list, `/resume` picker or `--continue` shows. Deleting the conversation
-  deletes them, events and all, whoever deletes it: `delete_session`, a
+  deletes them first, events and all, then its sub-agent records, then the
+  conversation, so a delete cut short leaves the conversation, by which the
+  rest is found again, whoever deletes it: `delete_session`, a
   `SessionReader` (`/sessions --delete` on another backend's conversation),
   `/new` on the memory store, and a conversation already gone leaves none
-  behind (`adk/sessions.py::delete_children`; Deep Agents deletes the
-  instances' threads before the conversation's). Instances are numbered
-  from the conversation's stored records, and each turn's first run past the
-  instances the conversation's store keeps besides
-  (`BaseWorkflowManager._stored_instances`, asked once per conversation per
-  turn; `AgentRuns.number_from`), whoever ran them: a manager before a
+  behind (`adk/sessions.py::delete_children`: the child sessions its records
+  name and every one that names the conversation, a transcript whose start
+  write was lost too; Deep Agents deletes the instances' threads). The
+  manager forgets the conversation it deletes (its sub-agent records, the
+  record of a failed turn's calls and every stop, its usage ledger, its
+  numbering), so a conversation of the same id starts from `researcher-1`.
+  Instances are numbered from the conversation's stored records, and each
+  turn's first run past the instances the conversation's store keeps
+  besides (`BaseWorkflowManager._stored_instances`, asked once per
+  conversation per turn, under a lock of the conversation's own; on ADK the
+  child sessions its records name, a listing's for one without records;
+  `AgentRuns.number_from`), whoever ran them: a manager before a
   restart or a switch of backend or store, or another process that had the
   conversation between two turns.
   `researcher-2` follows a stored `researcher-1`, whose transcript stays as
@@ -1899,7 +1933,12 @@ the start of the entry's title.
   "Dynamic node <agent> failed"), its `result` the text it wrote before it
   failed, a refused run's `a model refused the
   request` with the refusal notice as its `result`, an interrupted run's
-  `interrupted before it finished`. No delegation is an error result any
+  `interrupted before it finished`. The envelope of a run that ended
+  partial (its step limit, a cut answer), failed or cancelled ends with
+  `"open_tasks"`: the descriptions of its own tasks whose status is not
+  `completed`, in its list's order, when it has any
+  (`envelope(open_tasks=)`, `open_task_descriptions`), so its parent can
+  continue it with `message_agent`. No delegation is an error result any
   more ("Error running sub-agent: …" is gone): the envelope says how the
   run ended. A run's result is its last text, a reply that also called a
   tool included, so an empty final answer after it leaves that text; a run
@@ -3205,35 +3244,6 @@ step; each entry says what to use instead.
   `agentic_cli.tools.os_sandbox`.
 
 ### Fixed
-
-- **A message steered to a sub-agent run is never lost.** One its
-  transcript does not hold when the run ends (no model call came after it,
-  or the run was stopped before it was stored) goes to the instance's next
-  run, which takes it at its first model call, after its own message; a
-  closed instance's are dropped (logged). ADK counts each one stored as its
-  child session's append returns, Deep Agents once the model call after it
-  holds it.
-- **A call a stopped sub-agent run left at its prompt says what stopped it.**
-  `Not run: its parent stopped the run before this call ran.` (or `its time
-  limit`, `its token limit`) where every stop read "Not run: the user
-  cancelled it.", which the user's stop still reads, on both backends.
-- **A sub-agent whose parent's run is stopped says so.** A run working when
-  a run above it is cancelled by its control (its parent's stop, a limit,
-  the user's stop of that run) ends `cancelled`, `cancelled_by: "parent"`,
-  `error: "its parent's run was stopped"`, its instance idle, where it ended
-  `interrupted` as on Ctrl+C, which still makes every run the turn's.
-- **Deleting a conversation leaves nothing of its sub-agents behind.** Its
-  instances' transcripts are deleted first (on ADK they were deleted after
-  the conversation, so a delete cut short left ones nothing could reach),
-  then its records, then the conversation; the manager forgets the
-  conversation (its sub-agent records, the record of a failed turn's calls
-  and every stop, its usage ledger, its numbering), so a conversation of
-  the same id starts from `researcher-1`. On ADK each turn finds a
-  conversation's transcripts to number past by the instances its records
-  name, where every child session of the user was listed, a delete removes
-  those and every child session that names the conversation (a transcript
-  whose start write was lost goes too), and the stored instances of one
-  conversation are read under a lock of its own, not one shared by all.
 
 - **google-adk 2.15: a Claude refusal reads as before, Deep Agents'
   `load_skill` answers as ADK's, and Ctrl+C during a tool call warns of

@@ -39,9 +39,10 @@ instances' threads first, then the records, then the conversation's thread
 and row, so a delete cut short leaves the conversation, by which the rest is
 found again. The instances a conversation keeps, which number a new
 manager's next ones (``stored_instances``), are the records' ids and
-counters and the threads', read cheaply (each thread's first checkpoint
-holds no message), so an instance whose start write was lost is numbered
-past too.
+counters and the threads', read from each thread's first checkpoint only
+(it holds the first run's input, which the saver decodes: the brief, and an
+inheriting instance's copy of its parent's conversation), so an instance
+whose start write was lost is numbered past too.
 
 A finished job reports to the conversation in a ``HumanMessage`` of its own
 (``job_notification``), marked in its ``response_metadata``, which no
@@ -327,10 +328,14 @@ class CheckpointSessions:
         """The sub-agent instances whose transcript thread ``ref``'s conversation keeps, sorted.
 
         Read from the instance runs' first input checkpoints, by their
-        metadata (``source`` ``input``, ``step`` -1): one per thread, which
-        holds no message yet, never a checkpoint that holds a transcript (the
-        saver unpickles every checkpoint it returns, and its filter is a
-        metadata equality). A thread whose id does not name this conversation
+        metadata (``source`` ``input``, ``step`` -1): one per thread, never
+        a later one, which would hold the transcript (the saver decodes every
+        checkpoint it returns, and its filter is a metadata equality). The
+        one read holds its run's input, in its ``__start__`` channel and its
+        pending writes, and the saver decodes it on the event loop: the
+        brief, and an inheriting instance's copy of its parent's
+        conversation, so the read grows with the instances and with those
+        conversations. A thread whose id does not name this conversation
         and an instance is left out, whatever its metadata says.
         """
         wanted = {

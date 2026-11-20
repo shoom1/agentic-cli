@@ -2348,7 +2348,7 @@ class BaseCLIApp:
             # Ctrl+C stops the run in a sub-agent's view, which works outside
             # the input handler. A session that takes no binding leaves Ctrl+C
             # to thinking-prompt's own handling in a view: it ends the boxes
-            # and the run goes on, until /exit stops it or it ends.
+            # and the run goes on, until /exit interrupts it or it ends.
             if not bind_ctrl_c(self.session, lambda: self._agent_view):
                 logger.info("agent_view_ctrl_c_not_bound")
 
@@ -2365,12 +2365,14 @@ class BaseCLIApp:
                 finally:
                     opening.cancel()
                     await asyncio.gather(opening, return_exceptions=True)
-                    # A view's run still working is the user's to stop: it ends,
-                    # cancelled by the user, before the workflow goes (whose
-                    # cleanup waits for that turn).
+                    # A view's run still working is interrupted, as a process
+                    # exit interrupts any run: only Ctrl+C in a view is the
+                    # user's stop, so the sub-agent stays idle and its parent
+                    # may continue it. It ends before the workflow goes (whose
+                    # cleanup waits for that turn), so its turn records it.
                     view = self._agent_view
                     if view is not None:
-                        view.stop()
+                        view.interrupt()
                         await view.settled()
 
             # Propose memories from the session (if enabled) while the workflow

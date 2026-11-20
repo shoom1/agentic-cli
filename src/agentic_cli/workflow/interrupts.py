@@ -8,7 +8,10 @@ knows what happened rather than running a side effect again blindly:
 
 - a call that finished before the cancel keeps its real result, and the
   state it changed (``save_tasks``' tasks, a delegation's plan);
-- a running call, or a delegation, is answered ``INTERRUPTED_BY_USER``;
+- a running call, or a delegation, is answered ``INTERRUPTED_BY_USER``,
+  or, in a sub-agent run its parent or a limit stopped, ``Interrupted:
+  <cause> stopped the run before this call finished; ...``
+  (``interrupted_by``);
 - a call waiting at its permission prompt (both gates mark it) or at a
   question it asked (``BaseWorkflowManager.request_user_input``, by the
   active tool call) is ``NOT_RUN``, or, in a sub-agent run its parent or a
@@ -69,6 +72,11 @@ INTERRUPTED_BY_USER = (
     "Interrupted by the user before it finished; it may have partly run. "
     "Check before running it again."
 )
+#: A call that was running when its run was stopped by something else.
+INTERRUPTED_BY = (
+    "Interrupted: {cause} stopped the run before this call finished; it may "
+    "have partly run. Check before running it again."
+)
 #: A call left open by something else: a crash, or a cancel from before this rule.
 INTERRUPTED = (
     "Interrupted before it finished (its turn or the app stopped); it may have "
@@ -91,6 +99,12 @@ def not_run(cause: str | None) -> str:
     """What a call left at its prompt is told: ``NOT_RUN`` for the user's stop, else
     ``NOT_RUN_BY`` naming ``cause`` (``its parent``, ``its time limit``, ``its token limit``)."""
     return NOT_RUN if cause is None else NOT_RUN_BY.format(cause=cause)
+
+
+def interrupted_by(cause: str | None) -> str:
+    """What a call running when its run was stopped is told: ``INTERRUPTED_BY_USER``
+    for the user's stop, else ``INTERRUPTED_BY`` naming ``cause``, as ``not_run`` does."""
+    return INTERRUPTED_BY_USER if cause is None else INTERRUPTED_BY.format(cause=cause)
 
 
 #: The longest call id ``fresh_call_id`` makes: OpenAI's Chat Completions
@@ -162,7 +176,11 @@ def job_for_call(call_id: str | None, *, started_by: str | None = None) -> Any |
 
 
 def unrecorded(
-    call_id: str | None, *, by_user: bool, started_by: str | None = None
+    call_id: str | None,
+    *,
+    by_user: bool,
+    started_by: str | None = None,
+    cause: str | None = None,
 ) -> dict[str, Any]:
     """The answer for an open call no record holds: its job's state, else why it has none.
 
@@ -170,12 +188,14 @@ def unrecorded(
     the job by the instance of the call's run (``started_by``); ADK's
     ``left_open`` answers the root's own calls through it (``started_by``
     None), and a sub-agent's call with no job, its run being numbered no
-    more.
+    more. A stopped run's call (``by_user``) says what stopped it
+    (``interrupted_by(cause)``: None for the user); one no stop answers is
+    ``INTERRUPTED``.
     """
     record = job_for_call(call_id, started_by=started_by)
     if record is not None:
         return job_started(record)
-    return interrupted(INTERRUPTED_BY_USER if by_user else INTERRUPTED)
+    return interrupted(interrupted_by(cause) if by_user else INTERRUPTED)
 
 
 class _Active(enum.Enum):
@@ -302,8 +322,9 @@ class OpenCalls:
                 A job answers the call only when that run's instance
                 submitted it (``job_for_call``).
             cause: What stopped the run, for a call at its prompt
-                (``not_run``); None: the one recorded with the instance's
-                stop (``cancelled(cause=)``), else the user's.
+                (``not_run``) or one that was running (``interrupted_by``,
+                when ``by_user``); None: the one recorded with the
+                instance's stop (``cancelled(cause=)``), else the user's.
         """
         if call_id:
             key = get_active_turn()
@@ -311,12 +332,12 @@ class OpenCalls:
             finished = self._finished.get(key, {})
             if mark in finished:
                 return finished[mark]
+            if cause is None and mark[0] is not None:
+                cause = self._causes.get((key, mark[0]))
             if mark in self._asking.get(key, ()):
-                if cause is None and mark[0] is not None:
-                    cause = self._causes.get((key, mark[0]))
                 return interrupted(not_run(cause))
         # Its job, if it submitted one: the job of the run it was given.
-        return unrecorded(call_id, by_user=by_user, started_by=_instance(run))
+        return unrecorded(call_id, by_user=by_user, started_by=_instance(run), cause=cause)
 
     def cancelled(
         self, key: Any, *, instance: str | None = None, cause: str | None = None
@@ -325,9 +346,9 @@ class OpenCalls:
         a run of that instance of it.
 
         ``cause`` is what stopped that run when it was not the user (its
-        parent, a limit: ``not_run``), kept for the call it left at its
-        prompt, which the instance's next run answers; None (a stop by the
-        user) forgets an earlier one.
+        parent, a limit: ``not_run``, ``interrupted_by``), kept for the
+        calls it left at its prompt or running, which the instance's next
+        run answers; None (a stop by the user) forgets an earlier one.
         """
         if instance is None:
             self._cancelled.add(key)

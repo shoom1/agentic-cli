@@ -99,6 +99,7 @@ from agentic_cli.workflow.sessions import (
     set_active_turn,
     turn_has_ended,
 )
+from agentic_cli.workflow.tool_output import cap_tool_result, tool_output_dir
 from agentic_cli.workflow.service_registry import (
     get_service,
     set_service_registry,
@@ -143,6 +144,16 @@ _CLOSING: set[asyncio.Future] = set()
 #: How long a release waits for the sub-agent records still being written, in
 #: seconds: a store that hangs holds the rest of the release no longer.
 RECORDS_RELEASE_WAIT = 10.0
+
+
+class _UserRun:
+    """A run the user started (``run_instance``), while its turn lasts: its
+    task once it starts, and whether it is interrupted (``interrupt_instance``),
+    which makes a stop of its stream a turn's cancel, not the user's stop."""
+
+    def __init__(self) -> None:
+        self.work: asyncio.Task[Delegated] | None = None
+        self.interrupted = False
 
 
 def _module_of(klass: type) -> str:
@@ -862,8 +873,17 @@ class BaseWorkflowManager(ABC):
     # takes them, on any of its instances, through ``Delegations``.
 
     @property
+    def _user_runs(self) -> dict[tuple[SessionRef, str], _UserRun]:
+        """The runs the user started that are working, by conversation and instance."""
+        held = self.__dict__.get("_user_runs_held")
+        if held is None:
+            held = self.__dict__["_user_runs_held"] = {}
+        return held
+
+    @property
     def _instance_results(self) -> dict[tuple[SessionRef, str], dict[str, Any]]:
-        """The latest envelope of each instance the user ran, by conversation and instance."""
+        """The latest envelope of each instance the user ran, by conversation and
+        instance, as the cap left it (``_user_ran``)."""
         held = self.__dict__.get("_instance_results_held")
         if held is None:
             held = self.__dict__["_instance_results_held"] = {}
@@ -887,12 +907,15 @@ class BaseWorkflowManager(ABC):
         conversation's outside-content mark; a mark it brought marks the
         conversation here. A stopped instance runs (only the user may); one
         that is unknown, closed or running, or a blank message, is one
-        ``ERROR`` event and nothing runs. The run's full envelope is kept for
-        ``instance_result``.
+        ``ERROR`` event and nothing runs. The run's envelope is kept for
+        ``instance_result``, through the tool result cap.
 
         Stopping the stream (Ctrl+C cancels the consumer, or it closes the
         generator) is the user's stop of the run: it ends ``cancelled`` by
-        the user and the instance is ``stopped``, inside the turn.
+        the user and the instance is ``stopped``, inside the turn. A run
+        ``interrupt_instance`` interrupts ends as a turn's cancel ends its
+        runs instead: ``interrupted``, the instance ``idle``, the stream
+        raising ``asyncio.CancelledError``.
 
         Yields:
             The run's ``WorkflowEvent``s.
@@ -907,9 +930,14 @@ class BaseWorkflowManager(ABC):
                 state=await self._conversation_state(ref),
             )
             live = live_events.LiveEvents()
+            key = (ref, instance)
+            held = self._user_runs[key] = _UserRun()
 
             def stop_it() -> None:
-                # Its consumer stopped (Ctrl+C): the user's stop of the run alone.
+                # Its consumer stopped (Ctrl+C): the user's stop of the run
+                # alone, unless the run is interrupted (a turn's cancel).
+                if held.interrupted:
+                    return
                 record = self.agent_runs.instance(ref, instance)
                 if record is not None and record.status == INSTANCE_RUNNING and record.runs:
                     self._delegations.cancel(
@@ -917,15 +945,20 @@ class BaseWorkflowManager(ABC):
                     )
 
             async def source() -> AsyncGenerator[WorkflowEvent, None]:
+                if held.interrupted:  # before its run started: none starts
+                    raise asyncio.CancelledError
                 # The run's own task: a stop cancels the run, not its caller,
                 # so it ends cancelled by the user, not interrupted.
-                work = asyncio.create_task(
+                work = held.work = asyncio.create_task(
                     self._delegations.follow_up(request), name=f"user run of {instance}"
                 )
                 try:
                     delegated = await asyncio.shield(work)
                 except asyncio.CancelledError:
-                    stop_it()  # a run that started after the consumer's stop looked
+                    if held.interrupted:
+                        work.cancel()  # the run's caller is cancelled: it ends interrupted
+                    else:
+                        stop_it()  # a run that started after the consumer's stop looked
                     await asyncio.wait([work])
                     if not work.cancelled() and work.exception() is None:
                         self._user_ran(ref, instance, work.result())
@@ -935,21 +968,78 @@ class BaseWorkflowManager(ABC):
                     return
                 self._user_ran(ref, instance, delegated)
 
-            with live_events.reporting(live):
-                async with contextlib.aclosing(
-                    live_events.merged(source(), live, on_stop=stop_it)
-                ) as items:
-                    async for item in items:
-                        event = self._apply_event_hook(item)
-                        if event is not None:
-                            yield event
+            try:
+                with live_events.reporting(live):
+                    async with contextlib.aclosing(
+                        live_events.merged(source(), live, on_stop=stop_it)
+                    ) as items:
+                        async for item in items:
+                            event = self._apply_event_hook(item)
+                            if event is not None:
+                                yield event
+            finally:
+                if self._user_runs.get(key) is held:
+                    del self._user_runs[key]
+
+    def interrupt_instance(
+        self, instance: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> bool:
+        """Interrupt the run of ``instance`` the user started, as a turn's cancel (provisional).
+
+        What a process exit does to a run: not the user's stop. The run of
+        that ``run_instance`` ends ``interrupted`` and its instance stays
+        ``idle``, so its parent may continue it; its stream then raises
+        ``asyncio.CancelledError``, and its turn records the run and writes
+        the records as it ends (a stop of that stream from now on is no
+        stop of the user's either). Only ``run_instance``'s run: a run of
+        the root's turn ends with that turn.
+
+        Returns:
+            Whether such a run was working (or about to start); False,
+            doing nothing, otherwise.
+        """
+        held = self._user_runs.get((self.session_ref(session_id, user_id), instance))
+        if held is None or held.interrupted or (held.work is not None and held.work.done()):
+            return False
+        held.interrupted = True
+        if held.work is not None:
+            held.work.cancel()
+        return True
 
     def _user_ran(self, ref: SessionRef, instance: str, delegated: Delegated) -> None:
-        """Take what a run the user started left: its mark on the conversation, its envelope."""
+        """Take what a run the user started left: its mark on the conversation, its envelope.
+
+        The envelope is kept as the root reads it (``view_notice``): through
+        the tool result cap, as every envelope a model reads is (a ``task``
+        result's too), so one over ``tool_result_max_chars`` is cut as a
+        dict, its note under ``truncated`` naming its full output, saved
+        once, as the run ends, in the tool-output folder under the
+        instance's name.
+        """
         for value in delegated.state.values():
             if isinstance(value, str) and value:
                 self._outside_marks.mark(ref, value)
-        self._instance_results[(ref, instance)] = dict(delegated.result)
+        self._instance_results[(ref, instance)] = self._capped(instance, dict(delegated.result))
+
+    def _capped(self, instance: str, result: dict[str, Any]) -> dict[str, Any]:
+        """``result`` through the tool result cap, under ``instance``'s name; uncut if the cap fails."""
+        try:
+            capped = cap_tool_result(
+                result,
+                tool_name=instance,
+                max_chars=self._settings.tool_result_max_chars,
+                folder=tool_output_dir(self._settings.app_name),
+            )
+        except Exception as error:  # noqa: BLE001 - the cap never raises by design
+            # A bug in the cap must not lose the envelope: it goes uncut, as
+            # a tool result does when the backends' cap fails.
+            logger.warning(
+                "tool_result_cap_failed", tool=instance,
+                error_type=type(error).__name__, error=str(error),
+            )
+            logger.debug("tool_result_cap_failed", tool=instance, exc_info=error)
+            return result
+        return capped if isinstance(capped, dict) else result
 
     def instance_result(
         self, instance: str, *, session_id: str | None = None, user_id: str | None = None
@@ -957,8 +1047,10 @@ class BaseWorkflowManager(ABC):
         """The envelope of the latest run of ``instance`` that the user started (provisional).
 
         Kept in memory for the conversation (the records keep only the head
-        of a result); None when no run of the user's ended there, or after
-        the conversation was deleted.
+        of a result), as the tool result cap left it: one over
+        ``tool_result_max_chars`` is cut, its note under ``truncated`` naming
+        its full output. None when no run of the user's ended there, or
+        after the conversation was deleted.
         """
         return self._instance_results.get((self.session_ref(session_id, user_id), instance))
 
