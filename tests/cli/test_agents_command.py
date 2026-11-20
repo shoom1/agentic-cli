@@ -1,15 +1,17 @@
 """``/agents``: the open conversation's sub-agent runs (``cli/agents_command.py``).
 
-``/agents`` is a table of the runs, each followed by the runs it started, a
-level deeper: instance, type, status, run, title, tokens in/out, time.
-``/agents <id>`` shows one instance or run: its type, parent and title, then
-each run's status and time, its brief's other fields (a follow-up's message),
-the first lines of its result, its error and its tokens by model. An instance
-that was followed up shows a row per run. The runs are a real manager's records, filled as its event
-processors fill them (``AgentRuns.observe`` under the conversation's turn),
-and the tokens its usage ledger's; nothing reaches a provider. A manager that
-did not run them (a restart) loads them from the conversation's store as
-``/agents`` asks, each run's tokens its record's.
+``/agents`` is a picker of the instances (id, type, status, title, each
+followed by the ones it started), and Enter shows one as ``/agents <id>``
+does: one instance or run: its type, parent and title, then each run's
+status and time, its brief's other fields (a follow-up's message), the first
+lines of its result, its error and its tokens by model. An instance that was
+followed up shows every run in its panel. ``/agent <id>`` shows one,
+``/agent stop <id>`` and ``/agent close <id>`` are the user's stop and close,
+each saying what it did or why not. The runs are a real manager's records,
+filled as its event processors fill them (``AgentRuns.observe`` under the
+conversation's turn), and the tokens its usage ledger's; nothing reaches a
+provider. A manager that did not run them (a restart) loads them from the
+conversation's store as ``/agents`` asks, each run's tokens its record's.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import pytest
 from rich.console import Console
 
 from agentic_cli.cli import agents_command
-from agentic_cli.cli.agents_command import NO_RUNS, AgentsCommand
+from agentic_cli.cli.agents_command import AGENT_USAGE, NO_RUNS, AgentCommand, AgentsCommand
 from agentic_cli.cli.commands import CommandCategory, CommandRegistry
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
@@ -142,10 +144,25 @@ def crew_ran(manager: GoogleADKWorkflowManager) -> None:
     runs.end(fetcher, "failed", at=55, error="overloaded")
 
 
-async def agents(manager, args: str = "", *, session_id: str = "s1"):
-    """Run ``/agents <args>`` in an app whose conversation is ``session_id``."""
+async def agents(manager, args: str = "", *, session_id: str = "s1", picked=None):
+    """Run ``/agents <args>`` in an app whose conversation is ``session_id``;
+    its picker answers ``picked(options)`` (None: Esc)."""
     app = SimpleNamespace(workflow=manager, session_id=session_id, session=autospec_session())
+
+    async def show_dialog(dialog):
+        return picked(dialog.fields[0].options) if picked is not None else None
+
+    app.session.show_dialog.side_effect = show_dialog
     await AgentsCommand().execute(args, app)
+    return app.session
+
+
+async def agent(manager, args: str, *, session_id: str = "s1"):
+    """Run ``/agent <args>`` in an app whose conversation is ``session_id``
+    (the workflow's own is another: a workflow that started after the app
+    opened its conversation never loaded it)."""
+    app = SimpleNamespace(workflow=manager, session_id=session_id, session=autospec_session())
+    await AgentCommand().execute(args, app)
     return app.session
 
 
@@ -155,47 +172,56 @@ def rows_of(table) -> list[tuple[str, ...]]:
     return list(zip(*columns))
 
 
-class TestTheList:
-    async def test_every_run_each_followed_by_the_runs_it_started(self, manager):
+def options_of(session) -> list[str]:
+    """The options of the picker ``/agents`` showed."""
+    (dialog,) = session.show_dialog.call_args.args
+    (field,) = dialog.fields
+    return list(field.options)
+
+
+class TestThePicker:
+    async def test_each_instance_its_type_status_and_title_its_sub_agents_under_it(
+        self, manager
+    ):
         crew_ran(manager)
 
         session = await agents(manager)
 
-        (table,) = session.add_rich.call_args.args
-        assert table.title == "Sub-agents"
-        assert [column.header for column in table.columns] == [
-            "Agent", "Type", "Status", "Run", "Title", "Tokens in/out", "Time",
+        (dialog,) = session.show_dialog.call_args.args
+        assert dialog.title == "Sub-agents"
+        assert options_of(session) == [
+            "researcher-1 · researcher · idle · Find X.",
+            "  writer-1 · writer · idle · Draft it.",
+            "researcher-2 · researcher · running · Find Y.",
+            "checker-1 · checker · idle · Check it.",
+            "fetcher-1 · fetcher · idle · Fetch Z.",
         ]
-        assert rows_of(table) == [
-            ("researcher-1", "researcher", "completed", "#1", "Find X.", "1.3k / 310", "12s"),
-            ("  writer-1", "writer", "completed (partial)", "#1", "Draft it.", "800 / 2k", "40s"),
-            ("researcher-2", "researcher", "running", "#1", "Find Y.", "—", "10s"),
-            ("checker-1", "checker", "refused", "#1", "Check it.", "—", "1s"),
-            ("fetcher-1", "fetcher", "failed", "#1", "Fetch Z.", "—", "2s"),
-        ]
+        session.add_rich.assert_not_called()
 
-    async def test_a_working_run_says_whether_it_works_waits_for_a_slot_or_needs_the_user(
-        self, manager
-    ):
-        runs = Runs(manager, manager.session_ref("s1"))
-        runs.start("researcher", "c1", "Find X.", at=0)
-        queued = runs.start("researcher", "c2", "Find Y.", at=1)
-        runs.now(queued, "queued", at=1)
-        asking = runs.start("researcher", "c3", "Find Z.", at=2)
-        runs.now(asking, "input_required", at=30)
+    async def test_enter_shows_the_one_picked_as_agents_id_does(self, manager):
+        crew_ran(manager)
+
+        picked = await agents(manager, picked=lambda options: options[1])
+        shown = await agents(manager, "writer-1")
+
+        (panel,) = picked.add_rich.call_args.args
+        (same,) = shown.add_rich.call_args.args
+        assert str(panel.title) == "[bold]writer-1[/bold]"
+        assert rows_of(panel.renderable) == rows_of(same.renderable)
+
+    async def test_escape_shows_nothing(self, manager):
+        crew_ran(manager)
 
         session = await agents(manager)
 
-        (table,) = session.add_rich.call_args.args
-        assert [(row[0], row[2]) for row in rows_of(table)] == [
-            ("researcher-1", "running"), ("researcher-2", "queued"), ("researcher-3", "needs you"),
-        ]
+        session.add_rich.assert_not_called()
+        session.add_warning.assert_not_called()
 
     async def test_a_conversation_without_runs_says_so(self, manager):
         session = await agents(manager)
 
         session.add_message.assert_called_once_with("system", NO_RUNS)
-        session.add_rich.assert_not_called()
+        session.show_dialog.assert_not_called()
 
     async def test_another_conversations_runs_are_not_listed(self, manager):
         crew_ran(manager)
@@ -204,31 +230,16 @@ class TestTheList:
 
         session.add_message.assert_called_once_with("system", NO_RUNS)
 
-    async def test_a_title_is_shown_as_written(self, manager):
-        """Titles are the model's words: markup in one is text, never style."""
+    async def test_an_instance_with_follow_ups_is_one_option(self, manager):
         runs = Runs(manager, manager.session_ref("s1"))
-        runs.start("researcher", "c1", "Fix [/x] and [bold]this[/bold]", at=0)
+        first = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(first, "completed", at=5, result="X is 42.")
+        second = runs.follow("researcher-1", "c2", "Now find Y.", at=10)
+        runs.end(second, "completed", at=15, result="Y is 7.")
 
         session = await agents(manager)
 
-        (table,) = session.add_rich.call_args.args
-        out = io.StringIO()
-        Console(file=out, width=200, color_system=None).print(table)
-        assert "Fix [/x] and [bold]this[/bold]" in out.getvalue()
-
-    @pytest.mark.parametrize(
-        "seconds, shown",
-        [(0, "0s"), (59, "59s"), (60, "1m 00s"), (185, "3m 05s"), (3_725, "1h 02m")],
-    )
-    async def test_the_time_a_run_took(self, manager, seconds, shown):
-        runs = Runs(manager, manager.session_ref("s1"))
-        ref = runs.start("researcher", "c1", "Find X.", at=0)
-        runs.end(ref, "completed", at=seconds, result="X.")
-
-        session = await agents(manager)
-
-        (table,) = session.add_rich.call_args.args
-        assert rows_of(table)[0][-1] == shown
+        assert options_of(session) == ["researcher-1 · researcher · idle · Find X."]
 
 
 class TestOne:
@@ -347,14 +358,8 @@ class TestOne:
         second = runs.follow("researcher-1", "c2", "Now find Y.\nThe same way.", at=10)
         runs.end(second, "completed", at=15, result="Y is 7.")
 
-        listed = await agents(manager)
         shown = await agents(manager, "researcher-1")
 
-        (table,) = listed.add_rich.call_args.args
-        assert [row[:5] for row in rows_of(table)] == [
-            ("researcher-1", "researcher", "completed", "#1", "Find X."),
-            ("researcher-1", "researcher", "completed", "#2", "Now find Y."),
-        ]
         (panel,) = shown.add_rich.call_args.args
         assert rows_of(panel.renderable) == [
             ("Type", "researcher"),
@@ -366,6 +371,55 @@ class TestOne:
             ("  Message", "Now find Y.\nThe same way."),
             ("  Result", "Y is 7."),
         ]
+
+    async def test_a_working_run_says_whether_it_works_waits_for_a_slot_or_needs_the_user(
+        self, manager
+    ):
+        runs = Runs(manager, manager.session_ref("s1"))
+        runs.start("researcher", "c1", "Find X.", at=0)
+        queued = runs.start("researcher", "c2", "Find Y.", at=1)
+        runs.now(queued, "queued", at=1)
+        asking = runs.start("researcher", "c3", "Find Z.", at=2)
+        runs.now(asking, "input_required", at=30)
+
+        shown = [await agents(manager, name)
+                 for name in ("researcher-1", "researcher-2", "researcher-3")]
+
+        panels = [session.add_rich.call_args.args[0] for session in shown]
+        assert [rows_of(panel.renderable)[3] for panel in panels] == [
+            ("Run #1", "running · 1m 00s"), ("Run #1", "queued · 59s"),
+            ("Run #1", "needs you · 58s"),
+        ]
+
+    async def test_a_title_is_shown_as_written(self, manager):
+        """Titles are the model's words: markup in one is text, never style."""
+        runs = Runs(manager, manager.session_ref("s1"))
+        runs.start("researcher", "c1", "Fix [/x] and [bold]this[/bold]", at=0)
+
+        listed = await agents(manager)
+        shown = await agents(manager, "researcher-1")
+
+        assert options_of(listed) == [
+            "researcher-1 · researcher · running · Fix [/x] and [bold]this[/bold]",
+        ]
+        (panel,) = shown.add_rich.call_args.args
+        out = io.StringIO()
+        Console(file=out, width=200, color_system=None).print(panel)
+        assert "Fix [/x] and [bold]this[/bold]" in out.getvalue()
+
+    @pytest.mark.parametrize(
+        "seconds, shown",
+        [(0, "0s"), (59, "59s"), (60, "1m 00s"), (185, "3m 05s"), (3_725, "1h 02m")],
+    )
+    async def test_the_time_a_run_took(self, manager, seconds, shown):
+        runs = Runs(manager, manager.session_ref("s1"))
+        ref = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(ref, "completed", at=seconds, result="X.")
+
+        session = await agents(manager, "researcher-1")
+
+        (panel,) = session.add_rich.call_args.args
+        assert rows_of(panel.renderable)[3] == ("Run #1", f"completed · {shown}")
 
     async def test_an_unknown_id_says_so(self, manager):
         crew_ran(manager)
@@ -397,13 +451,15 @@ class TestAfterARestart:
         )
 
         listed = await agents(manager)
+        interrupted = await agents(manager, "researcher-2")
         shown = await agents(manager, "researcher-1")
 
-        (table,) = listed.add_rich.call_args.args
-        assert [row[:6] for row in rows_of(table)] == [
-            ("researcher-1", "researcher", "completed", "#1", "Find X.", "1.3k / 310"),
-            ("researcher-2", "researcher", "interrupted", "#1", "Find Y.", "—"),
+        assert options_of(listed) == [
+            "researcher-1 · researcher · idle · Find X.",
+            "researcher-2 · researcher · idle · Find Y.",
         ]
+        (label, value) = rows_of(interrupted.add_rich.call_args.args[0].renderable)[3]
+        assert (label, value.split(" · ")[0]) == ("Run #1", "interrupted")
         (panel,) = shown.add_rich.call_args.args
         assert rows_of(panel.renderable)[-2:] == [
             ("  Tokens", f"{SONNET}: 1.2k in / 300 out"),
@@ -424,8 +480,7 @@ class TestAfterARestart:
         session.add_warning.assert_called_once_with(
             "Sub-agent records not read from the store: disk unreadable"
         )
-        (table,) = session.add_rich.call_args.args
-        assert len(rows_of(table)) == 5
+        assert len(options_of(session)) == 5
 
 
     async def test_an_error_without_a_message_is_named_by_its_type(self, manager, monkeypatch):
@@ -438,6 +493,117 @@ class TestAfterARestart:
         session.add_warning.assert_called_once_with(
             "Sub-agent records not read from the store: TimeoutError"
         )
+
+
+class TestTheAgentCommand:
+    """``/agent <id>`` shows one sub-agent; ``/agent stop <id>`` and ``/agent
+    close <id>`` stop and close it, each saying what it did or why not."""
+
+    async def test_an_id_alone_shows_it_as_agents_id_does(self, manager):
+        crew_ran(manager)
+
+        shown = await agent(manager, "researcher-1")
+        same = await agents(manager, "researcher-1")
+
+        (panel,) = shown.add_rich.call_args.args
+        assert rows_of(panel.renderable) == rows_of(same.add_rich.call_args.args[0].renderable)
+
+    async def test_stop_stops_an_idle_one_and_says_only_the_user_continues_it(self, manager):
+        crew_ran(manager)
+
+        session = await agent(manager, "stop researcher-1")
+
+        session.add_success.assert_called_once_with(
+            "Stopped researcher-1: only you can start its next run."
+        )
+        conversation = manager.session_ref("s1")
+        assert manager.agent_runs.instance(conversation, "researcher-1").status == "stopped"
+        assert options_of(await agents(manager))[0] == (
+            "researcher-1 · researcher · stopped · Find X."
+        )
+
+    async def test_a_stop_that_leaves_it_closed_says_so(self, manager, monkeypatch):
+        """A type that is not continuable closes as its stopped run ends."""
+        crew_ran(manager)
+        conversation = manager.session_ref("s1")
+
+        async def stops_and_closes(instance, **ids):
+            last = manager.agent_runs.record(conversation, instance)
+            token = set_active_turn(conversation)
+            try:
+                manager.agent_runs.observe(
+                    WorkflowEvent.agent_instance(last.ref, "closed", reason="ended")
+                )
+            finally:
+                reset_active_turn(token)
+            return True
+
+        monkeypatch.setattr(manager, "stop_instance", stops_and_closes)
+
+        session = await agent(manager, "stop researcher-1")
+
+        session.add_success.assert_called_once_with(
+            "Stopped researcher-1: it is closed, as it takes no more runs."
+        )
+
+    async def test_close_closes_it_and_its_sub_agents_and_says_its_work_stays(self, manager):
+        crew_ran(manager)
+
+        session = await agent(manager, "close researcher-1")
+
+        session.add_success.assert_called_once_with(
+            "Closed researcher-1, writer-1; /agents researcher-1 still shows their work."
+        )
+        assert options_of(await agents(manager))[:2] == [
+            "researcher-1 · researcher · closed · Find X.",
+            "  writer-1 · writer · closed · Draft it.",
+        ]
+
+    async def test_each_says_why_it_did_nothing(self, manager):
+        crew_ran(manager)
+        await agent(manager, "stop researcher-1")
+        await agent(manager, "close checker-1")
+
+        said = [
+            await agent(manager, args)
+            for args in ("stop researcher-1", "stop checker-1", "close checker-1",
+                         "stop nobody-1", "close nobody-1")
+        ]
+
+        assert [s.add_message.call_args.args for s in said[:3]] == [
+            ("system", "researcher-1 is stopped already."),
+            ("system", "checker-1 is closed already."),
+            ("system", "checker-1 is closed already."),
+        ]
+        assert [s.add_warning.call_args.args for s in said[3:]] == [
+            ("No sub-agent nobody-1 in this conversation. Type /agents for the list.",),
+        ] * 2
+        assert not any(s.add_success.called for s in said)
+
+    async def test_without_an_id_it_says_how(self, manager):
+        said = [await agent(manager, args) for args in ("", "stop", "close")]
+
+        assert [s.add_warning.call_args.args for s in said] == [
+            (AGENT_USAGE,), ("Usage: /agent stop <id>",), ("Usage: /agent close <id>",),
+        ]
+
+    async def test_records_that_cannot_be_read_stop_nothing(self, manager, monkeypatch):
+        crew_ran(manager)
+
+        async def unreadable(conversation: SessionRef) -> None:
+            raise OSError("disk unreadable")
+
+        monkeypatch.setattr(manager, "load_agents", unreadable)
+        session = await agent(manager, "stop researcher-1")
+
+        session.add_warning.assert_called_once_with(
+            "Sub-agent records not read from the store: disk unreadable"
+        )
+        session.add_success.assert_not_called()
+        assert manager.agent_runs.instance(manager.session_ref("s1"), "researcher-1").status == (
+            "idle"
+        )
+
 
 class _Down:
     """An app whose workflow is not running."""
@@ -471,6 +637,15 @@ class TestWithoutAWorkflow:
             "Sub-agent runs not available (failed to start)."
         )
 
+    async def test_agent_says_the_same(self):
+        app = _Down(None)
+
+        await AgentCommand().execute("stop researcher-1", app)
+
+        app.session.add_warning.assert_called_once_with(
+            "Sub-agent runs not available (initializing...)."
+        )
+
 
 def test_it_is_a_built_in_workflow_command():
     from agentic_cli.cli.app import BaseCLIApp
@@ -482,3 +657,7 @@ def test_it_is_a_built_in_workflow_command():
     assert isinstance(command, AgentsCommand)
     assert command.category is CommandCategory.WORKFLOW
     assert command.usage == "/agents [<id>]"
+    one = registry.get("agent")
+    assert isinstance(one, AgentCommand)
+    assert one.category is CommandCategory.WORKFLOW
+    assert one.usage == "/agent <id> | stop <id> | close <id>"

@@ -200,6 +200,11 @@ REPLACED_ERROR = "stopped by its parent for a new message"
 REPLACED_BY_USER_ERROR = "stopped by the user for a new message"
 #: Why a parent's ``stop_agent`` closes an instance.
 CLOSED_BY_PARENT = "closed by its parent"
+#: Why the user stopped an instance: its run's envelope's ``error``, or, for
+#: an idle one, its ``AGENT_INSTANCE``'s reason (``stop_by_user``).
+STOPPED_BY_USER_ERROR = "stopped by the user"
+#: Why the user closed an instance (``AGENT_INSTANCE``'s reason; ``close_by_user``).
+CLOSED_BY_USER = "closed by the user"
 #: The error of a run that ended with a parent's run its control stopped.
 WITH_ITS_PARENT_ERROR = "its parent's run was stopped"
 #: Who cancels a run for its parent's tools (``cancelled_by``).
@@ -840,6 +845,99 @@ class Delegations:
             return False
         control.steer(message)
         return True
+
+    async def stop_by_user(self, conversation: SessionRef | None, instance: str) -> bool:
+        """The user's stop of ``conversation``'s ``instance``, any of its instances.
+
+        A running instance's run is cancelled by the user
+        (``STOPPED_BY_USER_ERROR``) and waited for to its end, which leaves
+        the instance ``stopped`` (``closed`` for a type that is not
+        ``continuable``); a run whose work had ended as the stop came
+        (``RunControl.finish``) ends as it went, and the instance is stopped
+        after its end. An idle instance is stopped at once (``AGENT_INSTANCE``
+        ``stopped``, reason ``STOPPED_BY_USER_ERROR``). Only the user may
+        start a stopped instance's next run. ``conversation``, when not the
+        active turn's, is made the active turn for the events; None is the
+        active turn's.
+
+        Returns:
+            True when it stopped the instance; False, doing nothing, for an
+            instance that is unknown, closed or stopped already.
+        """
+        conversation = conversation if conversation is not None else get_active_turn()
+        with _as_turn(conversation):
+            record = self._runs.instance(conversation, instance)
+            if record is None or record.status in (INSTANCE_CLOSED, INSTANCE_STOPPED):
+                return False
+            stopped = await self._user_stops_run(conversation, record)
+            logger.info("subagent_stopped", instance=instance, run=stopped, by=USER)
+            record = self._runs.instance(conversation, instance) or record
+            if record.status not in (INSTANCE_STOPPED, INSTANCE_CLOSED):
+                # Idle, or its run ended as it went: stopped without a run.
+                self._emit_instance(conversation, record, INSTANCE_STOPPED, STOPPED_BY_USER_ERROR)
+            return True
+
+    async def close_by_user(self, conversation: SessionRef | None, instance: str) -> list[str]:
+        """The user's close of ``conversation``'s ``instance`` and its descendants.
+
+        An idle or stopped one is closed at once (``close``, reason
+        ``CLOSED_BY_USER``); a running one's run is cancelled by the user and
+        waited for, its end closing it, then its open descendants. Its
+        transcript stays readable; it takes no follow-up. ``conversation``
+        as ``stop_by_user`` takes it.
+
+        Returns:
+            The ids closed, ``instance`` first, then its descendants in the
+            order they started; none for an instance that is unknown or closed.
+        """
+        conversation = conversation if conversation is not None else get_active_turn()
+        with _as_turn(conversation):
+            record = self._runs.instance(conversation, instance)
+            if record is None or record.status == INSTANCE_CLOSED:
+                return []
+            if record.status != INSTANCE_RUNNING:
+                return self.close(conversation, instance, reason=CLOSED_BY_USER)
+            closing = [
+                one.instance for one in (record, *self._descendants(conversation, instance))
+                if one.status != INSTANCE_CLOSED
+            ]
+            self._closing[(conversation, instance)] = CLOSED_BY_USER
+            if await self._user_stops_run(conversation, record) is None:
+                # No run of this manager's works for it: closed as an open one is.
+                self._closing.pop((conversation, instance), None)
+                for one in (record, *self._descendants(conversation, instance)):
+                    if one.instance == instance or one.status in _OPEN:
+                        self._close(conversation, one, CLOSED_BY_USER)
+            return [
+                one for one in closing
+                if (found := self._runs.instance(conversation, one)) is not None
+                and found.status == INSTANCE_CLOSED
+            ]
+
+    async def _user_stops_run(
+        self, conversation: SessionRef | None, record: InstanceRecord
+    ) -> str | None:
+        """Cancel ``record``'s working run by the user and wait for its end; the run's id.
+
+        None when no run of this manager works for it.
+        """
+        control = self._working_control(conversation, record=record)
+        if control is None:
+            return None
+        run = control.ref.run or ""
+        ended = self._ends[(conversation, run)]
+        self.cancel(run, by=USER, error=STOPPED_BY_USER_ERROR, conversation=conversation)
+        await ended.wait()
+        return run
+
+    def _emit_instance(
+        self, conversation: SessionRef | None, instance: InstanceRecord, status: str, reason: str
+    ) -> None:
+        """Report and record ``instance``'s change to ``status`` (``AGENT_INSTANCE``),
+        named by its last run."""
+        last = self._runs.record(conversation, instance.instance)
+        if last is not None:
+            self._emit(WorkflowEvent.agent_instance(last.ref, status, reason=reason))
 
     def stop_cause(self, run: RunRef | None, *, conversation: SessionRef | None = None) -> str | None:
         """What stopped ``run``, for a call it left at its prompt (``interrupts.not_run``).

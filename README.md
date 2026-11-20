@@ -1428,6 +1428,17 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `</agents>`, at most 2,000 characters. The list is taken once and kept, as
   the memory index is, so the prompt stays cached: it is taken again when the
   conversation is opened, after a summary and after `/compact`.
+- **The user's control.** `/agents` picks a sub-agent and shows it;
+  `/agent stop <id>` (its run cancelled by you, `cancelled_by: user`; it is
+  then `stopped`: its parent's messages are refused, only you can start its
+  next run) and `/agent close <id>` (it and its own sub-agents). The
+  manager's entry points (provisional, on the open conversation, any of its
+  sub-agents): `run_instance(id, message)` (a turn of its own, counted toward
+  no turn's runs; stopping the stream is your stop of the run),
+  `stop_instance(id)`, `close_instance(id)`, `steer_instance(id, message)`,
+  `instance_result(id)`, `tell_root(text)` (with `view_notice(id,
+  envelope)`'s text, left out of fact extraction and of the conversation's
+  title and turns, as a job's notice is).
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task` (nor, with
@@ -2265,7 +2276,8 @@ Built-in slash commands available in all apps:
 | `/models` | | The list the model pickers offer, each model's facts and why an entry is left out, and the providers in use (`/models <text>` searches the full listings, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
-| `/agents` | | This conversation's sub-agent runs, each under the run that started it: status, title, tokens in/out, time (`/agents <id>`: one instance or run, the first lines of its result, its error and its tokens by model) |
+| `/agents` | | Pick one of this conversation's sub-agents, each under the one that started it: id, type, status (`running`, `idle`, `stopped`, `closed`), title; Enter shows it (`/agents <id>`: one instance or run, each run's status and time, the first lines of its result, its error and its tokens by model) |
+| `/agent` | | One sub-agent: `/agent <id>` shows it, `/agent stop <id>` stops it (its run, if one works; only you can start its next run), `/agent close <id>` closes it and its own sub-agents (no more runs; its work stays readable) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep); on the memory store it says none are kept |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
