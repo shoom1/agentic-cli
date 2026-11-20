@@ -166,7 +166,6 @@ async def agent(manager, args: str, *, session_id: str = "s1"):
     return app.session
 
 
-
 def rows_of(table) -> list[tuple[str, ...]]:
     """A rich table's rows, as text."""
     columns = [[str(cell) for cell in column.cells] for column in table.columns]
@@ -495,6 +494,7 @@ class TestAfterARestart:
             "Sub-agent records not read from the store: TimeoutError"
         )
 
+
 class TestTheAgentCommand:
     """``/agent <id>`` shows one sub-agent; ``/agent stop <id>`` and ``/agent
     close <id>`` stop and close it, each saying what it did or why not."""
@@ -520,6 +520,30 @@ class TestTheAgentCommand:
         assert manager.agent_runs.instance(conversation, "researcher-1").status == "stopped"
         assert options_of(await agents(manager))[0] == (
             "researcher-1 · researcher · stopped · Find X."
+        )
+
+    async def test_a_stop_that_leaves_it_closed_says_so(self, manager, monkeypatch):
+        """A type that is not continuable closes as its stopped run ends."""
+        crew_ran(manager)
+        conversation = manager.session_ref("s1")
+
+        async def stops_and_closes(instance, **ids):
+            last = manager.agent_runs.record(conversation, instance)
+            token = set_active_turn(conversation)
+            try:
+                manager.agent_runs.observe(
+                    WorkflowEvent.agent_instance(last.ref, "closed", reason="ended")
+                )
+            finally:
+                reset_active_turn(token)
+            return True
+
+        monkeypatch.setattr(manager, "stop_instance", stops_and_closes)
+
+        session = await agent(manager, "stop researcher-1")
+
+        session.add_success.assert_called_once_with(
+            "Stopped researcher-1: it is closed, as it takes no more runs."
         )
 
     async def test_close_closes_it_and_its_sub_agents_and_says_its_work_stays(self, manager):

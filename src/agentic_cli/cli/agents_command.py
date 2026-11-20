@@ -47,7 +47,7 @@ from agentic_cli.cli.usage_tracker import format_tokens, format_usage
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_INPUT_REQUIRED, RUN_STARTED
 from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
-from agentic_cli.workflow.agents.runs import run_number
+from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, run_number
 
 if TYPE_CHECKING:
     from thinking_prompt import Placement
@@ -69,6 +69,8 @@ AGENT_USAGE = "Usage: /agent <id> | /agent stop <id> | /agent close <id>"
 SUBCOMMAND_USAGE = "Usage: /agent {subcommand} <id>"
 #: What ``/agent stop`` says it did.
 STOPPED_TEXT = "Stopped {instance}: only you can start its next run."
+#: What ``/agent stop`` says when the instance ended up closed (a type that takes no more runs).
+STOPPED_CLOSED_TEXT = "Stopped {instance}: it is closed, as it takes no more runs."
 #: What ``/agent close`` says it did (``whose``: ``its`` for one id, ``their`` for more).
 CLOSED_TEXT = "Closed {ids}; /agents {instance} still shows {whose} work."
 #: What ``/agent stop`` and ``/agent close`` say for an instance that is that already.
@@ -149,7 +151,10 @@ class AgentCommand(Command):
         ids = {"session_id": conversation.session_id, "user_id": conversation.user_id}
         if word == "stop":
             if await workflow.stop_instance(wanted, **ids):
-                app.session.add_success(STOPPED_TEXT.format(instance=wanted))
+                record = workflow.agent_runs.instance(conversation, wanted)
+                closed = record is not None and record.status == INSTANCE_CLOSED
+                text = STOPPED_CLOSED_TEXT if closed else STOPPED_TEXT
+                app.session.add_success(text.format(instance=wanted))
                 return
         else:
             closed = await workflow.close_instance(wanted, **ids)

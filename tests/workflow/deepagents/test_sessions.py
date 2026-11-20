@@ -459,7 +459,6 @@ class TestList:
 
         assert (row.title, row.turns) == ("Build it.", 1)
 
-
     async def test_the_limit_keeps_the_newest(self, saver, store):
         await say(saver, ref(session="s1"))
         await say(saver, ref(session="s2"))
