@@ -590,39 +590,19 @@ class ConversationCore:
             asyncio.CancelledError: Ctrl+C stopped it, as the processor
                 says, or while it waited for the turn lock.
         """
-        ui = parts.ui
-        try:
-            await self.turn_lock.acquire()
-        except asyncio.CancelledError:
-            ui.add_message("user", message)
-            ui.add_message("system", CANCELLED_LINE)
-            raise
-        try:
-            ui.add_message("user", message)
-            if not self._held_to_write(ui):
-                return False
-            async with self._dropping_left(parts):
-                self.turned = True  # the conversation now holds this message
-                reached = False  # the turn reached a ready workflow, which stores it
-                try:
-                    result = await parts.processor.process(
-                        message=message,
-                        workflow_controller=parts.controller,
-                        ui=ui,
-                        settings=parts.settings,
-                        usage_tracker=parts.tracker,
-                        session_id=self.session_id,
-                    )
-                    reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
-                except BaseException:
-                    reached = parts.controller.is_ready  # it may have begun
-                    raise
-                finally:
-                    if reached:
-                        self.written = True
-            return True
-        finally:
-            self.turn_lock.release()
+        return await self._write(
+            parts,
+            lambda: parts.processor.process(
+                message=message,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            ),
+            turns=True,
+            echo=message,
+        )
 
     async def run_instance(self, instance: str, message: str, parts: TurnParts) -> bool:
         """Run the user's ``message`` as the next run of a sub-agent, in its view.
@@ -693,13 +673,23 @@ class ConversationCore:
             turns=True,
         )
 
-    async def _write(self, parts: TurnParts, run: Callable[[], Awaitable[Any]], *, turns: bool) -> bool:
-        """``run_turn``'s frame without the echo: ``run()`` under the turn lock.
+    async def _write(
+        self,
+        parts: TurnParts,
+        run: Callable[[], Awaitable[Any]],
+        *,
+        turns: bool,
+        echo: str | None = None,
+    ) -> bool:
+        """``run()`` under the turn lock: the frame of every write to the conversation.
 
-        The conversation is held to write first; ``turned`` when ``turns``
-        (the main agent answered in it); ``written`` once ``run`` reached a
-        ready workflow (its result's status is not ``UNAVAILABLE``; one that
-        raised or was cancelled counts when the workflow was ready).
+        ``echo``, the line the user typed, is shown once the lock is taken,
+        and before ``CANCELLED_LINE`` when the wait for it is stopped (a line
+        Ctrl+C stops while it waits is shown and said cancelled, not dropped
+        unseen). The conversation is held to write first; ``turned`` when
+        ``turns`` (the main agent answered in it); ``written`` once ``run``
+        reached a ready workflow (its result's status is not ``UNAVAILABLE``;
+        one that raised or was cancelled counts when the workflow was ready).
 
         Returns:
             Whether it ran: False when another process has the conversation
@@ -713,9 +703,13 @@ class ConversationCore:
         try:
             await self.turn_lock.acquire()
         except asyncio.CancelledError:
+            if echo is not None:
+                ui.add_message("user", echo)
             ui.add_message("system", CANCELLED_LINE)
             raise
         try:
+            if echo is not None:
+                ui.add_message("user", echo)
             if not self._held_to_write(ui):
                 return False
             async with self._dropping_left(parts):
