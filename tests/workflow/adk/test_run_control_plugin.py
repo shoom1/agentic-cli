@@ -7,6 +7,9 @@ backends, are in the contract suite (``TestTheStepLimit``,
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("google.adk")
@@ -169,3 +172,63 @@ class TestThePlugin:
         )
 
         assert control.cancelled is None
+
+
+class TestSteering:
+    """Each steered message is the run's unstored one until its child
+    session holds it: a run stopped while it stores them keeps the rest for
+    its instance's next run."""
+
+    class Stalling:
+        """A session service whose second append never returns."""
+
+        def __init__(self) -> None:
+            self.stored: list[str] = []
+            self.stalled = asyncio.Event()
+
+        async def append_event(self, session, event):
+            if self.stored:
+                self.stalled.set()
+                await asyncio.Event().wait()
+            self.stored.append(event.content.parts[0].text)
+            return event
+
+    @staticmethod
+    def context(service) -> SimpleNamespace:
+        return SimpleNamespace(
+            invocation_id="i1", session=object(),
+            get_invocation_context=lambda: SimpleNamespace(session_service=service),
+        )
+
+    async def test_a_message_stored_is_no_more_unstored(self):
+        control = RunControl(REF, AgentLimits())
+        service = self.Stalling()
+        control.steer("Also Z.")
+        request = LlmRequest(contents=[user(text("# Task: Find X."))])
+
+        await RunControlPlugin(lambda: control, "anthropic").before_model_callback(
+            callback_context=self.context(service), llm_request=request
+        )
+
+        assert service.stored == ["Also Z."]
+        assert control.unstored() == []
+        assert request.contents[-1] == user(text("Also Z."))
+
+    async def test_a_run_stopped_while_storing_keeps_the_rest_unstored(self):
+        control = RunControl(REF, AgentLimits())
+        service = self.Stalling()
+        control.steer("Also Z.")
+        control.steer("In metric units.")
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+
+        call = asyncio.create_task(plugin.before_model_callback(
+            callback_context=self.context(service),
+            llm_request=LlmRequest(contents=[user(text("# Task: Find X."))]),
+        ))
+        await asyncio.wait_for(service.stalled.wait(), 5)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert service.stored == ["Also Z."]
+        assert control.unstored() == ["In metric units."]

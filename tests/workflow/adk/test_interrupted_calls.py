@@ -16,6 +16,7 @@ before its next run.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from agentic_cli.tools.jobs.backends import JobState  # noqa: E402
 from agentic_cli.workflow.interrupts import (  # noqa: E402
     INTERRUPTED,
     INTERRUPTED_BY_USER,
+    NOT_RUN,
     OpenCalls,
     interrupted,
     job_started,
@@ -150,6 +152,27 @@ class TestSeals:
 
         assert _answers(parents) == {"c1": interrupted(INTERRUPTED_BY_USER)}
         assert _answers(its_own) == {"c1": {"success": True, "value": 42}}
+
+
+    @pytest.mark.parametrize("cause, text", [
+        ("its parent", "Not run: its parent stopped the run before this call ran."),
+        (None, NOT_RUN),
+    ])
+    async def test_a_call_at_its_prompt_is_told_what_stopped_its_run(self, cause, text):
+        calls = OpenCalls()
+        plugin = InterruptedCallsPlugin(calls, stop_cause=lambda: cause)
+
+        with turn_of(CONVERSATION):
+            token = set_active_run(RESEARCHER)
+            with pytest.raises(asyncio.CancelledError):
+                with calls.asking("c1"):
+                    raise asyncio.CancelledError
+            sealed = await plugin.on_event_callback(
+                invocation_context=None, event=_seal("researcher", None, ("write_file", "c1")),
+            )
+            reset_active_run(token)
+
+        assert _answers(sealed) == {"c1": interrupted(text)}
 
 
 class TestActiveToolCall:

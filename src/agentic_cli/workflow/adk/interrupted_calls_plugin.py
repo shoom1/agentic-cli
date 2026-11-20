@@ -8,8 +8,9 @@ both marked ``INVOCATION_ABORTED`` and stored through ``on_event_callback``.
 This plugin rewrites them as ``workflow/interrupts.py`` says: a call that
 finished keeps its result (ADK stores parallel calls' results together,
 after the last, so the finished one would be lost), a call at its
-permission prompt was not run, a call whose job was submitted runs on, and
-any other was interrupted by the user; the content-less event becomes the
+permission prompt was not run (in a sub-agent run its parent or a limit
+stopped, the seal says which: ``stop_cause``), a call whose job was
+submitted runs on, and any other was interrupted by the user; the content-less event becomes the
 main agent's reply ``MARKER``.
 
 ADK's seals pair a result with a call by id alone, so a call whose id
@@ -55,6 +56,7 @@ record of the instance, whichever run made them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -121,12 +123,23 @@ class InterruptedCallsPlugin(BasePlugin):
         cap: The tool result cap, registered after this plugin: it tells
             this plugin each cut it makes, which a finished call's seal
             sends.
+        stop_cause: Asked once for each seal it writes: what stopped the run
+            whose runner wrote it (``Delegations.stop_cause``), told to a
+            call that waited at its prompt; None, or None answered, for the
+            user's stop.
     """
 
-    def __init__(self, open_calls: OpenCalls, cap: "ToolResultCapPlugin | None" = None) -> None:
+    def __init__(
+        self,
+        open_calls: OpenCalls,
+        cap: "ToolResultCapPlugin | None" = None,
+        *,
+        stop_cause: Callable[[], str | None] | None = None,
+    ) -> None:
         super().__init__(name="interrupted_calls")
         self._open = open_calls
         self._cap = cap
+        self._stop_cause = stop_cause
         if cap is not None:
             cap.on_cut = self._keep_cut
         # Each running call's active-tool-call token, by its invocation and
@@ -242,18 +255,21 @@ class InterruptedCallsPlugin(BasePlugin):
         # iterates it: a sub-agent run's, where its run is the active one.
         active = get_active_run()
         run = active.run if active is not None else None
-        parts = [await self._answered(part, actions, run) for part in content.parts]
+        cause = self._stop_cause() if self._stop_cause is not None else None
+        parts = [await self._answered(part, actions, run, cause) for part in content.parts]
         return event.model_copy(update={
             "content": types.Content(role=content.role, parts=parts), "actions": actions,
         })
 
-    async def _answered(self, part: types.Part, actions: Any, run: str | None) -> types.Part:
+    async def _answered(
+        self, part: types.Part, actions: Any, run: str | None, cause: str | None
+    ) -> types.Part:
         call = part.function_response
         if call is None:
             return part
         return types.Part(function_response=types.FunctionResponse(
             id=call.id, name=call.name,
-            response=_as_response(_from_record(self._open, call.id, run, actions)),
+            response=_as_response(_from_record(self._open, call.id, run, actions, cause=cause)),
         ))
 
 
@@ -280,7 +296,7 @@ def _ids_in_view(events: list[Event], branch: str | None) -> set[str]:
 
 def _from_record(
     open_calls: OpenCalls, call_id: str | None, run: str | None, actions: Any,
-    *, by_user: bool = True,
+    *, by_user: bool = True, cause: str | None = None,
 ) -> Any:
     """A call left open answered from the record, as ``run``'s.
 
@@ -288,9 +304,9 @@ def _from_record(
     the state it changed goes into ``actions``, stored with the answer as
     with its result. Any other is answered as ``OpenCalls.answer`` says:
     ``by_user`` whether the user stopped its turn (a stopped turn's call, by
-    default).
+    default); ``cause`` what stopped the run, for a call at its prompt.
     """
-    answer = open_calls.answer(call_id, by_user=by_user, run=run)
+    answer = open_calls.answer(call_id, by_user=by_user, run=run, cause=cause)
     if not isinstance(answer, _Finished):
         return answer
     actions.state_delta.update(answer.state_delta)

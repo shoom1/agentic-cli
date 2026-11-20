@@ -9,7 +9,8 @@ for the run in progress (``get_active_run``: the run's own task,
   event appended to the run's child session (through the callback
   context's session service: the invocation's own session, which a session
   loaded apart would fail ADK's revision check on) and a user content added
-  to the request, so they stay in its transcript. ADK stamps the call's
+  to the request, so they stay in its transcript, each the run's stored one
+  (``RunControl.stored``) once its append returns. ADK stamps the call's
   answer before this callback runs, so each event of the run from then on
   that is not later than the steered message is stamped just after it
   (``on_event_callback``): a durable store reads a session's events back by
@@ -96,7 +97,7 @@ class RunControlPlugin(BasePlugin):
         steered = control.take_steering()
         if steered:
             self._stamped[callback_context.invocation_id] = await _steer(
-                callback_context, llm_request, steered
+                callback_context, llm_request, steered, control
             )
         if control.model_call():
             llm_request.contents = with_note(list(llm_request.contents or []), STEP_LIMIT_NOTE)
@@ -144,10 +145,17 @@ class RunControlPlugin(BasePlugin):
 
 
 async def _steer(
-    callback_context: CallbackContext, llm_request: LlmRequest, messages: list[str]
+    callback_context: CallbackContext,
+    llm_request: LlmRequest,
+    messages: list[str],
+    control: RunControl,
 ) -> float:
     """``messages``, as the user's, in the run's child session and after the
-    request's last content; the time the last one is stamped with."""
+    request's last content; the time the last one is stamped with.
+
+    Each one is the run's stored one (``RunControl.stored``) as its append
+    returns: a run stopped while it appends keeps the rest unstored, for the
+    instance's next run."""
     service = callback_context.get_invocation_context().session_service
     session = callback_context.session
     stamped = 0.0
@@ -157,6 +165,7 @@ async def _steer(
             invocation_id=callback_context.invocation_id, author="user", content=content,
         )
         await service.append_event(session, event)
+        control.stored(1)
         llm_request.contents.append(content)
         stamped = event.timestamp
     return stamped

@@ -76,12 +76,16 @@ from agentic_cli.workflow.adk.sessions import (
     stored_instances,
     turn_state,
 )
-from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool
+from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool, follow_up_tools
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import (
+    FOLLOW_UP_CLASH_ERROR,
+    FOLLOW_UP_TOOLS,
+    TASK_TOOL,
+)
 from agentic_cli.workflow.outside_content import (
     BEFORE_0_7_0,
     JOB_RESULT,
@@ -490,14 +494,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ``transfer_to_agent``. An agent that delegates (``types``: its
         sub-agents, by name) gets the framework's ``task`` tool
         (``adk/task_tool.py::TaskTool``), whose calls run each sub-agent on
-        that sub-agent type's own runner (``_run_agent``). Only the root's
+        that sub-agent type's own runner (``_run_agent``); with
+        ``SubAgentPolicy.follow_ups`` it also gets ``message_agent``,
+        ``stop_agent`` and ``check_agents`` (``FollowUpTool``). Only the root's
         long-running tools are wrapped: a pending one would pause a
         sub-agent's run for good.
 
         Raises:
             AgentGraphError: A delegating agent's own tools include one named
-                ``task``, its delegation tool's name (its MCP tools, known
-                only once they connect, excepted).
+                ``task``, its delegation tool's name, or, with ``follow_ups``,
+                one named like one of the parent's other tools (its MCP tools,
+                known only once they connect, excepted).
         """
         built = build_adk_model(
             self._resolved_models[config.name], settings=self._settings, app_name=self.app_name
@@ -506,12 +513,20 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         if root:
             tools = self._wrap_long_running(tools)
         if types:
-            if TASK_TOOL in _tool_names(tools):
+            names = _tool_names(tools)
+            if TASK_TOOL in names:
                 raise AgentGraphError(
                     f"Agent {config.name!r} delegates to sub-agents through a tool named "
                     f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
                 )
             tools = [*tools, TaskTool(config.name, types, lambda: self._delegations)]
+            if self.subagent_policy.follow_ups:
+                clash = next((name for name in FOLLOW_UP_TOOLS if name in names), None)
+                if clash is not None:
+                    raise AgentGraphError(
+                        FOLLOW_UP_CLASH_ERROR.format(agent=config.name, tool=clash)
+                    )
+                tools = [*tools, *follow_up_tools(lambda: self._delegations)]
         instruction = config.get_prompt(self._settings)
         return LlmAgent(
             name=config.name,
@@ -741,6 +756,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             cache=self._build.cache if self._build is not None else None,
             skip_agents=frozenset(),
             memory_index=False,
+            stop_cause=lambda: self._delegations.stop_cause(get_active_run()),
         )
 
     def _chain(
@@ -752,8 +768,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         cache: ContextCacheConfig | None,
         skip_agents: frozenset[str],
         memory_index: bool,
+        stop_cause: Callable[[], str | None] | None = None,
     ) -> list:
-        """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on."""
+        """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on.
+
+        ``stop_cause`` is what a seal tells a call at its prompt stopped the
+        run (``InterruptedCallsPlugin``): a sub-agent chain's.
+        """
         from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
 
         kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
@@ -769,7 +790,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             tool_output_dir(self._settings.app_name),
             skip_agents=skip_agents,
         )
-        plugins.append(InterruptedCallsPlugin(self._open_calls, cap))
+        plugins.append(InterruptedCallsPlugin(self._open_calls, cap, stop_cause=stop_cause))
         plugins.append(cap)
         if memory_index and root is not None:
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin

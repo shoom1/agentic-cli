@@ -33,6 +33,13 @@ denies it, as it denies any tool the framework did not issue. What it
 relies on of ADK's ``BaseTool`` (its constructor's ``name`` and
 ``description``, ``_get_declaration``, ``run_async(args=, tool_context=)``)
 is contract-tested.
+
+With ``SubAgentPolicy.follow_ups`` a delegating agent also gets a
+``FollowUpTool`` for each of the parent's other tools (``message_agent``,
+``stop_agent``, ``check_agents``): the same kind of tool, bound to its own
+declaration, whose call hands its arguments to ``call_follow_up_tool``
+(``agents/follow_ups.py``) and returns the result as JSON text as ``task``
+does.
 """
 
 from __future__ import annotations
@@ -45,10 +52,16 @@ from google.adk.events import Event, EventActions
 from google.adk.tools import BaseTool
 from google.genai import types
 
-from agentic_cli.tools._core.delegation import TASK_TOOL
+from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
-from agentic_cli.workflow.agents.brief import task_description, task_parameters
+from agentic_cli.workflow.agents.brief import (
+    follow_up_description,
+    follow_up_parameters,
+    task_description,
+    task_parameters,
+)
 from agentic_cli.workflow.agents.delegate import DelegationRequest
+from agentic_cli.workflow.agents.follow_ups import call_follow_up_tool
 from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
 from agentic_cli.workflow.sessions import get_active_run
 
@@ -108,6 +121,51 @@ class TaskTool(BaseTool):
         for key, value in delegated.state.items():
             state[key] = value
         return json.dumps(delegated.result, ensure_ascii=False)
+
+
+class FollowUpTool(BaseTool):
+    """One of a delegating agent's tools for the sub-agents it started: ``message_agent``,
+    ``stop_agent`` or ``check_agents``.
+
+    Args:
+        name: Which tool (one of ``FOLLOW_UP_TOOLS``).
+        delegations: The manager's delegations, asked for at each call.
+
+    Raises:
+        ValueError: ``name`` is not one of the parent's tools.
+    """
+
+    def __init__(self, name: str, delegations: Callable[[], Delegations]) -> None:
+        if name not in FOLLOW_UP_TOOLS:
+            raise ValueError(f"{name!r} is not one of the parent's tools.")
+        super().__init__(name=name, description=follow_up_description(name))
+        self._parameters = follow_up_parameters(name)
+        self._delegations = delegations
+        if type(self) is FollowUpTool:
+            bind_tool_identity(self, get_registry().get(name))
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters_json_schema=self._parameters,
+        )
+
+    async def run_async(self, *, args: dict[str, Any], tool_context: "ToolContext") -> str:
+        state = tool_context.state
+        delegated = await call_follow_up_tool(
+            self._delegations(), self.name, args,
+            call_id=tool_context.function_call_id,
+            state={key: state[key] for key in SHARED_KEYS if key in state},
+        )
+        for key, value in delegated.state.items():
+            state[key] = value
+        return json.dumps(delegated.result, ensure_ascii=False)
+
+
+def follow_up_tools(delegations: Callable[[], Delegations]) -> list[FollowUpTool]:
+    """The parent's tools, in ``FOLLOW_UP_TOOLS`` order."""
+    return [FollowUpTool(name, delegations) for name in FOLLOW_UP_TOOLS]
 
 
 def inherited_events(events: Sequence[Event]) -> list[Event]:
