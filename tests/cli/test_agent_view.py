@@ -19,11 +19,13 @@ view is read-only.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from agentic_cli.cli import AppInfo
 from agentic_cli.cli import app as app_module
+from agentic_cli.cli import workflow_controller
 from agentic_cli.cli.agent_view import (
     BACK_RULE,
     COMPACT_IN_VIEW,
@@ -32,6 +34,7 @@ from agentic_cli.cli.agent_view import (
     READ_ONLY,
     STEERED,
     TELLING,
+    bind_ctrl_c,
 )
 from agentic_cli.cli.agents_command import NO_SUCH_AGENT
 from agentic_cli.cli.app import BaseCLIApp
@@ -473,3 +476,92 @@ class TestOffTheLoop:
             await typed(app, "/agent researcher-1", "Now find Y.", "/back")
 
         assert said(app.session, "add_response") == ["Done.", "Y is 7.", "Noted."]
+
+
+# -- Ctrl+C on the run in view ---------------------------------------------------------
+
+
+class _Viewed:
+    """What the Ctrl+C binding reads of a view: whether its run works, and its stop."""
+
+    def __init__(self) -> None:
+        self.working = False
+        self.stopped = 0
+
+    def stop(self) -> bool:
+        self.stopped += 1
+        return True
+
+
+class TestCtrlCInAView:
+    """The run in view works outside the input handler (the prompt stays open
+    to steer it), so thinking-prompt's Ctrl+C, which cancels the handler, does
+    not reach it: a binding of the session's own stops it, active only while
+    that run works (``tests/cli/test_console_turns.py`` presses it)."""
+
+    def test_it_stops_the_run_in_view_only_while_one_works(self):
+        from prompt_toolkit.keys import Keys
+        from thinking_prompt import ThinkingPromptSession
+
+        session = ThinkingPromptSession(message=">>> ")
+        view = _Viewed()
+
+        def runs_on_ctrl_c():
+            """The handler prompt_toolkit runs: the last binding whose filter holds."""
+            bound = session.app.key_bindings.get_bindings_for_keys((Keys.ControlC,))
+            return [binding for binding in bound if binding.filter()][-1].handler
+
+        assert bind_ctrl_c(session, lambda: view) is True
+        idle = runs_on_ctrl_c()
+        view.working = True
+        runs_on_ctrl_c()(None)
+
+        assert idle.__name__ == "cancel"  # thinking-prompt's own
+        assert view.stopped == 1
+
+    def test_a_fake_session_gets_none(self):
+        assert bind_ctrl_c(autospec_session(), lambda: None) is False
+
+
+class TestExitInAView:
+    async def test_a_run_still_working_at_exit_is_the_users_stop(self, make_crew, monkeypatch):
+        """``/exit`` while the run in view works: the run is the user's to
+        stop, and is, before the workflow goes (whose cleanup waits for it)."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_block", "r1"))],
+        )
+        monkeypatch.setattr(
+            workflow_controller, "create_workflow_manager_from_settings",
+            lambda **kwargs: crew.manager,
+        )
+        app = BaseCLIApp(
+            app_info=AppInfo(name="View test", version="0"),
+            agent_configs=[agent("coordinator")],
+            settings=crew.manager.settings,
+            session_id=SESSION,
+        )
+        app.session = opening_boxes(autospec_session())
+        app.session.app = SimpleNamespace(is_running=True)
+
+        async def then_exit() -> None:
+            """The user's lines, then ``/exit`` once the run in view works."""
+            await app.process_input("Find X.")
+            await app.process_input("/agent researcher-1")
+            await app.process_input("Wait here.")
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+
+        app.session.run_async.side_effect = then_exit
+        running = asyncio.create_task(app.run())
+        exited, _ = await asyncio.wait({running}, timeout=20)
+        if not exited:  # its workflow's cleanup waits for the run in view: unwind it
+            app.agent_view.stop()
+            await running
+
+        assert exited, "the app did not exit: the run in view was still working"
+        last = crew.records()[-1]
+        assert (last.ref.run, last.status, last.cancelled_by) == (
+            "researcher-1#2", RUN_CANCELLED, "user",
+        )
+        assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]

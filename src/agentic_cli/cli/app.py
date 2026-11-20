@@ -31,7 +31,7 @@ from prompt_toolkit.history import InMemoryHistory
 
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
-from agentic_cli.cli.agent_view import AgentView, leave_view, open_view
+from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
@@ -2333,6 +2333,10 @@ class BaseCLIApp:
                     return
                 await self.process_input(text)
 
+            # Ctrl+C stops the run in a sub-agent's view, which works outside
+            # the input handler.
+            bind_ctrl_c(self.session, lambda: self._agent_view)
+
             # Keep long-running jobs visible in the status bar while the
             # session runs, independent of the agent loop.
             async with job_monitor.running():
@@ -2346,6 +2350,13 @@ class BaseCLIApp:
                 finally:
                     opening.cancel()
                     await asyncio.gather(opening, return_exceptions=True)
+                    # A view's run still working is the user's to stop: it ends,
+                    # cancelled by the user, before the workflow goes (whose
+                    # cleanup waits for that turn).
+                    view = self._agent_view
+                    if view is not None:
+                        view.stop()
+                        await view.settled()
 
             # Propose memories from the session (if enabled) while the workflow
             # is still alive: leaving this context closes the manager, and the

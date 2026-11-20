@@ -15,8 +15,10 @@ A line typed there is the user's message to the instance: while it is idle
 works, given to that run before its next model step (``steer_instance``),
 never queued as a turn. The run works in a task of its own, outside the
 input handler: thinking-prompt takes no line while a handler runs, so the
-prompt stays open for the lines that steer it. A closed instance's view is
-read-only: no prompt, and a line typed there is refused.
+prompt stays open for the lines that steer it, and Ctrl+C stops it through
+the binding ``bind_ctrl_c`` adds (the user's stop: the instance is
+``stopped``). A closed instance's view is read-only: no prompt, and a line
+typed there is refused.
 
 ``/back`` leaves: it waits for a run still working, prints ``── back to main
 ──``, and, when a run the user started there ended since the main agent was
@@ -32,8 +34,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.key_binding import KeyBindings
 from rich.table import Table
 from rich.text import Text
 
@@ -349,6 +354,36 @@ async def leave_view(app: Any) -> bool:
             view_notice(view.instance, latest), app._turn_parts()
         )
     await app._tell_its_finished_jobs()
+    return True
+
+
+def bind_ctrl_c(session: Any, view: Callable[[], AgentView | None]) -> bool:
+    """Make Ctrl+C stop the run in view (``AgentView.stop``) while one works.
+
+    thinking-prompt's Ctrl+C cancels the input handler's task, and a view's
+    run works in a task of its own (the prompt stays open to steer it), so
+    the session's key bindings get one more, active only while that run
+    works; prompt_toolkit runs the last binding added whose filter holds.
+    Any other time Ctrl+C is thinking-prompt's.
+
+    Returns:
+        Whether it was bound: a session whose application has no key
+        bindings of prompt_toolkit's own (a fake) gets none.
+    """
+    bindings = getattr(getattr(session, "app", None), "key_bindings", None)
+    if not isinstance(bindings, KeyBindings):
+        return False
+
+    def working() -> bool:
+        current = view()
+        return current is not None and current.working
+
+    @bindings.add("c-c", filter=Condition(working))
+    def stop_the_run_in_view(event: Any) -> None:
+        current = view()
+        if current is not None:
+            current.stop()
+
     return True
 
 
