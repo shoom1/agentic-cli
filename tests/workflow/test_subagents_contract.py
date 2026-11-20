@@ -5148,6 +5148,8 @@ class TestARestart:
                 monkeypatch.setattr(first.manager, "_save_agent_records", written_no_more)
             finally:
                 await first.stop(turn)
+        # A killed process is sealed by no one (ADK's newer versions seal a cancelled run).
+        await killed_mid_call(first)
         await first.manager.cleanup()
         second = make_crew(
             follow_team(), store="sqlite",
