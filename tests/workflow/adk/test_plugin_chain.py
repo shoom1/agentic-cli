@@ -21,8 +21,9 @@ and these tests pin it whole, so a move anywhere fails one of them:
 - ``interrupted_calls`` before ``tool_result_cap``: it records every
   finished result, and the cap returns its cut, which ends ADK's after-tool
   callbacks;
-- ``memory_index`` before ``context_overflow`` and ``fit_guard``, which keep
-  it;
+- ``roster``, for a main agent that continues its sub-agents, before
+  ``memory_index``, which puts the index ahead of it; both before
+  ``context_overflow`` and ``fit_guard``, which keep them;
 - ``fit_guard`` last but the raw log and the clock: it measures the request
   every other plugin edited;
 - ``llm_logging_sent``: it logs the request as sent;
@@ -46,6 +47,7 @@ pytest.importorskip("google.adk")
 from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.memory_tools import search_memory  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
+from agentic_cli.workflow.agents import SubAgentPolicy  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from tests.workflow.adk.fakes import dead_base_urls  # noqa: E402
 from tests.workflow.test_adk_context_cache import _native_yaml  # noqa: E402
@@ -182,6 +184,44 @@ async def test_a_delegating_app(project):
     ]
     # One raw log for every runner, whose buffer the manager drains.
     assert logs == [shared]
+
+
+async def test_a_main_agent_that_continues_its_sub_agents_gets_the_roster(project):
+    """With the policy's ``follow_ups`` the main agent has ``message_agent``:
+    its chain carries the roster, before the memory index; a sub-agent type's
+    has none."""
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"],
+                        tools=[search_memory]),
+            AgentConfig(name="helper", prompt="Help.", description="Helps."),
+        ],
+        settings=_settings(extras=False),
+        subagents=SubAgentPolicy(follow_ups=True),
+    )
+
+    try:
+        await manager.initialize_services()
+        chain = [plugin.name for plugin in manager._runner.app.plugins]
+        helpers = [plugin.name for plugin in manager._agent_runners["helper"].app.plugins]
+    finally:
+        await manager.cleanup()
+
+    assert chain == [
+        "main_agent",
+        "call_latency",
+        "permission",
+        "tool_error",
+        "foreign_reasoning",
+        "interrupted_calls",
+        "tool_result_cap",
+        "roster",
+        "memory_index",
+        "context_overflow",
+        "fit_guard",
+        "call_sent",
+    ]
+    assert "roster" not in helpers
 
 
 async def test_a_native_adk_yaml_app_gets_the_same_chain(project):

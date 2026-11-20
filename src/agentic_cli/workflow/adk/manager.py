@@ -677,8 +677,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         - ``ToolResultCapPlugin``: every result over the limit is cut, but an
           agent's with after-tool callbacks of its own, which a cut would
           skip (``build.own_after_tool_agents``).
-        - ``MemoryIndexPlugin``, when the main agent has a memory tool:
-          before the overflow handler and the fit guard, which keep it.
+        - ``RosterPlugin``, when the main agent continues its sub-agents
+          (``_roster_wanted``), then ``MemoryIndexPlugin``, when it has a
+          memory tool, which puts the index ahead of the roster: both before
+          the overflow handler and the fit guard, which keep them.
         - ``OverflowPlugin``: a call refused as too long is summarized (the
           main agent) or trimmed, retried once from the request the fit guard
           saw, then one clear answer; for an agent that replies, the turn's.
@@ -707,6 +709,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             cache=cache,
             skip_agents=own_after_tool_agents(root),
             memory_index=self._memory_index_wanted(root.name),
+            roster=self._roster_wanted(root.name),
         )
 
     def _agent_plugin_chain(self, agent: LlmAgent) -> list:
@@ -726,7 +729,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
           model refused or cut is said so, and marked, as its parent reads
           it (an answer whose calls the step or token limit dropped among
           them);
-        - no memory index, and an overflow handler with no main agent: a
+        - no memory index and no roster, and an overflow handler with no main agent: a
           sub-agent's overflow, trimmed and retried once, then answers its
           call with an error response (``CONTEXT_OVERFLOW``) that ends the
           run failed.
@@ -771,6 +774,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         skip_agents: frozenset[str],
         memory_index: bool,
         stop_cause: Callable[[], str | None] | None = None,
+        roster: bool = False,
     ) -> list:
         """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on.
 
@@ -794,6 +798,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         plugins.append(InterruptedCallsPlugin(self._open_calls, cap, stop_cause=stop_cause))
         plugins.append(cap)
+        if roster and root is not None:
+            from agentic_cli.workflow.adk.roster_plugin import RosterPlugin
+
+            plugins.append(RosterPlugin(root=root, roster_for=self._roster_now))
         if memory_index and root is not None:
             from agentic_cli.workflow.adk.memory_index_plugin import MemoryIndexPlugin
 

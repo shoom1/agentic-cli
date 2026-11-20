@@ -13,8 +13,9 @@ plugins, after ADK has built the request (the summary included):
 - Over the agent's budget B, it drops the oldest whole turns from this
   request (``drop_turns``) until it is under the agent's trigger: a turn
   starts at a user's text, never at a tool result or right after a call, so
-  a call keeps its result; the newest turn stays, and so do the memory index
-  and a summary that open the conversation (``protected_head``). The first
+  a call keeps its result; the newest turn stays, and so do the memory index,
+  the roster of the main agent's sub-agents and a summary that open the
+  conversation (``protected_head``). The first
   kept user content starts with a note, ``FIT_NOTE``, as a part of its own:
   no new message, so no provider sees one more user message in a row. The
   session is untouched: the next request starts from the whole history again.
@@ -28,8 +29,8 @@ plugins, after ADK has built the request (the summary included):
   turn.
 - When the newest turn alone is over the budget, nothing it could drop would
   help: the request goes as it is, and the overflow handler answers.
-- As its last step, what opens the conversation (the memory index, a summary:
-  each a user content of its own) is folded into the next content when that
+- As its last step, what opens the conversation (the memory index, the roster, a
+  summary: each a user content of its own) is folded into the next content when that
   is a user's text, as parts before its own (``fold_summary``): a strict chat
   template refuses two user messages in a row.
 
@@ -60,6 +61,7 @@ from agentic_cli.logging import Loggers
 from agentic_cli.memory import INDEX_OPEN
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import ESTIMATE_MARGIN, chars_per_token
+from agentic_cli.workflow.agents.roster import ROSTER_OPEN
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX
 
@@ -228,13 +230,13 @@ def overhead_tokens(llm_request: "LlmRequest", kind: "ProviderKind") -> int:
 
 
 def fold_summary(contents: list[types.Content]) -> list[types.Content]:
-    """``contents`` with what opens them (the index, a summary) folded into the next one.
+    """``contents`` with what opens them (the index, the roster, a summary) folded into the next one.
 
-    The index and a summary are user contents of their own. Their parts go
+    The index, the roster and a summary are user contents of their own. Their parts go
     before those of the user's text that follows, the index's first, so no
     provider sees two user messages in a row. When no user text follows (a
-    tool result, a model's turn), an index and a summary become one content.
-    A lone index or summary before no user text is left as it is. ``contents``
+    tool result, a model's turn), they become one content.
+    A lone index, roster or summary before no user text is left as it is. ``contents``
     are never changed in place.
     """
     head = protected_head(contents)
@@ -380,13 +382,18 @@ def is_memory_index(content: types.Content) -> bool:
     return content.role == "user" and bool(first and first.text) and first.text.startswith(INDEX_OPEN)
 
 
+def is_roster(content: types.Content) -> bool:
+    """Whether ``content`` is the roster of sub-agents the main agent's requests carry."""
+    first = content.parts[0] if content.parts else None
+    return content.role == "user" and bool(first and first.text) and first.text.startswith(ROSTER_OPEN)
+
+
 def protected_head(contents: list[types.Content]) -> list[types.Content]:
-    """What opens ``contents`` and is never dropped: the index, then a summary."""
+    """What opens ``contents`` and is never dropped: the index, the roster, then a summary."""
     count = 0
-    if count < len(contents) and is_memory_index(contents[count]):
-        count += 1
-    if count < len(contents) and is_summary(contents[count]):
-        count += 1
+    for opens in (is_memory_index, is_roster, is_summary):
+        if count < len(contents) and opens(contents[count]):
+            count += 1
     return contents[:count]
 
 

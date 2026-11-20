@@ -11,8 +11,9 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   as every later call will be: the summary, then the turns it kept
   (``WrittenSummary.kept_turns``, ``fit_guard_plugin.keep_newest_turns``). A
   summary that fails is one warning a turn, as one before a model call is.
-  The memory index that opens the request stays first in the retry, with
-  the summary, and both are folded into its first user text.
+  The memory index and the roster of sub-agents that open the request stay
+  first in the retry, with the summary, and all are folded into its first
+  user text.
 - **A sub-agent** (on its own runner, whose chain has this plugin without a
   main agent) never summarizes; nor does the main agent when the summary
   covers nothing the request holds. The request is then retried with its
@@ -70,10 +71,10 @@ from agentic_cli.workflow.adk.call_clock import mark_latency
 from agentic_cli.workflow.adk.fit_guard_plugin import (
     drop_turns,
     fold_summary,
-    is_memory_index,
     is_summary,
     keep_newest_turns,
     overhead_tokens,
+    protected_head,
     report_trim,
 )
 from agentic_cli.workflow.context import (
@@ -259,13 +260,14 @@ class OverflowPlugin(BasePlugin):
 
 
 def _with_summary(contents: list[types.Content], summary: str) -> list[types.Content]:
-    """``contents`` with ``summary`` in place of the one they open with, after the index.
+    """``contents`` with ``summary`` in place of the one they open with, after the index and the roster.
 
-    The memory index, when the contents open with it, stays first. The summary
+    The memory index and the roster, when the contents open with them, stay first. The summary
     stands for the one they open with, and is folded as the fit guard folds
     (``fold_summary``), so no provider sees one more user message in a row.
     """
-    index = contents[:1] if contents and is_memory_index(contents[0]) else []
+    head = protected_head(contents)
+    index = head[:-1] if head and is_summary(head[-1]) else head
     rest = list(contents[len(index):])
     if rest and is_summary(rest[0]):
         remainder = list(rest[0].parts or [])[1:]
