@@ -17,11 +17,12 @@ does. With ``SubAgentPolicy(follow_ups=True)`` (``FOLLOWING``) a parent has
 its own tools for its sub-agents, the real ones: ``message_agent``
 (``message``), ``stop_agent`` (``stop``) and ``check_agents`` (``check``).
 ``make_crew(..., store="sqlite")`` keeps the conversation in the
-default sqlite store, so a second crew is a restart; ``no_seals`` stops a
-turn without the abort signal and ``killed_mid_call`` leaves an ADK child
-session as a killed process does (ADK seals a cancelled run itself, as far
-as its version goes), and ``carried_over``
-gives the new manager the instances and runs the first one recorded. Each
+default sqlite store, so a second crew is a restart: it loads the
+conversation's sub-agent records from the store; ``no_seals`` stops a turn
+without the abort signal, ``killed_mid_call`` leaves an ADK child session as
+a killed process does (ADK seals a cancelled run itself, as far as its
+version goes), and ``written_no_more`` makes a manager write no more
+records, as a killed process writes none. Each
 agent's prompt is ``You are <name>.``, by which ADK's fake API tells the
 agents apart.
 
@@ -49,6 +50,7 @@ from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
 from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.agents import records as agent_records
 from agentic_cli.workflow.agents import (
     INSTANCE_CLOSED,
     INSTANCE_IDLE,
@@ -4123,24 +4125,6 @@ async def killed_mid_call(crew: Crew, instance: str = "researcher-1") -> None:
     )
 
 
-def carried_over(crew: Crew, earlier: Crew) -> None:
-    """``crew``'s manager knows the instances and runs ``earlier``'s recorded,
-    each ended as it was and its instance idle, as a restart that reads them
-    from the conversation's store would."""
-    token = set_active_turn(crew.conversation)
-    try:
-        for record in earlier.records():
-            crew.manager.agent_runs.observe(WorkflowEvent.agent_run(
-                record.ref, RUN_STARTED, call_id=record.call_id, title=record.title,
-            ))
-            crew.manager.agent_runs.observe(WorkflowEvent.agent_run(
-                record.ref, record.status, call_id=record.call_id,
-                instance_status=INSTANCE_IDLE,
-            ))
-    finally:
-        reset_active_turn(token)
-
-
 SECOND = RunRef(
     agent="researcher", instance="researcher-1", run="researcher-1#2", parent_run=None, depth=1
 )
@@ -4469,7 +4453,6 @@ class TestAFollowUpAfterAStop:
             coordinator=[calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
             researcher=[says("Went on.")],
         )
-        carried_over(second, first)
         await second.turn("Go on.")
 
         answers = self.answered_once(second, 0)
@@ -5086,3 +5069,181 @@ class TestTheMarkComesBackThroughTheParentsTools:
         )
         assert await crew.instance_mark("middle-1") == "contract_bring_outside_content"
         assert (await crew.marked()) is True
+
+
+# -- the records beside the conversation: a restart keeps them; a delete leaves nothing ------
+
+
+async def written_no_more(conversation: SessionRef, data: Any) -> None:
+    """A manager's records write once its process is killed: nothing is written."""
+
+
+def records_kept(stored: Any) -> list[tuple[str, str]]:
+    """The runs a conversation's stored records hold: (run, status), in start order."""
+    return [(run["run"], run["status"]) for run in stored["runs"]]
+
+
+class TestARestart:
+    """A conversation's sub-agent records (its instances, its runs with their
+    briefs, envelopes and usage, its id counters) are kept beside it in its
+    store: a new manager (a restart) loads them with the conversation, and
+    numbers past them."""
+
+    async def test_it_keeps_the_runs_the_instances_and_the_counters(self, make_crew):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42.", usage=(100, 10)), says("Y is 7.", usage=(80, 8))],
+        )
+        await first.turn()
+        earlier = first.records()
+        await first.manager.cleanup()
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
+            researcher=[says("Z is 3.")],
+        )
+
+        await second.manager.initialize_services()
+        with no_blocking_calls():
+            await second.manager.load_session(SESSION, user_id=USER)
+            loaded = second.records()
+            await second.turn("Find Z.")
+
+        assert loaded == earlier
+        assert [record.usage for record in loaded] == [record.usage for record in earlier]
+        assert all(record.usage for record in loaded)
+        assert envelope_read(second.results_read("coordinator")["c3"])["agent"] == "researcher-3"
+        assert second.instances() == [
+            ("researcher-1", INSTANCE_IDLE), ("researcher-2", INSTANCE_IDLE),
+            ("researcher-3", INSTANCE_IDLE),
+        ]
+        stored = await second.manager._load_agent_records(second.conversation)
+        assert records_kept(stored) == [
+            ("researcher-1#1", RUN_COMPLETED), ("researcher-2#1", RUN_COMPLETED),
+            ("researcher-3#1", RUN_COMPLETED),
+        ]
+
+    async def test_a_run_the_process_was_killed_in_reads_interrupted_and_goes_on(
+        self, make_crew, monkeypatch
+    ):
+        """The app killed mid-run: the new process finds the run as last
+        written (working), and reads it interrupted, its instance idle; a
+        follow-up continues its history, and a new delegation is numbered
+        past every stored instance."""
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"))],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), use("contract_block", "r2"))],
+        )
+        with no_seals(monkeypatch):
+            turn = first.start()
+            try:
+                await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+                await until(lambda: first.recorded("r1", "researcher-1#1"))
+                await first.manager._agent_records_written(first.conversation)
+                monkeypatch.setattr(first.manager, "_save_agent_records", written_no_more)
+            finally:
+                await first.stop(turn)
+        await first.manager.cleanup()
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(follow("researcher-1", "Go on.", "c2")),
+                         calls(delegate("researcher", "Find Y.", "c3")), says("Done.")],
+            researcher=[says("Went on."), says("Y is 7.")],
+        )
+
+        await second.manager.initialize_services()
+        stored = await second.manager._load_agent_records(second.conversation)
+        await second.manager.load_session(SESSION, user_id=USER)
+        (found,) = second.records()
+        instances = second.instances()
+        await second.turn("Go on.")
+
+        assert records_kept(stored) == [("researcher-1#1", RUN_RUNNING)]
+        assert (found.status, found.error) == (RUN_INTERRUPTED, INTERRUPTED_ERROR)
+        assert instances == [("researcher-1", INSTANCE_IDLE)]
+        # Its follow-up continues its transcript, the calls it left answered first.
+        answers = TestAFollowUpAfterAStop.answered_once(second, 0)
+        assert list(answers) == ["r1", "r2"]
+        assert all(INTERRUPTED in answer for answer in answers.values())
+        assert "Find X." in second.bodies("researcher")[0]
+        read = second.results_read("coordinator")
+        assert envelope_read(read["c2"])["result"] == "Went on."
+        assert envelope_read(read["c3"])["agent"] == "researcher-2"
+        assert [(r.ref.run, r.status) for r in second.records()] == [
+            ("researcher-1#1", RUN_INTERRUPTED), ("researcher-1#2", RUN_COMPLETED),
+            ("researcher-2#1", RUN_COMPLETED),
+        ]
+
+    async def test_a_failing_write_is_warned_of_once_and_the_runs_complete(
+        self, make_crew, monkeypatch
+    ):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+
+        async def fails(conversation: SessionRef, data: Any) -> None:
+            raise OSError("disk full")
+
+        logs: list[dict[str, Any]] = []
+
+        class Recorder:
+            def __getattr__(self, level: str):
+                return lambda event, **fields: logs.append(
+                    {"event": event, "log_level": level, **fields}
+                )
+
+        monkeypatch.setattr(crew.manager, "_save_agent_records", fails)
+        monkeypatch.setattr(agent_records, "logger", Recorder())
+        events = [*await crew.turn(), *await crew.turn("Go on.")]
+
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[call])["status"] for call in ("c1", "c2")] == [
+            RUN_COMPLETED, RUN_COMPLETED,
+        ]
+        assert [(r.ref.run, r.status) for r in crew.records()] == [
+            ("researcher-1#1", RUN_COMPLETED), ("researcher-1#2", RUN_COMPLETED),
+        ]
+        warned = [(entry["event"], entry["session_id"]) for entry in logs
+                  if entry["log_level"] == "warning"]
+        assert warned == [("subagent_records_not_saved", SESSION)]
+        assert [e for e in events if e.type is EventType.ERROR] == []
+
+
+class TestADeletedConversation:
+    """Deleting a conversation removes its records and every instance's
+    transcript (the transcripts first, then the records, then the
+    conversation), on every store, and the manager forgets it: nothing is
+    left, nothing lists, and the same id starts as a new conversation."""
+
+    @pytest.mark.parametrize("store", ["memory", "sqlite"])
+    async def test_nothing_is_left_and_its_id_numbers_from_1(self, make_crew, store):
+        crew = make_crew(
+            follow_team(), store=store,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")),
+                         calls(follow("researcher-1", "Go on.", "c3")), says("Done."),
+                         calls(delegate("researcher", "Find Z.", "c4")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7."), says("Went on."), says("Z is 3.")],
+        )
+        await crew.turn()
+        before = (await transcripts(crew), await crew.manager._load_agent_records(crew.conversation))
+
+        with no_blocking_calls():
+            deleted = await crew.manager.delete_session(SESSION, user_id=USER)
+
+        assert deleted is True
+        assert before[0] == ["researcher-1", "researcher-2"] and before[1] is not None
+        assert await transcripts(crew) == []
+        assert await crew.manager._load_agent_records(crew.conversation) is None
+        assert await crew.manager.list_sessions(user_id=USER) == []
+        assert (crew.records(), crew.instances()) == ([], [])
+        assert crew.ledger().totals() == UsageTotals()
+        await crew.turn("Again.")
+        assert envelope_read(crew.results_read("coordinator")["c4"])["result"] == "Z is 3."
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
