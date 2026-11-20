@@ -1428,7 +1428,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `</agents>`, at most 2,000 characters. The list is taken once and kept, as
   the memory index is, so the prompt stays cached: it is taken again when the
   conversation is opened, after a summary and after `/compact`.
-- **The user's control.** `/agents` picks a sub-agent and shows it;
+- **The user's control.** `/agents` picks a sub-agent and opens its view, as
+  `/agent <id>` does (next bullet);
   `/agent stop <id>` (its run cancelled by you, `cancelled_by: user`; it is
   then `stopped`: its parent's messages are refused, only you can start its
   next run) and `/agent close <id>` (it and its own sub-agents). The
@@ -1439,6 +1440,19 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   `instance_result(id)`, `tell_root(text)` (with `view_notice(id,
   envelope)`'s text, left out of fact extraction and of the conversation's
   title and turns, as a job's notice is).
+- **A sub-agent's view.** `/agent <id>` opens one to work with directly: a
+  rule (`── researcher-2 · researcher · idle ──`) and a recap (its title and
+  objective, its last run's status, the first lines of its result, its
+  tokens), the prompt `researcher-2> `, and a status bar naming it, its
+  status, its own `ctx` and tokens (the jobs segment kept). A line you type is
+  its next run, streamed as a turn, its text the reply; a line typed while
+  that run works is given to it before its next model step. Ctrl+C stops the
+  run (it is then `stopped`; your next line continues it). `/back` prints
+  `── back to main ──` and, when a run you started there ended, tells the main
+  agent its latest result in one notice turn; finished jobs wait while you are
+  in a view (`↻N`) and are told after `/back`. In a view `/status` shows the
+  sub-agent's context, `/compact` is refused, and `/new` and `/resume` leave
+  the view first; a closed sub-agent's view has no prompt (`/back` only).
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task` (nor, with
@@ -2276,10 +2290,11 @@ Built-in slash commands available in all apps:
 | `/models` | | The list the model pickers offer, each model's facts and why an entry is left out, and the providers in use (`/models <text>` searches the full listings, `/models refresh` lists again) |
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
-| `/agents` | | Pick one of this conversation's sub-agents, each under the one that started it: id, type, status (`running`, `idle`, `stopped`, `closed`), title; Enter shows it (`/agents <id>`: one instance or run, each run's status and time, the first lines of its result, its error and its tokens by model) |
-| `/agent` | | One sub-agent: `/agent <id>` shows it, `/agent stop <id>` stops it (its run, if one works; only you can start its next run), `/agent close <id>` closes it and its own sub-agents (no more runs; its work stays readable) |
+| `/agents` | | Pick one of this conversation's sub-agents, each under the one that started it: id, type, status (`running`, `idle`, `stopped`, `closed`), title; Enter opens its view (`/agents <id>` shows one instance or run, each run's status and time, the first lines of its result, its error and its tokens by model) |
+| `/agent` | | One sub-agent: `/agent <id>` opens its view (a line typed there is its next run, or steers the run that works; `/back` returns), `/agent stop <id>` stops it (its run, if one works; only you can start its next run), `/agent close <id>` closes it and its own sub-agents (no more runs; its work stays readable) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep); on the memory store it says none are kept |
+| `/back` | | Leave a sub-agent's view, back to the main conversation; the main agent is told what you did there |
 | `/compact` | | Summarize the conversation now, keeping the newest turns word for word (`/compact <focus>`: what the summary should keep above all) |
 | `/new [backend]` | | Start a new conversation, on the backend named (`adk`, `deepagents`, `langgraph`) or the settings' `orchestrator`; the current one stays in `/sessions` (on the memory store it is dropped) |
 | `/resume` | | Reopen a saved conversation, on the backend that keeps it: pick one (Enter opens it, Esc cancels), or `/resume <id>`; the last messages are shown again (refused on the memory store) |

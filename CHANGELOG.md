@@ -575,6 +575,27 @@ the start of the entry's title.
 
 ### Added
 
+- **A sub-agent's view: `/agent <id>` and `/back`.** `/agent <id>` (or Enter in
+  `/agents`' picker) opens one of the conversation's sub-agents to work with
+  directly: a rule (`── researcher-2 · researcher · idle ──`) and a recap (its
+  title and objective, its last run's status, the first lines of its result,
+  its tokens; nothing replayed), the prompt `researcher-2> `, and a status bar
+  that names it, its status, its own `ctx` and tokens, the jobs segment kept.
+  A line typed there is its next run (`run_instance`, `started_by: user`), its
+  text the reply; a line typed while that run works is given to it before its
+  next model step (`steer_instance`), not queued. The run works outside the
+  input handler, so the prompt stays open to steer it, and Ctrl+C stops it (a
+  key binding of the view's own, active only while its run works: the user's
+  stop, the sub-agent `stopped`). `/back` waits for a run still working,
+  prints `── back to main ──`, and, when a run you started there ended, the
+  main agent gets one notice turn with its latest envelope (`tell_root`),
+  drawn as a job's notice is; the main agent's notices (finished jobs) wait
+  while a view is open, counted in `↻N`, and are told after it
+  (`job_auto_resume`). In a view `/status` shows the sub-agent's context,
+  `/compact` is refused, `/new` and `/resume` leave it first; a closed
+  sub-agent's view is read-only (no prompt). The app's `agent_view`,
+  `open_agent_view(id)` and `leave_agent_view()` (provisional) are what the
+  commands call.
 - **The main agent's requests list its open sub-agents, when it can continue
   them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
   (it has `message_agent`) is told which of its own sub-agents are open: a
@@ -623,7 +644,7 @@ the start of the entry's title.
   (`cancelled_by: user`), and the instance is `stopped` (an idle one at once):
   its parent's `message_agent` is refused, and only the user may start its
   next run. `/agent close <id>` closes it and its own sub-agents: no more
-  runs, its work still shown by `/agents <id>`. `/agent <id>` shows it. Each
+  runs, its work still shown by `/agents <id>`. `/agent <id>` opens its view. Each
   says what it did, or why not. The manager's entry points (provisional; the
   open conversation, or the one `session_id`/`user_id` name, any of its
   instances): `run_instance(instance, message)`, the user's follow-up as a
@@ -872,8 +893,9 @@ the start of the entry's title.
 - **`/agents`: the conversation's sub-agents.** A picker of the open
   conversation's sub-agent instances, each followed by the ones it started:
   id, type, status (`running`, `idle`, `stopped`, `closed`) and title; Enter
-  shows the one picked. `/agents <id>` shows one instance (`researcher-2`:
-  every run of it, its first and each follow-up) or run (`researcher-2#1`):
+  opens the view of the one picked (`/agent <id>`). `/agents <id>` shows one
+  instance (`researcher-2`: every run of it, its first and each follow-up) or
+  run (`researcher-2#1`):
   its type, parent and title, then each run's status (`running`, `queued`
   waiting for a free working slot, `needs you` waiting on the user,
   `completed`, `completed (partial)` for an answer cut at its output limit,
