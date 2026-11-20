@@ -1361,7 +1361,7 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   the conversation's events, copied once, at its first run.
   Only the outside-content mark passes between a run and its caller (its
   plan and tasks are its own): any other session-state key an app's ADK
-  tool writes in a sub-agent run stays in the run's child session, and a
+  tool writes in a sub-agent run stays in the instance's child session, and a
   `user:` or `app:` scoped one is kept under the child app, so the
   conversation never sees it; nor does the run read the conversation's
   other keys.
@@ -1385,8 +1385,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   oldest idle one is closed. Each instance's transcript is kept with its
   conversation (ADK: its child session; Deep Agents: a checkpointer thread
   of its own) and deleted with it; calls a stopped or crashed run left open
-  are answered before its next run's message, the finished ones with their
-  results.
+  are answered before its next run's message: from the record when one
+  finished (a crash on Deep Agents leaves no record, so each reads
+  interrupted there).
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task`. Each raises

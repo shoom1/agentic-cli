@@ -647,7 +647,8 @@ class BaseWorkflowManager(ABC):
         (``run.follow_up``) continues it, and the calls an earlier run left
         open there are answered before its message. The run starts from the
         shared state ``run.state`` (the outside-content mark: its
-        plan and tasks start empty), reports the run's events to the turn's
+        plan and tasks start empty for an instance's first run; a follow-up
+        continues its own), reports the run's events to the turn's
         live events as they are made, and returns its last answer, its
         outcome, the shared state it changed and its own last plan and tasks
         (``RunAnswer.plan``, ``RunAnswer.tasks``). A failed model call is

@@ -1396,8 +1396,9 @@ the start of the entry's title.
   parent's and its task the message the note ends:
   without it, Claude at times answered the user's request to the
   coordinator instead of its own. On ADK the conversation's events are
-  copied into the run's child session; on Deep Agents they are the run's
-  input messages, which its own summarization compacts when they are too
+  copied into the instance's child session, once, at its first run (a
+  follow-up does not see the parent's newer turns); on Deep Agents they are
+  the run's first input messages, which its own summarization compacts when they are too
   large for its model, and `ForeignReasoningMiddleware` leaves out the
   reasoning of AI messages another agent wrote, so the run is never sent its
   coordinator's.
@@ -1661,8 +1662,9 @@ the start of the entry's title.
 
 ### Changed
 
-- **A sub-agent's plan and task list are its own, on both backends.** A run
-  starts with no plan and no tasks, keeps what it saves (its last plan and
+- **A sub-agent's plan and task list are its own, on both backends.** An
+  instance's first run starts with no plan and no tasks (its follow-ups
+  continue its own), keeps what it saves (its last plan and
   tasks are on its record, and `/agents <id>` shows them after its result),
   and writes nothing of them to its caller: the conversation's plan and task
   list, and the status bar's task box, are the coordinator's alone, and two
@@ -1702,16 +1704,16 @@ the start of the entry's title.
   already known`, `## Done when`). A call whose brief misses a field its
   type requires, or names a type that is not the caller's, starts no run:
   its result is `{"success": false, "error": ...}` naming what to fix. A
-  run starts with no plan and no tasks, and what it saves stays with it (the
+  instance's first run starts with no plan and no tasks (its follow-ups continue its own), and what it saves stays with it (the
   status bar's task list is the conversation's alone). On ADK nothing else
   of a run's session state reaches its caller but the outside-content mark:
   any other key an app's ADK tool writes in a sub-agent run stays in the
-  run's child session, and a `user:` or `app:` scoped one is kept under the
+  instance's child session, and a `user:` or `app:` scoped one is kept under the
   child app (`<app_name>--agents`), so the conversation never sees it, where
   in 0.6 such keys reached the conversation; nor does a run read the
   conversation's other keys. On ADK each sub-agent type runs on a
   runner of its own over the manager's session service, on a child session
-  of the run (app `<app_name>--agents`, id `<conversation id>/<instance>`),
+  of its instance (app `<app_name>--agents`, id `<conversation id>/<instance>`),
   which no conversation list shows, and, an agent of its own there, its system
   instruction gets ADK's identity line after its prompt as the root's does
   (`You are an agent. Your internal name is "<name>".`, then its
