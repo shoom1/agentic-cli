@@ -575,27 +575,6 @@ the start of the entry's title.
 
 ### Added
 
-- **A sub-agent's view: `/agent <id>` and `/back`.** `/agent <id>` (or Enter in
-  `/agents`' picker) opens one of the conversation's sub-agents to work with
-  directly: a rule (`── researcher-2 · researcher · idle ──`) and a recap (its
-  title and objective, its last run's status, the first lines of its result,
-  its tokens; nothing replayed), the prompt `researcher-2> `, and a status bar
-  that names it, its status, its own `ctx` and tokens, the jobs segment kept.
-  A line typed there is its next run (`run_instance`, `started_by: user`), its
-  text the reply; a line typed while that run works is given to it before its
-  next model step (`steer_instance`), not queued. The run works outside the
-  input handler, so the prompt stays open to steer it, and Ctrl+C stops it (a
-  key binding of the view's own, active only while its run works: the user's
-  stop, the sub-agent `stopped`). `/back` waits for a run still working,
-  prints `── back to main ──`, and, when a run you started there ended, the
-  main agent gets one notice turn with its latest envelope (`tell_root`),
-  drawn as a job's notice is; the main agent's notices (finished jobs) wait
-  while a view is open, counted in `↻N`, and are told after it
-  (`job_auto_resume`). In a view `/status` shows the sub-agent's context,
-  `/compact` is refused, `/new` and `/resume` leave it first; a closed
-  sub-agent's view is read-only (no prompt). The app's `agent_view`,
-  `open_agent_view(id)` and `leave_agent_view()` (provisional) are what the
-  commands call.
 - **The main agent's requests list its open sub-agents, when it can continue
   them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
   (it has `message_agent`) is told which of its own sub-agents are open: a
@@ -661,6 +640,27 @@ the start of the entry's title.
   after the user worked with a sub-agent is
   `agents/envelope.py::view_notice`: "The user worked with <id> directly; its
   latest result: <envelope as JSON>". On both backends, contract-tested.
+- **A sub-agent's view: `/agent <id>` and `/back`.** `/agent <id>` (or Enter in
+  `/agents`' picker) opens one of the conversation's sub-agents to work with
+  directly: a rule (`── researcher-2 · researcher · idle ──`) and a recap (its
+  title and objective, its last run's status, the first lines of its result,
+  its tokens; nothing replayed), the prompt `researcher-2> `, and a status bar
+  that names it, its status, its own `ctx` and tokens, the jobs segment kept.
+  A line typed there is its next run (`run_instance`, `started_by: user`), its
+  text the reply; a line typed while that run works is given to it before its
+  next model step (`steer_instance`), not queued. The run works outside the
+  input handler, so the prompt stays open to steer it, and Ctrl+C stops it (a
+  key binding of the view's own, active only while its run works: the user's
+  stop, the sub-agent `stopped`). `/back` waits for a run still working,
+  prints `── back to main ──`, and, when a run you started there ended, the
+  main agent gets one notice turn with its latest envelope (`tell_root`),
+  drawn as a job's notice is; the main agent's notices (finished jobs) wait
+  while a view is open, counted in `↻N`, and are told after it
+  (`job_auto_resume`). In a view `/status` shows the sub-agent's context,
+  `/compact` is refused, `/new` and `/resume` leave it first; a closed
+  sub-agent's view is read-only (no prompt). The app's `agent_view`,
+  `open_agent_view(id)` and `leave_agent_view()` (provisional) are what the
+  commands call.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
   `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them
