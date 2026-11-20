@@ -69,6 +69,7 @@ from agentic_cli.workflow.adk.overflow_plugin import OVERFLOW_PLUGIN_FAILED, Ove
 from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.sessions import (
+    BRIEF_KEY,
     ServiceSessions,
     child_app,
     child_session_id,
@@ -1656,7 +1657,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         the conversation's store: instances are numbered past the ones it
         keeps (``_stored_instances``). One it keeps all the same is never
         replaced: ADK refuses to make it (``AlreadyExistsError``), and the
-        run fails with that.
+        run fails with that. A first run's message carries a state delta that
+        marks it as the instance's brief (``BRIEF_KEY``), which the fit guard
+        keeps in every later run's request.
 
         A follow-up takes the session its instance's earlier runs left: the
         calls an earlier run left open there are answered first
@@ -1695,7 +1698,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         for event in run.history or ():
             await service.append_event(session, event)
-        return dict(run.state), None
+        if run.follow_up:
+            return dict(run.state), None
+        return dict(run.state), {BRIEF_KEY: run.ref.run}
 
     async def _stored_instances(self, conversation: SessionRef) -> dict[str, int]:
         """The highest instance number of each type ``conversation``'s child sessions keep.

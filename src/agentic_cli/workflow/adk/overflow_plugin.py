@@ -19,7 +19,8 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   covers nothing the request holds. The request is then retried with its
   oldest whole turns left out down to half the budget
   (``fit_guard_plugin.drop_turns``); a sub-agent run's task message, its
-  invocation's user content, is never among them (``keep_task``).
+  invocation's user content, is never among them, nor its instance's brief
+  (``keep_task``).
 - The retry is built from the request as the fit guard saw it
   (``FitGuardPlugin.request_as_seen``, this call's own copy, never a parallel
   call's), without the model's context cache: a model's adapter may have
@@ -69,6 +70,7 @@ from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.adk.call_clock import mark_latency
 from agentic_cli.workflow.adk.fit_guard_plugin import (
+    brief_of,
     drop_turns,
     fold_summary,
     is_summary,
@@ -127,7 +129,8 @@ class OverflowPlugin(BasePlugin):
         fit_guard: The app's fit guard, whose copy of each request a retry
             is built from; without one, the request the callback is given.
         keep_task: Whether a trimmed retry keeps its task message (its
-            invocation's user content) whatever it leaves out: a sub-agent
+            invocation's user content) and its instance's brief whatever it
+            leaves out: a sub-agent
             type's chain, whose runs each start from one.
     """
 
@@ -178,6 +181,7 @@ class OverflowPlugin(BasePlugin):
                 target_tokens=budget.budget // 2 - overhead_tokens(request, kind),
                 kind=kind,
                 task=callback_context.user_content if self._keep_task else None,
+                brief=brief_of(callback_context.session.events) if self._keep_task else None,
             )
         if not dropped:
             return self._does_not_fit(agent)

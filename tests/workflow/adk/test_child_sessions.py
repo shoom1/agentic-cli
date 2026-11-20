@@ -23,6 +23,9 @@ session service (``adk/sessions.py``): app ``child_app(app)``, session
 - No child session lists, or is found, as a conversation.
 - A message steered to a run is stored where the run read it: after the
   tool result before it, before the answer it prompted, on every store.
+- An instance's first run marks its message as the instance's brief: the
+  event's state delta holds ``BRIEF_KEY`` (the run's id), which the fit
+  guard finds it by on every later run (``fit_guard_plugin.brief_of``).
 
 Turns run the real manager on ``FakeAPI`` (Claude), on the memory store and
 on sqlite.
@@ -48,7 +51,9 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk import sessions as adk_sessions  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.adk.sessions import RECORDS_KEY, child_app  # noqa: E402
+from agentic_cli.workflow.adk.fit_guard_plugin import brief_of  # noqa: E402
+from agentic_cli.workflow.adk.sessions import BRIEF_KEY, RECORDS_KEY, child_app  # noqa: E402
+from agentic_cli.workflow.agents import SubAgentPolicy  # noqa: E402
 from agentic_cli.workflow.agents.runs import RECORDS_VERSION  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
@@ -828,3 +833,40 @@ class TestASteeredMessage:
             "user: Also find Z.",
             "researcher: X is 42; Z is 42.",
         ]
+
+
+class TestTheBrief:
+    @pytest.mark.parametrize("store", ["memory", "sqlite"])
+    async def test_a_first_runs_message_is_marked_and_a_follow_ups_is_not(
+        self, store, project, monkeypatch
+    ):
+        api = Team(
+            coordinator=[delegation("toolu_c1"), says("Asked."),
+                         calls("message_agent", "toolu_c2", agent="researcher-1",
+                               message="Now find Y."), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(api))
+        manager = GoogleADKWorkflowManager(
+            agent_configs=team(),
+            settings=BaseSettings(
+                session_store=store, default_model="claude-sonnet-4-6", default_user="u"
+            ),
+            subagents=SubAgentPolicy(follow_ups=True),
+        )
+        try:
+            await say(manager, "Go.")
+            await say(manager, "Again.")
+            session = await child(manager, "researcher-1")
+        finally:
+            await manager.cleanup()
+
+        marked = [event for event in session.events
+                  if event.actions and BRIEF_KEY in (event.actions.state_delta or {})]
+        assert [(e.author, e.actions.state_delta[BRIEF_KEY]) for e in marked] == [
+            ("user", "researcher-1#1")
+        ]
+        assert brief_of(session.events) == marked[0].content
+        assert texts_of(session)[0] == marked[0].content.parts[0].text
+        assert marked[0].content.parts[0].text.startswith("# Task: Find X")
+        assert "Now find Y." in texts_of(session)
