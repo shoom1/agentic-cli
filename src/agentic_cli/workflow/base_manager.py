@@ -565,9 +565,11 @@ class BaseWorkflowManager(ABC):
         """This manager's sub-agent runs, kept by conversation (provisional).
 
         Named by the backends' event processors and recorded from their
-        ``AGENT_RUN`` events (``workflow/agents/runs.py``): ``records(ref)``
-        lists a conversation's in the order they started; a turn ends the
-        runs it leaves open (``_turn``). In memory, for this manager's life
+        ``AGENT_RUN`` and ``AGENT_INSTANCE`` events
+        (``workflow/agents/runs.py``): ``records(ref)`` lists a
+        conversation's runs in the order they started and ``instances(ref)``
+        its sub-agent instances, each with its status; a turn ends the runs
+        it leaves open (``_turn``). In memory, for this manager's life
         (a backend switch builds a new manager); made on first use.
         """
         runs = self.__dict__.get("_agent_runs")
@@ -628,9 +630,9 @@ class BaseWorkflowManager(ABC):
         store holds of another manager's runs (before a restart or a switch
         of backend or store, or another process's between two turns), which
         this manager's numbering goes past (``Delegations``, once per
-        conversation per turn). The base keeps no
-        sub-agent transcript, and so keeps none (Deep Agents: a sub-agent is
-        compiled without a checkpointer).
+        conversation per turn). A sub-agent instance's transcript is ADK's
+        child session and Deep Agents' checkpointer thread of its own; the
+        base keeps none.
         """
         return {}
 
@@ -639,8 +641,11 @@ class BaseWorkflowManager(ABC):
 
         Called in the run's own task, where the run is the active run and no
         tool call is (``agents/delegate.py``). It runs ``run.config``'s agent
-        on ``run.message`` (after ``run.history`` for an inheriting one),
-        from the shared state ``run.state`` (the outside-content mark: its
+        on ``run.message`` (after ``run.history`` for an inheriting one), on
+        its instance's own transcript: a first run starts it, a follow-up
+        (``run.follow_up``) continues it, and the calls an earlier run left
+        open there are answered before its message. The run starts from the
+        shared state ``run.state`` (the outside-content mark: its
         plan and tasks start empty), reports the run's events to the turn's
         live events as they are made, and returns its last answer, its
         outcome, the shared state it changed and its own last plan and tasks

@@ -4,7 +4,9 @@ Driven with a fake hook and no backend: the brief is read against the
 caller's own sub-agents, the run is named and its ``AGENT_RUN`` events are
 recorded and reported to the turn's live events, the hook runs in a task of
 its own (the run active there, no tool call), and the run ends as the hook's
-answer says, with its envelope.
+answer says, with its envelope. An instance outlives its run: ``follow_up``
+is its next run through the same hook, ``close`` ends an idle one, and a
+run's end says the status it leaves its instance in.
 """
 
 from __future__ import annotations
@@ -20,6 +22,9 @@ import pytest
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents import (
     DEFAULT_LIMITS,
+    INSTANCE_CLOSED,
+    INSTANCE_IDLE,
+    INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -36,9 +41,11 @@ from agentic_cli.workflow.agents import (
 from agentic_cli.workflow.agents import delegate as delegate_module
 from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
 from agentic_cli.workflow.agents.delegate import (
+    RUNS_PER_TURN_ERROR,
     AgentRun,
     DelegationRequest,
     Delegations,
+    FollowUpRequest,
     RunAnswer,
     RunFailed,
     started_by,
@@ -61,6 +68,7 @@ from agentic_cli.workflow.sessions import (
     close_turn_scope,
     get_active_run,
     get_active_tool_call,
+    get_active_turn,
     open_turn_scope,
     reset_active_tool_call,
     reset_active_turn,
@@ -201,10 +209,15 @@ class TestACompletedRun:
             "status": RUN_STARTED, "agent": "researcher", "partial": False, "call_id": "c1",
             "title": "Find X", "brief": {"title": "Find X", "objective": "Find X."},
             "started_by": "agent:root", "mode": "blocking",
+            "inherit_context": False, "continuable": True,
         }
         assert (ended.metadata["status"], ended.metadata["result"], ended.run) == (
             RUN_COMPLETED, "X is 42.", RESEARCHER
         )
+        # Its instance waits for a follow-up.
+        assert ended.metadata["instance_status"] == INSTANCE_IDLE
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_IDLE
+        assert run.follow_up is False
         (record,) = runs.records(CONVERSATION)
         assert (record.status, record.title, record.brief, record.started_by, record.mode) == (
             RUN_COMPLETED, "Find X", {"title": "Find X", "objective": "Find X."},
@@ -1803,3 +1816,456 @@ class TestWaitingOnTheUser:
             await asyncio.wait_for(turn.task, 5)
 
         assert turn.of("researcher-1")[-1] == RUN_COMPLETED
+
+
+# -- instances: a follow-up is an instance's next run; the status a run leaves it in ---------
+
+CHECKER = AgentConfig(name="checker", prompt="p", description="Checks.", continuable=False)
+WITH_CHECKER = {
+    **TYPES,
+    "coordinator": AgentConfig(
+        name="coordinator", prompt="p", sub_agents=["researcher", "middle", "reader", "checker"]
+    ),
+    "checker": CHECKER,
+}
+CHECK = {"agent_type": "checker", "title": "Check", "objective": "Check X."}
+
+
+def follow(
+    instance: str = "researcher-1", message: str = "Go on.", **fields: Any
+) -> FollowUpRequest:
+    """The root's follow-up of ``instance`` (its call ``c2``), unless ``fields`` say otherwise."""
+    return FollowUpRequest(
+        instance=instance, message=message,
+        started_by=fields.pop("started_by", "agent:root"),
+        call_id=fields.pop("call_id", "c2"), **fields,
+    )
+
+
+def users(
+    instance: str = "researcher-1", message: str = "Go on.", **fields: Any
+) -> FollowUpRequest:
+    """The user's follow-up of ``instance``: no caller, no call."""
+    return FollowUpRequest(instance=instance, message=message, started_by="user", **fields)
+
+
+async def turned(work: Callable[[], Awaitable[Any]]) -> tuple[Any, list[WorkflowEvent]]:
+    """``work()`` in one turn of ``CONVERSATION`` (its span open, its live events
+    reported): what it returned, and what was reported."""
+    live = LiveEvents()
+    out: dict[str, Any] = {}
+
+    async def source():
+        token = set_active_turn(CONVERSATION)
+        scope = open_turn_scope()
+        try:
+            with live_events.reporting(live):
+                out["result"] = await work()
+        finally:
+            close_turn_scope(scope)
+            reset_active_turn(token)
+        if False:  # pragma: no cover
+            yield
+
+    events = [item async for item in merged(source(), live)]
+    return out["result"], events
+
+
+def instance_events(events: list[WorkflowEvent]) -> list[tuple[str, str, str | None]]:
+    """Each ``AGENT_INSTANCE``: its instance, its status, its reason."""
+    return [
+        (e.run.instance, e.metadata["status"], e.metadata.get("reason"))
+        for e in events if e.type is EventType.AGENT_INSTANCE
+    ]
+
+
+class TestAFollowUp:
+    async def test_it_is_the_instances_next_run_through_the_same_hook(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request())
+            return await made.follow_up(follow(state={"outside_content": "web_fetch"}))
+
+        result, events = await turned(work)
+
+        second = RunRef(agent="researcher", instance="researcher-1", run="researcher-1#2",
+                        parent_run=None, depth=1)
+        assert result.result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        assert result.run == second
+        first_run, second_run = asked
+        assert (second_run.ref, second_run.follow_up, second_run.message, second_run.history) == (
+            second, True, "Go on.", None
+        )
+        assert second_run.state == {"outside_content": "web_fetch"}
+        assert first_run.follow_up is False
+        started = runs_of_status(events, RUN_STARTED)[1]
+        assert started.metadata == {
+            "status": RUN_STARTED, "agent": "researcher", "partial": False, "call_id": "c2",
+            "title": "Go on.", "started_by": "agent:root", "mode": "blocking",
+            "input": "Go on.",
+        }
+        assert runs_of_status(events, RUN_COMPLETED)[1].metadata["instance_status"] == (
+            INSTANCE_IDLE
+        )
+        record = runs.record(CONVERSATION, "researcher-1#2")
+        assert (record.input, record.started_by, record.title) == ("Go on.", "agent:root", "Go on.")
+        instance = runs.instance(CONVERSATION, "researcher-1")
+        assert (instance.status, instance.runs, instance.title) == (
+            INSTANCE_IDLE, ["researcher-1#1", "researcher-1#2"], "Find X",
+        )
+
+    async def test_its_run_names_the_run_that_sent_it_as_its_parent(self):
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.run == "middle-1#1":
+                await made.delegate(request(LEAF, caller=run.ref, caller_agent="middle",
+                                            call_id="m1"))
+            elif run.ref.run == "middle-1#2":
+                await made.follow_up(follow("leaf-1", caller=run.ref, call_id="m2",
+                                            started_by="agent:middle-1"))
+            return RunAnswer(text=run.ref.run or "")
+
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+
+        async def work():
+            await made.delegate(request(MIDDLE))
+            return await made.follow_up(follow("middle-1"))
+
+        await turned(work)
+
+        record = runs.record(CONVERSATION, "leaf-1#2")
+        assert record.ref == RunRef(agent="leaf", instance="leaf-1", run="leaf-1#2",
+                                    parent_run="middle-1#2", depth=2)
+        assert record.started_by == "agent:middle-1"
+        assert runs.instance(CONVERSATION, "leaf-1").parent == "middle-1"
+
+    async def test_an_agents_follow_up_counts_toward_its_turns_runs_and_the_users_does_not(self):
+        hook, asked = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+
+        async def work():
+            await made.delegate(request())
+            return [await made.follow_up(follow()), await made.follow_up(users())]
+
+        (agents, user), _ = await turned(work)
+
+        assert agents.result == {
+            "success": False, "error": RUNS_PER_TURN_ERROR.format(limit=1),
+        }
+        assert agents.run is None
+        assert (user.result["status"], user.run.run) == (RUN_COMPLETED, "researcher-1#2")
+        assert len(asked) == 2
+
+    async def test_the_user_may_continue_an_instance_the_user_stopped(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        await stopped(made, working, by="user", error="stopped by the user")
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_STOPPED
+
+        async def answered(run: AgentRun) -> RunAnswer:
+            return RunAnswer(text="Went on.")
+
+        made._hook = answered
+        result, _ = await turned(lambda: made.follow_up(users()))
+
+        assert (result.result["status"], result.result["result"]) == (RUN_COMPLETED, "Went on.")
+        assert runs.record(CONVERSATION, "researcher-1#2").started_by == "user"
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_IDLE
+
+    async def test_a_conversation_named_is_the_runs_outside_its_turn(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        await turned(lambda: made.delegate(request()))
+
+        result = await made.follow_up(users(conversation=CONVERSATION))
+
+        assert result.result["run"] == "researcher-1#2"
+        assert asked[-1].conversation == CONVERSATION
+        assert runs.record(CONVERSATION, "researcher-1#2").status == RUN_COMPLETED
+        assert get_active_turn() is None
+
+    async def test_a_follow_up_blocks_no_event_loop(self):
+        hook, _ = answering()
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request()))
+
+        with no_blocking_calls():
+            result, _ = await turned(lambda: made.follow_up(follow()))
+
+        assert result.result["status"] == RUN_COMPLETED
+
+
+def runs_of_status(events: list[WorkflowEvent], status: str) -> list[WorkflowEvent]:
+    return [e for e in events if e.type is EventType.AGENT_RUN and e.metadata["status"] == status]
+
+
+class TestARefusedFollowUp:
+    """A follow-up that cannot start a run is its error result, and nothing
+    else happens: no run, no record, no event."""
+
+    @staticmethod
+    async def refused(made: Delegations, asked: FollowUpRequest, hook_calls: list) -> Any:
+        before = len(hook_calls)
+        result, events = await turned(lambda: made.follow_up(asked))
+        assert (result.run, result.state, events) == (None, {}, [])
+        assert len(hook_calls) == before
+        assert result.result["success"] is False
+        return result.result["error"]
+
+    async def test_an_unknown_instance_with_none_yet(self):
+        hook, asked = answering()
+
+        error = await self.refused(delegations(hook), follow("researcher-9"), asked)
+
+        assert error == "'researcher-9' is not one of your sub-agents. You have no sub-agents yet."
+
+    async def test_another_agents_child_names_the_senders_own(self):
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                await made.delegate(request(LEAF, caller=run.ref, caller_agent="middle",
+                                            call_id="m1"))
+            return RunAnswer(text="Done.")
+
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request(MIDDLE)))
+        await turned(lambda: made.delegate(request(call_id="c3")))
+
+        error = await self.refused(made, follow("leaf-1"), [])
+
+        assert error == "'leaf-1' is not one of your sub-agents. Yours: middle-1, researcher-1."
+
+    async def test_the_users_unknown_one_names_every_instance(self):
+        hook, asked = answering()
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request()))
+
+        error = await self.refused(made, users("writer-1"), asked)
+
+        assert error == "'writer-1' is not one of your sub-agents. Yours: researcher-1."
+
+    async def test_a_closed_one(self):
+        hook, asked = answering()
+        made = delegations(hook, types=WITH_CHECKER)
+        await turned(lambda: made.delegate(request(CHECK)))
+
+        error = await self.refused(made, users("checker-1"), asked)
+
+        assert error == "checker-1 is closed; start a new one with task."
+
+    async def test_one_the_user_stopped_sent_by_an_agent(self):
+        hook, working = waiting()
+        made = delegations(hook)
+        await stopped(made, working, by="user", error="stopped by the user")
+
+        error = await self.refused(made, follow(), [])
+
+        assert error == "researcher-1 was stopped by the user; only the user can continue it."
+
+    async def test_a_running_one(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        results: list[Any] = []
+
+        async def work():
+            running = asyncio.create_task(made.delegate(request()))
+            await working.wait()
+            results.append(await made.follow_up(follow()))
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
+
+        await turned(work)
+
+        (result,) = results
+        assert result.result == {
+            "success": False,
+            "error": "researcher-1 is running: an instance runs one run at a time.",
+        }
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == ["researcher-1#1"]
+
+    @pytest.mark.parametrize("message", ["", "  \n"])
+    async def test_a_blank_message(self, message):
+        hook, asked = answering()
+        made = delegations(hook)
+        await turned(lambda: made.delegate(request()))
+
+        error = await self.refused(made, follow(message=message), asked)
+
+        assert error == "A follow-up needs a message."
+
+
+class TestTheStatusARunLeavesItsInstanceIn:
+    async def test_a_parents_cancel_leaves_it_idle(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+
+        _, events, _ = await stopped(delegations(hook, runs=runs), working, by="parent",
+                                     error="no longer needed")
+
+        assert events[-1].metadata["instance_status"] == INSTANCE_IDLE
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_IDLE
+
+    async def test_the_users_cancel_leaves_it_stopped(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+
+        _, events, _ = await stopped(delegations(hook, runs=runs), working, by="user",
+                                     error="stopped by the user")
+
+        assert events[-1].metadata["instance_status"] == INSTANCE_STOPPED
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_STOPPED
+
+    async def test_a_type_that_is_not_continuable_is_closed_at_its_runs_end(self):
+        hook, _ = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=WITH_CHECKER)
+
+        result, events = await turned(lambda: made.delegate(request(CHECK)))
+
+        assert result.result["status"] == RUN_COMPLETED
+        started, ended = events
+        assert started.metadata["continuable"] is False
+        assert ended.metadata["instance_status"] == INSTANCE_CLOSED
+        record = runs.instance(CONVERSATION, "checker-1")
+        assert (record.status, record.continuable) == (INSTANCE_CLOSED, False)
+
+
+class TestMaxOpen:
+    async def test_past_it_the_oldest_idle_instance_is_closed(self):
+        hook, _ = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_open=2))
+
+        async def work():
+            for call_id in ("c1", "c2", "c3"):
+                await made.delegate(request(call_id=call_id))
+
+        _, events = await turned(work)
+
+        assert [(i.instance, i.status) for i in runs.instances(CONVERSATION)] == [
+            ("researcher-1", INSTANCE_CLOSED), ("researcher-2", INSTANCE_IDLE),
+            ("researcher-3", INSTANCE_IDLE),
+        ]
+        assert instance_events(events) == [("researcher-1", INSTANCE_CLOSED,
+            "more than 2 sub-agents open: the oldest idle one is closed")]
+        # Closed after the end of the run that took it past the limit.
+        third_end = runs_of_status(events, RUN_COMPLETED)[2]
+        assert events.index(third_end) < len(events) - 1
+        assert third_end.metadata["instance_status"] == INSTANCE_IDLE
+
+    async def test_the_oldest_is_the_one_whose_last_run_ended_first(self):
+        hook, _ = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_open=2))
+
+        async def work():
+            await made.delegate(request(call_id="c1"))
+            await made.delegate(request(call_id="c2"))
+            await made.follow_up(follow("researcher-1", call_id="c3"))
+            await made.delegate(request(call_id="c4"))
+
+        _, events = await turned(work)
+
+        assert [i.instance for i in runs.instances(CONVERSATION)
+                if i.status == INSTANCE_CLOSED] == ["researcher-2"]
+
+    async def test_a_stopped_one_counts_and_is_never_the_one_closed(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_open=1))
+        await stopped(made, working, by="user", error="stopped by the user")
+
+        async def answered(run: AgentRun) -> RunAnswer:
+            return RunAnswer(text="Done.")
+
+        made._hook = answered
+        _, events = await turned(lambda: made.delegate(request(call_id="c2")))
+
+        # The run's own instance is the only idle one: its end closes it.
+        assert runs_of_status(events, RUN_COMPLETED)[0].metadata["instance_status"] == (
+            INSTANCE_CLOSED
+        )
+        assert instance_events(events) == []
+        assert [(i.instance, i.status) for i in runs.instances(CONVERSATION)] == [
+            ("researcher-1", INSTANCE_STOPPED), ("researcher-2", INSTANCE_CLOSED),
+        ]
+
+
+class TestClose:
+    async def test_it_closes_an_idle_instance_and_its_descendants(self):
+        made: Delegations
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            if run.ref.agent == "middle":
+                await made.delegate(request(LEAF, caller=run.ref, caller_agent="middle",
+                                            call_id="m1"))
+            return RunAnswer(text="Done.")
+
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        await turned(lambda: made.delegate(request(MIDDLE)))
+        await turned(lambda: made.delegate(request(call_id="c2")))
+
+        closed, events = await turned(
+            lambda: _now(made.close(CONVERSATION, "middle-1", reason="closed by its parent"))
+        )
+
+        assert closed == ["middle-1", "leaf-1"]
+        assert instance_events(events) == [
+            ("middle-1", INSTANCE_CLOSED, "closed by its parent"),
+            ("leaf-1", INSTANCE_CLOSED, "closed by its parent"),
+        ]
+        assert {i.instance: i.status for i in runs.instances(CONVERSATION)} == {
+            "middle-1": INSTANCE_CLOSED, "leaf-1": INSTANCE_CLOSED,
+            "researcher-1": INSTANCE_IDLE,
+        }
+
+    async def test_a_stopped_one_is_closed_too(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        await stopped(made, working, by="user", error="stopped by the user")
+
+        assert made.close(CONVERSATION, "researcher-1", reason="done") == ["researcher-1"]
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_CLOSED
+
+    async def test_a_running_closed_or_unknown_one_is_not(self):
+        hook, working = waiting()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=WITH_CHECKER)
+        hook_done, _ = answering()
+        closes: list[list[str]] = []
+
+        async def work():
+            running = asyncio.create_task(made.delegate(request()))
+            await working.wait()
+            closes.append(made.close(CONVERSATION, "researcher-1", reason="x"))
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
+
+        await turned(work)
+        made._hook = hook_done
+        await turned(lambda: made.delegate(request(CHECK, call_id="c2")))
+        closes.append(made.close(CONVERSATION, "checker-1", reason="x"))
+        closes.append(made.close(CONVERSATION, "writer-1", reason="x"))
+
+        assert closes == [[], [], []]
+
+
+async def _now(value: Any) -> Any:
+    """``value``, awaited: a synchronous call as ``turned``'s work."""
+    return value

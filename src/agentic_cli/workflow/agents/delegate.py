@@ -26,6 +26,18 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
   or a failed run's one warning after it), and returns the result envelope
   (``envelope.envelope``) with the shared state the run changed.
 
+A sub-agent is an instance that outlives its run: it is ``idle`` when the run
+ends, and ``Delegations.follow_up`` starts its next run (``<instance>#2``)
+through the same hook, working slots, limits, events and envelope, with
+``AgentRun.follow_up`` set: the instance's transcript exists, and the run's
+message is the follow-up as written. One run per instance at a time: a
+follow-up to a running instance is refused. A run's end says the status it
+leaves its instance in: ``stopped`` for the user's cancel, ``closed`` for a
+type that is not continuable (``AgentConfig.continuable``) or when more
+instances are open than ``SubAgentPolicy.max_open`` allows (the oldest idle
+one is closed), else ``idle``. ``Delegations.close`` closes an idle or
+stopped instance and its descendants.
+
 Each run works under its ``RunControl`` (``agents/control.py``,
 ``AgentRun.control``): its limits (its type's over the policy's), the time
 limit running while the hook does, and a cancel of the run alone
@@ -78,10 +90,11 @@ the run works. A run ends:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.constants import truncate
@@ -98,6 +111,10 @@ from agentic_cli.workflow.agents.envelope import (
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED, cut_off_warning
 from agentic_cli.workflow.agents.policy import AgentLimits
 from agentic_cli.workflow.agents.runs import (
+    INSTANCE_CLOSED,
+    INSTANCE_IDLE,
+    INSTANCE_RUNNING,
+    INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -108,6 +125,7 @@ from agentic_cli.workflow.agents.runs import (
     RUN_RUNNING,
     RUN_STARTED,
     AgentRuns,
+    InstanceRecord,
     result_head,
     run_title,
 )
@@ -119,9 +137,11 @@ from agentic_cli.workflow.sessions import (
     count_run_this_turn,
     current_turn_scope,
     get_active_turn,
+    reset_active_turn,
     runs_this_turn,
     set_active_run,
     set_active_tool_call,
+    set_active_turn,
 )
 
 if TYPE_CHECKING:
@@ -141,6 +161,22 @@ RUNS_PER_TURN_ERROR = (
     "This turn has already started {limit} sub-agent runs, the most one turn may start. "
     "Answer with what you have."
 )
+
+
+#: ``started_by`` of a run the user starts (a follow-up from a view).
+USER = "user"
+#: What a follow-up to an instance its sender may not continue is told.
+NOT_YOURS_ERROR = "'{instance}' is not one of your sub-agents. {yours}"
+YOURS = "Yours: {instances}."
+NO_SUB_AGENTS = "You have no sub-agents yet."
+CLOSED_ERROR = "{instance} is closed; start a new one with task."
+STOPPED_ERROR = "{instance} was stopped by the user; only the user can continue it."
+RUNNING_ERROR = "{instance} is running: an instance runs one run at a time."
+NO_MESSAGE_ERROR = "A follow-up needs a message."
+#: Why an instance past ``SubAgentPolicy.max_open`` is closed.
+MAX_OPEN_REASON = "more than {limit} sub-agents open: the oldest idle one is closed"
+#: The statuses of an instance that waits between its runs.
+_OPEN = frozenset({INSTANCE_IDLE, INSTANCE_STOPPED})
 
 
 def started_by(caller: RunRef | None) -> str:
@@ -183,7 +219,7 @@ class AgentRun:
         ref: The run.
         config: Its agent type.
         message: The task message (``brief.task_message``): the run's first
-            user message.
+            user message; a follow-up's, the message as written.
         conversation: The conversation it runs in.
         state: The shared state it starts from.
         history: An inheriting run's parent conversation, as the backend
@@ -191,6 +227,10 @@ class AgentRun:
         control: Its control (``agents/control.py``): its limits, a cancel
             of the run alone, the messages steered to it. A run made
             without one gets one with no limits.
+        follow_up: Whether this is an instance's next run: its transcript
+            exists, ``message`` is the follow-up as written (no task
+            message), ``history`` is None, and ``state`` is the caller's
+            shared state (the outside-content mark).
     """
 
     ref: RunRef
@@ -200,10 +240,36 @@ class AgentRun:
     state: Mapping[str, Any]
     history: Any = None
     control: RunControl = None  # type: ignore[assignment]  # filled below when None
+    follow_up: bool = False
 
     def __post_init__(self) -> None:
         if self.control is None:
             object.__setattr__(self, "control", RunControl(self.ref, AgentLimits()))
+
+
+@dataclass(frozen=True)
+class FollowUpRequest:
+    """A follow-up to an instance: the message that starts its next run.
+
+    Attributes:
+        instance: The instance to continue (``researcher-2``).
+        message: The follow-up, as written.
+        started_by: Who sends it: ``agent:<instance>`` (``agent:root`` for
+            the root) or ``USER``.
+        caller: The run that sends it; None for the root's own call or the user.
+        call_id: The caller's tool call; None for the user.
+        conversation: The conversation; None: the active turn's.
+        state: The caller's shared state (the outside-content mark), which
+            the run starts from.
+    """
+
+    instance: str
+    message: str
+    started_by: str
+    caller: RunRef | None = None
+    call_id: str | None = None
+    conversation: SessionRef | None = None
+    state: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -267,7 +333,7 @@ class _Working:
     the working status it said last (``running`` from its start)."""
 
     ref: RunRef
-    call_id: str
+    call_id: str | None
     pool: SlotPool
     slot: Slot
     emit: Callable[[WorkflowEvent], None]
@@ -441,14 +507,9 @@ class Delegations:
             config, brief = read_brief(request.arguments, self.sub_agents(request.caller_agent))
         except BriefError as error:
             return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
-        started = runs_this_turn()
-        limit = self.policy.max_runs_per_turn
-        if started is not None and started >= limit:
-            logger.info("subagent_runs_per_turn_reached", agent=config.name, limit=limit)
-            return Delegated(
-                result={"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=limit)},
-                state={}, run=None,
-            )
+        refused = self._past_runs_per_turn(config.name)
+        if refused is not None:
+            return refused
         count_run_this_turn()
         conversation = get_active_turn()
         await self._number_past_stored(conversation)
@@ -456,12 +517,144 @@ class Delegations:
         self._emit(WorkflowEvent.agent_run(
             ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
             brief=brief.fields(), started_by=started_by(request.caller), mode=BLOCKING,
+            inherit_context=config.inherit_context, continuable=config.continuable,
         ))
+        return await self._run(
+            ref, config, conversation, request.call_id,
+            message=task_message(brief, inherit=config.inherit_context),
+            state=request.state,
+            history=request.history if config.inherit_context else None,
+        )
+
+    async def follow_up(self, request: FollowUpRequest) -> Delegated:
+        """Run the instance ``request`` names once more, to its end; its envelope.
+
+        The instance's next run (``AgentRuns.next_run``), through the same
+        hook, slots, limits, events and envelope as a first run, its
+        ``AGENT_RUN`` start carrying the message as its ``input``. A
+        follow-up that cannot run is the error result and nothing else
+        happens: an unknown instance (an agent may continue only its own
+        sub-agents, the user any), a closed one, one the user stopped (only
+        the user continues it), a running one (one run per instance at a
+        time) and a blank message. An agent's follow-up counts toward its
+        turn's runs (``SubAgentPolicy.max_runs_per_turn``), the user's does
+        not. Everything up to the run's start event is one synchronous step,
+        so two follow-ups of one instance cannot both start.
+        """
+        conversation = (
+            request.conversation if request.conversation is not None else get_active_turn()
+        )
+        with _as_turn(conversation):
+            error = self._follow_up_refused(conversation, request)
+            if error is not None:
+                return Delegated(result={"success": False, "error": error}, state={}, run=None)
+            instance = self._runs.instance(conversation, request.instance)
+            assert instance is not None
+            if request.started_by != USER:
+                refused = self._past_runs_per_turn(instance.agent)
+                if refused is not None:
+                    return refused
+                count_run_this_turn()
+            caller = request.caller
+            ref = self._runs.next_run(
+                conversation, request.instance,
+                parent_run=None if caller is None or caller.is_root else caller.run,
+            )
+            self._emit(WorkflowEvent.agent_run(
+                ref, RUN_STARTED, call_id=request.call_id, title=run_title(request.message),
+                started_by=request.started_by, mode=BLOCKING, input=request.message,
+            ))
+            return await self._run(
+                ref, self._types[instance.agent], conversation, request.call_id,
+                message=request.message, state=request.state, history=None, follow_up=True,
+            )
+
+    def close(self, conversation: SessionRef | None, instance: str, *, reason: str) -> list[str]:
+        """Close the idle or stopped ``instance`` of ``conversation`` and its descendants.
+
+        Each closed instance is reported (``AGENT_INSTANCE``, ``closed``,
+        with ``reason``). A running, closed or unknown instance is left as it
+        is.
+
+        Returns:
+            The ids closed, the instance first, then its descendants in the
+            order they started; empty when it could not be closed.
+        """
+        with _as_turn(conversation):
+            record = self._runs.instance(conversation, instance)
+            if record is None or record.status not in _OPEN:
+                return []
+            closed: list[str] = []
+            for one in [record, *self._descendants(conversation, instance)]:
+                if one.status in _OPEN:
+                    self._close(conversation, one, reason)
+                    closed.append(one.instance)
+            return closed
+
+    def _past_runs_per_turn(self, agent: str) -> Delegated | None:
+        """The error result of a call past the runs its turn may start, else None."""
+        started = runs_this_turn()
+        limit = self.policy.max_runs_per_turn
+        if started is not None and started >= limit:
+            logger.info("subagent_runs_per_turn_reached", agent=agent, limit=limit)
+            return Delegated(
+                result={"success": False, "error": RUNS_PER_TURN_ERROR.format(limit=limit)},
+                state={}, run=None,
+            )
+        return None
+
+    def _follow_up_refused(
+        self, conversation: SessionRef | None, request: FollowUpRequest
+    ) -> str | None:
+        """Why ``request`` cannot start a run, else None."""
+        message = request.message
+        if not isinstance(message, str) or not message.strip():
+            return NO_MESSAGE_ERROR
+        if request.started_by == USER:
+            yours = self._runs.instances(conversation)
+        else:
+            sender = request.caller.instance if request.caller is not None else "root"
+            yours = [i for i in self._runs.instances(conversation) if i.parent == sender]
+        found = next((i for i in yours if i.instance == request.instance), None)
+        if found is None:
+            names = ", ".join(i.instance for i in yours)
+            return NOT_YOURS_ERROR.format(
+                instance=request.instance,
+                yours=YOURS.format(instances=names) if yours else NO_SUB_AGENTS,
+            )
+        if found.status == INSTANCE_CLOSED:
+            return CLOSED_ERROR.format(instance=found.instance)
+        if found.status == INSTANCE_STOPPED and request.started_by != USER:
+            return STOPPED_ERROR.format(instance=found.instance)
+        if found.status == INSTANCE_RUNNING:
+            return RUNNING_ERROR.format(instance=found.instance)
+        return None
+
+    async def _run(
+        self,
+        ref: RunRef,
+        config: AgentConfig,
+        conversation: SessionRef | None,
+        call_id: str | None,
+        *,
+        message: str,
+        state: Mapping[str, Any],
+        history: Callable[[], Any] | None,
+        follow_up: bool = False,
+    ) -> Delegated:
+        """Run ``ref``'s run, started and reported already, to its end; its envelope.
+
+        What a first run and a follow-up share: the run's control, its task,
+        the caller's slot lent while it waits.
+        """
         control = RunControl(
             ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref)
         )
         inner = asyncio.create_task(
-            self._in_run(ref, config, brief, conversation, request, control),
+            self._in_run(
+                ref, config, conversation, call_id, control,
+                message=message, state=state, history=history, follow_up=follow_up,
+            ),
             name=f"agent run {ref.run}",
         )
         control.bind(inner)
@@ -470,12 +663,12 @@ class Delegations:
         caller = _working.get()
         try:
             if caller is None:
-                return await self._ended(ref, request.call_id, inner, control)
+                return await self._ended(ref, call_id, inner, control)
             # The caller waits: its slot works for another run meanwhile.
             caller.children.add(ref.run or "")
             try:
                 async with caller.pool.lent(caller.slot):
-                    return await self._ended(ref, request.call_id, inner, control)
+                    return await self._ended(ref, call_id, inner, control)
             finally:
                 caller.children.discard(ref.run or "")
         finally:
@@ -520,7 +713,7 @@ class Delegations:
         return config.limits.over(self.policy.limits)
 
     async def _ended(
-        self, ref: RunRef, call_id: str, inner: asyncio.Task[RunAnswer], control: RunControl
+        self, ref: RunRef, call_id: str | None, inner: asyncio.Task[RunAnswer], control: RunControl
     ) -> Delegated:
         """Wait for the run's task ``inner``, then end the run as it went; its envelope."""
         try:
@@ -621,10 +814,14 @@ class Delegations:
         self,
         ref: RunRef,
         config: AgentConfig,
-        brief: Any,
         conversation: SessionRef | None,
-        request: DelegationRequest,
+        call_id: str | None,
         control: RunControl,
+        *,
+        message: str,
+        state: Mapping[str, Any],
+        history: Callable[[], Any] | None,
+        follow_up: bool,
     ) -> RunAnswer:
         """The run, in its own task: the active run, and no tool call active.
 
@@ -639,28 +836,25 @@ class Delegations:
         caller = _working.get()
         set_active_run(ref)
         set_active_tool_call(None)
-        history = (
-            request.history()
-            if config.inherit_context and request.history is not None else None
-        )
         run = AgentRun(
             ref=ref,
             config=config,
-            message=task_message(brief, inherit=config.inherit_context),
+            message=message,
             conversation=conversation,
-            state=dict(request.state),
-            history=history,
+            state=dict(state),
+            history=history() if history is not None else None,
             control=control,
+            follow_up=follow_up,
         )
         pool = self.slots(conversation)
         queued = pool.free == 0
         if queued:
-            self._emit(WorkflowEvent.agent_run(ref, RUN_QUEUED, call_id=request.call_id))
+            self._emit(WorkflowEvent.agent_run(ref, RUN_QUEUED, call_id=call_id))
         slot = await pool.acquire(NEW)
         try:
             if queued:
-                self._emit(WorkflowEvent.agent_run(ref, RUN_RUNNING, call_id=request.call_id))
-            _working.set(_Working(ref, request.call_id, pool, slot, emit=self._emit))
+                self._emit(WorkflowEvent.agent_run(ref, RUN_RUNNING, call_id=call_id))
+            _working.set(_Working(ref, call_id, pool, slot, emit=self._emit))
             with control.timing():
                 return await self._hook(run)
         finally:
@@ -678,7 +872,7 @@ class Delegations:
     def _cancelled(
         self,
         ref: RunRef,
-        call_id: str,
+        call_id: str | None,
         cancelled: tuple[str, str],
         answer: RunAnswer,
     ) -> Delegated:
@@ -701,7 +895,7 @@ class Delegations:
     def _failed(
         self,
         ref: RunRef,
-        call_id: str,
+        call_id: str | None,
         error: str,
         *,
         warning: str,
@@ -727,7 +921,7 @@ class Delegations:
     def _end(
         self,
         ref: RunRef,
-        call_id: str,
+        call_id: str | None,
         status: str,
         *,
         text: str = "",
@@ -739,15 +933,85 @@ class Delegations:
     ) -> WorkflowEvent:
         """Report and record the ``AGENT_RUN`` that ends ``ref``'s run; that event.
 
-        The end carries the run's last ``plan`` and ``tasks`` when it has any.
+        The end carries the run's last ``plan`` and ``tasks`` when it has any,
+        and the status it leaves its instance in: ``closed`` for a type that
+        is not continuable or one past ``max_open`` (the oldest idle
+        instance is closed: another one after this event), ``stopped`` for
+        the user's cancel, else ``idle``.
         """
+        conversation = get_active_turn()
+        instance = self._runs.instance(conversation, ref.instance)
+        if instance is not None and not instance.continuable:
+            left = INSTANCE_CLOSED
+        elif status == RUN_CANCELLED and cancelled_by == USER:
+            left = INSTANCE_STOPPED
+        else:
+            left = INSTANCE_IDLE
+        closing = self._past_max_open(conversation, ref.instance, left)
+        if ref.instance in closing:
+            left = INSTANCE_CLOSED
         end = WorkflowEvent.agent_run(
             ref, status, call_id=call_id, result=result_head(text), error=error,
             partial=partial, usage=self._usage(ref), cancelled_by=cancelled_by,
             plan=plan or None, tasks=list(tasks) if tasks else None,
+            instance_status=left,
         )
         self._emit(end)
+        for other in closing:
+            record = self._runs.instance(conversation, other)
+            if other != ref.instance and record is not None:
+                self._close(
+                    conversation, record,
+                    MAX_OPEN_REASON.format(limit=self.policy.max_open),
+                )
         return end
+
+    def _past_max_open(
+        self, conversation: SessionRef | None, ending: str, left: str
+    ) -> list[str]:
+        """The instances to close for ``max_open``, when ``ending`` leaves in status ``left``.
+
+        The open instances (``idle`` or ``stopped``) are counted, the ending
+        one included when it is; past the limit, the oldest idle ones (by
+        their last run's end, the ending one the newest) are the ones to
+        close. A stopped instance counts and is never one of them.
+        """
+        instances = self._runs.instances(conversation)
+        open_ = [i for i in instances if i.instance != ending and i.status in _OPEN]
+        ending_open = left in _OPEN
+        excess = len(open_) + (1 if ending_open else 0) - self.policy.max_open
+        if excess <= 0:
+            return []
+
+        def ended(record: InstanceRecord) -> Any:
+            last = self._runs.record(conversation, record.instance)
+            return last.ended if last is not None and last.ended is not None else datetime.max
+
+        idle = sorted(
+            (i for i in open_ if i.status == INSTANCE_IDLE), key=ended
+        )
+        names = [i.instance for i in idle]
+        if left == INSTANCE_IDLE:
+            names.append(ending)
+        return names[:excess]
+
+    def _descendants(self, conversation: SessionRef | None, instance: str) -> list[InstanceRecord]:
+        """The instances below ``instance`` (its children, theirs...), in the order they started."""
+        below = {instance}
+        found: list[InstanceRecord] = []
+        for record in self._runs.instances(conversation):
+            if record.parent in below:
+                below.add(record.instance)
+                found.append(record)
+        return found
+
+    def _close(self, conversation: SessionRef | None, record: InstanceRecord, reason: str) -> None:
+        """Report that ``record``'s instance is closed (``AGENT_INSTANCE``)."""
+        last = self._runs.record(conversation, record.instance)
+        if last is None:  # pragma: no cover - an instance has a run
+            return
+        logger.info("subagent_closed", instance=record.instance, reason=reason)
+        self._emit(WorkflowEvent.agent_instance(last.ref, INSTANCE_CLOSED, reason=reason))
 
     def _side_tokens(
         self, conversation: SessionRef | None, ref: RunRef
@@ -780,6 +1044,19 @@ class Delegations:
     def _report(event: WorkflowEvent) -> None:
         """Report ``event`` to the turn's live events (none outside a turn)."""
         live_events.report(event)
+
+
+@contextmanager
+def _as_turn(conversation: SessionRef | None) -> Iterator[None]:
+    """The block runs as a turn of ``conversation``, unless it is None or already the active turn."""
+    if conversation is None or conversation == get_active_turn():
+        yield
+        return
+    token = set_active_turn(conversation)
+    try:
+        yield
+    finally:
+        reset_active_turn(token)
 
 
 def _caller_cancelling() -> bool:
