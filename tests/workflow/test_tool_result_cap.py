@@ -30,10 +30,7 @@ pytest.importorskip("google.adk")
 from google.adk.integrations.openai._openai_responses_llm import (  # noqa: E402
     _serialize_json_value,
 )
-from google.adk.models.anthropic_llm import (  # noqa: E402
-    _part_to_message_block,
-    _ToolUseIdSanitizer,
-)
+from google.adk.models.anthropic_llm import part_to_message_block  # noqa: E402
 from google.adk.tools import FunctionTool  # noqa: E402
 from google.genai import types  # noqa: E402
 
@@ -132,7 +129,7 @@ def claude_reads(response: dict) -> str:
     """What ADK's Claude adapter sends Claude of a function response."""
     part = types.Part.from_function_response(name="probe", response=response)
     part.function_response.id = "toolu_1"
-    content = _part_to_message_block(part, _ToolUseIdSanitizer())["content"]
+    content = part_to_message_block(part)["content"]
     return content if isinstance(content, str) else json.dumps(content)
 
 
