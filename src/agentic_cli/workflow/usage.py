@@ -525,6 +525,10 @@ class UsageLedgers:
             ledger = self._ledgers[conversation] = UsageLedger(conversation)
         return ledger
 
+    def forget(self, conversation: SessionRef | None) -> None:
+        """Drop ``conversation``'s ledger (it was deleted): its next one starts empty."""
+        self._ledgers.pop(conversation, None)
+
     def record(self, event: WorkflowEvent) -> UsageRow | None:
         """Record an ``LLM_USAGE`` in the ledger of the turn it is made in
         (``get_active_turn``)."""

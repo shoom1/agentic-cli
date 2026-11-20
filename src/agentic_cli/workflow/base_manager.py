@@ -760,12 +760,25 @@ class BaseWorkflowManager(ABC):
         """The block deletes ``conversation`` from the store; this manager then forgets it.
 
         Before the block, nothing more of its records is written (a write
-        under way is waited for, so none lands after the delete).
+        under way is waited for, so none lands after the delete). After it,
+        unless it raised: its sub-agent records and their loading
+        (``agent_runs``), the calls it recorded (``OpenCalls``: a failed
+        turn's too), its usage ledger and its numbering (``Delegations``), so
+        a conversation of the same id starts as a new one.
         """
         writer = self.__dict__.get("_records_writer")
         if writer is not None:
             await writer.discard(conversation)
         yield
+        self.agent_runs.forget(conversation)
+        self._agents_loaded.discard(conversation)
+        open_calls = getattr(self, "_open_calls", None)  # a manager made without __init__ has none
+        if open_calls is not None:
+            open_calls.forget(conversation)
+        self._usage_ledgers.forget(conversation)
+        delegations = self.__dict__.get("_delegations_made")
+        if delegations is not None:
+            delegations.forget(conversation)
 
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).

@@ -473,3 +473,31 @@ class TestACallNotRunSaysWhy:
             with run_as(RESEARCHER):
                 cancelled_at_its_prompt(calls, "r1")
                 assert calls.answer("r1", by_user=True) == interrupted(NOT_RUN)
+
+
+class TestADeletedConversation:
+    def test_forget_drops_its_calls_a_failed_turns_and_its_stops_and_no_others(self):
+        calls = OpenCalls()
+        for conversation in (ref("a"), ref("b")):
+            with turn_of(conversation):
+                calls.finished("c1", "the root's")
+                with run_as(RESEARCHER):
+                    cancelled_at_its_prompt(calls, "r2")
+            calls.failed(conversation)
+            calls.cancelled(conversation)
+            calls.cancelled(conversation, instance="researcher-1", cause="its parent")
+
+        calls.forget(ref("a"))
+
+        with turn_of(ref("a")):
+            assert calls.recorded("c1", run=None) is None
+            with run_as(RESEARCHER):
+                assert calls.answer("r2", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+        assert calls.take_cancel(ref("a")) is False
+        assert calls.take_cancel(ref("a"), instance="researcher-1") is False
+        with turn_of(ref("b")):
+            assert calls.recorded("c1", run=None) == "the root's"
+        assert calls.take_cancel(ref("b")) is True
+        # What stopped an instance's run goes with its stop.
+        assert calls._causes == {(ref("b"), "researcher-1"): "its parent"}
+        assert calls.take_cancel(ref("b"), instance="researcher-1") is True

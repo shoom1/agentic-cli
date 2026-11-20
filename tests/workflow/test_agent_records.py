@@ -519,3 +519,44 @@ class TestAManagersRecords:
             "researcher-1#1", "researcher-2#1", "researcher-3#1",
         ]
         assert runs_in(stored, ref) == runs_of(one, ref)
+
+
+class TestADeletedConversation:
+    """Deleting a conversation writes nothing of it after the delete, and the
+    manager forgets it: its records, the calls it recorded, its usage, its
+    numbering; a turn of the same id starts as a new conversation's."""
+
+    async def test_it_is_forgotten_and_its_id_starts_again(self, kept):
+        stored: dict[SessionRef, Any] = {}
+        manager = kept(stored)
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        await turn(manager)
+
+        assert await manager.delete_session("s", user_id="u") is True
+
+        assert manager.agent_runs.records(ref) == [] and manager.agent_runs.instances(ref) == []
+        assert manager.usage_of(ref).turns == 0
+        await turn(manager)
+        assert runs_of(manager, ref) == [("researcher-1#1", RUN_COMPLETED)]
+        assert manager.loads == [ref, ref]
+
+    async def test_a_write_under_way_ends_before_the_delete_and_none_follows(self, kept):
+        stored: dict[SessionRef, Any] = {}
+        manager = kept(stored)
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        manager.save_gate = asyncio.Event()
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+        manager._agent_records_changed(ref)  # waits behind the one under way
+
+        deleting = asyncio.ensure_future(manager.delete_session("s", user_id="u"))
+        await asyncio.sleep(0.01)
+        waited = not deleting.done()
+        manager.save_gate.set()
+        await deleting
+        await asyncio.sleep(0.01)
+
+        assert waited
+        assert ref not in stored
