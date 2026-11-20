@@ -613,7 +613,10 @@ the start of the entry's title.
   `fit_guard_plugin.brief_of`; `drop_turns(brief=)`). The difference is the
   libraries': Deep Agents' summary also stands for a follow-up's own message
   once it is older than what a summary keeps word for word, where ADK's
-  trim keeps it. The main agent's summaries are unchanged.
+  trim keeps it. An instance's summary that would stand for less than a fifth
+  of its trigger is not written (the brief restated in each summary can keep
+  a long brief near the trigger), as ADK's is not. The main agent's
+  summaries are unchanged.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
   `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them

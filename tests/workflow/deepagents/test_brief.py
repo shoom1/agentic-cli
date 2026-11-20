@@ -156,3 +156,26 @@ class TestTheSummaries:
 
         assert sent[0].content == f"{SUMMARY_PREFIX}\n\nA summary."
         assert event["summary_message"].content == f"{SUMMARY_PREFIX}\n\nA summary."
+
+
+class TestALongBrief:
+    BIG = "Brief. " + "word " * 12_600  # about 14,000 tokens; local:small summarizes at 16,150
+
+    async def test_one_summary_not_one_per_call(self):
+        """A brief near the trigger stays in the request after its summary: a
+        later call whose summary would save little (under ``MIN_SAVING`` of
+        the trigger) does not write another."""
+        chat = ScriptedChat(label="worker", script=[ai(f"S{n}.") for n in range(1, 10)])
+        messages = [brief_message(self.BIG, id="t1"), AIMessage("Reading.", id="a0"),
+                    HumanMessage("Turn 1: " + "word " * 2_400, id="h1"), AIMessage("A1.", id="a1")]
+        _, event = await summarized(chat, messages)
+        written = [event is not None]
+        for n in range(2, 10):
+            messages = [*messages, HumanMessage(f"Short {n}. " + "word " * 400, id=f"h{n}"),
+                        AIMessage(f"A{n}.", id=f"a{n}")]
+            _, new = await summarized(chat, messages, event)
+            written.append(new is not None)
+            event = new or event
+
+        assert written == [True] + [False] * 8
+        assert blocks(event["summary_message"])[0] == self.BIG

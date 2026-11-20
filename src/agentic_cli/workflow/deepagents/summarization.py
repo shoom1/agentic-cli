@@ -117,6 +117,7 @@ from langchain_core.runnables.config import set_config_context
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import (
+    MIN_SAVING,
     ContextBudget,
     FailedSummaries,
     chars_per_token,
@@ -345,15 +346,30 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         alone decides. Otherwise Deep Agents decides. Either way, a range
         whose summary wrote no text earlier in the turn is skipped until it
         has grown (``FailedSummaries``): it would come back empty again.
+
+        In an instance's thread (one with a brief), a summary at the trigger
+        that would stand for less than ``MIN_SAVING`` of it is not written,
+        as ADK's is not (``summary_range``): the brief restated in every
+        summary can keep a request near the trigger, and a summary per call
+        would save nothing.
+        A request over the input budget is summarized whatever it saves
+        (Deep Agents decides that apart from this).
         """
         if self._trigger_tokens is not None and _counted_before_the_summary(messages):
             due = total_tokens >= self._trigger_tokens
         else:
             due = super()._should_summarize(messages, total_tokens)
-        if due and self._failures.skips(live_events.current(), *self._range(messages)):
+        if not due:
+            return False
+        start, saving = self._range(messages)
+        small = self._trigger_tokens is not None and saving < MIN_SAVING * self._trigger_tokens
+        if small and _BRIEF.get() is not None:
+            logger.debug("deepagents_summary_saves_little", agent=self.agent, saving=saving)
+            return False
+        if self._failures.skips(live_events.current(), start, saving):
             logger.debug("deepagents_summary_not_retried", agent=self.agent)
             return False
-        return due
+        return True
 
     def _range(self, messages: list["AnyMessage"]) -> tuple[str | None, int]:
         """Where a summary of ``messages`` would start, and its size in tokens.
