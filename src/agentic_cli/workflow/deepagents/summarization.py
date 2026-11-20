@@ -295,6 +295,8 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         on_written: Called once a summary is written, before the model is
             called with it (the manager drops the conversation's memory index
             and roster snapshots).
+        budget_tokens: The agent's input budget, which a summary skipped for
+            saving little never lets a request pass.
         **kwargs: ``SummarizationMiddleware``'s arguments.
     """
 
@@ -305,12 +307,14 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         index: Callable[[], str] | None = None,
         roster: Callable[[], str] | None = None,
         on_written: Callable[[], None] | None = None,
+        budget_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
         self._index = index
         self._roster = roster
+        self._budget_tokens = budget_tokens
         self._on_written = on_written
         helper = self._lc_helper
         # Inside the retry: a mapped overflow is never retried as it was sent.
@@ -351,9 +355,9 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         that would stand for less than ``MIN_SAVING`` of it is not written,
         as ADK's is not (``summary_range``): the brief restated in every
         summary can keep a request near the trigger, and a summary per call
-        would save nothing.
-        A request over the input budget is summarized whatever it saves
-        (Deep Agents decides that apart from this).
+        would save nothing. A request over the agent's input budget is
+        summarized whatever it saves, the window known to the profile or not;
+        without a budget nothing is skipped.
         """
         if self._trigger_tokens is not None and _counted_before_the_summary(messages):
             due = total_tokens >= self._trigger_tokens
@@ -363,7 +367,10 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
             return False
         start, saving = self._range(messages)
         small = self._trigger_tokens is not None and saving < MIN_SAVING * self._trigger_tokens
-        if small and _BRIEF.get() is not None:
+        # Never past the input budget, whether or not the model's profile gives
+        # Deep Agents one to force a summary with.
+        within = self._budget_tokens is not None and total_tokens <= self._budget_tokens
+        if small and within and _BRIEF.get() is not None:
             logger.debug("deepagents_summary_saves_little", agent=self.agent, saving=saving)
             return False
         if self._failures.skips(live_events.current(), start, saving):
@@ -570,12 +577,15 @@ def build_summarization(
         ContextBudgetError: The model's input budget is too small to work in.
     """
     install_history_filters()
+    if budget is None:
+        budget = context_budget(resolved, settings)
     trigger, keep = summarization_thresholds(resolved, settings, budget)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         index=index,
         roster=roster,
         on_written=on_written,
+        budget_tokens=budget.budget,
         model=model,
         backend=NoArchiveBackend(),
         trigger=trigger,

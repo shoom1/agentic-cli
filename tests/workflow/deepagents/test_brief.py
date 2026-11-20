@@ -16,6 +16,7 @@ from langchain.agents.middleware import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agentic_cli.workflow.agents import SubAgentPolicy
+from agentic_cli.workflow.context import context_budget
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.deepagents.sessions import instance_thread_id
 from agentic_cli.workflow.deepagents.summarization import (
@@ -171,7 +172,7 @@ class TestALongBrief:
         _, event = await summarized(chat, messages)
         written = [event is not None]
         for n in range(2, 10):
-            messages = [*messages, HumanMessage(f"Short {n}. " + "word " * 400, id=f"h{n}"),
+            messages = [*messages, HumanMessage(f"Short {n}. " + "word " * 200, id=f"h{n}"),
                         AIMessage(f"A{n}.", id=f"a{n}")]
             _, new = await summarized(chat, messages, event)
             written.append(new is not None)
@@ -179,3 +180,23 @@ class TestALongBrief:
 
         assert written == [True] + [False] * 8
         assert blocks(event["summary_message"])[0] == self.BIG
+
+    async def test_never_a_request_past_the_budget(self):
+        """The skip is for requests under the input budget (here 19,000 tokens,
+        the window not being known to the model's profile): once the brief and
+        the steps pass it, a summary is written whatever it saves."""
+        chat = ScriptedChat(label="worker", script=[ai(f"S{n}.") for n in range(1, 10)])
+        middleware = build_summarization(chat, resolved("local:small", agent="worker"), context())
+        budget = context_budget(resolved("local:small", agent="worker"), context()).budget
+        messages = [brief_message(self.BIG, id="t1"), AIMessage("Reading.", id="a0"),
+                    HumanMessage("Turn 1: " + "word " * 2_400, id="h1"), AIMessage("A1.", id="a1")]
+        sent, event = await summarized(chat, messages)
+        sizes = [middleware.token_counter(sent)]
+        for n in range(2, 10):
+            messages = [*messages, HumanMessage(f"Short {n}. " + "word " * 400, id=f"h{n}"),
+                        AIMessage(f"A{n}.", id=f"a{n}")]
+            sent, new = await summarized(chat, messages, event)
+            sizes.append(middleware.token_counter(sent))
+            event = new or event
+
+        assert max(sizes) <= budget, sizes
