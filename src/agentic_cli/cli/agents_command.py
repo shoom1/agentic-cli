@@ -3,7 +3,8 @@
 ``/agents`` is a picker of the conversation's instances: each one's id
 (``researcher-2``), type, status (``running``, ``idle``, ``stopped`` or
 ``closed``) and title, each followed by the instances it started, a level
-deeper. Enter shows the one picked, as ``/agents <id>`` does: one instance
+deeper. Enter opens the view of the one picked (``/agent <id>``), Esc
+nothing; ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent, its
 title, then each run's status (while it works ``running``, ``queued`` waiting
 for a free working slot, or ``needs you`` waiting on the user; a completion
@@ -14,7 +15,8 @@ message in their place), the first lines of its result, the plan and the
 task list it left (its own: a run's plan and tasks are not its parent's),
 its error and its tokens by model.
 
-``/agent <id>`` shows one as well; ``/agent stop <id>`` is the user's stop
+``/agent <id>`` opens one's view (``cli/agent_view.py``: the user works with
+it directly, ``/back`` returns); ``/agent stop <id>`` is the user's stop
 of an instance (its run, if one works, cancelled by the user; only the user
 may start its next run) and ``/agent close <id>`` the user's close of it and
 its own sub-agents (no more runs; its work stays readable). Each says what it
@@ -95,7 +97,7 @@ class AgentsCommand(Command):
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """The instances in a picker (Enter shows one), or, with an id, that one."""
+        """The instances in a picker (Enter opens the view of one), or, with an id, shows that one."""
         workflow = _workflow(app)
         if workflow is None:
             return
@@ -112,23 +114,23 @@ class AgentsCommand(Command):
         dialog, ids = picker(instances, placement=_placement(app))
         picked = await app.session.show_dialog(dialog)
         if picked is not None and picked in ids:
-            show(app, workflow, conversation, ids[picked])
+            await app.open_agent_view(ids[picked])
 
 
 class AgentCommand(Command):
-    """Show, stop or close one of the open conversation's sub-agents."""
+    """Open, stop or close one of the open conversation's sub-agents."""
 
     def __init__(self) -> None:
         super().__init__(
             name="agent",
-            description="Show, stop or close one of this conversation's sub-agents",
+            description="Open one of this conversation's sub-agents, or stop or close one",
             usage="/agent <id> | stop <id> | close <id>",
             examples=["/agent researcher-2", "/agent stop researcher-2", "/agent close researcher-2"],
             category=CommandCategory.WORKFLOW,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """``/agent <id>`` shows one; ``stop <id>`` and ``close <id>`` stop and close it."""
+        """``/agent <id>`` opens its view; ``stop <id>`` and ``close <id>`` stop and close it."""
         workflow = _workflow(app)
         if workflow is None:
             return
@@ -139,8 +141,7 @@ class AgentCommand(Command):
             return
         word = parts[0]
         if word not in ("stop", "close"):
-            await _load(app, workflow, conversation)
-            show(app, workflow, conversation, word)
+            await app.open_agent_view(word)
             return
         if len(parts) < 2:
             app.session.add_warning(SUBCOMMAND_USAGE.format(subcommand=word))

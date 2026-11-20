@@ -26,6 +26,8 @@ from agentic_cli.workflow.factory import orchestrator_of
 from agentic_cli.workflow.settings import OrchestratorType
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agentic_cli.cli.usage_tracker import UsageTracker
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.agents.policy import SubAgentPolicy
@@ -221,6 +223,10 @@ class WorkflowController:
         self.usage_tracker: "UsageTracker | None" = None
         # Status-bar jobs segment, published by JobMonitor; None when idle.
         self.jobs_status_segment: str | None = None
+        # While a sub-agent's view is open, what the bar says of its instance,
+        # in place of the main agent's model and tokens; None in the main
+        # conversation.
+        self.view_segment: "Callable[[], str] | None" = None
 
     @property
     def agent_configs(self) -> tuple["AgentConfig", ...]:
@@ -839,13 +845,21 @@ class WorkflowController:
         """Update UI status bar with current workflow status.
 
         It names the model of the main agent, whose context the ``ctx``
-        segment shows (``_main_model``).
+        segment shows (``_main_model``). In a sub-agent's view it names the
+        instance instead (``view_segment``: its status, its own ``ctx`` and
+        tokens), the jobs segment kept.
 
         Args:
             ui: UI session to update
         """
         if self._init_error:
             ui.set_status("Init failed - check API keys")
+        elif self._workflow is not None and self.view_segment is not None:
+            parts = [self.view_segment()]
+            if self.jobs_status_segment:
+                parts.append(self.jobs_status_segment)
+            parts.extend(["Ctrl+C: cancel", "/back: main"])
+            ui.set_status(" | ".join(parts))
         elif self._workflow is not None:
             parts = [_main_model(self._workflow)]
             if self.usage_tracker:

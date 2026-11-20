@@ -31,6 +31,7 @@ from prompt_toolkit.history import InMemoryHistory
 
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
+from agentic_cli.cli.agent_view import AgentView, leave_view, open_view
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
@@ -389,6 +390,10 @@ class BaseCLIApp:
     #: and the newer ones passed over; None when it chose nothing then.
     _chosen_at_start: "tuple[Hold | None, list[tuple[str, int]]] | None" = None
 
+    #: The sub-agent's view that is open (``open_agent_view``); None in the
+    #: main conversation.
+    _agent_view: AgentView | None = None
+
     def __init__(
         self,
         app_info: AppInfo,
@@ -616,6 +621,34 @@ class BaseCLIApp:
             RuntimeError: If workflow is not yet initialized
         """
         return self._workflow_controller.workflow
+
+    @property
+    def agent_view(self) -> AgentView | None:
+        """The sub-agent's view that is open (provisional), or None in the
+        main conversation: a line typed goes to it, and the prompt and status
+        bar are its."""
+        return self._agent_view
+
+    async def open_agent_view(self, instance: str) -> bool:
+        """Open the view of one of the conversation's sub-agents (provisional).
+
+        What ``/agent <id>`` and Enter in ``/agents``' picker call
+        (``cli/agent_view.py``). In another's view it leaves that one first.
+
+        Returns:
+            Whether the view is open. False, said: an unknown id, records
+            that could not be read, or a workflow that does not run.
+        """
+        return await open_view(self, instance)
+
+    async def leave_agent_view(self) -> bool:
+        """Leave the open sub-agent's view, back to the main conversation
+        (provisional): what ``/back`` calls.
+
+        Returns:
+            Whether a view was left. False, said, when none is open.
+        """
+        return await leave_view(self)
 
     @property
     def workflow_error(self) -> Exception | None:
@@ -897,6 +930,7 @@ class BaseCLIApp:
             NewCommand,
             ModelsCommand,
         )
+        from agentic_cli.cli.agent_view import BackCommand
         from agentic_cli.cli.agents_command import AgentCommand, AgentsCommand
         from agentic_cli.cli.memory_command import MemoryCommand
         from agentic_cli.cli.settings_command import SettingsCommand
@@ -909,6 +943,7 @@ class BaseCLIApp:
         self.command_registry.register(JobsCommand())
         self.command_registry.register(AgentsCommand())
         self.command_registry.register(AgentCommand())
+        self.command_registry.register(BackCommand())
         self.command_registry.register(ResumeSessionCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
@@ -921,6 +956,11 @@ class BaseCLIApp:
     async def process_input(self, user_input: str) -> None:
         """Process user input.
 
+        A command runs as it does anywhere; when a sub-agent's view is open
+        its prompt and status bar are drawn again after it (the command may
+        have changed the instance). A line in a view goes to the view
+        (``AgentView.take``), any other to the conversation.
+
         Args:
             user_input: The raw user input string
         """
@@ -932,6 +972,10 @@ class BaseCLIApp:
         # Route to appropriate handler
         if user_input.startswith("/"):
             await self._handle_command(user_input)
+            if self._agent_view is not None:
+                self._agent_view.refresh()
+        elif self._agent_view is not None:
+            await self._agent_view.take(user_input)
         else:
             await self._handle_message(user_input)
 
