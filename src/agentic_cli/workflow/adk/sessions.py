@@ -27,25 +27,43 @@ service of a store from the settings, without the manager, for
 
 A sub-agent instance's transcript is a child session in the same session
 service: app ``child_app(app_name)`` (``<app>--agents``), session
-``child_session_id(conversation, instance)`` (``<conversation>/<instance>``),
+``child_session_id(conversation, instance)`` (``<conversation>/<instance>``,
+the conversation's ``%`` and ``/`` percent-encoded: ``a/b``'s are
+``a%2Fb/<instance>``, so the first ``/`` of a child app's id always ends its
+conversation, and an id of the CLI's, which holds neither, is as it was),
 the conversation's user. Under its own app name it never lists as a
 conversation. ADK keys a session by at most ``MAX_KEY`` characters, so a
 longer id is refused before anything is stored. A conversation's children
 are deleted with it (``delete_children``: ``ServiceSessions.delete``, the
 manager's and its reader's), and each turn numbers its instances past the
 ones they keep (``stored_instances``), so none is ever another run's.
+
+A conversation's sub-agent records (``AgentRuns.export``: its instances,
+its runs, its id counters) are one more session of the child app, named as
+the conversation, encoded (``records_session_id``: no ``/``, where its
+instances' ids hold one), its state holding them under ``RECORDS_KEY``:
+made at the first write (``save_records``), each later write an event whose state delta
+replaces them, since ADK takes no second writer on the conversation's own
+session while a turn runs. No two conversations' records or transcripts
+share an id. Its children are found by the instances the records name, a listing of the user's child sessions only for a
+conversation without records. ``ServiceSessions.delete`` deletes the
+transcripts first, then the records, then the conversation, so a delete cut
+short leaves the conversation, by which the rest is found again.
 """
+
 
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER
+from agentic_cli.workflow.agents.runs import stored_instance_ids
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
@@ -59,6 +77,11 @@ TITLE_KEY = "agentic_cli.title"
 #: How many turns the user ran in it.
 TURNS_KEY = "agentic_cli.turns"
 
+#: The state key of a conversation's sub-agent records, in its records session.
+RECORDS_KEY = "agentic_cli.agents"
+#: The author of a records session's events (each a write of the records).
+RECORDS_AUTHOR = "agentic_cli"
+
 #: What a child session's app name adds to the conversation's app name.
 CHILD_APP_SUFFIX = "--agents"
 #: The longest app name or session id ADK stores (``sessions/schemas/shared.py``).
@@ -70,13 +93,36 @@ def child_app(app_name: str) -> str:
     return f"{app_name}{CHILD_APP_SUFFIX}"
 
 
+def _encoded(conversation: str) -> str:
+    """``conversation`` as the child app's ids hold it: its ``%`` and ``/``
+    percent-encoded, so it holds no ``/`` (``urllib.parse.unquote`` reads it back)."""
+    return conversation.replace("%", "%25").replace("/", "%2F")
+
+
+def records_session_id(conversation: str) -> str:
+    """The child app's session that holds the conversation ``conversation``'s records."""
+    return _encoded(conversation)
+
+
+def child_of(session_id: str) -> tuple[str, str] | None:
+    """The conversation and the instance a child app's session id names
+    (``child_session_id``, decoded); None for a records session or an id that names none."""
+    encoded, slash, instance = session_id.partition("/")
+    if not slash or not instance or "/" in instance:
+        return None
+    return unquote(encoded), instance
+
+
 def child_session_id(conversation: str, instance: str) -> str:
     """The session that holds ``instance``'s transcript in the conversation ``conversation``.
+
+    ``<conversation>/<instance>``, the conversation's ``%`` and ``/``
+    percent-encoded.
 
     Raises:
         ValueError: The id is longer than ADK stores (``MAX_KEY``).
     """
-    session_id = f"{conversation}/{instance}"
+    session_id = f"{_encoded(conversation)}/{instance}"
     if len(session_id) > MAX_KEY:
         raise ValueError(
             f"The session of sub-agent {instance} would be {len(session_id)} characters long; "
@@ -91,17 +137,83 @@ async def _children(
     """The ids of ``conversation``'s child sessions, ``user_id``'s, in
     ``app_name``'s child app.
 
-    Each is ``<conversation>/<instance>``, an instance id holding no ``/``:
-    a conversation whose own id goes on past a ``/`` (``s/x``) has children
-    of its own, which are not ``s``'s. Read with ADK's public listing, which
-    returns each session without its events.
+    Each is ``child_session_id(conversation, <instance>)``. A conversation
+    with records has the instances they name (``stored_instance_ids``: one
+    look at its records session); one without, every child session of the
+    user whose id names the conversation (``child_of``, decoded), read with
+    ADK's public listing (which returns each session without its events): a
+    records session names none, and the conversation ``s/x``'s children
+    (``s%2Fx/<instance>``) are not ``s``'s.
     """
-    prefix = f"{conversation}/"
+    named = stored_instance_ids(
+        await load_records(service, SessionRef(app_name, user_id, conversation))
+    )
+    if named is not None:
+        prefix = f"{_encoded(conversation)}/"
+        return [
+            f"{prefix}{instance}" for instance in named
+            if "/" not in instance and len(prefix) + len(instance) <= MAX_KEY
+        ]
     listed = await service.list_sessions(app_name=child_app(app_name), user_id=user_id)
     return [
         session.id for session in getattr(listed, "sessions", None) or ()
-        if session.id.startswith(prefix) and "/" not in session.id[len(prefix):]
+        if (child_of(session.id) or ("",))[0] == conversation
     ]
+
+
+async def load_records(service: "BaseSessionService", ref: SessionRef) -> Any | None:
+    """What ``ref``'s records session holds under ``RECORDS_KEY``; None for none.
+
+    Read without its events (``num_recent_events=0``).
+    """
+    from google.adk.sessions.base_session_service import GetSessionConfig
+
+    session = await service.get_session(
+        app_name=child_app(ref.app_name), user_id=ref.user_id,
+        session_id=records_session_id(ref.session_id),
+        config=GetSessionConfig(num_recent_events=0),
+    )
+    if session is None:
+        return None
+    return (session.state or {}).get(RECORDS_KEY)
+
+
+async def save_records(
+    service: "BaseSessionService", ref: SessionRef, data: Mapping[str, Any]
+) -> None:
+    """Keep ``data`` as ``ref``'s sub-agent records, replacing what its records session held.
+
+    The session is made at the first write, with ``data`` as its state;
+    each later write is one event of its own whose state delta replaces
+    them (``append_event``: ADK keeps a session's state only through its
+    events).
+    """
+    from google.adk.events import Event, EventActions
+    from google.adk.sessions.base_session_service import GetSessionConfig
+
+    app = child_app(ref.app_name)
+    session_id = records_session_id(ref.session_id)
+    session = await service.get_session(
+        app_name=app, user_id=ref.user_id, session_id=session_id,
+        config=GetSessionConfig(num_recent_events=0),
+    )
+    if session is None:
+        await service.create_session(
+            app_name=app, user_id=ref.user_id, session_id=session_id,
+            state={RECORDS_KEY: dict(data)},
+        )
+        return
+    await service.append_event(session, Event(
+        author=RECORDS_AUTHOR, actions=EventActions(state_delta={RECORDS_KEY: dict(data)}),
+    ))
+
+
+async def delete_records(service: "BaseSessionService", ref: SessionRef) -> None:
+    """Delete ``ref``'s records session, its events with it; none is nothing to do."""
+    await service.delete_session(
+        app_name=child_app(ref.app_name), user_id=ref.user_id,
+        session_id=records_session_id(ref.session_id),
+    )
 
 
 async def delete_children(
@@ -110,7 +222,7 @@ async def delete_children(
     """Delete ``conversation``'s child sessions: its sub-agent instances' transcripts.
 
     Every session of ``app_name``'s child app (``child_app``) that is
-    ``user_id``'s and ``conversation``'s (``<conversation>/<instance>``);
+    ``user_id``'s and ``conversation``'s (``child_session_id``);
     their events go with them (ADK's session store deletes a session's
     events with it). What a conversation's delete leaves of it otherwise.
 
@@ -136,8 +248,9 @@ async def stored_instances(
 ) -> dict[str, int]:
     """The highest instance number of each agent type ``conversation``'s child sessions keep.
 
-    Read from their ids (``<conversation>/<type>-<n>``, ``AgentRuns``'
-    instance ids): what another manager ran there (before a restart, or in
+    Read from their ids (``child_session_id``: ``<conversation>/<type>-<n>``,
+    ``AgentRuns``' instance ids, decoded with ``child_of``): what another
+    manager ran there (before a restart, or in
     another process between two turns), which this one numbers past. An id
     that names no such instance is left out.
 
@@ -149,7 +262,10 @@ async def stored_instances(
     """
     counts: dict[str, int] = {}
     for session_id in await _children(service, app_name, user_id, conversation):
-        agent, _, number = session_id.rpartition("/")[2].rpartition("-")
+        named = child_of(session_id)
+        if named is None:
+            continue
+        agent, _, number = named[1].rpartition("-")
         if agent and number.isascii() and number.isdigit():
             counts[agent] = max(counts.get(agent, 0), int(number))
     return counts
@@ -300,13 +416,16 @@ class ServiceSessions:
         return rows
 
     async def delete(self, ref: SessionRef) -> bool:
-        """Delete ``ref``'s session and its sub-agents' transcripts; False if there was none.
+        """Delete ``ref``'s session, its sub-agents' transcripts and its records;
+        False if there was no session.
 
         ADK's own delete answers nothing, for an unknown id too, so the
         session is looked up first, without its events
         (``num_recent_events=0``). Its child sessions (``delete_children``)
-        are deleted after it, whatever the look found: a conversation
-        already gone may have left some. The answer is the conversation's.
+        go first, then its records (``delete_records``), then the session,
+        whatever the look found: a conversation already gone may have left
+        some, and a delete cut short leaves the conversation, by which the
+        rest is found again. The answer is the conversation's.
         """
         from google.adk.sessions.base_session_service import GetSessionConfig
 
@@ -314,11 +433,12 @@ class ServiceSessions:
             app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
             config=GetSessionConfig(num_recent_events=0),
         )
+        await delete_children(self._service, ref.app_name, ref.user_id, ref.session_id)
+        await delete_records(self._service, ref)
         if stored is not None:
             await self._service.delete_session(
                 app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
             )
-        await delete_children(self._service, ref.app_name, ref.user_id, ref.session_id)
         return stored is not None
 
 

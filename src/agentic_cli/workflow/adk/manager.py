@@ -72,7 +72,9 @@ from agentic_cli.workflow.adk.sessions import (
     ServiceSessions,
     child_app,
     child_session_id,
+    load_records,
     make_session_service,
+    save_records,
     stored_instances,
     turn_state,
 )
@@ -1655,6 +1657,11 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         the store lost is made as a first run's, the follow-up's message
         alone.
 
+        A session is made only once the conversation's records name its
+        instance (the run's start written: ``_agent_records_written``), so
+        the records name every transcript the conversation keeps, which is
+        how its delete and its numbering find them (``adk/sessions.py``).
+
         Returns:
             The shared state the run starts from, and the state delta its
             message carries (None for none).
@@ -1673,6 +1680,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     start[OUTSIDE_CONTENT_KEY] = mark
                     return start, {OUTSIDE_CONTENT_KEY: mark}
                 return start, None
+        if run.conversation is not None:
+            await self._agent_records_written(run.conversation)
         session = await service.create_session(
             app_name=app, user_id=user_id, session_id=session_id, state=dict(run.state)
         )
@@ -1694,6 +1703,37 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._session_service, conversation.app_name, conversation.user_id,
             conversation.session_id,
         )
+
+    async def _load_agent_records(self, conversation: SessionRef) -> Any | None:
+        """``conversation``'s records, from its records session (the base's store hook).
+
+        The child app's session named as the conversation
+        (``adk/sessions.py::load_records``), read without its events.
+
+        Raises:
+            RuntimeError: The session store is not open.
+        """
+        return await load_records(self._open_store(), conversation)
+
+    async def _save_agent_records(
+        self, conversation: SessionRef, data: Mapping[str, Any]
+    ) -> None:
+        """Keep ``data`` as ``conversation``'s records (the base's store hook): its
+        records session, made at the first write (``adk/sessions.py::save_records``).
+
+        A session of its own, never the conversation's: ADK takes no second
+        writer on a session while a turn runs on it.
+
+        Raises:
+            RuntimeError: The session store is not open.
+        """
+        await save_records(self._open_store(), conversation, data)
+
+    def _open_store(self) -> Any:
+        service = self._session_service
+        if service is None:
+            raise RuntimeError("The session store is not open.")
+        return service
 
     def _report_raw_log(self) -> None:
         """Report what the raw LLM log holds (a sub-agent run's calls) to the turn's live events.
@@ -1901,11 +1941,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return await stored.info(self.session_ref(session_id, user_id))
 
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """Delete a persisted session from the store.
+        """Delete a persisted session from the store, with its sub-agents'
+        transcripts and records.
 
         ADK's own delete answers nothing, for an unknown id too, so the
         session is looked up first, without its events
-        (``num_recent_events=0``).
+        (``num_recent_events=0``). The transcripts go first, then the
+        records, then the session (``ServiceSessions.delete``); then this
+        manager forgets the conversation (``_deleting``).
 
         Args:
             session_id: Session to delete.
@@ -1917,7 +1960,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         stored = self._stored
         if stored is None:
             return False
-        return await stored.delete(self.session_ref(session_id, user_id))
+        ref = self.session_ref(session_id, user_id)
+        async with self._deleting(ref):
+            deleted = await stored.delete(ref)
+        return deleted
 
     async def recent_messages(
         self, session_id: str, limit: int = 20, *, user_id: str | None = None

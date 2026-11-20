@@ -382,7 +382,8 @@ async def test_a_resume_checks_the_session_without_its_events_then_reads_them():
     async def recorded(**kwargs):
         got = await get_session(**kwargs)
         config = kwargs.get("config")
-        read.append((config.num_recent_events if config else None, len(got.events)))
+        if kwargs["app_name"] == "test":  # the conversation's (its sub-agents' records are not)
+            read.append((config.num_recent_events if config else None, len(got.events)))
         return got
 
     service.get_session = recorded

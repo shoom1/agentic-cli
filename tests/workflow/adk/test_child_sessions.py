@@ -4,11 +4,15 @@ Each sub-agent run's transcript is a child session in the conversation's own
 session service (``adk/sessions.py``): app ``child_app(app)``, session
 ``<conversation>/<instance>``, the conversation's user.
 
-- Deleting the conversation deletes its children (``delete_children``, which
-  ``ServiceSessions.delete`` calls after the conversation's own delete,
-  whatever that found), so the manager's ``delete_session`` and a
-  ``SessionReader``'s leave none behind, on every store; their events go
-  with them.
+- Deleting the conversation deletes its children first (``delete_children``,
+  which ``ServiceSessions.delete`` calls whatever the conversation's own
+  look found), then its sub-agent records, then the conversation, so the
+  manager's ``delete_session`` and a ``SessionReader``'s leave none behind,
+  on every store; their events go with them.
+- A conversation's sub-agent records are one more session of the child app,
+  named as the conversation (state key ``RECORDS_KEY``), never a transcript:
+  a first run's start is written before its child session is made, and the
+  children are found by the instances the records name.
 - A manager numbers a conversation's instances past the ones its store
   keeps (``_stored_instances``, asked once per conversation per turn), so
   neither a new manager (a restart) nor one whose turns another process's
@@ -26,6 +30,7 @@ on sqlite.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import sqlite3
 
@@ -42,10 +47,11 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk import sessions as adk_sessions  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
-from agentic_cli.workflow.adk.sessions import child_app  # noqa: E402
+from agentic_cli.workflow.adk.sessions import RECORDS_KEY, child_app  # noqa: E402
+from agentic_cli.workflow.agents.runs import RECORDS_VERSION  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.service_registry import WORKFLOW, get_service  # noqa: E402
-from agentic_cli.workflow.sessions import get_active_run  # noqa: E402
+from agentic_cli.workflow.sessions import SessionRef, get_active_run  # noqa: E402
 from agentic_cli.workflow.session_readers import open_session_reader  # noqa: E402
 from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI  # noqa: E402
@@ -113,7 +119,7 @@ class TestDeleteChildren:
             (child_app(APP), "u", "s/researcher-2"),
             (child_app(APP), "u", "s/writer-1"),
             (child_app(APP), "u", "t/researcher-1"),     # another conversation's
-            (child_app(APP), "u", "s/x/researcher-1"),   # the conversation "s/x"'s
+            (child_app(APP), "u", "s%2Fx/researcher-1"),   # the conversation "s/x"'s
             (child_app(APP), "v", "s/researcher-1"),     # another user's
             (APP, "u", "s"),                             # the conversation itself
         ]:
@@ -122,7 +128,7 @@ class TestDeleteChildren:
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
         assert deleted == 3
-        assert await stored_ids(service, child_app(APP)) == ["s/x/researcher-1", "t/researcher-1"]
+        assert await stored_ids(service, child_app(APP)) == ["s%2Fx/researcher-1", "t/researcher-1"]
         assert await stored_ids(service, child_app(APP), "v") == ["s/researcher-1"]
         assert await stored_ids(service, APP) == ["s"]
 
@@ -154,6 +160,179 @@ class TestDeleteChildren:
         assert (before, events()) == (1, 0)
 
 
+def records_naming(*instances: str) -> dict:
+    """Stored records (``AgentRuns.export``'s shape) that name ``instances``, each idle."""
+    return {
+        "v": RECORDS_VERSION, "saved": "2026-11-19T10:00:00", "numbered": {},
+        "instances": [{
+            "instance": instance, "agent": instance.rpartition("-")[0], "parent": "root",
+            "depth": 1, "inherit_context": False, "title": "", "status": "idle",
+            "runs": [f"{instance}#1"], "continuable": True,
+        } for instance in instances],
+        "runs": [],
+    }
+
+
+class TestTheRecordsSession:
+    """A conversation's sub-agent records are one session of the child app,
+    named as the conversation, its state holding them under ``RECORDS_KEY``:
+    made at the first write, written with an event's state delta, never a
+    conversation or an instance's transcript."""
+
+    async def test_written_read_and_written_over(self, service):
+        conversation = SessionRef(APP, "u", "s")
+
+        assert await adk_sessions.load_records(service, conversation) is None
+        await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+        await adk_sessions.save_records(service, conversation, records_naming("researcher-2"))
+
+        session = await service.get_session(app_name=child_app(APP), user_id="u", session_id="s")
+        assert session.state[RECORDS_KEY] == records_naming("researcher-2")
+        assert await adk_sessions.load_records(service, conversation) == records_naming("researcher-2")
+        assert await adk_sessions.load_records(service, SessionRef(APP, "u", "t")) is None
+        assert await stored_ids(service, APP) == []
+
+    async def test_deleted(self, service):
+        conversation = SessionRef(APP, "u", "s")
+        await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+
+        await adk_sessions.delete_records(service, conversation)
+        await adk_sessions.delete_records(service, conversation)  # none: nothing to do
+
+        assert await stored_ids(service, child_app(APP)) == []
+
+    def test_the_ids_encode_a_conversations_percent_and_slash(self):
+        assert adk_sessions.child_session_id("s", "researcher-1") == "s/researcher-1"
+        assert adk_sessions.records_session_id("s") == "s"
+        assert adk_sessions.child_session_id("a/b%2F", "researcher-1") == (
+            "a%2Fb%252F/researcher-1"
+        )
+        assert adk_sessions.records_session_id("a/b%2F") == "a%2Fb%252F"
+        assert adk_sessions.child_of("a%2Fb%252F/researcher-1") == ("a/b%2F", "researcher-1")
+        assert adk_sessions.child_of("a%2Fb%252F") is None
+
+
+class TestAManagersRecords:
+    """The manager writes a conversation's records to its records session
+    (the base's store hooks), on every store."""
+
+    @pytest.mark.parametrize("store", ["memory", "sqlite"])
+    async def test_a_turns_runs_are_in_its_records_session(self, store, project, monkeypatch):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        manager = manager_on(store)
+        try:
+            await say(manager, "Find X.")
+            conversation = manager.session_ref("s", "u")
+            kept = await manager._load_agent_records(conversation)
+            exported = manager.agent_runs.export(conversation)
+        finally:
+            await manager.cleanup()
+
+        assert {**kept, "saved": None} == {**exported, "saved": None}
+        assert [(run["run"], run["status"]) for run in kept["runs"]] == [
+            ("researcher-1#1", "completed"),
+        ]
+
+    async def test_a_first_runs_start_is_written_before_its_transcript_is_made(
+        self, project, monkeypatch
+    ):
+        """So a conversation's records name every transcript it keeps: its
+        children are found by them."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        manager = manager_on("sqlite")
+        seen: list[tuple[list[str], bool]] = []
+        save = manager._save_agent_records
+
+        async def saving(conversation, data):
+            await asyncio.sleep(0.05)  # a slow store: the run waits for its start's write
+            made = await child(manager, "researcher-1") is not None
+            seen.append(([run["status"] for run in data["runs"]], made))
+            await save(conversation, data)
+
+        manager._save_agent_records = saving
+        try:
+            await say(manager, "Find X.")
+        finally:
+            await manager.cleanup()
+
+        assert seen[0] == (["running"], False)
+        assert seen[-1] == (["completed"], True)
+
+
+class TestConversationIdsWithASlash:
+    """An app may name a conversation with a ``/`` in its id. In the child app
+    the conversation part of every id has its ``%`` and ``/`` percent-encoded,
+    so ``a/researcher-1``'s records are never ``a``'s transcript of
+    ``researcher-1``, and no two conversations share an id there."""
+
+    @pytest.mark.parametrize("store", ["memory", "sqlite"])
+    async def test_each_keeps_its_own_records_and_transcripts_and_a_delete_leaves_the_others(
+        self, store, project, monkeypatch
+    ):
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        manager = manager_on(store)
+        one, other = manager.session_ref("a", "u"), manager.session_ref("a/researcher-1", "u")
+        try:
+            await say(manager, "Find X.", "a")
+            await say(manager, "Find Y.", "a/researcher-1")
+            deleted = await manager.delete_session("a", user_id="u")
+            left = [await manager._load_agent_records(ref) for ref in (one, other)]
+            transcripts = [await child(manager, "researcher-1", ref.session_id) for ref in (one, other)]
+            stored = await stored_ids(manager._session_service, child_app(manager.app_name))
+        finally:
+            await manager.cleanup()
+
+        assert deleted is True
+        assert [records_kept(records) if records else None for records in left] == [
+            None, [("researcher-1#1", "completed")],
+        ]
+        assert transcripts[0] is None and texts_of(transcripts[1])[1:] == ["Y is 7."]
+        assert stored == ["a%2Fresearcher-1", "a%2Fresearcher-1/researcher-1"]
+
+
+def records_kept(stored) -> list[tuple[str, str]]:
+    """The runs a conversation's stored records hold: (run, status), in start order."""
+    return [(run["run"], run["status"]) for run in stored["runs"]]
+
+
+class TestTheChildrenRecordsName:
+    """A conversation with records finds its transcripts by the instances
+    they name, without listing every session the user keeps."""
+
+    async def test_they_are_deleted_and_counted_without_a_listing(self, service, monkeypatch):
+        conversation = SessionRef(APP, "u", "s")
+        for session_id in ("s/researcher-1", "s/researcher-2"):
+            await service.create_session(
+                app_name=child_app(APP), user_id="u", session_id=session_id
+            )
+        await adk_sessions.save_records(
+            service, conversation, records_naming("researcher-1", "researcher-2")
+        )
+        listed: list[str] = []
+        real = service.list_sessions
+
+        async def listing(**names):
+            listed.append(names["app_name"])
+            return await real(**names)
+
+        monkeypatch.setattr(service, "list_sessions", listing)
+
+        counts = await adk_sessions.stored_instances(service, APP, "u", "s")
+        deleted = await adk_sessions.delete_children(service, APP, "u", "s")
+
+        assert (counts, deleted, listed) == ({"researcher": 2}, 2, [])
+        monkeypatch.undo()
+        assert await stored_ids(service, child_app(APP)) == ["s"]
+
+    async def test_records_of_another_version_are_no_list(self, service):
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="s/researcher-1"
+        )
+        await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
+
+        assert await adk_sessions.stored_instances(service, APP, "u", "s") == {"researcher": 1}
+
+
 class TestDeletingTheConversation:
     @pytest.mark.parametrize("store", ["memory", "sqlite"])
     async def test_its_delete_deletes_its_runs_transcripts(self, store, project, monkeypatch):
@@ -168,9 +347,31 @@ class TestDeletingTheConversation:
         finally:
             await manager.cleanup()
 
-        assert before == ["s/researcher-1", "t/researcher-1"]
+        # Each conversation's records session is named as it.
+        assert before == ["s", "s/researcher-1", "t", "t/researcher-1"]
         assert deleted is True
-        assert after == ["t/researcher-1"]
+        assert after == ["t", "t/researcher-1"]
+
+    async def test_its_transcripts_go_first_then_its_records_then_it(self, service):
+        conversation = SessionRef(APP, "u", "s")
+        await service.create_session(app_name=APP, user_id="u", session_id="s")
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="s/researcher-1"
+        )
+        await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+        deleted: list[tuple[str, str]] = []
+        real = service.delete_session
+
+        async def deleting(**names):
+            deleted.append((names["app_name"], names["session_id"]))
+            await real(**names)
+
+        service.delete_session = deleting
+
+        assert await adk_sessions.ServiceSessions(service).delete(conversation) is True
+        assert deleted == [
+            (child_app(APP), "s/researcher-1"), (child_app(APP), "s"), (APP, "s"),
+        ]
 
     async def test_a_conversation_already_gone_leaves_none_behind(self, project, monkeypatch):
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
@@ -200,8 +401,9 @@ class TestDeletingTheConversation:
             deleted = await reader.delete("s")
 
         assert deleted is True
-        assert sqlite_rows(manager, "select app_name, id from sessions order by id") == [
-            (manager.app_name, "t"), (child_app(manager.app_name), "t/researcher-1"),
+        assert sqlite_rows(manager, "select app_name, id from sessions order by app_name, id") == [
+            (manager.app_name, "t"), (child_app(manager.app_name), "t"),
+            (child_app(manager.app_name), "t/researcher-1"),
         ]
         assert {app for (app,) in sqlite_rows(manager, "select distinct session_id from events")} == {
             "t", "t/researcher-1",
@@ -231,7 +433,8 @@ def texts_of(session) -> list[str]:
 
 async def child(manager, instance: str, conversation: str = "s"):
     return await manager._session_service.get_session(
-        app_name=child_app(manager.app_name), user_id="u", session_id=f"{conversation}/{instance}"
+        app_name=child_app(manager.app_name), user_id="u",
+        session_id=adk_sessions.child_session_id(conversation, instance),
     )
 
 
@@ -253,7 +456,7 @@ class TestStoredInstances:
         for session_id in [
             "s/researcher-1", "s/researcher-3", "s/writer-2",
             "t/researcher-7",            # another conversation's
-            "s/x/researcher-9",          # the conversation "s/x"'s
+            "s%2Fx/researcher-9",        # the conversation "s/x"'s
             "s/notes", "s/writer-two",   # no instance of the framework's
         ]:
             await service.create_session(
@@ -293,7 +496,8 @@ class TestNumberedPastTheStored:
         finally:
             await second.cleanup()
 
-        assert runs == [("researcher-2#1", "completed")]
+        # The first manager's runs are its records, loaded with the conversation.
+        assert runs == [("researcher-1#1", "completed"), ("researcher-2#1", "completed")]
         assert texts_of(earlier)[1:] == ["X is 42."]
         assert texts_of(later)[1:] == ["Y is 7."]
 
@@ -329,8 +533,8 @@ class TestNumberedPastTheStored:
         finally:
             await second.cleanup()
 
-        assert runs == ["researcher-2#1", "researcher-3#1"]
-        assert stored == ["s/researcher-1", "s/researcher-2", "s/researcher-3"]
+        assert runs == ["researcher-1#1", "researcher-2#1", "researcher-3#1"]
+        assert stored == ["s", "s/researcher-1", "s/researcher-2", "s/researcher-3"]
         assert asked == [second.session_ref("s", "u")]
 
     async def test_turns_another_manager_ran_in_between_are_numbered_past(
@@ -356,13 +560,15 @@ class TestNumberedPastTheStored:
 
         assert runs == {
             "one": [("researcher-1#1", "completed"), ("researcher-3#1", "completed")],
-            "two": [("researcher-2#1", "completed")],
+            # Each loaded the conversation's records once, at its first turn.
+            "two": [("researcher-1#1", "completed"), ("researcher-2#1", "completed")],
         }
         assert texts_of(last)[1:] == ["Z is 3."]
 
     async def test_a_stored_transcript_is_never_replaced(self, project, monkeypatch):
         """A run whose instance the store already keeps (here: a store that
-        could not tell what it keeps) fails, and the transcript stays."""
+        could tell neither from its records nor its transcripts what it keeps)
+        fails, and the transcript stays."""
         route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
         first = manager_on("sqlite")
         try:
@@ -375,7 +581,11 @@ class TestNumberedPastTheStored:
         async def keeps_none(conversation):
             return {}
 
+        async def reads_none(conversation):
+            return None
+
         second._stored_instances = keeps_none
+        second._load_agent_records = reads_none
         try:
             await say(second, "Find Y.")
             (record,) = second.agent_runs.records(second.session_ref("s", "u"))
@@ -455,7 +665,7 @@ class TestAModelSwitchBetweenTurns:
         finally:
             await second.cleanup()
 
-        assert runs == [("researcher-2#1", "completed")]
+        assert runs == [("researcher-1#1", "completed"), ("researcher-2#1", "completed")]
         assert [body["model"] for body in answers.bodies("researcher")] == [
             "claude-sonnet-4-6", "claude-haiku-4-5",
         ]

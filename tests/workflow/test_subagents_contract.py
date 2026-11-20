@@ -3044,7 +3044,9 @@ class TestTheTimeLimit:
 
         async def slow_state_read(**kwargs: Any) -> Any:
             config = kwargs.get("config")
-            if kwargs["app_name"].endswith("--agents") and config is not None \
+            # The run's child session (``s/researcher-1``), not the conversation's records (``s``).
+            if kwargs["app_name"].endswith("--agents") and "/" in kwargs["session_id"] \
+                    and config is not None \
                     and config.num_recent_events == 0:
                 stopped = None
                 if stop == "parent":

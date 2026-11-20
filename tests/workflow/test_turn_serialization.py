@@ -63,7 +63,12 @@ class _Harness:
         async def _ensure() -> None:
             return None
 
+        async def _no_records(conversation):
+            return None
+
         self.manager._ensure_initialized = _ensure
+        # Its stores are stand-ins: they keep no sub-agent records.
+        self.manager._load_agent_records = _no_records
         self.revive()
 
     def revive(self) -> None:
