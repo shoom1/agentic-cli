@@ -506,6 +506,17 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """
         return self._sessions is not None and await self._sessions.exists(ref)
 
+    async def _conversation_state(self, ref: "SessionRef") -> dict[str, Any]:
+        """The state a run the user starts in ``ref``'s conversation starts from.
+
+        The conversation's outside-content mark, seeded from its checkpoint
+        and read from the manager's marks, under the key its runs share it
+        by (the state a ``task`` call hands its run).
+        """
+        self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+        mark = self._outside_marks.get(ref)
+        return {"outside_content": mark} if mark else {}
+
     async def _deliver_job_notice(
         self, notice: str, record: Any, result: Any, ref: "SessionRef"
     ) -> AsyncGenerator[WorkflowEvent, None]:

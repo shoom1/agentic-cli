@@ -48,17 +48,27 @@ from agentic_cli.models import (
     RoleMap,
     resolve_model,
 )
+from agentic_cli.workflow import live_events
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.agents.delegate import (
+    STOPPED_BY_USER_ERROR,
+    USER,
     AgentRun,
+    Delegated,
     Delegations,
+    FollowUpRequest,
     RunAnswer,
     waiting_on_user,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.records import RecordsWriter
 from agentic_cli.workflow.agents.roster import Rosters
-from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, RUN_END_STATUSES, AgentRuns
+from agentic_cli.workflow.agents.runs import (
+    INSTANCE_CLOSED,
+    INSTANCE_RUNNING,
+    RUN_END_STATUSES,
+    AgentRuns,
+)
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -214,7 +224,8 @@ class BaseWorkflowManager(ABC):
 
     Concurrency contract:
         A manager runs **one turn at a time**. ``process()``,
-        ``resume_with_job_result()`` and ``compact()`` enter through
+        ``resume_with_job_result()``, ``compact()`` and ``run_instance()``
+        (the user's follow-up of a sub-agent) enter through
         ``_turn`` and serialize on an internal turn lock, so overlapping
         callers queue rather than interleave — the backend's per-invocation
         event buffers are manager-scoped, and interleaving would let one
@@ -814,7 +825,8 @@ class BaseWorkflowManager(ABC):
         marks it again). After it,
         unless it raised: its sub-agent records and their loading
         (``agent_runs``), the calls it recorded (``OpenCalls``: a failed
-        turn's too), its usage ledger, its main agent's roster and its
+        turn's too), its usage ledger, its main agent's roster, the latest
+        result of each instance the user ran (``instance_result``) and its
         numbering (``Delegations``), so
         a conversation of the same id starts as a new one.
         """
@@ -836,9 +848,203 @@ class BaseWorkflowManager(ABC):
             open_calls.forget(conversation)
         self._usage_ledgers.forget(conversation)
         self._rosters.forget(conversation)
+        for key in [k for k in self._instance_results if k[0] == conversation]:
+            del self._instance_results[key]
         delegations = self.__dict__.get("_delegations_made")
         if delegations is not None:
             delegations.forget(conversation)
+
+    # ---- The user's control of the open conversation's sub-agents ----
+    #
+    # What the CLI's ``/agent`` commands and an instance's view call
+    # (provisional). Each acts on the open conversation (``session_ref()``),
+    # or on the one its ``session_id`` and ``user_id`` name, as ``process``
+    # takes them, on any of its instances, through ``Delegations``.
+
+    @property
+    def _instance_results(self) -> dict[tuple[SessionRef, str], dict[str, Any]]:
+        """The latest envelope of each instance the user ran, by conversation and instance."""
+        held = self.__dict__.get("_instance_results_held")
+        if held is None:
+            held = self.__dict__["_instance_results_held"] = {}
+        return held
+
+    async def run_instance(
+        self,
+        instance: str,
+        message: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the user's follow-up of a sub-agent ``instance``, as a turn of its own (provisional).
+
+        The instance's next run, on its transcript, ``started_by`` the user:
+        a turn of the conversation (``_turn``: the root does not run), whose
+        events are the run's (its ``AGENT_RUN`` start and end, its text, its
+        tool calls, its own sub-agents' runs). It is counted toward no
+        turn's runs (``max_runs_per_turn``) and starts from the
+        conversation's outside-content mark; a mark it brought marks the
+        conversation here. A stopped instance runs (only the user may); one
+        that is unknown, closed or running, or a blank message, is one
+        ``ERROR`` event and nothing runs. The run's full envelope is kept for
+        ``instance_result``.
+
+        Stopping the stream (Ctrl+C cancels the consumer, or it closes the
+        generator) is the user's stop of the run: it ends ``cancelled`` by
+        the user and the instance is ``stopped``, inside the turn.
+
+        Yields:
+            The run's ``WorkflowEvent``s.
+
+        Raises:
+            Exception: The store's, when the conversation's sub-agent records
+                cannot be read (``load_agents``): nothing runs.
+        """
+        async with self._turn(session_id, user_id) as ref:
+            request = FollowUpRequest(
+                instance=instance, message=message, started_by=USER, conversation=ref,
+                state=await self._conversation_state(ref),
+            )
+            live = live_events.LiveEvents()
+
+            def stop_it() -> None:
+                # Its consumer stopped (Ctrl+C): the user's stop of the run alone.
+                record = self.agent_runs.instance(ref, instance)
+                if record is not None and record.status == INSTANCE_RUNNING and record.runs:
+                    self._delegations.cancel(
+                        record.runs[-1], by=USER, error=STOPPED_BY_USER_ERROR, conversation=ref
+                    )
+
+            async def source() -> AsyncGenerator[WorkflowEvent, None]:
+                # The run's own task: a stop cancels the run, not its caller,
+                # so it ends cancelled by the user, not interrupted.
+                work = asyncio.create_task(
+                    self._delegations.follow_up(request), name=f"user run of {instance}"
+                )
+                try:
+                    delegated = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    await asyncio.wait([work])
+                    if not work.cancelled() and work.exception() is None:
+                        self._user_ran(ref, instance, work.result())
+                    raise
+                if delegated.run is None:
+                    yield WorkflowEvent.error(str(delegated.result.get("error", "")))
+                    return
+                self._user_ran(ref, instance, delegated)
+
+            with live_events.reporting(live):
+                async with contextlib.aclosing(
+                    live_events.merged(source(), live, on_stop=stop_it)
+                ) as items:
+                    async for item in items:
+                        event = self._apply_event_hook(item)
+                        if event is not None:
+                            yield event
+
+    def _user_ran(self, ref: SessionRef, instance: str, delegated: Delegated) -> None:
+        """Take what a run the user started left: its mark on the conversation, its envelope."""
+        for value in delegated.state.values():
+            if isinstance(value, str) and value:
+                self._outside_marks.mark(ref, value)
+        self._instance_results[(ref, instance)] = dict(delegated.result)
+
+    def instance_result(
+        self, instance: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """The envelope of the latest run of ``instance`` that the user started (provisional).
+
+        Kept in memory for the conversation (the records keep only the head
+        of a result); None when no run of the user's ended there, or after
+        the conversation was deleted.
+        """
+        return self._instance_results.get((self.session_ref(session_id, user_id), instance))
+
+    async def stop_instance(
+        self, instance: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> bool:
+        """Stop the sub-agent ``instance`` for the user (provisional).
+
+        A running instance's run (it works inside some turn, the root's or a
+        ``run_instance``'s) is cancelled from outside, ``cancelled_by`` the
+        user, and waited for: the instance is ``stopped`` and its records
+        written when this returns, which takes no turn lock. An idle one is
+        stopped at once. Only the user may start a stopped instance's next
+        run (``run_instance``); its parent's ``message_agent`` is refused.
+
+        Returns:
+            False, doing nothing, for an instance that is unknown, closed or
+            stopped already.
+
+        Raises:
+            Exception: The store's, when the conversation's sub-agent records
+                cannot be read: nothing is stopped.
+        """
+        ref = self.session_ref(session_id, user_id)
+        await self.load_agents(ref)
+        stopped = await self._delegations.stop_by_user(ref, instance)
+        await self._agent_records_written(ref)
+        return stopped
+
+    async def close_instance(
+        self, instance: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> list[str]:
+        """Close the sub-agent ``instance`` and its own sub-agents for the user (provisional).
+
+        A closed instance takes no follow-up; its work stays readable. A
+        running one's run is stopped by the user first and the instance
+        closes as it ends, which this waits for; the records are written when
+        it returns, which takes no turn lock.
+
+        Returns:
+            The ids closed, ``instance`` first; none for an instance that is
+            unknown or closed already.
+
+        Raises:
+            Exception: The store's, when the conversation's sub-agent records
+                cannot be read: nothing is closed.
+        """
+        ref = self.session_ref(session_id, user_id)
+        await self.load_agents(ref)
+        closed = await self._delegations.close_by_user(ref, instance)
+        await self._agent_records_written(ref)
+        return closed
+
+    def steer_instance(
+        self,
+        instance: str,
+        message: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> bool:
+        """Give the user's ``message`` to ``instance``'s running run, before its next model step (provisional).
+
+        Returns:
+            False when the instance has no running run (unknown, idle,
+            stopped, closed, or one that takes no more steps).
+
+        Raises:
+            ValueError: ``message`` is not text, or blank.
+        """
+        ref = self.session_ref(session_id, user_id)
+        record = self.agent_runs.instance(ref, instance)
+        if record is None or record.status != INSTANCE_RUNNING or not record.runs:
+            return False
+        steered = self._delegations.steer(ref, record.runs[-1], message)
+        if steered:
+            logger.info("subagent_steered", run=record.runs[-1], started_by=USER)
+        return steered
+
+    async def _conversation_state(self, ref: SessionRef) -> dict[str, Any]:
+        """What a run the user starts in ``ref``'s conversation starts from (a backend hook).
+
+        Its outside-content mark, under the key its backend's runs share it
+        by (the state a ``task`` call hands its run); the marks are seeded
+        from the conversation's own state first. The base has none.
+        """
+        return {}
 
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).
@@ -2418,7 +2624,7 @@ class BaseWorkflowManager(ABC):
         """Run the block as one turn of a conversation, and yield the conversation.
 
         How every turn-shaped entry point starts (``process``,
-        ``resume_with_job_result``, ``compact``): the conversation is
+        ``resume_with_job_result``, ``compact``, ``run_instance``): the conversation is
         resolved as ``session_ref`` resolves it (the manager's current
         session and the default user for what is omitted) and named in the
         log context; then turn admission (:meth:`_turn_admission`: the

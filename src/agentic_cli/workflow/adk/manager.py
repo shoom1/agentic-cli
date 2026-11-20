@@ -1778,6 +1778,22 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         return session is not None
 
+    async def _conversation_state(self, ref: SessionRef) -> dict[str, Any]:
+        """The state a run the user starts in ``ref``'s conversation starts from.
+
+        The conversation's outside-content mark: the session read whole (a
+        conversation from before 0.7.0 is told by its events) seeds the
+        marks as a turn does, then the mark the manager holds is the state's
+        ``OUTSIDE_CONTENT_KEY``, as a ``task`` call hands it to its run.
+        """
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        if session is not None:
+            self._seed_outside_content(ref, session)
+        mark = self._outside_marks.get(ref)
+        return {OUTSIDE_CONTENT_KEY: mark} if mark else {}
+
     async def _deliver_job_notice(
         self, notice: str, record: Any, result: Any, ref: SessionRef
     ) -> AsyncGenerator[WorkflowEvent, None]:
