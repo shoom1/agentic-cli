@@ -129,6 +129,10 @@ Closer = tuple[str, Callable[[], Any]]
 #: garbage collected halfway (``BaseWorkflowManager._release_resources``).
 _CLOSING: set[asyncio.Future] = set()
 
+#: How long a release waits for the sub-agent records still being written, in
+#: seconds: a store that hangs holds the rest of the release no longer.
+RECORDS_RELEASE_WAIT = 10.0
+
 
 def _module_of(klass: type) -> str:
     module = getattr(klass, "__module__", None)
@@ -687,9 +691,11 @@ class BaseWorkflowManager(ABC):
         stored records replace what this manager holds of the conversation
         (``AgentRuns.restore``): a run found working is ended
         ``interrupted`` and its instance made idle, which is written back.
-        Records of another version are ignored with one warning: the
-        conversation starts with none, numbered past the transcripts its
-        store keeps (``_stored_instances``), and its next write replaces them.
+        Records of another version, or that do not read, are ignored with one
+        warning: the conversation starts with none, numbered past the
+        transcripts its store keeps (``_stored_instances``), and what the
+        store keeps is never written over (this manager's runs of it are not
+        saved) until they are read again (``load_session``).
 
         Raises:
             Exception: The store's, when its records cannot be read; nothing
@@ -711,12 +717,16 @@ class BaseWorkflowManager(ABC):
             try:
                 interrupted = self.agent_runs.restore(conversation, data)
             except ValueError as error:
+                # Never written over: what cannot be read here may be read by
+                # another version, and a run of this manager is not saved.
                 loaded.add(conversation)
+                self._agents_unwritten.add(conversation)
                 logger.warning(
                     "subagent_records_ignored", session_id=conversation.session_id,
-                    error=str(error),
+                    error=str(error), kept=True,
                 )
                 return
+            self._agents_unwritten.discard(conversation)
             loaded.add(conversation)
             logger.info(
                 "subagent_records_loaded", session_id=conversation.session_id,
@@ -737,6 +747,14 @@ class BaseWorkflowManager(ABC):
         return loaded
 
     @property
+    def _agents_unwritten(self) -> set[SessionRef]:
+        """The conversations whose stored records could not be read: never written (made on first use)."""
+        held = self.__dict__.get("_agents_unwritten_set")
+        if held is None:
+            held = self.__dict__["_agents_unwritten_set"] = set()
+        return held
+
+    @property
     def _agent_records(self) -> RecordsWriter:
         """What writes the conversations' records to their store (made on first use)."""
         writer = self.__dict__.get("_records_writer")
@@ -754,7 +772,10 @@ class BaseWorkflowManager(ABC):
         Only a conversation whose records were loaded is written: a write
         replaces what its store keeps.
         """
-        if conversation is not None and conversation in self._agents_loaded:
+        if (
+            conversation is not None and conversation in self._agents_loaded
+            and conversation not in self._agents_unwritten
+        ):
             self._agent_records.changed(conversation)
 
     def _holds_unsaved_agents(self, conversation: SessionRef) -> bool:
@@ -794,14 +815,15 @@ class BaseWorkflowManager(ABC):
         writer = self.__dict__.get("_records_writer")
         was_loaded = conversation in self._agents_loaded
         self._agents_loaded.discard(conversation)
-        if writer is not None:
-            await writer.discard(conversation)
         try:
+            if writer is not None:
+                await writer.discard(conversation)
             yield
         except BaseException:
             if was_loaded:
                 self._agents_loaded.add(conversation)
             raise
+        self._agents_unwritten.discard(conversation)
         self.agent_runs.forget(conversation)
         open_calls = getattr(self, "_open_calls", None)  # a manager made without __init__ has none
         if open_calls is not None:
@@ -2427,7 +2449,9 @@ class BaseWorkflowManager(ABC):
            closes started on a worker thread
            (:meth:`_start_closing_services`): they block, and on the event
            loop they froze the app.
-        4. The closers, in one task of its own, in a fixed order: the
+        4. The closers, in one task of its own (first the sub-agent records
+           still being written are waited for, up to ``RECORDS_RELEASE_WAIT``,
+           before anything is detached), in a fixed order: the
            backend's, the store's and the catalog's, while the services
            close on their thread, then the services' closes waited for,
            last and under a shield of their own, so a service close that
@@ -2479,32 +2503,36 @@ class BaseWorkflowManager(ABC):
         catalog, self._catalog = self._catalog, None
 
         not_synchronous: list[TypeError] = []
-        closers: list[Closer] = []
-        writer = self.__dict__.get("_records_writer")
-        if writer is not None:
-            # The sub-agent records being written finish before the store closes.
-            closers.append(("subagent_records", writer.flush_all))
-        closers += self._detached(self._detach_backend, not_synchronous)
-        if not keep_store:
-            closers += self._detached(self._detach_store, not_synchronous)
-        closers.append((
-            "model_catalog",
-            functools.partial(self._aclose_owned, catalog, "model_catalog"),
-        ))
 
-        # The services' hook: their closes start on worker threads now.
-        services: list[asyncio.Future[None]] = []
-        self._services_closing = services
-        try:
-            self._cleanup_managers()
-        finally:
-            self._services_closing = None
-        if services:
-            closers.append(
-                ("services", lambda: asyncio.shield(asyncio.gather(*services)))
-            )
+        async def release() -> None:
+            # The sub-agent records still being written finish first, while
+            # the store is attached: a write looks it up as it starts, so one
+            # queued behind another would find it detached.
+            writer = self.__dict__.get("_records_writer")
+            if writer is not None:
+                await writer.flush_all(timeout=RECORDS_RELEASE_WAIT)
+            closers = self._detached(self._detach_backend, not_synchronous)
+            if not keep_store:
+                closers += self._detached(self._detach_store, not_synchronous)
+            closers.append((
+                "model_catalog",
+                functools.partial(self._aclose_owned, catalog, "model_catalog"),
+            ))
 
-        closing = asyncio.ensure_future(self._close_in_order(closers))
+            # The services' hook: their closes start on worker threads now.
+            services: list[asyncio.Future[None]] = []
+            self._services_closing = services
+            try:
+                self._cleanup_managers()
+            finally:
+                self._services_closing = None
+            if services:
+                closers.append(
+                    ("services", lambda: asyncio.shield(asyncio.gather(*services)))
+                )
+            await self._close_in_order(closers)
+
+        closing = asyncio.ensure_future(release())
         _CLOSING.add(closing)
         closing.add_done_callback(_CLOSING.discard)
         await asyncio.shield(closing)

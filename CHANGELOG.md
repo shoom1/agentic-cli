@@ -639,7 +639,8 @@ the start of the entry's title.
   first checkpoint holds no message, and a first run whose thread the store
   keeps all the same fails rather than continue it), and records of another
   version, or that do not read, are ignored with one warning
-  (`subagent_records_ignored`). `AgentRuns.export(ref)` and
+  (`subagent_records_ignored`) and never written over: that conversation's
+  runs are not saved until opening it again reads them. `AgentRuns.export(ref)` and
   `restore(ref, data)` (provisional; `RECORDS_VERSION`) are the format, and
   `AgentRuns(on_change=)` tells each change; a backend keeps them through
   `BaseWorkflowManager._load_agent_records` and `_save_agent_records` (the

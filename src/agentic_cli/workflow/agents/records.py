@@ -87,11 +87,14 @@ class RecordsWriter:
         if task is not None and not task.done():
             await asyncio.wait([task])
 
-    async def flush_all(self) -> None:
-        """Wait until every conversation's records are written. Never raises."""
+    async def flush_all(self, *, timeout: float | None = None) -> None:
+        """Wait until every conversation's records are written. Never raises.
+
+        ``timeout`` bounds the wait (seconds): a store that hangs is left
+        with its write, which goes on."""
         tasks = [task for task in self._writing.values() if not task.done()]
         if tasks:
-            await asyncio.wait(tasks)
+            await asyncio.wait(tasks, timeout=timeout)
 
     async def discard(self, conversation: SessionRef) -> None:
         """Write nothing more of ``conversation`` (it is being deleted): what

@@ -690,7 +690,10 @@ def _list(value: Any) -> list[Any]:
 def _time(value: Any) -> datetime:
     if type(value) is not str:
         raise TypeError("a time that is not text")
-    return datetime.fromisoformat(value)
+    found = datetime.fromisoformat(value)
+    if found.tzinfo is not None:
+        raise ValueError("a time with a zone")  # every time kept is the app's own clock
+    return found
 
 
 def _counts(value: Any) -> dict[str, int]:

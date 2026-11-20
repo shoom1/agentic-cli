@@ -446,7 +446,8 @@ class TestAManagersRecords:
         assert runs_of(manager, ref) == [
             ("researcher-1#1", RUN_COMPLETED), ("researcher-2#1", RUN_COMPLETED),
         ]
-        assert manager.stored[ref]["v"] == RECORDS_VERSION
+        # What cannot be read is never written over: this manager's runs are not saved.
+        assert manager.stored[ref] == {"v": RECORDS_VERSION + 1, "runs": "?"}
 
     async def test_a_store_that_cannot_be_read_stops_the_turn_and_is_read_again(
         self, kept, logged
@@ -551,6 +552,21 @@ class TestLoadingIsCarefulWithWhatItHolds:
 
         assert warned(logged) == [("subagent_records_ignored", "s")]
         assert runs_of(second, ref) == [("researcher-1#1", RUN_COMPLETED)]
+        assert second.stored[ref] == stored  # never written over
+
+    @pytest.mark.parametrize("field", ["started", "ended"])
+    async def test_an_ended_runs_time_with_a_zone_is_refused_at_restore(self, kept, logged, field):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        stored = copy.deepcopy(manager.stored[ref])
+        stored["runs"][0][field] = "2026-11-19T10:00:00+02:00"
+        second = kept({ref: stored})
+
+        await turn(second, "Find Y.")
+
+        assert warned(logged) == [("subagent_records_ignored", "s")]
+        assert second.stored[ref] == stored
 
     async def test_a_conversation_is_loaded_only_once_its_records_were_read_into_it(self, kept):
         stored: dict[SessionRef, Any] = {}
@@ -616,6 +632,21 @@ class TestLoadingIsCarefulWithWhatItHolds:
         assert runs_in(killed, ref) == [("researcher-1#1", RUN_INTERRUPTED)]
         assert warned(logged) == []
 
+    async def test_opening_again_reads_records_that_were_fixed_and_writes_again(self, kept):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        good = {}
+        await turn(kept(good))
+        manager.stored[ref] = {"v": RECORDS_VERSION + 1}
+        await turn(manager)  # ignored: not written
+        assert manager.stored[ref] == {"v": RECORDS_VERSION + 1}
+
+        manager.stored[ref] = good[manager.session_ref("s", "u")]
+        await manager.load_session("s", user_id="u")
+        await turn(manager, "Find Y.")
+
+        assert runs_in(manager.stored, ref)[-1] == ("researcher-2#1", RUN_COMPLETED)
+
     async def test_opening_again_keeps_what_could_not_be_saved(self, kept, logged):
         stored: dict[SessionRef, Any] = {}
         manager = kept(stored)
@@ -646,6 +677,54 @@ class TestLoadingIsCarefulWithWhatItHolds:
             manager.hold.set()
             await asyncio.wait_for(running, 5)
         assert runs_of(manager, ref) == [("researcher-1#1", RUN_COMPLETED)]
+
+
+class _Detaching(_Kept):
+    """A backend whose write looks its store up as it starts, as both do."""
+
+    store_open = True
+
+    def _detach_store(self):
+        self.store_open = False
+        return []
+
+    async def _save_agent_records(self, conversation: SessionRef, data: Any) -> None:
+        if not self.store_open:
+            raise RuntimeError("The session store is not open.")
+        await super()._save_agent_records(conversation, data)
+
+
+class TestTheReleaseWritesBeforeItDetaches:
+    async def test_a_write_under_way_and_one_queued_behind_it_both_land(self, context, logged):
+        stored: dict[SessionRef, Any] = {}
+        manager = _Detaching(TEAM, settings=context.settings, stored=stored)
+        await turn(manager)
+        ref = manager.session_ref("s", "u")
+        manager.save_gate = asyncio.Event()
+        manager.agent_runs.records(ref)[0].title = "First change."
+        manager._agent_records_changed(ref)  # a write starts
+        await asyncio.sleep(0)
+        manager.agent_runs.records(ref)[0].title = "Second change."
+        manager._agent_records_changed(ref)  # waits behind it
+
+        cleaning = asyncio.ensure_future(manager.cleanup())
+        await asyncio.sleep(0.01)
+        manager.save_gate.set()
+        await cleaning
+
+        assert stored[ref]["runs"][0]["title"] == "Second change."
+        assert warned(logged) == []
+
+    async def test_a_hung_store_does_not_hold_the_release_for_ever(self, context, monkeypatch):
+        monkeypatch.setattr(base_manager_module, "RECORDS_RELEASE_WAIT", 0.05)
+        manager = _Detaching(TEAM, settings=context.settings, stored={})
+        await turn(manager)
+        ref = manager.session_ref("s", "u")
+        manager.save_gate = asyncio.Event()  # never opened
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+
+        await asyncio.wait_for(manager.cleanup(), 5)
 
 
 class TestADeletedConversation:
@@ -708,3 +787,24 @@ class TestADeletedConversation:
             async with again._deleting(ref):
                 raise RuntimeError("delete failed")
         assert ref in again._agents_loaded
+
+    async def test_a_cancel_while_the_delete_waits_for_a_write_keeps_it_loaded(self, kept):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        manager.save_gate = asyncio.Event()  # a write under way that does not end
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+
+        async def deleting() -> None:
+            async with manager._deleting(ref):
+                pass
+
+        waiting = asyncio.ensure_future(deleting())
+        await asyncio.sleep(0.01)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        manager.save_gate.set()
+
+        assert ref in manager._agents_loaded

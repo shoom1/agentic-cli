@@ -42,6 +42,17 @@ manager's next ones (``stored_instances``), are the records' ids and
 counters and the threads', read cheaply (each thread's first checkpoint
 holds no message), so an instance whose start write was lost is numbered
 past too.
+
+A finished job reports to the conversation in a ``HumanMessage`` of its own
+(``job_notification``), marked in its ``response_metadata``, which no
+provider adapter sends. The model reads it as the rest of the conversation;
+``recent`` leaves it out, because the user did not write it, and so does a
+conversation's row: its title is the first prompt the user typed, its turns
+how many they typed.
+
+``open_sessions`` opens a store's conversations from the settings, without
+the manager, for ``workflow/session_readers.py``: the checkpointer and the
+index the manager would open, read through ``CheckpointSessions``.
 """
 
 from __future__ import annotations
