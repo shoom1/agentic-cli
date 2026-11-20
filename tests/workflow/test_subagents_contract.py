@@ -4501,3 +4501,122 @@ class TestAFollowUpAfterAModelSwitch:
             ("researcher-1#1", RUN_COMPLETED), ("researcher-1#2", RUN_COMPLETED),
         ]
         assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+
+
+# -- a run's end: its open tasks, and a child stopped with its parent ------------------
+
+
+class TestOpenTasksInTheEnvelope:
+    """A run that did not complete fully names the tasks it left open, so its
+    parent can continue it (``message_agent``)."""
+
+    SAVED = [{"description": "find X", "status": "completed"},
+             {"description": "find Y", "status": "pending"}]
+
+    async def test_a_run_at_its_step_limit(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True,
+                   limits=AgentLimits(max_model_calls=2))],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED)), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": True, "result": "X is 42.",
+            "error": STEP_LIMIT_ERROR, "open_tasks": ["find Y"],
+        }
+
+    async def test_a_cancelled_run_keeps_its_plan_and_tasks(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True, tools=(contract_block,))],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED), text="X is 42."),
+                        calls(use("contract_block", "r2"))],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+        events = await asyncio.wait_for(turn, 10)
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["status"], read["cancelled_by"], read["open_tasks"]) == (
+            RUN_CANCELLED, "parent", ["find Y"]
+        )
+        (ended,) = runs_of(events, RUN_CANCELLED)
+        assert [task["description"] for task in ended.metadata["tasks"]] == ["find X", "find Y"]
+        (record,) = crew.records()
+        assert [task["description"] for task in record.tasks] == ["find X", "find Y"]
+
+    async def test_none_for_a_run_that_completed(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", include_state_tools=True)],
+            coordinator=[calls(delegate("researcher", "Find X and Y.", "c1")), says("Done.")],
+            researcher=[calls(use("save_tasks", "r1", tasks=self.SAVED)), says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert "open_tasks" not in envelope_read(crew.results_read("coordinator")["c1"])
+
+
+def nested_team(**middle: Any) -> list[AgentConfig]:
+    """A coordinator, a middle agent that delegates, and its leaf, which may block."""
+    return [
+        agent("coordinator", sub_agents=("middle",)),
+        agent("middle", sub_agents=("leaf",), **middle),
+        agent("leaf", tools=(contract_block,)),
+    ]
+
+
+class TestAChildOfAStoppedRun:
+    """A run whose parent's run is cancelled by its control (its parent's
+    stop, a limit) ends cancelled by its parent, saying so, and its instance
+    stays idle; Ctrl+C still makes both the turn's, interrupted."""
+
+    SCRIPTS = dict(
+        coordinator=[calls(delegate("middle", "Plan X.", "c1")), says("Done.")],
+        middle=[calls(delegate("leaf", "Look X up.", "m1"))],
+        leaf=[calls(use("contract_block", "l1"))],
+    )
+
+    async def test_by_its_parents_stop(self, make_crew):
+        crew = make_crew(nested_team(), **self.SCRIPTS)
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("middle-1#1", by="parent", error="no longer needed") is True
+        await asyncio.wait_for(turn, 10)
+
+        assert [(r.ref.run, r.status, r.cancelled_by, r.error) for r in crew.records()] == [
+            ("middle-1#1", RUN_CANCELLED, "parent", "no longer needed"),
+            ("leaf-1#1", RUN_CANCELLED, "parent", "its parent's run was stopped"),
+        ]
+        assert crew.instances() == [("middle-1", INSTANCE_IDLE), ("leaf-1", INSTANCE_IDLE)]
+
+    async def test_by_its_parents_time_limit(self, make_crew):
+        crew = make_crew(nested_team(limits=AgentLimits(timeout=1.0)), **self.SCRIPTS)
+
+        await asyncio.wait_for(crew.turn(), 20)
+
+        assert [(r.ref.run, r.status, r.cancelled_by, r.error) for r in crew.records()] == [
+            ("middle-1#1", RUN_CANCELLED, "limit", TIME_LIMIT_ERROR),
+            ("leaf-1#1", RUN_CANCELLED, "parent", "its parent's run was stopped"),
+        ]
+
+    async def test_ctrl_c_makes_both_the_turns(self, make_crew):
+        crew = make_crew(nested_team(), **self.SCRIPTS)
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        await crew.stop(turn)
+
+        assert [(r.ref.run, r.status, r.cancelled_by) for r in crew.records()] == [
+            ("middle-1#1", RUN_INTERRUPTED, None), ("leaf-1#1", RUN_INTERRUPTED, None),
+        ]
