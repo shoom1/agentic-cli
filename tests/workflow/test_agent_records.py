@@ -592,6 +592,30 @@ class TestLoadingIsCarefulWithWhatItHolds:
 
         assert runs_in(killed, ref) == [("researcher-1#1", RUN_INTERRUPTED)]
 
+    async def test_a_release_right_after_opening_keeps_the_interrupted_mark_and_warns_of_nothing(
+        self, kept, logged
+    ):
+        stored: dict[SessionRef, Any] = {}
+        first = kept(stored)
+        first.hold = asyncio.Event()
+        ref = first.session_ref("s", "u")
+        running = asyncio.ensure_future(turn(first))
+        try:
+            await until(lambda: ref in stored)
+            killed = copy.deepcopy(stored)
+        finally:
+            running.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await running
+        second = kept(killed)
+        await second.initialize_services()
+
+        await second.load_session("s", user_id="u")
+        await second.cleanup()
+
+        assert runs_in(killed, ref) == [("researcher-1#1", RUN_INTERRUPTED)]
+        assert warned(logged) == []
+
     async def test_opening_again_keeps_what_could_not_be_saved(self, kept, logged):
         stored: dict[SessionRef, Any] = {}
         manager = kept(stored)
