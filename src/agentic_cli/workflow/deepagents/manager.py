@@ -280,6 +280,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
         root = self._root_agent_name  # from the graph the base validated
         index_wanted = self._memory_index_wanted(root)
+        roster_wanted = self._roster_wanted(root)
         graphs: dict[str, CompiledStateGraph] = {}
         self._root = build_agent_tree(
             self._agent_configs,
@@ -303,7 +304,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             marks=self._outside_marks,
             memory_index=self._memory_index_now if index_wanted else None,
             memory_index_cached=self._memory_index_cached if index_wanted else None,
-            memory_index_forget=self._forget_memory_index if index_wanted else None,
+            memory_index_forget=(
+                self._forget_memory_index if index_wanted or roster_wanted else None
+            ),
+            roster=self._roster_now if roster_wanted else None,
             delegations=lambda: self._delegations,
             graphs=graphs,
         )

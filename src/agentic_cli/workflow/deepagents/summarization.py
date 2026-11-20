@@ -14,8 +14,9 @@ ADK: summarize at the smaller of ``context_summarize_at`` of B and the
 ``context_max_tokens`` ceiling, and keep the newest 12% of that word for
 word. A model whose window is unknown counts as 128,000 tokens, not Deep
 Agents' fixed 170,000 tokens or 6 messages, which never fire on a small
-model. The memory index the main agent's requests carry counts toward their
-size (``ReportingSummarizationMiddleware._count_tokens``).
+model. The memory index and the roster of sub-agents the main agent's
+requests carry count toward their size
+(``ReportingSummarizationMiddleware._count_tokens``).
 
 **No archive.** Deep Agents writes the summarized messages to its virtual
 filesystem and gives the model the file's path; with its file tools off the
@@ -259,19 +260,22 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     on the strength of a count reported before it, and one that wrote no text
     is not tried again in its turn over the same range (``_should_summarize``).
 
-    Its count of a request includes the memory index the agent's requests
-    carry, which ``MemoryIndexMiddleware`` adds after this middleware. A
-    summary written changes the prompt prefix, so ``on_written`` runs once
-    it is, before the request goes on: the request that carries the new
-    summary carries a new memory index too.
+    Its count of a request includes the memory index and the roster of
+    sub-agents the agent's requests carry, which ``MemoryIndexMiddleware``
+    and ``RosterMiddleware`` add after this middleware. A summary written
+    changes the prompt prefix, so ``on_written`` runs once it is, before the
+    request goes on: the request that carries the new summary carries a new
+    memory index and roster too.
 
     Args:
         agent: The agent whose stack this is.
         index: The memory index the agent's requests carry (``""`` for none);
             it must read no file (the manager's ``_memory_index_cached``).
+        roster: The roster of sub-agents the agent's requests carry (``""``
+            for none), counted as the index is: the manager's ``_roster_now``.
         on_written: Called once a summary is written, before the model is
             called with it (the manager drops the conversation's memory index
-            snapshot).
+            and roster snapshots).
         **kwargs: ``SummarizationMiddleware``'s arguments.
     """
 
@@ -280,12 +284,14 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         *,
         agent: str | None,
         index: Callable[[], str] | None = None,
+        roster: Callable[[], str] | None = None,
         on_written: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
         self._index = index
+        self._roster = roster
         self._on_written = on_written
         helper = self._lc_helper
         # Inside the retry: a mapped overflow is never retried as it was sent.
@@ -300,12 +306,14 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     def _count_tokens(
         self, messages: list["AnyMessage"], system_message: Any, tools: Any
     ) -> int:
-        """The base count, plus the memory index this agent's requests carry
-        (added after this middleware, by ``MemoryIndexMiddleware``)."""
+        """The base count, plus the memory index and the roster this agent's
+        requests carry (added after this middleware, by ``MemoryIndexMiddleware``
+        and ``RosterMiddleware``)."""
         total = super()._count_tokens(messages, system_message, tools)
-        text = self._index() if self._index is not None else ""
-        if text:
-            total += self.token_counter([HumanMessage(content=text)])
+        for added in (self._index, self._roster):
+            text = added() if added is not None else ""
+            if text:
+                total += self.token_counter([HumanMessage(content=text)])
         return total
 
     def _should_summarize(self, messages: list["AnyMessage"], total_tokens: int) -> bool:
@@ -463,6 +471,7 @@ def build_summarization(
     *,
     budget: ContextBudget | None = None,
     index: Callable[[], str] | None = None,
+    roster: Callable[[], str] | None = None,
     on_written: Callable[[], None] | None = None,
 ) -> SummarizationMiddleware:
     """An agent's summarization middleware, on its own model.
@@ -479,8 +488,11 @@ def build_summarization(
             never reads a file. Before a conversation's first request it
             counts nothing, and the provider-reported count, which the base
             class also reads, covers it after.
+        roster: The roster of sub-agents the agent's requests carry, counted
+            as the index is: the manager's ``_roster_now``.
         on_written: Called once a summary is written, before the request
-            that carries it is sent: the manager's ``_forget_memory_index``.
+            that carries it is sent: the manager's ``_forget_memory_index``,
+            which drops the index's and the roster's snapshots.
 
     Raises:
         ContextBudgetError: The model's input budget is too small to work in.
@@ -490,6 +502,7 @@ def build_summarization(
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         index=index,
+        roster=roster,
         on_written=on_written,
         model=model,
         backend=NoArchiveBackend(),

@@ -78,6 +78,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ForeignReasoningMiddleware,
     MemoryIndexMiddleware,
     PermissionMiddleware,
+    RosterMiddleware,
     SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
     ToolResultCapMiddleware,
@@ -432,6 +433,30 @@ class TestTheStack:
             MemoryIndexMiddleware, AnthropicPromptCachingMiddleware,
         ]
         assert MemoryIndexMiddleware not in [type(m) for m in created["helper"]["middleware"]]
+
+    def test_the_root_gets_the_roster_middleware_outside_the_memory_index(
+        self, created, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        build_agent_tree(
+            TEAM,
+            chat_models={config.name: ScriptedChat(label=config.name) for config in TEAM},
+            resolved={"lead": resolved(SONNET_THINKING, "lead"),
+                      "helper": resolved("google:gemini-2.5-flash", "helper")},
+            tools={},
+            prompts={config.name: "p" for config in TEAM},
+            settings=context(tool_result_max_chars=30_000),
+            checkpointer=None,
+            memory_index=lambda: "",
+            memory_index_cached=lambda: "",
+            roster=lambda: "",
+        )
+        lead = [type(m) for m in created["lead"]["middleware"]]
+        assert lead[1:7] == [
+            ForeignReasoningMiddleware, ReportingSummarizationMiddleware, ContextOverflowMiddleware,
+            RosterMiddleware, MemoryIndexMiddleware, AnthropicPromptCachingMiddleware,
+        ]
+        assert RosterMiddleware not in [type(m) for m in created["helper"]["middleware"]]
 
     def test_every_agent_summarizes_on_its_own_models_budget(self, created):
         # The coordinator on a 1M-token Claude (the ceiling), the helper on a
