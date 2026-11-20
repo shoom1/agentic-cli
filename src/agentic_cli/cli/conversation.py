@@ -660,6 +660,39 @@ class ConversationCore:
             turns=False,
         )
 
+    async def tell_root(self, text: str, parts: TurnParts) -> bool:
+        """Tell the main agent what the user did in a sub-agent's view, as a turn.
+
+        A notice the user did not type (``view_notice``): under the turn
+        lock as ``run_instance``, held to write, ``turned`` (the main agent
+        answered in the conversation) and ``written`` once it reached a
+        ready workflow.
+
+        Args:
+            text: The notice.
+            parts: The app's parts it runs on.
+
+        Returns:
+            Whether it ran: False when another process has the conversation
+            open (said), and nothing ran.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
+                or while it waited for the turn lock.
+        """
+        return await self._write(
+            parts,
+            lambda: parts.processor.process_notice(
+                text,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            ),
+            turns=True,
+        )
+
     async def _write(self, parts: TurnParts, run: Callable[[], Awaitable[Any]], *, turns: bool) -> bool:
         """``run_turn``'s frame without the echo: ``run()`` under the turn lock.
 

@@ -26,8 +26,18 @@ What the workflow answers:
   started without the loop's context, as an executor's is
   (``console_stdlib_warning``), and a Python warning
   (``console_python_warning``).
+- ``delegate``: the main agent's sub-agent ``researcher-1`` runs once ("Find
+  X.", "X is 42."), then ``The researcher found X.``; ``/agent researcher-1``
+  opens its view.
 - anything else: ``Echo: <message>``, at once, and the call's usage: a
   4,000-token prompt against a 16,000-token trigger (``ctx 4k/16k (25%)``).
+
+In ``researcher-1``'s view a line is its next run (``run_instance``): ``hold``
+says ``Holding.`` and waits for a line given to it (``steer_instance``), then
+says ``Steered: <line>``; ``slow`` says ``Working on it.`` and waits until
+Ctrl+C stops it (the user's stop: the instance is stopped); anything else
+says ``Researched: <line>``. The main agent's notice after the view
+(``tell_root``) is answered ``Told: <the notice's first clause>``.
 
 ``/compact`` reports that a summary is being written, waits until a file
 named ``summarized`` appears, then reports its usage and what it did: 2
@@ -64,10 +74,18 @@ import agentic_cli.cli.workflow_controller as workflow_controller
 from agentic_cli.cli import AppInfo, BaseCLIApp
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.agents import AgentRuns
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.context import CompactResult
 from agentic_cli.workflow.events import InputType, UserInputRequest, WorkflowEvent
-from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
+from agentic_cli.workflow.sessions import (
+    SessionInfo,
+    SessionRef,
+    reset_active_turn,
+    session_title,
+    set_active_turn,
+)
+from agentic_cli.workflow.usage import UsageLedgers
 
 
 class ScriptedManager:
@@ -86,6 +104,13 @@ class ScriptedManager:
     def __init__(self) -> None:
         self.is_initialized = False
         self._input_callback: Any = None
+        #: The sub-agent runs ``delegate`` and a view make (real records).
+        self.agent_runs = AgentRuns()
+        self._ledgers = UsageLedgers()
+        #: Each instance's latest envelope of a run the user started.
+        self._results: dict[tuple[SessionRef, str], dict] = {}
+        #: A ``hold`` run's wait for the line given to it.
+        self._holding: asyncio.Future[str] | None = None
         self._sessions: set[str | None] = set()
         #: Each stored conversation's messages and when it last changed.
         self._messages: dict[str, list[dict]] = {}
@@ -173,10 +198,90 @@ class ScriptedManager:
         ))
         return CompactResult(messages_summarized=2, tokens_before=7_400, tokens_after=1_200)
 
+    # -- sub-agents ------------------------------------------------------------------
+
+    def _observe(self, conversation: SessionRef, event: WorkflowEvent) -> None:
+        """Record ``event`` as a run reports it, under its conversation's turn."""
+        token = set_active_turn(conversation)
+        try:
+            self.agent_runs.observe(event)
+        finally:
+            reset_active_turn(token)
+
+    async def load_agents(self, conversation) -> None:
+        pass
+
+    def usage_of(self, conversation):
+        return self._ledgers.ledger(conversation)
+
+    def context_budget(self, agent_name=None):
+        raise KeyError(agent_name)  # no context managed here
+
+    def instance_result(self, instance, *, session_id=None, user_id=None):
+        return self._results.get((self.session_ref(session_id), instance))
+
+    def steer_instance(self, instance, message, *, session_id=None, user_id=None) -> bool:
+        if self._holding is None or self._holding.done():
+            return False
+        self._holding.set_result(message)
+        return True
+
+    async def run_instance(self, instance, message, *, session_id=None, user_id=None):
+        conversation = self.session_ref(session_id)  # one user here
+        ref = self.agent_runs.next_run(conversation, instance, parent_run=None)
+        started = WorkflowEvent.agent_run(ref, "started", title=message, input=message,
+                                          started_by="user", mode="blocking")
+        self._observe(conversation, started)
+        yield started
+        ended = WorkflowEvent.agent_run(ref, "cancelled", error="stopped by the user",
+                                        cancelled_by="user", instance_status="stopped")
+        try:
+            if message == "hold":
+                yield self._instance_text(ref, "Holding.")
+                self._holding = asyncio.get_running_loop().create_future()
+                text = f"Steered: {await self._holding}"
+            elif message == "slow":
+                yield self._instance_text(ref, "Working on it.")
+                await asyncio.Event().wait()  # until Ctrl+C stops the run
+            else:
+                text = f"Researched: {message}"
+            yield self._instance_text(ref, text)
+            ended = WorkflowEvent.agent_run(ref, "completed", result=text, instance_status="idle")
+        finally:
+            self._observe(conversation, ended)
+            self._results[(conversation, instance)] = {
+                "success": ended.metadata["status"] == "completed", "agent": instance,
+                "run": ref.run, "status": ended.metadata["status"],
+                "result": ended.metadata.get("result", ""),
+            }
+        yield ended
+
+    @staticmethod
+    def _instance_text(ref, text: str) -> WorkflowEvent:
+        event = WorkflowEvent.text(text)
+        event.run = ref
+        event.metadata.update(agent=ref.agent, subagent=True)
+        return event
+
+    async def tell_root(self, text, *, session_id=None, user_id=None):
+        yield WorkflowEvent.text(f"Told: {text.split(';')[0]}")
+
     async def process(self, message: str, user_id: str, session_id: str | None = None):
         self._sessions.add(session_id)
         self._said(session_id, "user", message)
-        if message == "slow":
+        if message == "delegate":
+            conversation = self.session_ref(session_id)  # as the CLI names it
+            ref = self.agent_runs.run_for(conversation, None, "c1", "researcher")
+            self._observe(conversation, WorkflowEvent.agent_run(
+                ref, "started", title="Find X.", call_id="c1",
+                brief={"title": "Find X.", "objective": "Find X."},
+                started_by="agent:root", mode="blocking",
+            ))
+            self._observe(conversation, WorkflowEvent.agent_run(
+                ref, "completed", call_id="c1", result="X is 42.", instance_status="idle",
+            ))
+            yield WorkflowEvent.text("The researcher found X.")
+        elif message == "slow":
             yield WorkflowEvent.thinking("Working on it")
             await asyncio.Event().wait()  # until Ctrl+C cancels the turn
         elif message == "ask":

@@ -1071,8 +1071,12 @@ class BaseCLIApp:
             one that could not be told now (its conversation's lookup failed,
             before any claim), the failure said. Whether each one was
             delivered is recorded on the job and reported by ``/jobs``; a
-            failed delivery is surfaced to the user by the turn itself.
+            failed delivery is surfaced to the user by the turn itself. 0
+            in a sub-agent's view: the main agent's notices wait for
+            ``/back`` (``leave_agent_view``), which tells them.
         """
+        if self._agent_view is not None:
+            return 0
         return await self._conversation.deliver_finished_jobs(self._turn_parts())
 
     async def _kept_elsewhere(self, record: Any) -> bool:
@@ -1183,6 +1187,7 @@ class BaseCLIApp:
                 install it); nothing changed.
         """
         target = check_backend(backend).value if backend is not None else None
+        await self._leave_view_first()
         async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
                 return await self._new_conversation(target)
@@ -1323,6 +1328,7 @@ class BaseCLIApp:
         if not self._place().kept:  # one conversation at a time: none to go back to
             self.session.add_error(NOT_KEPT)
             return False
+        await self._leave_view_first()
         backend = getattr(session_id, "backend", None)  # the picker's
         async with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(str(session_id), backend)
@@ -1366,6 +1372,12 @@ class BaseCLIApp:
                 f"{len(waiting)} finished jobs wait for this conversation: "
                 "/jobs resume tells them now.",
             )
+
+    async def _leave_view_first(self) -> None:
+        """Leave the open sub-agent's view, if one is: ``/new`` and ``/resume``
+        change the conversation from the main one."""
+        if self._agent_view is not None:
+            await self.leave_agent_view()
 
     async def _tell_its_finished_jobs(self) -> None:
         """Once a conversation is open, its finished jobs resume (``job_auto_resume``).

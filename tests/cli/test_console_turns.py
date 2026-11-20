@@ -1,5 +1,7 @@
 """Turns on a real console, over a pty: Ctrl+C, a question, typing ahead,
-``/new``, ``/resume``, ``/compact`` and the status bar's ``ctx``.
+``/new``, ``/resume``, ``/compact``, the status bar's ``ctx`` and a
+sub-agent's view (``/agent <id>``: a follow-up, a line that steers the run
+that works, Ctrl+C on it, ``/back``).
 
 thinking-prompt 0.4's Ctrl+C cancels the turn's task, its dialogs are
 ``Dialog`` objects, drawn in a box or inline, and it refuses Enter while a
@@ -544,3 +546,26 @@ def test_the_status_bar_shows_how_full_the_context_is(console):
     console.expect("Echo: hello")
     console.expect("ctx 4k/16k (25%)")
     console.exit()
+
+
+def test_a_sub_agents_view_runs_a_follow_up_and_back_tells_the_main_agent(console):
+    """``/agent <id>`` opens the view (its rule, its prompt); a line is the
+    sub-agent's next run, its reply shown; ``/back`` returns and the main
+    agent is told what the user did there."""
+    console.type_line("delegate")
+    console.expect("The researcher found X.")
+    console.type_line("/agent researcher-1")
+    console.expect("── researcher-1 · researcher · idle ──")
+    console.expect("researcher-1>")
+    console.type_line("Find Y.")
+    console.expect("Researched: Find Y.")
+    console.type_line("/back")
+    console.expect("── back to main ──")
+    console.expect("Told: The user worked with researcher-1 directly")
+    console.type_line("which")
+    console.expect("Session: ")
+    console.exit()
+
+    transcript = console.transcript
+    assert transcript.index("Researched: Find Y.") < transcript.index("── back to main ──")
+    assert "Busy" not in transcript

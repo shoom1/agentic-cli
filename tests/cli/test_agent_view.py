@@ -26,35 +26,44 @@ from agentic_cli.cli import AppInfo
 from agentic_cli.cli import app as app_module
 from agentic_cli.cli.agent_view import (
     BACK_RULE,
+    COMPACT_IN_VIEW,
+    JOBS_WAIT,
     NOT_IN_VIEW,
     READ_ONLY,
     STEERED,
+    TELLING,
 )
 from agentic_cli.cli.agents_command import NO_SUCH_AGENT
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.message_processor import CANCELLED_LINE
-from agentic_cli.cli.usage_tracker import UsageTracker
+from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens
+from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.workflow.agents import (
     INSTANCE_IDLE,
     INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
 )
+from agentic_cli.workflow.agents.envelope import view_notice
 from tests.cli.dialog_fakes import autospec_session, opening_boxes
+from tests.loop_guard import no_blocking_calls
 from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     BLOCKING,
     HELD,
     SESSION,
+    USER,
     Crew,
     agent,
     backend,
     calls,
+    contract_start_job,
     delegate,
     follow_team,
     make_crew,
     parent_team,
     project,
     says,
+    until,
     use,
 )
 
@@ -322,3 +331,145 @@ class TestLeavingAndSwitching:
 
         assert app.session.message == ""
         assert status(app).startswith("researcher-1 · closed")
+
+
+# -- /back's notice; the main conversation's commands in a view ------------------------
+
+
+class TestTheMainAgentIsTold:
+    """``/back`` tells the main agent once, in a notice turn, when a run the
+    user started there ended; its own notices wait while a view is open."""
+
+    async def test_after_a_run_of_yours_the_main_agent_is_told_once(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew, coordinator=[says("Noted: Y is 7.")], researcher=[says("Y is 7.")],
+        )
+
+        await typed(app, "Now find Y.", "/back")
+
+        latest = crew.manager.instance_result("researcher-1", session_id=SESSION)
+        assert said(app.session, "add_message")[-3:] == [
+            "/back", BACK_RULE, TELLING.format(instance="researcher-1"),
+        ]
+        assert crew.last_message("coordinator") == view_notice("researcher-1", latest)
+        assert said(app.session, "add_response")[-1] == "Noted: Y is 7."
+        assert app.agent_view is None
+        assert app.session.message == ">>> "
+        assert not status(app).startswith("researcher-1")
+        recent = await crew.manager.recent_messages(SESSION, user_id=USER)
+        assert [m["content"] for m in recent] == ["Find X.", "Done.", "Noted: Y is 7."]
+        # Back in the view and out again: nothing new to tell.
+        await typed(app, "/agent researcher-1", "/back")
+        assert crew.requests("coordinator") == 3
+
+    async def test_without_a_run_of_yours_nothing_is_told(self, make_crew):
+        crew, app = await in_a_view(make_crew)
+
+        await typed(app, "/back")
+
+        assert said(app.session, "add_message")[-1] == BACK_RULE
+        assert crew.requests("coordinator") == 2
+
+    async def test_it_waits_for_the_run_in_view_and_tells_its_result(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew, team=parent_team(), coordinator=[says("Noted.")],
+            researcher=[calls(use("contract_hold", "r1")), says("Z is 9.")],
+        )
+
+        await app.process_input("Hold on.")
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        back = asyncio.create_task(app.process_input("/back"))
+        await asyncio.sleep(0.05)
+        assert not back.done()
+        HELD["go"].set()
+        await asyncio.wait_for(back, 10)
+
+        assert '"result": "Z is 9."' in crew.last_message("coordinator")
+        assert app.agent_view is None
+
+    async def test_the_main_agents_notices_wait_until_back(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew,
+            team=[agent("coordinator", sub_agents=("researcher",)),
+                  agent("researcher", tools=(contract_start_job,))],
+            coordinator=[says("Noted."), says("The build finished.")],
+            researcher=[calls(use("contract_start_job", "r1")), says("Started the build.")],
+        )
+        app.settings.update_setting("job_auto_resume", True)
+        jobs = crew.manager.job_manager
+
+        await typed(app, "Start the build.")
+        (record,) = jobs.list()
+        await until(lambda: jobs.get(record.job_id).state in TERMINAL_STATES)
+        await typed(app, "/jobs resume")
+
+        assert said(app.session, "add_message")[-1] == JOBS_WAIT
+        assert crew.requests("coordinator") == 2
+        await typed(app, "/back")
+        assert said(app.session, "add_response")[-2:] == ["Noted.", "The build finished."]
+        assert jobs.awaiting_resume() == []
+
+
+class TestTheMainConversationsCommands:
+    """In a view ``/compact`` is refused, ``/new`` and ``/resume`` leave it
+    first, and ``/status`` shows the instance's context."""
+
+    async def test_compact_is_refused(self, make_crew):
+        crew, app = await in_a_view(make_crew)
+
+        await typed(app, "/compact")
+
+        app.session.add_warning.assert_called_once_with(COMPACT_IN_VIEW)
+        assert crew.requests("coordinator") == 2
+        assert app.agent_view is not None
+
+    async def test_new_leaves_the_view_first(self, make_crew):
+        crew, app = await in_a_view(make_crew)
+
+        await typed(app, "/new")
+
+        messages = said(app.session, "add_message")
+        assert messages[-2] == BACK_RULE
+        assert messages[-1].startswith("New conversation ")
+        assert app.agent_view is None
+        assert app.session.message == ">>> "
+
+    async def test_resume_leaves_the_view_first(self, make_crew):
+        crew, app = await in_a_view(make_crew, store="sqlite")
+
+        await typed(app, "/resume zzz")
+
+        assert BACK_RULE in said(app.session, "add_message")
+        assert said(app.session, "add_error")[-1].startswith("No conversation 'zzz' found")
+        assert app.agent_view is None
+
+    async def test_status_shows_the_instances_context(self, make_crew):
+        crew, app = await in_a_view(make_crew)
+        budget = crew.manager.context_budget("researcher")
+
+        await typed(app, "/status")
+
+        (panel,) = app.session.add_rich.call_args.args
+        rows = dict(rows_of(panel.renderable))
+        assert rows["Sub-agent"] == "researcher-1 (researcher, idle)"
+        assert rows["Summarize At"] == format_tokens(budget.trigger)
+        assert rows["Last Prompt"] == "1.2k"
+        assert rows["Tokens"] == "1.2k in / 40 out"
+        assert "Main Agent" not in rows
+
+
+class TestOffTheLoop:
+    async def test_it_blocks_no_event_loop(self, make_crew):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Noted.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        app = await app_on(crew)
+        await typed(app, "Find X.")
+
+        with no_blocking_calls():
+            await typed(app, "/agent researcher-1", "Now find Y.", "/back")
+
+        assert said(app.session, "add_response") == ["Done.", "Y is 7.", "Noted."]

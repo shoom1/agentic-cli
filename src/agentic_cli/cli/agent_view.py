@@ -18,9 +18,14 @@ input handler: thinking-prompt takes no line while a handler runs, so the
 prompt stays open for the lines that steer it. A closed instance's view is
 read-only: no prompt, and a line typed there is refused.
 
-``/back`` leaves: it waits for a run still working and prints ``── back to
-main ──``. While a view is open, ``/compact`` is refused, ``/new`` and
-``/resume`` leave it first, and ``/status`` shows the instance's context.
+``/back`` leaves: it waits for a run still working, prints ``── back to main
+──``, and, when a run the user started there ended since the main agent was
+last told, tells the main agent once, in a notice turn (``tell_root`` with
+``agents/envelope.py::view_notice``) drawn as a job's notice is; then the
+finished jobs that waited for the conversation are told
+(``job_auto_resume``). While a view is open the main agent's notices wait,
+counted in ``↻N``. ``/compact`` is refused in a view; ``/new`` and
+``/resume`` leave it first; ``/status`` shows the instance's context.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from agentic_cli.cli.message_processor import MessageProcessor
 from agentic_cli.cli.usage_tracker import UsageTracker, format_tokens
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents import INSTANCE_CLOSED, INSTANCE_RUNNING
+from agentic_cli.workflow.agents.envelope import view_notice
 from agentic_cli.workflow.usage import PURPOSE_SUBAGENT
 
 if TYPE_CHECKING:
@@ -61,10 +67,16 @@ BACK_RULE = "── back to main ──"
 VIEW_PROMPT = "{instance}> "
 #: What a line typed in a closed instance's view is told.
 READ_ONLY = "{instance} is closed: its view is read-only. /back returns to the main conversation."
+#: What ``/compact`` says in a view.
+COMPACT_IN_VIEW = "/compact works in the main conversation only."
 #: What ``/back`` says outside a view.
 NOT_IN_VIEW = "Not in a sub-agent's view: /agent <id> opens one."
 #: What a line given to the run in view says.
 STEERED = "Given to {instance}'s run before its next step."
+#: The line before the main agent's notice turn after a view.
+TELLING = "↻ Telling the main agent what you did with {instance}."
+#: What ``/jobs resume`` says in a view.
+JOBS_WAIT = "In a sub-agent's view the main agent's notices wait: /back tells them."
 
 
 class AgentView:
@@ -131,6 +143,41 @@ class AgentView:
         except Exception:  # noqa: BLE001 - the bar names the instance at least
             logger.debug("view_status_failed", instance=self.instance, exc_info=True)
             return self.instance
+
+    def context_rows(self) -> list[tuple[str, str]]:
+        """``/status``' rows for the instance's context, in place of the main agent's.
+
+        The instance, its type and status; its model, the model's window,
+        its input budget and the prompt size its transcript is summarized
+        (or trimmed) at, when its manager manages its context; its last
+        prompt and its tokens.
+        """
+        from agentic_cli.workflow.context import UNKNOWN_WINDOW
+
+        workflow = self.app.workflow
+        record = workflow.agent_runs.instance(self.conversation, self.instance)
+        if record is None:
+            return [("Sub-agent", f"{self.instance} (gone)")]
+        rows = [("Sub-agent", f"{self.instance} ({record.agent}, {record.status})")]
+        model = getattr(workflow, "agent_models", {}).get(record.agent)
+        if model is not None:
+            rows.append(("Model", str(model.ref)))
+        budget = _budget(workflow, record.agent)
+        if budget is not None:
+            window = (
+                format_tokens(budget.window) if budget.window_known
+                else f"unknown, {format_tokens(UNKNOWN_WINDOW)} floor in use"
+            )
+            rows += [
+                ("Context Window", window),
+                ("Input Budget", format_tokens(budget.budget)),
+                ("Summarize At", format_tokens(budget.trigger)),
+            ]
+        last = _last_prompt(workflow, self.conversation, record)
+        rows.append(("Last Prompt", format_tokens(last) if last else "—"))
+        tokens_in, tokens_out = instance_tokens(workflow, self.conversation, self.instance)
+        rows.append(("Tokens", f"{format_tokens(tokens_in)} in / {format_tokens(tokens_out)} out"))
+        return rows
 
     def show(self, record: "InstanceRecord") -> None:
         """Print the view's rule and the instance's recap."""
@@ -272,7 +319,10 @@ async def leave_view(app: Any) -> bool:
     to the main conversation; False, said, when none is.
 
     A run still working there ends first (Ctrl+C stops it); then the rule,
-    the app's prompt and status bar.
+    the app's prompt and status bar; then, when a run the user started there
+    ended since the main agent last heard of the instance, one notice turn
+    (``ConversationCore.tell_root``) with its latest envelope; then the
+    finished jobs that waited (``job_auto_resume``).
     """
     view = app.agent_view
     if view is None:
@@ -286,6 +336,19 @@ async def leave_view(app: Any) -> bool:
     app.session.add_message("system", BACK_RULE)
     controller.update_status_bar(app.session)
     logger.info("agent_view_left", instance=view.instance)
+    workflow = _workflow(app)
+    if workflow is None:
+        return True
+    latest = workflow.instance_result(
+        view.instance, session_id=view.conversation.session_id,
+        user_id=view.conversation.user_id,
+    )
+    if latest is not None and latest.get("run") != view.told:
+        app.session.add_message("system", TELLING.format(instance=view.instance))
+        await app._conversation.tell_root(
+            view_notice(view.instance, latest), app._turn_parts()
+        )
+    await app._tell_its_finished_jobs()
     return True
 
 
