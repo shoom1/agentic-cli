@@ -575,6 +575,51 @@ the start of the entry's title.
 
 ### Added
 
+- **Sub-agent instances, continued with follow-up runs, on both backends.**
+  A delegation starts an instance (`researcher-2`) that outlives its run:
+  `idle` once the run ends, it takes follow-ups, each its next run
+  (`researcher-2#2`), which sees everything the instance did before. The
+  manager's delegations' `follow_up(FollowUpRequest(instance=, message=,
+  started_by=, caller=, call_id=, conversation=, state=))` (provisional;
+  `FollowUpRequest` in `agentic_cli.workflow.agents.delegate`) runs it,
+  blocking, through the same backend hook as a first run (`AgentRun.follow_up`
+  True: the message as written, no history), in the same working slots,
+  under the same limits, with the same `AGENT_RUN` events (its start's
+  `input` is the message) and the same envelope; an agent's follow-up counts
+  toward `max_runs_per_turn`, the user's (`started_by="user"`) does not. One
+  instance runs one run at a time. A follow-up that cannot run starts none,
+  and its caller reads why: `'<x>' is not one of your sub-agents. Yours:
+  <ids>.` (`You have no sub-agents yet.` for none; an agent may continue only
+  its own children), `<id> is closed; start a new one with task.`, `<id> was
+  stopped by the user; only the user can continue it.` (for any sender but
+  the user), `<id> is running: an instance runs one run at a time.`, `A
+  follow-up needs a message.`. An instance's status is `running`, `idle`,
+  `stopped` (the user cancelled its run: only the user may start its next) or
+  `closed` (`INSTANCE_STATUSES` and `InstanceRecord`, exported from
+  `agentic_cli.workflow.agents`; `agent_runs.instances(ref)`,
+  `instance(ref, id)` and `next_run(ref, id, parent_run=)`, provisional), kept
+  from the runs' events: a run's end says the status it leaves its instance in
+  (`metadata["instance_status"]`; `WorkflowEvent.agent_run(instance_status=)`,
+  and a first run's start its instance's `inherit_context` and
+  `continuable`), and `EventType.AGENT_INSTANCE`
+  (`WorkflowEvent.agent_instance(ref, status, reason=)`) a change without a
+  run, which the CLI shows nothing of. `AgentConfig.continuable` (default
+  True; the agent YAML's `continuable`) set to False makes a type one-shot:
+  its instance is closed when its run ends; `validate_agent_graph` refuses a
+  value that is not True or False, and False on the root.
+  `SubAgentPolicy.max_open` (20) is how many instances a conversation keeps
+  open (`idle` or `stopped`): past it, as a run ends, the oldest idle one (by
+  its last run's end) is closed. The delegations' `close(ref, instance,
+  reason=)` closes an idle or stopped instance and its descendants. On ADK a
+  follow-up runs on its instance's child session, the calls an earlier run
+  left open there answered first, and the caller's outside-content mark
+  passed when the session has none; on Deep Agents each instance's
+  transcript is a checkpointer thread of its own (`[app, user, session,
+  "<instance>"]`), which its follow-ups continue, the calls an earlier run
+  left open answered as its next run starts: from the record when one
+  returned, as the user's when the run was stopped, `INTERRUPTED` after a
+  crash. A model switch keeps the instances, their transcripts and their
+  records.
 - **`SubAgentPolicy` and `AgentLimits`: an app's sub-agent policy and a
   run's limits, enforced on both backends** (`agentic_cli.workflow`, and
   `agentic_cli.workflow.agents` with `DEFAULT_LIMITS`). Frozen dataclasses.
@@ -594,7 +639,9 @@ the start of the entry's title.
   depth; a `task` call past it starts no run, and its caller reads
   `{"success": false, "error": "This turn has already started 20 sub-agent
   runs, the most one turn may start. Answer with what you have."}`;
-  `task`'s description says "At most 20 runs per turn.") and `limits`,
+  `task`'s description says "At most 20 runs per turn."), `max_open` (20:
+  a conversation keeps at most that many sub-agent instances open between
+  their runs; past it the oldest idle one is closed) and `limits`,
   every run's `AgentLimits` (`DEFAULT_LIMITS`,
   `AgentLimits(max_model_calls=100)`, unless the app sets its own). A
   policy's own `limits` replace `DEFAULT_LIMITS` whole:
@@ -692,10 +739,12 @@ the start of the entry's title.
   for an answer cut at its output limit, `refused`, `failed`, `cancelled`,
   `interrupted`),
   run, title, tokens in/out (from the usage ledger, so a run still going
-  shows what it has used so far) and time. `/agents <id>` shows one instance
-  (`researcher-2`) or run (`researcher-2#1`): its type, parent and title,
-  then each run's status and time, the other fields of its brief, the first
-  lines of its result, its error and its tokens by model. The runs are the manager's records, kept in
+  shows what it has used so far) and time, a row for each run of an
+  instance (its first and each follow-up, titled by its message's first
+  line). `/agents <id>` shows one instance (`researcher-2`: every run of it)
+  or run (`researcher-2#1`): its type, parent and title, then each run's
+  status and time, the other fields of its brief (a follow-up's message), the
+  first lines of its result, its error and its tokens by model. The runs are the manager's records, kept in
   memory with it: a conversation resumed from an earlier run of the app, or
   after a backend switch, lists none. During a turn each line of the events
   box names the sub-agent run at work (`researcher-2 › Calling: web_fetch`),
@@ -1619,23 +1668,27 @@ the start of the entry's title.
   list, and the status bar's task box, are the coordinator's alone, and two
   runs at once no longer overwrite each other's. Only the outside-content
   mark reaches the conversation.
-- **On ADK, a conversation's sub-agent transcripts are deleted with it, and no
-  run reuses one.** Each sub-agent run's transcript is a child
-  session of its conversation (app `<app_name>--agents`, id `<conversation
-  id>/<instance>`), which no conversation list, `/resume` picker or
-  `--continue` shows. Deleting the conversation deletes them, events and
-  all, whoever deletes it: `delete_session`, a `SessionReader`
-  (`/sessions --delete` on another backend's conversation), `/new` on the
-  memory store, and a conversation already gone leaves none behind
-  (`adk/sessions.py::delete_children`). Instances are numbered per manager,
-  so each turn's first run is numbered past the instances the
+- **A conversation's sub-agent transcripts are deleted with it, on both
+  backends, and no first run reuses one.** Each sub-agent instance's
+  transcript is, on ADK, a child session of its conversation (app
+  `<app_name>--agents`, id `<conversation id>/<instance>`) and, on Deep
+  Agents, a checkpointer thread of its own (`[app, user, session,
+  "<instance>"]`; every sub-agent is compiled on the manager's checkpointer,
+  where it had none), which its follow-ups continue and no conversation
+  list, `/resume` picker or `--continue` shows. Deleting the conversation
+  deletes them, events and all, whoever deletes it: `delete_session`, a
+  `SessionReader` (`/sessions --delete` on another backend's conversation),
+  `/new` on the memory store, and a conversation already gone leaves none
+  behind (`adk/sessions.py::delete_children`; Deep Agents deletes the
+  instances' threads before the conversation's). Instances are numbered per
+  manager, so each turn's first run is numbered past the instances the
   conversation's store keeps (`BaseWorkflowManager._stored_instances`,
   asked once per conversation per turn; `AgentRuns.number_from`), whoever
   ran them: a manager before a restart or a switch of backend or store, or
   another process that had the conversation between two turns.
   `researcher-2` follows a stored `researcher-1`, whose transcript stays as
-  it was. A run whose instance the store keeps all the same fails rather
-  than replace it.
+  it was. A first run whose instance the store keeps all the same fails
+  rather than replace it.
 - **One `task` tool on both backends, which takes a brief.** **Breaking:**
   ADK offered one tool per sub-agent (`researcher(request=...)`) and Deep
   Agents its own `task(description=, subagent_type=)`; now every agent

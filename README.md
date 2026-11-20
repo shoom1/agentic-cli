@@ -336,8 +336,8 @@ ADK integrations:
   their reasoning text
 - **Delegation** — its parent calls the framework's `task` tool with a
   brief; the sub-agent runs on a runner of its own, on a child session of
-  the run, and its parent gets the run's envelope back in the same turn
-  (see [Sub-agent context](#sub-agent-context))
+  its instance, which its follow-ups continue, and its parent gets the run's
+  envelope back in the same turn (see [Sub-agent context](#sub-agent-context))
 - **Summarizing** — ADK's `EventsCompactionConfig` with the framework's
   summarizer: the main agent's conversation is summarized on its own model
   once a prompt reaches the trigger Deep Agents uses (the smaller of
@@ -1271,6 +1271,7 @@ configs = [coordinator, researcher, analyst]
 | `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: its task alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
 | `brief_required` | tuple[str, ...] | The brief fields a delegation to this agent must fill (default `("objective",)`; `title` and `objective` are always required): any of `deliverable`, `constraints`, `known`, `done_when`. A `task` call that leaves one empty starts no run, and its caller reads which. Not on the root |
 | `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field: each of its runs works under them, and one past a limit ends (see [Sub-agent context](#sub-agent-context)). Not on the root |
+| `continuable` | bool | Whether an instance of this agent takes follow-ups after its run (`True`, the default) or is closed when its run ends (`False`, one-shot); see [Sub-agent context](#sub-agent-context). Not `False` on the root |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -1353,10 +1354,11 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   address the user: its answer goes to its parent.
 - **On ADK**, each agent is built on its own, with no ADK sub-agents, so no
   agent built from a config is offered `transfer_to_agent`; each sub-agent
-  type runs on a runner of its own, each run on a child session (app
-  `<app_name>--agents`, id `<conversation id>/<instance>`), which
-  `/sessions` never lists and which is deleted with its conversation; an
-  inheriting run's child session starts with the conversation's events.
+  type runs on a runner of its own, each instance on a child session (app
+  `<app_name>--agents`, id `<conversation id>/<instance>`), which its
+  follow-up runs continue, which `/sessions` never lists and which is deleted
+  with its conversation; an inheriting instance's child session starts with
+  the conversation's events, copied once, at its first run.
   Only the outside-content mark passes between a run and its caller (its
   plan and tasks are its own): any other session-state key an app's ADK
   tool writes in a sub-agent run stays in the run's child session, and a
@@ -1364,9 +1366,27 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   conversation never sees it; nor does the run read the conversation's
   other keys.
   **On Deep Agents**, each sub-agent's graph runs apart from its parent's,
-  in a task of its own; an inheriting run starts from the conversation's
-  messages, which its own summarization compacts when they are too large
-  for its model.
+  in a task of its own, each instance on a thread of the conversation's
+  checkpointer (continued by its follow-ups and deleted with the
+  conversation); an inheriting instance starts from the conversation's
+  messages, copied once, at its first run, which its own summarization
+  compacts when they are too large for its model.
+- **Instances and follow-ups.** Each delegation starts an instance
+  (`researcher-1`, numbered per type in its conversation) that outlives its
+  run: `idle` once the run ends, it can be continued with a follow-up, its
+  next run (`researcher-1#2`), which sees everything the instance did
+  before and answers with an envelope as the first did. An app's tool
+  sends one through the manager's delegations (`follow_up(FollowUpRequest(
+  instance=, message=, started_by=, ...))`, provisional); an instance runs
+  one run at a time, a closed one or (for an agent) one the user stopped is
+  refused, and an agent may continue only its own sub-agents. A type with
+  `continuable=False` is closed when its run ends, and past
+  `SubAgentPolicy.max_open` (20) instances open in a conversation the
+  oldest idle one is closed. Each instance's transcript is kept with its
+  conversation (ADK: its child session; Deep Agents: a checkpointer thread
+  of its own) and deleted with it; calls a stopped or crashed run left open
+  are answered before its next run's message, the finished ones with their
+  results.
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task`. Each raises
@@ -1504,7 +1524,7 @@ are `AgentConfig`'s, and an unknown one is an error:
 | `tools` | A list of names: a registered tool's name (`web_search`, or your own), or a dotted path `my_pkg.tools.fn` to a function registered with `@register_tool` |
 | `mcp_servers`, `skills` | As on `AgentConfig`: MCP servers (`name`, `transport`, `command`/`args` or `url`, ...) and skill names |
 | `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (its task alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
-| `brief_required`, `limits` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written) |
+| `brief_required`, `limits`, `continuable` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written), `continuable: false` (one-shot) |
 | `include_state_tools` | `true` by default: the plan and task tools are added |
 
 - **A tool is a name, resolved when the manager is built.** A bare name is
