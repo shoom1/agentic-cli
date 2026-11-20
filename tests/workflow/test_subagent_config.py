@@ -1,10 +1,12 @@
-"""A sub-agent type's delegation fields: ``AgentConfig.brief_required`` and ``AgentConfig.limits``.
+"""A sub-agent type's delegation fields: ``brief_required``, ``limits`` and ``continuable``.
 
 ``brief_required`` names the brief fields a delegation to the type must fill
 (the title and the objective are always needed); ``limits`` are the type's
-run limits, over the policy's field by field. ``validate_agent_graph``
-checks both for every backend: ``brief_required`` names brief fields,
-``limits`` is an ``AgentLimits``, and the root sets neither, since it is
+run limits, over the policy's field by field; ``continuable`` says whether
+an instance of the type takes follow-ups (False: it is closed when its run
+ends). ``validate_agent_graph`` checks all three for every backend:
+``brief_required`` names brief fields, ``limits`` is an ``AgentLimits``,
+``continuable`` is True or False, and the root sets none, since it is
 never delegated to.
 """
 
@@ -35,10 +37,13 @@ class TestTheFields:
     def test_no_limits_of_its_own_by_default(self):
         assert AgentConfig(name="a", prompt="p").limits is None
 
+    def test_an_instance_takes_follow_ups_by_default(self):
+        assert AgentConfig(name="a", prompt="p").continuable is True
+
     def test_they_follow_inherit_context(self):
         # Appended: a positional AgentConfig(...) written before them still binds.
         names = [f.name for f in dataclasses.fields(AgentConfig)]
-        assert names[-3:] == ["inherit_context", "brief_required", "limits"]
+        assert names[-4:] == ["inherit_context", "brief_required", "limits", "continuable"]
 
     def test_they_are_kept(self):
         limits = AgentLimits(timeout=60)
@@ -91,6 +96,24 @@ class TestTheGraphChecks:
         message = str(exc.value)
         assert "limits" in message and "'researcher'" in message and repr(value) in message
         assert "AgentLimits" in message
+
+    def test_a_sub_agent_may_be_one_shot(self):
+        assert validate_agent_graph(team(writer={"continuable": False})).root_name == "lead"
+
+    @pytest.mark.parametrize("value", ["no", 0, None])
+    def test_continuable_is_true_or_false(self, value):
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(writer={"continuable": value}))
+        message = str(exc.value)
+        assert "continuable must be True or False" in message
+        assert f"'writer' ({value!r})" in message
+
+    def test_the_root_is_not_one_shot(self):
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(lead={"continuable": False}))
+        message = str(exc.value)
+        assert "'lead'" in message and "sets continuable" in message
+        assert "never delegated to" in message
 
     def test_the_root_keeps_the_default_brief(self):
         # The default is indistinguishable from not setting it.

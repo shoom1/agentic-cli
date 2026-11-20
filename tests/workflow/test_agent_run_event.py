@@ -4,7 +4,9 @@
 root's own (``root_run``) or a sub-agent's; None for what the manager says
 itself (a failed turn's error). ``WorkflowEvent.agent_run`` is a run's start
 (``started``, with its title) or its end (``completed``, ``failed``,
-``refused``, ``cancelled``, ``interrupted``, with the first of its result).
+``refused``, ``cancelled``, ``interrupted``, with the first of its result and
+its instance's status after it). ``WorkflowEvent.agent_instance`` is a change
+of an instance's status without a run.
 """
 
 from __future__ import annotations
@@ -63,3 +65,55 @@ class TestTheRunAnEventNames:
 
     def test_it_is_a_field(self):
         assert WorkflowEvent(type=EventType.TEXT, content="hi", run=RESEARCHER).run == RESEARCHER
+
+
+class TestAnInstancesStatus:
+    """An instance's status rides on its runs' events (``instance_status`` on
+    an end), and on ``AGENT_INSTANCE`` for a change without a run."""
+
+    def test_an_end_carries_its_instances_status(self):
+        event = WorkflowEvent.agent_run(
+            RESEARCHER, "completed", result="X is 42.", instance_status="idle"
+        )
+
+        assert event.metadata["instance_status"] == "idle"
+
+    def test_none_unless_given(self):
+        event = WorkflowEvent.agent_run(RESEARCHER, "completed", result="X is 42.")
+
+        assert "instance_status" not in event.metadata
+
+    def test_a_first_runs_start_carries_what_its_instance_keeps(self):
+        event = WorkflowEvent.agent_run(
+            RESEARCHER, "started", title="Find X.", inherit_context=True, continuable=False
+        )
+
+        assert (event.metadata["inherit_context"], event.metadata["continuable"]) == (True, False)
+
+    def test_a_follow_ups_start_carries_its_input(self):
+        second = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
+
+        event = WorkflowEvent.agent_run(second, "started", title="Go on.", input="Go on.\nAnd on.")
+
+        assert event.metadata["input"] == "Go on.\nAnd on."
+        assert "inherit_context" not in event.metadata and "continuable" not in event.metadata
+
+
+class TestAgentInstance:
+    def test_its_value(self):
+        assert EventType.AGENT_INSTANCE.value == "agent_instance"
+
+    def test_it_names_the_instance_by_its_last_run_and_says_its_status(self):
+        event = WorkflowEvent.agent_instance(RESEARCHER, "closed", reason="closed by its parent")
+
+        assert event.type is EventType.AGENT_INSTANCE
+        assert event.run == RESEARCHER
+        assert event.content == "researcher-1 closed"
+        assert event.metadata == {
+            "status": "closed", "agent": "researcher", "reason": "closed by its parent",
+        }
+
+    def test_no_reason_unless_given(self):
+        event = WorkflowEvent.agent_instance(RESEARCHER, "stopped")
+
+        assert event.metadata == {"status": "stopped", "agent": "researcher"}

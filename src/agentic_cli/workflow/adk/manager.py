@@ -61,6 +61,7 @@ from agentic_cli.workflow.adk.fit_guard_plugin import FitGuardPlugin
 from agentic_cli.workflow.adk.interrupted_calls_plugin import (
     InterruptedCallsPlugin,
     left_open,
+    left_open_by,
     unsealed,
 )
 from agentic_cli.workflow.adk.model_factory import build_adk_model, generate_text
@@ -1497,9 +1498,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         outside-content mark alone: its plan and tasks start empty) and, for
         an inheriting run, the conversation's events
         (``task_tool.inherited_events``), then the runner runs the task
-        message on it as one invocation. Its events go to the turn's live
-        events as they are made, through a processor made for the run, and
-        so do the raw log's records of its calls. As a turn's runner is, it
+        message on it as one invocation. A follow-up (``run.follow_up``) runs
+        on the session its instance's earlier runs left, the calls they left
+        open answered first, and its message is the invocation's input. Its
+        events go to the turn's live events as they are made, through a
+        processor made for the run, and so do the raw log's records of its
+        calls. As a turn's runner is, it
         is stopped with its abort signal set first, so ADK seals the calls
         it leaves open, in its child session, before the cancel goes on.
         A cancel of the run alone (its control's: a limit, its parent or the
@@ -1532,7 +1536,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
         app = child_app(self.app_name)
         session_id = child_session_id(conversation.session_id, run.ref.instance)
-        await self._child_session(app, conversation.user_id, session_id, run)
+        start, state_delta = await self._child_session(
+            app, conversation.user_id, session_id, run
+        )
         build = self._build
         processor = ADKEventProcessor(
             model=self.model,
@@ -1550,6 +1556,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             user_id=conversation.user_id,
             session_id=session_id,
             new_message=types.Content(role="user", parts=[types.Part.from_text(text=run.message)]),
+            state_delta=state_delta,
             run_config=self._run_config(),
             abort_signal=aborted,
         )
@@ -1604,26 +1611,53 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 text=processor.answer, error=failure[0], error_code=failure[1], **own
             )
         return RunAnswer(
-            text=processor.answer, outcome=processor.outcome, state=_changed(state, run.state),
+            text=processor.answer, outcome=processor.outcome, state=_changed(state, start),
             **own,
         )
 
     async def _child_session(
         self, app: str, user_id: str, session_id: str, run: AgentRun
-    ) -> None:
-        """Make ``run``'s child session: the state it starts from, and an inheriting run's history.
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Make ``run``'s child session, or take its instance's: the state it starts from.
 
-        Its instance is new to the conversation's store: instances are
-        numbered past the ones it keeps (``_stored_instances``). One it
-        keeps all the same is never replaced: ADK refuses to make it
-        (``AlreadyExistsError``), and the run fails with that.
+        A first run makes it, with the state the run starts from and, for an
+        inheriting run, the conversation's events. Its instance is new to
+        the conversation's store: instances are numbered past the ones it
+        keeps (``_stored_instances``). One it keeps all the same is never
+        replaced: ADK refuses to make it (``AlreadyExistsError``), and the
+        run fails with that.
+
+        A follow-up takes the session its instance's earlier runs left: the
+        calls an earlier run left open there are answered first
+        (``left_open_by``), and the caller's outside-content mark goes with
+        the message when the session holds none (its state delta). A session
+        the store lost is made as a first run's, the follow-up's message
+        alone.
+
+        Returns:
+            The shared state the run starts from, and the state delta its
+            message carries (None for none).
         """
         service = self._session_service
+        if run.follow_up:
+            session = await service.get_session(
+                app_name=app, user_id=user_id, session_id=session_id
+            )
+            if session is not None:
+                for answer in left_open_by(session.events, self._open_calls, run.ref):
+                    await service.append_event(session, answer)
+                start = {k: session.state[k] for k in SHARED_KEYS if k in session.state}
+                mark = run.state.get(OUTSIDE_CONTENT_KEY)
+                if mark and not start.get(OUTSIDE_CONTENT_KEY):
+                    start[OUTSIDE_CONTENT_KEY] = mark
+                    return start, {OUTSIDE_CONTENT_KEY: mark}
+                return start, None
         session = await service.create_session(
             app_name=app, user_id=user_id, session_id=session_id, state=dict(run.state)
         )
         for event in run.history or ():
             await service.append_event(session, event)
+        return dict(run.state), None
 
     async def _stored_instances(self, conversation: SessionRef) -> dict[str, int]:
         """The highest instance number of each type ``conversation``'s child sessions keep.

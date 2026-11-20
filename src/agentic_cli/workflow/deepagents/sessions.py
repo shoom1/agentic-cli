@@ -7,10 +7,16 @@ share one), and ``json.loads`` reads it back. Every checkpoint of the turn
 also carries the three values in its metadata (``run_config``), so a scan can
 ask the saver for one app and user.
 
-Sub-agents store no checkpoints (``agent_builder`` compiles them with
-``checkpointer=False``). A thread an older version wrote may hold some, under
-their task's namespace (``tools:<task-id>``): a scan keeps the root namespace
-(``""``), and deleting the thread removes them with it.
+Each sub-agent instance's transcript is a thread of its own,
+``json.dumps([app_name, user_id, session_id, instance])``
+(``instance_thread_id``): its follow-up runs continue it, its checkpoints'
+metadata carry the conversation's triple, the instance and
+``thread_kind: "instance"`` (``instance_run_config``), and it names no
+conversation (``ref_from_thread_id``), so no listing shows it. A thread an
+older version wrote may hold sub-agent checkpoints under their task's
+namespace (``tools:<task-id>``): a scan keeps the root namespace (``""``),
+and deleting the thread removes them with it. Deleting a conversation
+deletes its instances' threads first.
 
 A conversation's row (``SessionInfo``) is kept in an index, a LangGraph store
 beside the checkpointer (``checkpointers.open_store``), under
@@ -69,6 +75,10 @@ logger = Loggers.workflow()
 #: The namespace of the root agent's checkpoints.
 _ROOT = ""
 
+#: What an instance thread's checkpoints say in their metadata's
+#: ``thread_kind``.
+_INSTANCE_THREAD = "instance"
+
 #: The index's namespaces (each then takes the app and the user): the rows,
 #: and the backfill's marks.
 _ROWS = ("agentic_cli", "sessions")
@@ -114,6 +124,11 @@ def ref_from_thread_id(value: str) -> SessionRef | None:
     return None
 
 
+def instance_thread_id(ref: SessionRef, instance: str) -> str:
+    """The checkpointer thread of ``instance``, a sub-agent of ``ref``'s conversation."""
+    return json.dumps([ref.app_name, ref.user_id, ref.session_id, instance])
+
+
 def run_config(ref: SessionRef, **extra: Any) -> dict[str, Any]:
     """The run config of a turn in ``ref``'s conversation.
 
@@ -130,6 +145,25 @@ def run_config(ref: SessionRef, **extra: Any) -> dict[str, Any]:
         },
         **extra,
     }
+
+
+def instance_run_config(ref: SessionRef, instance: str, **extra: Any) -> dict[str, Any]:
+    """The run config of a run of the sub-agent ``instance`` of ``ref``'s conversation.
+
+    ``run_config``'s, its thread the instance's, its metadata adding the
+    instance and ``thread_kind: "instance"``.
+
+    Args:
+        ref: The conversation.
+        instance: The sub-agent instance (``researcher-2``).
+        **extra: More run config keys (``callbacks``, for one).
+    """
+    config = run_config(ref, **extra)
+    config["configurable"] = {"thread_id": instance_thread_id(ref, instance)}
+    config["metadata"] = {
+        **config["metadata"], "instance": instance, "thread_kind": _INSTANCE_THREAD,
+    }
+    return config
 
 
 def job_notification(
@@ -253,12 +287,56 @@ class CheckpointSessions:
         listed = sorted(rows.values(), key=lambda row: row.updated, reverse=True)
         return listed if limit is None else listed[:limit]
 
-    async def delete(self, ref: SessionRef) -> bool:
-        """Delete ``ref``'s thread and its row; False if there was neither.
+    async def instances(self, ref: SessionRef) -> list[str]:
+        """The sub-agent instances whose transcript ``ref``'s conversation keeps, sorted.
 
-        The thread goes with any sub-agent checkpoints an older version
-        stored in it.
+        Read from the instance runs' input checkpoints, by their metadata:
+        one per run, never the root's checkpoints (each holds the whole
+        conversation). A thread whose id does not name this conversation and
+        an instance is left out, whatever its metadata says.
         """
+        wanted = {
+            "app_name": ref.app_name, "user_id": ref.user_id, "session_id": ref.session_id,
+            "thread_kind": _INSTANCE_THREAD, "source": "input",
+        }
+        found: set[str] = set()
+        async for item in self._saver.alist(None, filter=wanted):
+            try:
+                parts = json.loads(item.config["configurable"]["thread_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                isinstance(parts, list) and len(parts) == 4
+                and all(isinstance(part, str) for part in parts)
+                and parts[:3] == [ref.app_name, ref.user_id, ref.session_id]
+            ):
+                found.add(parts[3])
+        return sorted(found)
+
+    async def stored_instances(self, ref: SessionRef) -> dict[str, int]:
+        """The highest instance number of each agent type ``ref``'s conversation keeps.
+
+        Read from the instance threads' ids (``<type>-<n>``, ``AgentRuns``'
+        instance ids), as ``adk/sessions.py::stored_instances`` reads ADK's:
+        what another manager ran there, which this one numbers past. An
+        instance that names no such number is left out.
+        """
+        counts: dict[str, int] = {}
+        for instance in await self.instances(ref):
+            agent, _, number = instance.rpartition("-")
+            if agent and number.isascii() and number.isdigit():
+                counts[agent] = max(counts.get(agent, 0), int(number))
+        return counts
+
+    async def delete(self, ref: SessionRef) -> bool:
+        """Delete ``ref``'s thread, its instances' threads and its row.
+
+        False if there was no conversation (its instances' threads are
+        deleted whatever else is found). The thread goes with any sub-agent
+        checkpoints an older version stored in it.
+        """
+        for instance in await self.instances(ref):
+            await self._saver.adelete_thread(instance_thread_id(ref, instance))
         namespace = _rows_of(ref.app_name, ref.user_id)
         stored = await self._root(ref) is not None
         indexed = await self._store.aget(namespace, ref.session_id) is not None

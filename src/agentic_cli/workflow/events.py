@@ -49,6 +49,9 @@ class EventType(Enum):
     # A sub-agent run's start and end (WorkflowEvent.agent_run)
     AGENT_RUN = "agent_run"
 
+    # A sub-agent instance's status changing without a run (WorkflowEvent.agent_instance)
+    AGENT_INSTANCE = "agent_instance"
+
     # Context management events
     CONTEXT_TRIMMED = "context_trimmed"
     CONTEXT_SUMMARIZING = "context_summarizing"
@@ -207,12 +210,19 @@ class WorkflowEvent:
         cancelled_by: str | None = None,
         plan: str | None = None,
         tasks: list[dict[str, Any]] | None = None,
+        instance_status: str | None = None,
+        input: str | None = None,
+        inherit_context: bool | None = None,
+        continuable: bool | None = None,
     ) -> "WorkflowEvent":
         """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
 
         ``run`` is the sub-agent's run, and ``metadata["status"]`` says which:
         ``started`` (with its ``title``, its ``brief``, who it was
-        ``started_by`` and its ``mode``), then one end status (``completed``,
+        ``started_by`` and its ``mode``; a first run of an instance also
+        says whether the instance ``inherit_context`` and is ``continuable``,
+        and a follow-up's start carries its ``input``, the message as
+        written), then one end status (``completed``,
         ``failed``, ``refused``, ``cancelled``, ``interrupted``: the constants
         of ``workflow/agents/runs.py``) with the first of its ``result``, its
         ``error``, whether the result is ``partial``, the tokens the run
@@ -237,6 +247,13 @@ class WorkflowEvent:
             cancelled_by: A cancelled run's canceller: ``parent``, ``user`` or ``limit``.
             plan: An end's last plan of the run's own (``metadata["plan"]``).
             tasks: An end's last task list of the run's own (``metadata["tasks"]``).
+            instance_status: An end's status of its instance after it: ``idle``,
+                ``stopped`` or ``closed``.
+            input: A follow-up's start: its message as written.
+            inherit_context: A first run's start: whether its instance sees
+                its parent's conversation.
+            continuable: A first run's start: whether its instance takes
+                follow-ups.
         """
         metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
         if title is not None:
@@ -261,8 +278,41 @@ class WorkflowEvent:
             metadata["plan"] = plan
         if tasks is not None:
             metadata["tasks"] = tasks
+        if instance_status is not None:
+            metadata["instance_status"] = instance_status
+        if input is not None:
+            metadata["input"] = input
+        if inherit_context is not None:
+            metadata["inherit_context"] = inherit_context
+        if continuable is not None:
+            metadata["continuable"] = continuable
         return cls(
             type=EventType.AGENT_RUN,
+            content=f"{ref.instance} {status}",
+            metadata=metadata,
+            run=ref,
+        )
+
+    @classmethod
+    def agent_instance(
+        cls, ref: "RunRef", status: str, *, reason: str | None = None
+    ) -> "WorkflowEvent":
+        """Create a sub-agent instance's change of status without a run (``AGENT_INSTANCE``).
+
+        An idle instance closed, or an idle one the user stopped: no run
+        starts or ends, so no ``AGENT_RUN`` carries it. ``run`` is the
+        instance's last run, ``metadata["status"]`` the new status.
+
+        Args:
+            ref: The instance's last run.
+            status: The status it has now (``idle``, ``stopped``, ``closed``).
+            reason: Why, for a close.
+        """
+        metadata: dict[str, Any] = {"status": status, "agent": ref.agent}
+        if reason is not None:
+            metadata["reason"] = reason
+        return cls(
+            type=EventType.AGENT_INSTANCE,
             content=f"{ref.instance} {status}",
             metadata=metadata,
             run=ref,

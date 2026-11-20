@@ -70,6 +70,9 @@ class AgentConfig:
             policy's (``SubAgentPolicy.limits``) field by field: a field
             left None takes the policy's. None (the default) takes the
             policy's as they are. Only on sub-agents.
+        continuable: Whether an instance of this agent takes follow-ups
+            after its run. True (the default) keeps it ``idle`` for the
+            next; False closes it when its run ends. Only on sub-agents.
     """
 
     name: str
@@ -85,6 +88,7 @@ class AgentConfig:
     inherit_context: bool = False
     brief_required: tuple[str, ...] = _DEFAULT_BRIEF_REQUIRED
     limits: AgentLimits | None = None
+    continuable: bool = True
 
     def get_prompt(self, settings: "BaseSettings | None" = None) -> str:
         """Get the prompt string, calling the factory if the prompt is callable.
@@ -216,8 +220,10 @@ def validate_agent_graph(
     11. each agent's ``brief_required`` is a tuple (or list) of brief field
         names: ``title``, or one of ``BRIEF_FIELDS``;
     12. each agent's ``limits`` is None or an ``AgentLimits``;
-    13. the root sets neither ``brief_required`` (beyond its default, the
-        objective) nor ``limits``: it is never delegated to.
+    13. each agent's ``continuable`` is True or False;
+    14. the root sets none of ``brief_required`` (beyond its default, the
+        objective), ``limits`` and ``continuable`` (beyond True): it is never
+        delegated to.
 
     Args:
         configs: The declared agents.
@@ -353,7 +359,7 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
 
 
 def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> None:
-    """Each agent's ``brief_required`` and ``limits`` are what they say, and the root sets neither.
+    """Each agent's ``brief_required``, ``limits`` and ``continuable`` are what they say, and the root sets none.
 
     Raises:
         AgentGraphError: Naming the agent(s), the value and what to change.
@@ -380,12 +386,25 @@ def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> N
             "Write limits=AgentLimits(max_model_calls=..., timeout=..., max_tokens=...)."
         )
 
+    not_bool = [
+        f"{name!r} ({config.continuable!r})"
+        for name, config in config_map.items()
+        if not isinstance(config.continuable, bool)
+    ]
+    if not_bool:
+        raise AgentGraphError(
+            f"continuable must be True or False: {', '.join(not_bool)}. "
+            "True (the default) keeps a sub-agent's instance for follow-ups; "
+            "False closes it when its run ends."
+        )
+
     config = config_map[root]
     on_root = [
         name
         for name, is_set in (
             ("brief_required", tuple(config.brief_required) != _DEFAULT_BRIEF_REQUIRED),
             ("limits", config.limits is not None),
+            ("continuable", config.continuable is False),
         )
         if is_set
     ]

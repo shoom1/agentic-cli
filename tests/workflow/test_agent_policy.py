@@ -84,6 +84,12 @@ class TestSubAgentPolicy:
         assert policy.max_active == 4
         assert policy.max_runs_per_turn == 20
         assert policy.limits is DEFAULT_LIMITS
+        assert policy.max_open == 20
+
+    def test_max_open_comes_last(self):
+        # Appended: a positional SubAgentPolicy(...) written before it still binds.
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-1] == "max_open"
+        assert SubAgentPolicy(max_open=3).max_open == 3
 
     def test_the_default_limits_are_a_hundred_model_calls(self):
         assert DEFAULT_LIMITS == AgentLimits(max_model_calls=100)
@@ -97,7 +103,7 @@ class TestSubAgentPolicy:
         policy = SubAgentPolicy(max_active=1, max_runs_per_turn=5, limits=limits)
         assert (policy.max_active, policy.max_runs_per_turn, policy.limits) == (1, 5, limits)
 
-    @pytest.mark.parametrize("field", ["max_active", "max_runs_per_turn"])
+    @pytest.mark.parametrize("field", ["max_active", "max_runs_per_turn", "max_open"])
     @pytest.mark.parametrize("value", [0, -3, 1.0, None, "4", True])
     def test_a_count_must_be_a_positive_int(self, field, value):
         with pytest.raises(ValueError) as exc:

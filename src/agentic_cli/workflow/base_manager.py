@@ -56,7 +56,7 @@ from agentic_cli.workflow.agents.delegate import (
     waiting_on_user,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
-from agentic_cli.workflow.agents.runs import AgentRuns
+from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -565,9 +565,11 @@ class BaseWorkflowManager(ABC):
         """This manager's sub-agent runs, kept by conversation (provisional).
 
         Named by the backends' event processors and recorded from their
-        ``AGENT_RUN`` events (``workflow/agents/runs.py``): ``records(ref)``
-        lists a conversation's in the order they started; a turn ends the
-        runs it leaves open (``_turn``). In memory, for this manager's life
+        ``AGENT_RUN`` and ``AGENT_INSTANCE`` events
+        (``workflow/agents/runs.py``): ``records(ref)`` lists a
+        conversation's runs in the order they started and ``instances(ref)``
+        its sub-agent instances, each with its status; a turn ends the runs
+        it leaves open (``_turn``). In memory, for this manager's life
         (a backend switch builds a new manager); made on first use.
         """
         runs = self.__dict__.get("_agent_runs")
@@ -618,6 +620,7 @@ class BaseWorkflowManager(ABC):
                 hook=self._run_agent,
                 ledgers=self._usage_ledgers,
                 stored=self._stored_instances,
+                open_calls=getattr(self, "_open_calls", None),
             )
         return delegations
 
@@ -628,9 +631,9 @@ class BaseWorkflowManager(ABC):
         store holds of another manager's runs (before a restart or a switch
         of backend or store, or another process's between two turns), which
         this manager's numbering goes past (``Delegations``, once per
-        conversation per turn). The base keeps no
-        sub-agent transcript, and so keeps none (Deep Agents: a sub-agent is
-        compiled without a checkpointer).
+        conversation per turn). A sub-agent instance's transcript is ADK's
+        child session and Deep Agents' checkpointer thread of its own; the
+        base keeps none.
         """
         return {}
 
@@ -639,9 +642,13 @@ class BaseWorkflowManager(ABC):
 
         Called in the run's own task, where the run is the active run and no
         tool call is (``agents/delegate.py``). It runs ``run.config``'s agent
-        on ``run.message`` (after ``run.history`` for an inheriting one),
-        from the shared state ``run.state`` (the outside-content mark: its
-        plan and tasks start empty), reports the run's events to the turn's
+        on ``run.message`` (after ``run.history`` for an inheriting one), on
+        its instance's own transcript: a first run starts it, a follow-up
+        (``run.follow_up``) continues it, and the calls an earlier run left
+        open there are answered before its message. The run starts from the
+        shared state ``run.state`` (the outside-content mark: its
+        plan and tasks start empty for an instance's first run; a follow-up
+        continues its own), reports the run's events to the turn's
         live events as they are made, and returns its last answer, its
         outcome, the shared state it changed and its own last plan and tasks
         (``RunAnswer.plan``, ``RunAnswer.tasks``). A failed model call is
@@ -2206,7 +2213,14 @@ class BaseWorkflowManager(ABC):
                 finally:
                     # A sub-agent run the turn leaves open (a cancel, a
                     # failure) ends with it: no event can say so any more.
-                    self.agent_runs.interrupt_open(ref, usage=ledger.run_usage)
+                    for stopped in self.agent_runs.interrupt_open(ref, usage=ledger.run_usage):
+                        # An instance left closed (a one-shot type) never runs
+                        # again to answer its calls: free them.
+                        known = self.agent_runs.instance(ref, stopped.instance)
+                        open_calls = getattr(self, "_open_calls", None)
+                        closed = known is not None and known.status == INSTANCE_CLOSED
+                        if closed and open_calls is not None:
+                            open_calls.take_cancel(ref, instance=stopped.instance)
 
     async def _release_resources(
         self, keep_session_service: bool = False, keep_checkpointer: bool = False

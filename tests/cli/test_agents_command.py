@@ -3,8 +3,9 @@
 ``/agents`` is a table of the runs, each followed by the runs it started, a
 level deeper: instance, type, status, run, title, tokens in/out, time.
 ``/agents <id>`` shows one instance or run: its type, parent and title, then
-each run's status and time, its brief's other fields, the first lines of its
-result, its error and its tokens by model. The runs are a real manager's records, filled as its event
+each run's status and time, its brief's other fields (a follow-up's message),
+the first lines of its result, its error and its tokens by model. An instance
+that was followed up shows a row per run. The runs are a real manager's records, filled as its event
 processors fill them (``AgentRuns.observe`` under the conversation's turn),
 and the tokens its usage ledger's; nothing reaches a provider.
 """
@@ -77,6 +78,14 @@ class Runs:
         title = request.splitlines()[0]
         self._observe(WorkflowEvent.agent_run(
             ref, "started", title=title, call_id=call_id, brief=brief,
+        ), at)
+        return ref
+
+    def follow(self, instance: str, call_id: str, message: str, *, at: int) -> RunRef:
+        """The instance's next run, on ``message`` (a follow-up)."""
+        ref = self.manager.agent_runs.next_run(self.conversation, instance, parent_run=None)
+        self._observe(WorkflowEvent.agent_run(
+            ref, "started", title=message.splitlines()[0], call_id=call_id, input=message,
         ), at)
         return ref
 
@@ -322,6 +331,33 @@ class TestOne:
             ("Parent", "root"),
             ("Title", "Find Y."),
             ("Run #1", "running · 10s"),
+        ]
+
+    async def test_an_instances_follow_up_shows_its_message(self, manager):
+        runs = Runs(manager, manager.session_ref("s1"))
+        first = runs.start("researcher", "c1", "Find X.", at=0)
+        runs.end(first, "completed", at=5, result="X is 42.")
+        second = runs.follow("researcher-1", "c2", "Now find Y.\nThe same way.", at=10)
+        runs.end(second, "completed", at=15, result="Y is 7.")
+
+        listed = await agents(manager)
+        shown = await agents(manager, "researcher-1")
+
+        (table,) = listed.add_rich.call_args.args
+        assert [row[:5] for row in rows_of(table)] == [
+            ("researcher-1", "researcher", "completed", "#1", "Find X."),
+            ("researcher-1", "researcher", "completed", "#2", "Now find Y."),
+        ]
+        (panel,) = shown.add_rich.call_args.args
+        assert rows_of(panel.renderable) == [
+            ("Type", "researcher"),
+            ("Parent", "root"),
+            ("Title", "Find X."),
+            ("Run #1", "completed · 5s"),
+            ("  Result", "X is 42."),
+            ("Run #2", "completed · 5s"),
+            ("  Message", "Now find Y.\nThe same way."),
+            ("  Result", "Y is 7."),
         ]
 
     async def test_an_unknown_id_says_so(self, manager):

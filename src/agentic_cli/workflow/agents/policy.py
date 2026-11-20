@@ -104,11 +104,15 @@ class SubAgentPolicy:
             model-call limit, while
             ``AgentLimits(timeout=60).over(DEFAULT_LIMITS)`` keeps the 100
             calls.
+        max_open: How many sub-agent instances a conversation keeps open
+            (``idle`` or ``stopped``) between their runs; past it, as a run
+            ends, the oldest idle one (by its last run's end) is closed.
     """
 
     max_active: int = 4
     max_runs_per_turn: int = 20
     limits: AgentLimits = DEFAULT_LIMITS
+    max_open: int = 20
 
     def __post_init__(self) -> None:
         _check_count("SubAgentPolicy", "max_active", self.max_active, optional=False)
@@ -117,6 +121,7 @@ class SubAgentPolicy:
             raise ValueError(
                 f"SubAgentPolicy.limits must be an AgentLimits, not {self.limits!r}."
             )
+        _check_count("SubAgentPolicy", "max_open", self.max_open, optional=False)
 
 
 def as_policy(subagents: object) -> SubAgentPolicy:
