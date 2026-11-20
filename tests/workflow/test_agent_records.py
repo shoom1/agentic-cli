@@ -813,6 +813,37 @@ class TestACancelledReleaseWaitingOnAWrite:
         manager.save_gate = None
         await manager.cleanup()
 
+    async def test_a_cancel_in_the_wait_returns_at_once_and_the_closing_goes_on(self, context):
+        class SlowStore(_Detaching):
+            closed = False
+
+            def _detach_store(self):
+                super()._detach_store()
+                return [("store", self._close_store)]
+
+            async def _close_store(self):
+                await asyncio.sleep(0.5)  # a store close that takes a while
+                type(self).closed = True
+
+        manager = SlowStore(TEAM, settings=context.settings, stored={})
+        await turn(manager)
+        ref = manager.session_ref("s", "u")
+        manager.save_gate = asyncio.Event()  # a write the store does not answer
+        manager._agent_records_changed(ref)
+        await asyncio.sleep(0)
+        cleaning = asyncio.ensure_future(manager.cleanup())
+        await asyncio.sleep(0.05)
+
+        cleaning.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(cleaning, 0.2)  # not held for the store's close
+
+        assert cleaning.cancelled()
+        assert SlowStore.closed is False and manager._initialized is False
+        for closing in list(base_manager_module._CLOSING):
+            await closing
+        assert SlowStore.closed is True  # everything still closed, once
+
     async def test_a_write_left_behind_by_the_bound_never_lands_after_the_store_closed(
         self, context, monkeypatch, logged
     ):

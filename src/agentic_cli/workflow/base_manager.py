@@ -2437,7 +2437,9 @@ class BaseWorkflowManager(ABC):
 
         0. A release that detaches the store first waits for the sub-agent
            records still being written, up to ``RECORDS_RELEASE_WAIT``, and
-           abandons what the store does not answer (``RecordsWriter``).
+           abandons what the store does not answer (``RecordsWriter``). A
+           cancel in that wait detaches and starts the closers all the same,
+           then raises at once, the closers finishing in their task.
         1. The base's state, at once: ``is_initialized`` False, the context
            budgets and the memory index snapshots dropped, the catalog
            detached.
@@ -2546,9 +2548,11 @@ class BaseWorkflowManager(ABC):
         closing = asyncio.ensure_future(self._close_in_order(closers))
         _CLOSING.add(closing)
         closing.add_done_callback(_CLOSING.discard)
-        await asyncio.shield(closing)
         if cancelled is not None:
+            # The cancel stops only the wait: everything is detached, and the
+            # closers finish in their own task (held in ``_CLOSING``).
             raise cancelled
+        await asyncio.shield(closing)
         logger.info("workflow_manager_cleaned_up")
         if not_synchronous:
             raise not_synchronous[0]
