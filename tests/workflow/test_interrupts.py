@@ -334,3 +334,65 @@ class TestFreshCallId:
         assert len(new) <= 40
         assert all(c.isalnum() or c in "_-" for c in new)
         assert new.startswith("functions_write_todos_0x")
+
+
+SECOND = RunRef(
+    agent="researcher", instance="researcher-1", run="researcher-1#2", parent_run=None, depth=1
+)
+OTHER = RunRef(
+    agent="researcher", instance="researcher-2", run="researcher-2#1", parent_run=None, depth=1
+)
+
+
+class TestAnInstancesCallsOutliveItsRun:
+    """A sub-agent's calls are kept by its instance, not by its run: an
+    instance runs one run at a time, and its next run answers, before its
+    first model call, the calls an earlier run left open (Deep Agents, on
+    the instance's own thread)."""
+
+    def test_its_next_run_reads_what_an_earlier_run_recorded(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                calls.finished("r1", "the lookup")
+                cancelled_at_its_prompt(calls, "r2")
+
+            with run_as(SECOND):
+                assert calls.answer("r1", by_user=True) == "the lookup"
+                assert calls.answer("r2", by_user=True) == interrupted(NOT_RUN)
+            with run_as(OTHER):
+                assert calls.answer("r1", by_user=True) == interrupted(INTERRUPTED_BY_USER)
+            assert calls.recorded("r1", run="researcher-1#2") == "the lookup"
+
+    def test_a_stopped_run_is_told_once_to_its_instances_next_run(self):
+        calls = OpenCalls()
+
+        calls.cancelled(ref("a"), instance="researcher-1")
+
+        assert calls.take_cancel(ref("a")) is False  # the conversation's turn was not stopped
+        assert calls.take_cancel(ref("a"), instance="researcher-2") is False
+        assert calls.take_cancel(ref("a"), instance="researcher-1") is True
+        assert calls.take_cancel(ref("a"), instance="researcher-1") is False
+
+    def test_a_turn_that_ends_keeps_a_stopped_instances_calls_until_its_next_run(self):
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            calls.finished("c1", "the root's")
+            with run_as(RESEARCHER):
+                calls.finished("r1", "the lookup")
+                cancelled_at_its_prompt(calls, "r2")
+            with run_as(OTHER):
+                calls.finished("r9", "another's")
+        calls.cancelled(ref("a"), instance="researcher-1")
+
+        calls.clear(ref("a"))
+
+        with turn_of(ref("a")):
+            assert calls.recorded("c1", run=None) is None
+            assert calls.recorded("r9", run="researcher-2#1") is None
+            with run_as(SECOND):
+                assert calls.take_cancel(ref("a"), instance="researcher-1") is True
+                assert calls.answer("r1", by_user=True) == "the lookup"
+                assert calls.answer("r2", by_user=True) == interrupted(NOT_RUN)
+        calls.clear(ref("a"))  # its next run took the stop: they go now
+        assert calls._finished == {} and calls._asking == {}

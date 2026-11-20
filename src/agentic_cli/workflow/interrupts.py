@@ -29,10 +29,12 @@ A job answers only a call of the run that submitted it
 (``JobRecord.started_by``).
 
 ``OpenCalls`` is a manager's record of what became of its calls, kept by
-conversation and, within it, by the run that made each call (the root's
-own, or a sub-agent's: ``workflow.sessions.get_active_run``), since a
+conversation and, within it, by the instance whose run made each call (the
+root's own, or a sub-agent's: ``workflow.sessions.get_active_run``), since a
 provider that numbers its call ids per agent gives a sub-agent's call the
-id of its parent's delegation: the backends answer from it (ADK as the
+id of its parent's delegation. An instance runs one run at a time and its
+next run (a follow-up) answers, before its message, what an earlier run left
+open, so the record outlives the run. The backends answer from it (ADK as the
 cancelled turn stops, through its ``abort_signal``, and a failed turn's
 calls as that conversation's next turn starts; Deep Agents before the first
 model call of that conversation's next turn, however many turns ran in
@@ -176,16 +178,9 @@ class _Active(enum.Enum):
 #: (``workflow.sessions.get_active_run``; the root's own calls are no run).
 ACTIVE_RUN = _Active.RUN
 
-#: A call's place in its conversation's record: the run that made it (None
-#: for the root's own), and its id.
+#: A call's place in its conversation's record: the instance whose run made
+#: it (None for the root's own), and its id.
 _Mark = tuple[str | None, str]
-
-
-def _run_id(run: str | None | _Active) -> str | None:
-    if run is ACTIVE_RUN:
-        active = get_active_run()
-        return active.run if active is not None else None
-    return run
 
 
 def _instance(run: str | None | _Active) -> str | None:
@@ -213,24 +208,31 @@ class OpenCalls:
     saved, so ``clear`` forgets its conversation's calls; one that fails
     keeps those that finished (``failed``).
 
-    Within its conversation a call is the run's that made it (``run=``: by
-    default the run in progress, ``get_active_run()``; None for the root's
-    own calls), so a sub-agent's call never stands for its parent's: a
-    provider that numbers its call ids per agent (``call_0``, ...) gives a
-    sub-agent's first call the id of the delegation that started it.
+    Within its conversation a call is the instance's whose run made it
+    (``run=``: by default the run in progress, ``get_active_run()``, or a
+    run's id; None for the root's own calls), so a sub-agent's call never
+    stands for its parent's: a provider that numbers its call ids per agent
+    (``call_0``, ...) gives a sub-agent's first call the id of the
+    delegation that started it. A sub-agent instance's next run reads what
+    an earlier run of it recorded, and a stop of one of its runs is recorded
+    for it (``cancelled(instance=)``): ``clear`` keeps its calls until its
+    next run takes the stop.
     """
 
     def __init__(self) -> None:
         self._finished: dict[Any, dict[_Mark, Any]] = {}
         self._asking: dict[Any, set[_Mark]] = {}
+        # The conversations whose turn the user stopped, and the (conversation,
+        # instance) pairs whose run was stopped.
         self._cancelled: set[Any] = set()
+        self._stopped: set[tuple[Any, str]] = set()
 
     def finished(
         self, call_id: str | None, result: Any, *, run: str | None | _Active = ACTIVE_RUN
     ) -> None:
         """Record that ``call_id`` of ``run`` returned ``result``."""
         if call_id:
-            self._finished.setdefault(get_active_turn(), {})[(_run_id(run), call_id)] = result
+            self._finished.setdefault(get_active_turn(), {})[(_instance(run), call_id)] = result
 
     def recorded(
         self, call_id: str | None, *, run: str | None | _Active = ACTIVE_RUN
@@ -239,7 +241,7 @@ class OpenCalls:
         turn's conversation, or None."""
         if not call_id:
             return None
-        return self._finished.get(get_active_turn(), {}).get((_run_id(run), call_id))
+        return self._finished.get(get_active_turn(), {}).get((_instance(run), call_id))
 
     @contextmanager
     def asking(
@@ -253,7 +255,7 @@ class OpenCalls:
             yield
             return
         key = get_active_turn()
-        mark = (_run_id(run), call_id)
+        mark = (_instance(run), call_id)
         self._asking.setdefault(key, set()).add(mark)
         try:
             yield
@@ -285,7 +287,7 @@ class OpenCalls:
         """
         if call_id:
             key = get_active_turn()
-            mark = (_run_id(run), call_id)
+            mark = (_instance(run), call_id)
             finished = self._finished.get(key, {})
             if mark in finished:
                 return finished[mark]
@@ -294,22 +296,42 @@ class OpenCalls:
         # Its job, if it submitted one: the job of the run it was given.
         return unrecorded(call_id, by_user=by_user, started_by=_instance(run))
 
-    def cancelled(self, key: Any) -> None:
-        """The user stopped the turn of conversation ``key``."""
-        self._cancelled.add(key)
+    def cancelled(self, key: Any, *, instance: str | None = None) -> None:
+        """The user stopped the turn of conversation ``key``, or, with ``instance``,
+        a run of that instance of it."""
+        if instance is None:
+            self._cancelled.add(key)
+        else:
+            self._stopped.add((key, instance))
 
-    def take_cancel(self, key: Any) -> bool:
-        """Whether the user stopped the last turn of ``key``; asking forgets it."""
-        if key in self._cancelled:
-            self._cancelled.discard(key)
+    def take_cancel(self, key: Any, *, instance: str | None = None) -> bool:
+        """Whether the turn of ``key`` (or a run of its ``instance``) was stopped;
+        asking forgets it."""
+        held: set[Any] = self._cancelled if instance is None else self._stopped
+        mark = key if instance is None else (key, instance)
+        if mark in held:
+            held.discard(mark)
             return True
         return False
 
     def clear(self, key: Any) -> None:
-        """Forget conversation ``key``'s calls, every run's: its turn ended
-        with every one answered."""
-        self._finished.pop(key, None)
-        self._asking.pop(key, None)
+        """Forget conversation ``key``'s calls: its turn ended with every one answered.
+
+        A sub-agent instance whose run was stopped keeps its calls until its
+        next run takes the stop (``take_cancel(instance=)``): that run
+        answers them.
+        """
+        kept = {instance for conversation, instance in self._stopped if conversation == key}
+        for held in (self._finished, self._asking):
+            marks = held.pop(key, None)
+            if marks is None:
+                continue
+            if isinstance(marks, dict):
+                marks = {m: v for m, v in marks.items() if m[0] in kept}
+            else:
+                marks = {m for m in marks if m[0] in kept}
+            if marks:
+                held[key] = marks
 
     def failed(self, key: Any) -> None:
         """The turn of conversation ``key`` failed: its next turn answers its calls.
