@@ -46,12 +46,16 @@ _NORMAL_FINISH = frozenset(
 #: ADK's code for a reply with nothing in it: no parts, or only thoughts or
 #: blank text (``apply_empty_response_policy``).
 _NO_CONTENT = "MODEL_RETURNED_NO_CONTENT"
-#: ADK's Claude adapter's words for a reply with nothing in it that stopped
-#: for another reason than STOP, from google-adk 2.15 (``anthropic_llm``'s
+#: ADK's Claude adapter's words for a refusal or a reply cut at its token
+#: limit with nothing in it, from google-adk 2.15 (``anthropic_llm``'s
 #: ``_empty_response_error``): "Claude stopped with SAFETY ('refusal') and no
 #: content.", the reason also its error code. Like ``_NO_CONTENT``'s, they say
 #: no more than the code; an older ADK gives such a reply no error at all.
-ADK_CLAUDE_NO_CONTENT = re.compile(r"Claude stopped with [A-Z_]+ \(.*\) and no content\.")
+#: Its words for another stop say more (``model_context_window_exceeded``, as
+#: ``MAX_TOKENS``: the context filled up), and are kept.
+ADK_CLAUDE_NO_CONTENT = re.compile(
+    r"Claude stopped with (?:SAFETY \('refusal'\)|MAX_TOKENS \('max_tokens'\)) and no content\."
+)
 
 
 class ADKEventProcessor:
@@ -114,12 +118,13 @@ class ADKEventProcessor:
     too) ends the turn too, raising nothing: it becomes the turn's ``ERROR``,
     "<model> returned no answer", its code the error code or finish reason,
     then the reply's error message, unless that is ADK's own words for an
-    empty reply (``_NO_CONTENT``'s, ``ADK_CLAUDE_NO_CONTENT``), which say no
-    more than the code. Both are the turn's one ``ERROR``, with a failed
-    turn's fields (``WorkflowEvent.turn_failed``: ``rate_limited`` false, the
-    code as ``error_type``). No other error code of the main agent is mapped:
-    ADK records one for an exception that then leaves the run, which the
-    manager reports as the turn's one ``ERROR``.
+    empty reply that say no more than the code (``_NO_CONTENT``'s, and
+    ``ADK_CLAUDE_NO_CONTENT``: a Claude refusal's or a cut reply's). Both are
+    the turn's one ``ERROR``, with a failed turn's fields
+    (``WorkflowEvent.turn_failed``: ``rate_limited`` false, the code as
+    ``error_type``). No other error code of the main agent is mapped: ADK
+    records one for an exception that then leaves the run, which the manager
+    reports as the turn's one ``ERROR``.
 
     Every event an agent wrote names its run (``WorkflowEvent.run``): the
     sub-agent run the processor was made for, else the agent's own at depth

@@ -2987,7 +2987,9 @@ step; each entry says what to use instead.
   its own ("Claude stopped with SAFETY ('refusal') and no content."), which
   the turn's `ERROR` repeated after "<model> returned no answer"; they say
   no more than the code, so they are left out (`ADK_CLAUDE_NO_CONTENT`), as
-  ADK's words for an empty STOP reply are. ADK's `load_skill` also lists
+  ADK's words for an empty STOP reply are. Its words for another stop are
+  kept: an empty reply whose context window filled up
+  (`model_context_window_exceeded`) says so. ADK's `load_skill` also lists
   the skill's resources (`resources`), which the Deep Agents skill tool now
   does with ADK's own function on an ADK that lists them, so both backends
   answer alike on every ADK. And ADK hands a cancelled tool call's

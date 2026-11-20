@@ -159,6 +159,28 @@ def test_adks_claude_adapter_words_a_reply_with_nothing_in_it_so(stop_reason, co
         assert ADK_CLAUDE_NO_CONTENT.fullmatch(response.error_message), response.error_message
 
 
+def test_adks_words_for_a_claude_reply_whose_context_filled_up_are_kept():
+    """google-adk 2.15 gives Claude's ``model_context_window_exceeded`` with
+    nothing in it the code ``MAX_TOKENS`` and words that say why ("Claude
+    stopped with MAX_TOKENS ('model_context_window_exceeded') and no
+    content."): the only words saying the context filled up, so the processor
+    keeps them. An older ADK gives the stop no error at all."""
+    from google.adk.models.anthropic_llm import message_to_generate_content_response
+
+    from agentic_cli.workflow.adk.event_processor import ADK_CLAUDE_NO_CONTENT
+
+    message = anthropic.types.Message.model_validate(
+        claude_stopped("model_context_window_exceeded")
+    )
+    response = message_to_generate_content_response(message)
+
+    if response.error_code is None:
+        assert response.error_message is None
+    else:
+        assert "model_context_window_exceeded" in response.error_message
+        assert not ADK_CLAUDE_NO_CONTENT.fullmatch(response.error_message), response.error_message
+
+
 async def test_a_sub_agents_reply_that_is_no_answer_fails_its_run_warned_with_its_code(
     monkeypatch,
 ):
