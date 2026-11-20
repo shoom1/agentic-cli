@@ -3,14 +3,18 @@
 Each run is named readably within its conversation: its instance
 ``<agent>-<n>`` (``researcher-2``, numbered per agent, past the instances
 the conversation's store already keeps: ``number_from``) and its run
-``<instance>#<n>`` (each instance runs once: ``#1``). The framework names a
-run as it starts it (``agents/delegate.py::Delegations``) with ``run_for``,
-keyed by (conversation, parent run, the parent's call id): the same key
-names the same run until it has ended, and a new one after (a provider that
-numbers its call ids repeats them every turn).
+``<instance>#<n>`` (a first run is ``#1``, each follow-up the next number).
+A run is one piece of work; an instance outlives its runs and is ``idle``
+between them (``InstanceRecord``: ``running``, ``idle``, ``stopped`` when the
+user stopped it, ``closed``). The framework names a first run as it starts it
+(``agents/delegate.py::Delegations``) with ``run_for``, keyed by
+(conversation, parent run, the parent's call id): the same key names the same
+run until it has ended, and a new one after (a provider that numbers its call
+ids repeats them every turn); an instance's next run is named by ``next_run``.
 
 The records are written from the runs' own events (``AGENT_RUN``: started,
-then how it works while it does, then one end status), which
+then how it works while it does, then one end status, carrying the status it
+leaves its instance in; ``AGENT_INSTANCE`` a change without a run), which
 ``Delegations`` hands to ``observe`` as it makes them, under the turn they
 are reported in. The one other writer is ``interrupt_open``, for the runs a
 turn leaves open when it is stopped or fails, when no event can reach its
@@ -49,6 +53,17 @@ RUN_CANCELLED = "cancelled"
 RUN_INTERRUPTED = "interrupted"
 RUN_END_STATUSES = frozenset(
     {RUN_COMPLETED, RUN_FAILED, RUN_REFUSED, RUN_CANCELLED, RUN_INTERRUPTED}
+)
+
+#: An instance's statuses. It is ``running`` while a run of it works, ``idle``
+#: between runs, ``stopped`` once the user stopped its run (only the user
+#: continues it) and ``closed`` when it can take no more.
+INSTANCE_RUNNING = "running"
+INSTANCE_IDLE = "idle"
+INSTANCE_STOPPED = "stopped"
+INSTANCE_CLOSED = "closed"
+INSTANCE_STATUSES = frozenset(
+    {INSTANCE_RUNNING, INSTANCE_IDLE, INSTANCE_STOPPED, INSTANCE_CLOSED}
 )
 
 #: The longest title a run gets: the first line of its brief's title.
@@ -134,6 +149,8 @@ class RunRecord:
         cancelled_by: Who cancelled it, for a cancelled run.
         plan: Its own last plan (``""`` for none).
         tasks: Its own last task list (the state tools' list of dicts).
+        input: A follow-up's message as written; ``""`` for a first run,
+            whose input is its brief.
     """
 
     ref: RunRef
@@ -152,6 +169,35 @@ class RunRecord:
     cancelled_by: str | None = None
     plan: str = ""
     tasks: list[dict[str, Any]] = field(default_factory=list)
+    input: str = ""
+
+
+@dataclass
+class InstanceRecord:
+    """One sub-agent instance of a conversation, as its runs' events told it.
+
+    Attributes:
+        instance: Its id (``researcher-2``).
+        agent: Its type.
+        parent: The instance that started it (``root`` for the root's
+            children and the user's).
+        depth: How far below the root it is.
+        inherit_context: Whether it sees its parent's conversation.
+        title: Its first brief's title.
+        status: One of ``INSTANCE_STATUSES``.
+        runs: Its run ids, oldest first.
+        continuable: Whether its type takes follow-ups, as it was when it started.
+    """
+
+    instance: str
+    agent: str
+    parent: str
+    depth: int
+    inherit_context: bool
+    title: str
+    status: str
+    runs: list[str] = field(default_factory=list)
+    continuable: bool = True
 
 
 def own_plan_and_tasks(state: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -203,6 +249,8 @@ class AgentRuns:
         self._numbered: dict[tuple[Any, str], int] = {}
         # Each conversation's records, by run id, in start order.
         self._records: dict[Any, dict[str, RunRecord]] = {}
+        # Each conversation's instances, by id, in start order.
+        self._instances: dict[Any, dict[str, InstanceRecord]] = {}
 
     def run_for(
         self, conversation: SessionRef | None, parent: RunRef | None, call_id: str, agent: str
@@ -248,23 +296,61 @@ class AgentRuns:
             if count > self._numbered.get(key, 0):
                 self._numbered[key] = count
 
+    def next_run(
+        self, conversation: SessionRef | None, instance: str, *, parent_run: str | None
+    ) -> RunRef:
+        """The next run of ``instance``: ``<instance>#<n+1>``, of the same agent and depth.
+
+        ``parent_run`` is the run that sends it (None for the root's own
+        message, or the user's). Raises ``KeyError`` for an unknown instance.
+        """
+        record = self._instances[conversation][instance]
+        last = max((int(n) for n in map(run_number, record.runs) if n.isdigit()), default=0)
+        return RunRef(
+            agent=record.agent,
+            instance=instance,
+            run=_run_id(instance, last + 1),
+            parent_run=parent_run,
+            depth=record.depth,
+        )
+
+    def instances(self, conversation: SessionRef | None) -> list[InstanceRecord]:
+        """``conversation``'s instances, in the order they started."""
+        return list(self._instances.get(conversation, {}).values())
+
+    def instance(self, conversation: SessionRef | None, instance: str) -> InstanceRecord | None:
+        """One instance of ``conversation``, or None."""
+        return self._instances.get(conversation, {}).get(instance)
+
     def observe(self, event: WorkflowEvent) -> None:
         """Record what a run's ``AGENT_RUN`` event says, under the turn it is reported in.
 
-        A start makes the run's record (its call, title, brief, who started
-        it and its mode), ``running``; a working status (``queued``,
+        A start makes the run's record (its call, title, brief, input, who
+        started it and its mode), ``running``, and makes its instance or
+        reopens it (``running``); a working status (``queued``,
         ``running``, ``input_required``) becomes a working record's status;
         an end gives it its status, time, result, error, whether it is
         partial, what it used, who cancelled it and its own last plan and
-        tasks (an end whose start was not seen makes the record too). Any
-        other event changes nothing, and neither does a working status of a
-        run that has ended or was never started.
+        tasks, and sets its instance's status from the end's
+        ``instance_status`` (``idle`` without one; an end whose start was not
+        seen makes the record and the instance too). ``AGENT_INSTANCE`` sets a
+        known instance's status without a run. Any other event changes
+        nothing, and neither does a working status of a run that has ended
+        or was never started.
         """
         ref = event.run
-        if event.type is not EventType.AGENT_RUN or ref is None or ref.run is None:
+        if ref is None or ref.run is None:
             return
-        records = self._records.setdefault(get_active_turn(), {})
+        conversation = get_active_turn()
         metadata = event.metadata
+        if event.type is EventType.AGENT_INSTANCE:
+            known = self._instances.get(conversation, {}).get(ref.instance)
+            if known is not None and metadata.get("status") in INSTANCE_STATUSES:
+                known.status = metadata["status"]
+            return
+        if event.type is not EventType.AGENT_RUN:
+            return
+        records = self._records.setdefault(conversation, {})
         status = metadata.get("status")
         if status == RUN_STARTED:
             records[ref.run] = RunRecord(
@@ -276,7 +362,12 @@ class AgentRuns:
                 brief=dict(metadata.get("brief") or {}),
                 started_by=metadata.get("started_by"),
                 mode=metadata.get("mode") or "blocking",
+                input=metadata.get("input") or "",
             )
+            instance = self._instance_of(conversation, ref, metadata)
+            if ref.run not in instance.runs:
+                instance.runs.append(ref.run)
+            instance.status = INSTANCE_RUNNING
             return
         if status in RUN_WORKING_STATUSES:
             working = records.get(ref.run)
@@ -302,6 +393,11 @@ class AgentRuns:
         record.usage = dict(metadata.get("usage") or {})
         record.cancelled_by = metadata.get("cancelled_by")
         record.plan, record.tasks = own_plan_and_tasks(metadata)
+        instance = self._instance_of(conversation, ref, metadata)
+        if ref.run not in instance.runs:
+            instance.runs.append(ref.run)
+        left = metadata.get("instance_status")
+        instance.status = left if left in INSTANCE_STATUSES else INSTANCE_IDLE
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""
@@ -334,18 +430,41 @@ class AgentRuns:
             if record.status not in RUN_END_STATUSES:
                 record.status = RUN_INTERRUPTED
                 record.ended = now
+                known = self._instances.get(conversation, {}).get(record.ref.instance)
+                if known is not None and known.status == INSTANCE_RUNNING:
+                    known.status = INSTANCE_IDLE
                 if usage is not None and record.ref.run is not None:
                     record.usage = usage(record.ref.run)
                 ended.append(record.ref)
         return ended
 
     def forget(self, conversation: SessionRef | None) -> None:
-        """Drop ``conversation``'s runs, records and numbering."""
+        """Drop ``conversation``'s runs, records, instances and numbering."""
         self._records.pop(conversation, None)
+        self._instances.pop(conversation, None)
         self._runs = {key: ref for key, ref in self._runs.items() if key[0] != conversation}
         self._numbered = {
             key: count for key, count in self._numbered.items() if key[0] != conversation
         }
+
+    def _instance_of(
+        self, conversation: SessionRef | None, ref: RunRef, metadata: Mapping[str, Any]
+    ) -> InstanceRecord:
+        """``ref``'s instance, made from a first run's event when it is new."""
+        instances = self._instances.setdefault(conversation, {})
+        record = instances.get(ref.instance)
+        if record is None:
+            record = instances[ref.instance] = InstanceRecord(
+                instance=ref.instance,
+                agent=ref.agent,
+                parent=run_instance(ref.parent_run) if ref.parent_run else "root",
+                depth=ref.depth,
+                inherit_context=bool(metadata.get("inherit_context", False)),
+                title=metadata.get("title") or "",
+                status=INSTANCE_RUNNING,
+                continuable=bool(metadata.get("continuable", True)),
+            )
+        return record
 
     def _ended(self, conversation: SessionRef | None, ref: RunRef) -> bool:
         record = self._records.get(conversation, {}).get(ref.run or "")

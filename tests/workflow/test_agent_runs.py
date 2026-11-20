@@ -17,6 +17,11 @@ from typing import Any, Callable
 import pytest
 
 from agentic_cli.workflow.agents import (
+    INSTANCE_CLOSED,
+    INSTANCE_IDLE,
+    INSTANCE_RUNNING,
+    INSTANCE_STATUSES,
+    INSTANCE_STOPPED,
     RUN_COMPLETED,
     RUN_FAILED,
     RUN_INPUT_REQUIRED,
@@ -26,6 +31,7 @@ from agentic_cli.workflow.agents import (
     RUN_STARTED,
     RUN_WORKING_STATUSES,
     AgentRuns,
+    InstanceRecord,
     RunRecord,
     result_head,
     run_title,
@@ -387,6 +393,165 @@ class TestForget:
         assert runs.records(ONE) == []
         assert runs.run_for(ONE, None, "c9", "researcher").run == "researcher-1#1"
         assert [r.ref.run for r in runs.records(TWO)] == ["researcher-1#1"]
+
+
+def ended(
+    runs: AgentRuns, conversation: SessionRef, ref: RunRef, **fields: Any
+) -> None:
+    """``ref``'s run ended completed, as ``fields`` say."""
+    in_turn(conversation, lambda: runs.observe(WorkflowEvent.agent_run(
+        ref, RUN_COMPLETED, call_id="c1", result="ok", **fields
+    )))
+
+
+class TestInstances:
+    """Each instance's status, kept from its runs' events: a start makes it
+    (or reopens it) ``running``, an end sets the status it carries, and
+    ``AGENT_INSTANCE`` a change without a run."""
+
+    def test_the_statuses(self):
+        assert INSTANCE_STATUSES == {"running", "idle", "stopped", "closed"}
+        assert (INSTANCE_RUNNING, INSTANCE_IDLE, INSTANCE_STOPPED, INSTANCE_CLOSED) == (
+            "running", "idle", "stopped", "closed",
+        )
+
+    def test_a_first_runs_start_makes_its_instance_running(self):
+        runs = AgentRuns()
+        ref = runs.run_for(ONE, None, "c1", "researcher")
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_STARTED, title="Find X.", call_id="c1",
+            inherit_context=True, continuable=False,
+        )))
+
+        assert runs.instances(ONE) == [InstanceRecord(
+            instance="researcher-1", agent="researcher", parent="root", depth=1,
+            inherit_context=True, title="Find X.", status=INSTANCE_RUNNING,
+            runs=["researcher-1#1"], continuable=False,
+        )]
+        assert runs.instance(ONE, "researcher-1") is runs.instances(ONE)[0]
+
+    def test_a_start_without_them_keeps_the_defaults(self):
+        runs = AgentRuns()
+        started(runs, ONE, "c1", "researcher")
+
+        record = runs.instance(ONE, "researcher-1")
+        assert (record.inherit_context, record.continuable) == (False, True)
+
+    def test_a_childs_parent_is_its_parent_runs_instance(self):
+        runs = AgentRuns()
+        middle = started(runs, ONE, "c1", "middle")
+        leaf = runs.run_for(ONE, middle, "m1", "leaf")
+
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(leaf, RUN_STARTED, title="Look.", call_id="m1")
+        ))
+
+        record = runs.instance(ONE, "leaf-1")
+        assert (record.parent, record.depth) == ("middle-1", 2)
+
+    @pytest.mark.parametrize("status", [INSTANCE_IDLE, INSTANCE_CLOSED, INSTANCE_STOPPED])
+    def test_an_end_leaves_it_as_its_instance_status_says(self, status):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+
+        ended(runs, ONE, ref, instance_status=status)
+
+        assert runs.instance(ONE, "researcher-1").status == status
+
+    def test_an_end_that_says_none_leaves_it_idle(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+
+        ended(runs, ONE, ref)
+
+        assert runs.instance(ONE, "researcher-1").status == INSTANCE_IDLE
+
+    def test_its_next_run_is_numbered_past_its_runs(self):
+        runs = AgentRuns()
+        middle = started(runs, ONE, "c1", "middle")
+        leaf = runs.run_for(ONE, middle, "m1", "leaf")
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_run(leaf, RUN_STARTED, title="Look.", call_id="m1")
+        ))
+        ended(runs, ONE, leaf, instance_status=INSTANCE_IDLE)
+
+        assert runs.next_run(ONE, "leaf-1", parent_run="middle-1#1") == RunRef(
+            agent="leaf", instance="leaf-1", run="leaf-1#2", parent_run="middle-1#1", depth=2,
+        )
+        # The root's own message, or the user's, has no parent run.
+        assert runs.next_run(ONE, "leaf-1", parent_run=None).parent_run is None
+
+    def test_an_unknown_instance_has_no_next_run(self):
+        with pytest.raises(KeyError):
+            AgentRuns().next_run(ONE, "researcher-1", parent_run=None)
+
+    def test_a_follow_ups_start_reopens_it_and_keeps_its_first_title(self):
+        runs = AgentRuns()
+        first = started(runs, ONE, "c1", "researcher")
+        ended(runs, ONE, first, instance_status=INSTANCE_IDLE)
+        second = runs.next_run(ONE, "researcher-1", parent_run=None)
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            second, RUN_STARTED, title="Go on.", call_id="c2", input="Go on.\nAnd on.",
+        )))
+
+        record = runs.instance(ONE, "researcher-1")
+        assert (record.status, record.runs, record.title) == (
+            INSTANCE_RUNNING, ["researcher-1#1", "researcher-1#2"], "researcher work",
+        )
+        run = runs.record(ONE, "researcher-1#2")
+        assert (run.title, run.input) == ("Go on.", "Go on.\nAnd on.")
+        assert runs.record(ONE, "researcher-1#1").input == ""
+        # The instance's latest run is its record.
+        assert runs.record(ONE, "researcher-1") is run
+
+    def test_agent_instance_sets_its_status_without_a_run(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        ended(runs, ONE, ref, instance_status=INSTANCE_IDLE)
+
+        in_turn(ONE, lambda: runs.observe(
+            WorkflowEvent.agent_instance(ref, INSTANCE_CLOSED, reason="closed by its parent")
+        ))
+
+        assert runs.instance(ONE, "researcher-1").status == INSTANCE_CLOSED
+        assert [r.status for r in runs.records(ONE)] == [RUN_COMPLETED]
+
+    def test_agent_instance_for_an_unknown_instance_or_status_changes_nothing(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "researcher")
+        other = runs.run_for(ONE, None, "c2", "writer")
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_instance(other, INSTANCE_CLOSED)))
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_instance(ref, "asleep")))
+
+        assert [i.instance for i in runs.instances(ONE)] == ["researcher-1"]
+        assert runs.instance(ONE, "researcher-1").status == INSTANCE_RUNNING
+
+    def test_a_turn_that_stops_its_run_leaves_it_idle(self):
+        runs = AgentRuns()
+        started(runs, ONE, "c1", "researcher")
+
+        runs.interrupt_open(ONE)
+
+        assert runs.instance(ONE, "researcher-1").status == INSTANCE_IDLE
+
+    def test_they_are_kept_by_conversation_in_start_order(self):
+        runs = AgentRuns()
+        for call_id, agent in (("c1", "writer"), ("c2", "researcher")):
+            started(runs, ONE, call_id, agent)
+
+        assert [i.instance for i in runs.instances(ONE)] == ["writer-1", "researcher-1"]
+        assert runs.instances(TWO) == [] and runs.instance(TWO, "writer-1") is None
+
+    def test_forget_drops_them(self):
+        runs = AgentRuns()
+        started(runs, ONE, "c1", "researcher")
+
+        runs.forget(ONE)
+
+        assert runs.instances(ONE) == []
 
 
 class TestTitlesAndResults:

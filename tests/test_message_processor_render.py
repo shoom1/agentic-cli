@@ -590,6 +590,19 @@ class TestTheAgentAtWork:
         ]
         assert ui.rich() == [] and ui.responses() == []
 
+    async def test_an_instances_change_without_a_run_writes_nothing(self):
+        """``AGENT_INSTANCE`` (an idle instance closed, or stopped) feeds the
+        records alone: the events box keeps its line, and nothing is printed."""
+        events = [
+            _by(RESEARCHER_1, WorkflowEvent.tool_call("lookup", {"q": "x"})),
+            WorkflowEvent.agent_instance(RESEARCHER_2, "closed", reason="closed by its parent"),
+        ]
+
+        ui, lines = await _watch(events)
+
+        assert lines == ["researcher-1 › Calling: lookup", "researcher-1 › Calling: lookup"]
+        assert ui.rich() == [] and ui.responses() == []
+
     async def test_a_sub_agents_text_without_a_run_keeps_its_agents_name(self):
         """An event that names no run (an app's own event processor) is
         shown as before: under its agent's name."""
