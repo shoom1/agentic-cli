@@ -2335,8 +2335,11 @@ class BaseCLIApp:
                 await self.process_input(text)
 
             # Ctrl+C stops the run in a sub-agent's view, which works outside
-            # the input handler.
-            bind_ctrl_c(self.session, lambda: self._agent_view)
+            # the input handler. A session that takes no binding leaves Ctrl+C
+            # to thinking-prompt's own handling in a view: it ends the boxes
+            # and the run goes on, until /exit stops it or it ends.
+            if not bind_ctrl_c(self.session, lambda: self._agent_view):
+                logger.info("agent_view_ctrl_c_not_bound")
 
             # Keep long-running jobs visible in the status bar while the
             # session runs, independent of the agent loop.

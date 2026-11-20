@@ -603,6 +603,40 @@ class TestExitInAView:
         assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
 
 
+class TestCtrlCNotBound:
+    async def test_a_session_that_cannot_take_the_binding_is_logged(self, make_crew, monkeypatch):
+        """Without the binding Ctrl+C in a view is thinking-prompt's own (it
+        ends the boxes, and the run goes on): the log says so at info."""
+        crew = make_crew(follow_team())
+        monkeypatch.setattr(
+            workflow_controller, "create_workflow_manager_from_settings",
+            lambda **kwargs: crew.manager,
+        )
+        events: list[dict] = []
+
+        class Recorder:
+            def __getattr__(self, level: str):
+                def log(event: str, **fields) -> None:
+                    events.append({"event": event, "log_level": level, **fields})
+
+                return log
+
+        monkeypatch.setattr(app_module, "logger", Recorder())
+        app = BaseCLIApp(
+            app_info=AppInfo(name="View test", version="0"),
+            agent_configs=[agent("coordinator")],
+            settings=crew.manager.settings,
+            session_id=SESSION,
+        )
+        app.session = opening_boxes(autospec_session())
+        app.session.app = SimpleNamespace(is_running=True)  # no prompt_toolkit key bindings
+
+        await asyncio.wait_for(app.run(), 20)
+
+        (logged,) = [e for e in events if e["event"] == "agent_view_ctrl_c_not_bound"]
+        assert logged["log_level"] == "info"
+
+
 # -- one dialog at a time: a run's question and a command's dialog ------------------------
 
 
@@ -772,3 +806,47 @@ class TestAWorkflowThatIsDown:
         assert app.agent_view is None
         assert said(app.session, "add_response")[-1] == "Noted."
         assert '"result": "Y is 7."' in crew.last_message("coordinator")
+
+
+# -- what the main conversation keeps while a view is open ---------------------------------
+
+
+class TestTheMainConversationInAView:
+    async def test_the_main_agents_context_stays_put_after_a_view_run(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"), usage=(900, 9)),
+                         says("Done.", usage=(1_000, 10))],
+            researcher=[says("X is 42.", usage=(1_200, 40)), says("Y is 7.", usage=(5_000, 20))],
+        )
+        app = await app_on(crew)
+        await typed(app, "Find X.")
+        before = app.usage_tracker.last_prompt_tokens
+        assert before  # the main agent's own call moved it
+
+        await typed(app, "/agent researcher-1", "Now find Y.")
+
+        # The instance's call is a sub-agent's: it never moves the main agent's ctx.
+        assert app.usage_tracker.last_prompt_tokens == before
+
+    async def test_finished_jobs_wait_in_a_view_and_the_bar_counts_them(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew,
+            team=[agent("coordinator", sub_agents=("researcher",)),
+                  agent("researcher", tools=(contract_start_job,))],
+            coordinator=[says("Noted."), says("The build finished.")],
+            researcher=[calls(use("contract_start_job", "r1")), says("Started the build.")],
+        )
+        app.settings.update_setting("job_auto_resume", True)
+        jobs = crew.manager.job_manager
+        await typed(app, "Start the build.")
+        (record,) = jobs.list()
+        await until(lambda: jobs.get(record.job_id).state in TERMINAL_STATES)
+
+        await app._new_job_monitor().poll_once()
+
+        assert "↻1" in status(app)
+        assert status(app).startswith("researcher-1 · ")  # still the view's bar
+        assert await app.resume_finished_jobs() == 0
+        assert crew.requests("coordinator") == 2
+        assert [r.job_id for r in jobs.awaiting_resume()] == [record.job_id]
