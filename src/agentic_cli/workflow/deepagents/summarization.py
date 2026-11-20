@@ -44,6 +44,20 @@ agent's run: there is no later call in it to skip for. The main agent's
 ends the turn; a sub-agent's answers its ``task`` call with the error
 (``ToolCallErrorMiddleware``), and its coordinator goes on.
 
+**An instance's brief.** A sub-agent instance's first run marks its task
+message as the instance's brief (``brief_message``); a follow-up's message is
+not marked. A summary of the instance's thread stands for the messages before
+its cut, the brief among them, so it is restated: ``awrap_model_call`` puts the
+request's brief in a context variable for the call, ``_partition_messages``
+notes whether the brief is among the messages kept, and
+``_build_new_messages_with_path`` prepends the brief's text blocks to the
+summary message when it is not. Deep Agents stores that message as the event's
+and sends it first, so the event keeps its shape (one message before the cut),
+its cutoff arithmetic is untouched, and every reader of the event, an
+inheriting child of the instance included, sees the brief. The summary also
+summarizes the brief, which does no harm. The main agent's thread has no
+brief, and its summaries are Deep Agents' own.
+
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start
 (``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
@@ -62,7 +76,7 @@ count is the prompt the summary replaced, no evidence: the middleware's
 ``_should_summarize`` then decides on its own estimate of the request
 alone, as ADK's engine stops at a summary. They rest on private Deep Agents
 methods (``_apply_event_to_messages``, ``_compute_state_cutoff``,
-``_build_new_messages_with_path``, ``_should_summarize``, ``_lc_helper``
+``_build_new_messages_with_path``, ``_partition_messages``, ``_should_summarize``, ``_lc_helper``
 and its summary model, and, for a failed summary's range,
 ``_get_effective_messages`` and ``_determine_cutoff_index``); contract tests
 pin them.
@@ -76,6 +90,8 @@ import inspect
 import logging
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import (
@@ -135,6 +151,8 @@ _NO_ARCHIVE = "archive disabled"
 #: the mark's ``kind`` on a summary ``/compact`` wrote.
 _MARK = "agentic_cli"
 COMPACTED = "compact"
+#: The mark's ``kind`` on an instance's brief, its first run's task message.
+BRIEF = "brief"
 
 #: Deep Agents' texts for a history it could not offload (an error log and a
 #: warning), and the per-write warning before them. Matched at the start.
@@ -350,6 +368,44 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         return start, self.token_counter(summarized)
 
     async def awrap_model_call(
+        self,
+        request: "ModelRequest",
+        handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
+    ) -> Any:
+        # The thread's brief, for a summary this call writes.
+        brief = brief_of(request.messages)
+        token = _BRIEF.set(_Brief(brief) if brief is not None else None)
+        try:
+            return await self._awrap_model_call(request, handler)
+        finally:
+            _BRIEF.reset(token)
+
+    def _partition_messages(
+        self, conversation_messages: list["AnyMessage"], cutoff_index: int
+    ) -> tuple[list["AnyMessage"], list["AnyMessage"]]:
+        """Deep Agents' partition, noting whether the call's brief is among the
+        messages kept: a summary restates it when it is not."""
+        summarized, kept = super()._partition_messages(conversation_messages, cutoff_index)
+        brief = _BRIEF.get()
+        if brief is not None:
+            brief.restate = not any(_same(message, brief.message) for message in kept)
+        return summarized, kept
+
+    def _build_new_messages_with_path(
+        self, summary: str, file_path: str | None
+    ) -> list["AnyMessage"]:
+        """Deep Agents' summary message, opening with the call's brief when the
+        summary stands for it (``_partition_messages``)."""
+        messages = super()._build_new_messages_with_path(summary, file_path)
+        brief = _BRIEF.get()
+        if brief is None or not brief.restate or len(messages) != 1:
+            return messages
+        (message,) = messages
+        return [message.model_copy(update={
+            "content": [*_text_blocks(brief.message.content), *_text_blocks(message.content)]
+        })]
+
+    async def _awrap_model_call(
         self,
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
@@ -616,6 +672,53 @@ async def write_summary(
             helper._acreate_summary(messages), context=context
         )
     return summary.strip()
+
+
+def brief_message(text: str, *, id: str) -> HumanMessage:
+    """An instance's brief: its first run's task message, marked as the brief.
+
+    The mark is in ``response_metadata``, which no provider adapter sends, as
+    a job notification's is.
+    """
+    return HumanMessage(content=text, id=id, response_metadata={_MARK: {"kind": BRIEF}})
+
+
+def is_brief(message: "AnyMessage") -> bool:
+    """Whether ``message`` is an instance's brief (by its mark, never its text)."""
+    mark = message.response_metadata.get(_MARK)
+    return isinstance(mark, dict) and mark.get("kind") == BRIEF
+
+
+def brief_of(messages: Sequence["AnyMessage"]) -> "AnyMessage | None":
+    """The brief of the thread ``messages`` belong to: the last one marked.
+
+    The last, since an inheriting instance's copied conversation holds its
+    parent's brief before its own.
+    """
+    return next((m for m in reversed(messages) if is_brief(m)), None)
+
+
+@dataclass
+class _Brief:
+    """The brief of the thread a model call is for, and whether a summary it
+    writes restates it (``_partition_messages`` decides)."""
+
+    message: "AnyMessage"
+    restate: bool = False
+
+
+#: The brief of the model call in progress (``awrap_model_call``).
+_BRIEF: ContextVar[_Brief | None] = ContextVar("agentic_cli_summary_brief", default=None)
+
+
+def _same(a: "AnyMessage", b: "AnyMessage") -> bool:
+    """Whether ``a`` and ``b`` are one message: the same object, or the same id."""
+    return a is b or (a.id is not None and a.id == b.id)
+
+
+def _text_blocks(content: Any) -> list[Any]:
+    """``content`` as a list of content blocks."""
+    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
 
 
 def summary_event(

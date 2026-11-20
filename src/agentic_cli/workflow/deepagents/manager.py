@@ -92,6 +92,7 @@ from agentic_cli.workflow.deepagents.sessions import (
 )
 from agentic_cli.workflow.deepagents.summarization import (
     ReportingSummarizationMiddleware,
+    brief_message,
     compact_cutoff,
     newest_answer,
     summary_event,
@@ -749,7 +750,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         The run is on its instance's own thread of the manager's checkpointer
         (``instance_run_config``): a first run starts it with the task
         message, a follow-up (``run.follow_up``) continues it, its input the
-        message and the caller's mark when set. The calls an earlier run of
+        message and the caller's mark when set. A first run's task message is
+        marked as the instance's brief (``summarization.brief_message``), which
+        the instance's summaries keep. The calls an earlier run of
         the instance left open are answered on that thread before its first
         model call (``InterruptedCallsMiddleware``). The shared keys it
         changed are compared with the thread's state as the run started it
@@ -780,7 +783,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         if conversation is None:
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
         graph = self._agent_graphs[run.ref.agent]
-        task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
+        task_id = f"agentic-cli-task-{uuid.uuid4().hex}"
+        # A first run's message is its instance's brief, which its summaries keep.
+        task = (
+            HumanMessage(content=run.message, id=task_id) if run.follow_up
+            else brief_message(run.message, id=task_id)
+        )
         if not run.follow_up and self._checkpointer is not None:
             # A first run never continues a thread the store already keeps
             # (as ADK refuses to make an existing session): whatever numbered

@@ -60,6 +60,7 @@ from agentic_cli.models import (  # noqa: E402
 )
 from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.agents.brief import Brief, task_message  # noqa: E402
+from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.context import (  # noqa: E402
     OVERFLOW_ERROR_CODE,
@@ -850,8 +851,12 @@ class TestSummarizationInATurn:
         assert first == [{"role": "system", "content": "Work."}, {"role": "user", "content": (
             task_message(Brief(title="Brief", objective="Brief."))
         )}]
-        # and the worker's summary, of its brief and first report, stays its own.
-        assert last[1]["content"].endswith("A summary of 3 messages.")
+        # and the worker's summary, of its brief and first report, stays its own,
+        # its brief ahead of it.
+        assert [part["text"] for part in last[1]["content"]] == [
+            task_message(Brief(title="Brief", objective="Brief.")),
+            f"{SUMMARY_PREFIX}\n\nA summary of 3 messages.",
+        ]
         assert state["_summarization_event"]["cutoff_index"] == own["cutoff_index"]
         assert state["_summarization_event"]["summary_message"].text == own["summary_message"].text
         trimmed = [e for e in delegating if e.type is EventType.CONTEXT_TRIMMED]
