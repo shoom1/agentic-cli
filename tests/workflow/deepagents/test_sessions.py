@@ -12,8 +12,12 @@ session hooks from the checkpointer:
   sub-agent checkpoints an older version stored (namespace
   ``tools:<task-id>``) and threads that are not ours, and ``limit`` keeps the
   newest; one conversation's row is ``info``;
-- deleting removes the whole thread, sub-agents' checkpoints included, and
-  reports an unknown one;
+- deleting removes the whole thread, sub-agents' checkpoints included, every
+  sub-agent instance's thread of the conversation too, and reports an
+  unknown one;
+- each sub-agent instance's transcript is a thread of its own
+  (``instance_thread_id``), which never lists as a conversation; the
+  instances a conversation keeps number a new manager's next ones;
 - recent messages are the user's and the assistant's text.
 
 Conversations are written by real agent trees on scripted models, into a real
@@ -43,6 +47,8 @@ from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  #
 from agentic_cli.tools.jobs import JobState  # noqa: E402
 from agentic_cli.workflow.deepagents.sessions import (  # noqa: E402
     CheckpointSessions,
+    instance_run_config,
+    instance_thread_id,
     job_notification,
     ref_from_thread_id,
     run_config,
@@ -50,6 +56,7 @@ from agentic_cli.workflow.deepagents.sessions import (  # noqa: E402
 )
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
+from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai, task  # noqa: E402
 
 AWKWARD = SessionRef("app", "ü/ser:1", 'a "quoted"/id')
@@ -203,6 +210,70 @@ class TestRunConfig:
             assert (entry["app_name"], entry["user_id"], entry["session_id"]) == (
                 "app", "ü/ser:1", 'a "quoted"/id'
             )
+
+
+class TestAnInstancesThread:
+    """Each sub-agent instance's transcript is a thread of its own, keyed by
+    its conversation's triple and its id; its checkpoints carry both."""
+
+    def test_it_is_the_triple_and_the_instance_as_json(self):
+        assert instance_thread_id(SessionRef("app", "u", "s"), "researcher-1") == (
+            '["app", "u", "s", "researcher-1"]'
+        )
+
+    def test_it_names_no_conversation(self):
+        assert ref_from_thread_id(instance_thread_id(AWKWARD, "researcher-1")) is None
+
+    def test_its_run_config_keys_the_thread_and_records_the_instance(self):
+        callbacks = [object()]
+
+        config = instance_run_config(AWKWARD, "researcher-1", callbacks=callbacks)
+
+        assert config == {
+            "configurable": {"thread_id": instance_thread_id(AWKWARD, "researcher-1")},
+            "metadata": {
+                "app_name": "app", "user_id": "ü/ser:1", "session_id": 'a "quoted"/id',
+                "instance": "researcher-1", "thread_kind": "instance",
+            },
+            "callbacks": callbacks,
+        }
+
+
+async def instance_ran(saver, session: SessionRef, instance: str, *texts: str) -> None:
+    """A run of the sub-agent instance ``instance`` of ``session`` on its own
+    thread, as the manager runs one, saying ``texts`` in turn (one run each)."""
+    graph = _tree(saver, [SOLO], solo=[ai(text) for text in texts] or [ai("Done.")])
+    for text in texts or ("Done.",):
+        await graph.ainvoke(
+            {"messages": [HumanMessage(f"Then {text}")]}, instance_run_config(session, instance)
+        )
+
+
+class TestStoredInstances:
+    async def test_the_highest_stored_number_of_each_type(self, saver, store):
+        await say(saver, ref())
+        for instance in ("researcher-1", "researcher-3", "writer-2", "notes"):
+            await instance_ran(saver, ref(), instance)
+        await instance_ran(saver, ref(session="s2"), "researcher-7")  # another conversation's
+        await instance_ran(saver, ref(user="bob"), "writer-9")  # another user's
+        sessions = CheckpointSessions(saver, store)
+
+        assert await sessions.instances(ref()) == [
+            "notes", "researcher-1", "researcher-3", "writer-2",
+        ]
+        assert await sessions.stored_instances(ref()) == {"researcher": 3, "writer": 2}
+        # No instance's thread lists as a conversation.
+        assert [e.session_id for e in await sessions.list("app", "alice")] == ["s1"]
+
+    async def test_an_instance_run_twice_is_one(self, saver, store):
+        await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
+
+        assert await CheckpointSessions(saver, store).instances(ref()) == ["researcher-1"]
+
+    async def test_none_is_none(self, saver, store):
+        await say(saver, ref())
+
+        assert await CheckpointSessions(saver, store).stored_instances(ref()) == {}
 
 
 # --- the store --------------------------------------------------------------------------
@@ -374,6 +445,28 @@ class TestDelete:
 
         assert await sessions.exists(ref()) is False
         assert [t for t, _ in await threads(saver) if t == thread_id(ref())] == []
+
+    async def test_it_deletes_its_instances_threads_and_no_others(self, saver, store):
+        await say(saver, ref())
+        await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
+        await instance_ran(saver, ref(session="s2"), "researcher-1")
+        sessions = CheckpointSessions(saver, store)
+
+        with no_blocking_calls():
+            assert await sessions.delete(ref()) is True
+
+        assert await sessions.instances(ref()) == []
+        assert await sessions.instances(ref(session="s2")) == ["researcher-1"]
+        assert [t for t, _ in await threads(saver)] == [
+            instance_thread_id(ref(session="s2"), "researcher-1")
+        ]
+
+    async def test_a_conversation_already_gone_leaves_no_instance_behind(self, saver, store):
+        await instance_ran(saver, ref(), "researcher-1")
+        sessions = CheckpointSessions(saver, store)
+
+        assert await sessions.delete(ref()) is False
+        assert await threads(saver) == []
 
     async def test_an_unknown_session_is_not_deleted(self, saver, store):
         await say(saver, ref())
@@ -585,3 +678,42 @@ class TestSharedFileWithAdk:
             finally:
                 await adk.cleanup()
                 await deep.cleanup()
+
+
+class TestNumberedPastTheStored:
+    """A new manager (a restart) numbers a conversation's instances past the
+    ones its checkpointer keeps (``_stored_instances``), whose threads stay
+    as they were."""
+
+    async def test_a_restart_numbers_past_them(self, hermetic, monkeypatch):
+        models = ScriptedModels(
+            coordinator=[ai(calls=[task("worker", "Do it.", "c1")]), ai("Done."),
+                         ai(calls=[task("worker", "Do it again.", "c2")]), ai("Done.")],
+            worker=[ai("Worked."), ai("Worked again.")],
+        )
+        monkeypatch.setattr(manager_module, "build_chat_model", models)
+        configs = [COORDINATOR, WORKER]
+        with MockContext(google_api_key="test-key") as ctx:
+            first = DeepAgentsWorkflowManager(
+                agent_configs=configs, settings=ctx.settings, model="gemini-2.5-flash"
+            )
+            try:
+                await converse(first, "Delegate.", user="u", session="s")
+            finally:
+                await first.cleanup()
+            second = DeepAgentsWorkflowManager(
+                agent_configs=configs, settings=ctx.settings, model="gemini-2.5-flash"
+            )
+            try:
+                await second.initialize_services()
+                with no_blocking_calls():
+                    stored = await second._stored_instances(second.session_ref("s", "u"))
+                await converse(second, "Again.", user="u", session="s")
+                runs = [r.ref.run for r in second.agent_runs.records(second.session_ref("s", "u"))]
+                kept = await second._sessions.instances(second.session_ref("s", "u"))
+            finally:
+                await second.cleanup()
+
+        assert stored == {"worker": 1}
+        assert runs == ["worker-2#1"]
+        assert kept == ["worker-1", "worker-2"]

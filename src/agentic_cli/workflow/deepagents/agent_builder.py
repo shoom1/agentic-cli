@@ -1,8 +1,9 @@
 """The agents: one ``create_agent`` graph per ``AgentConfig``, each standalone.
 
-Every agent is its own graph, built apart from the others: the root on the
-conversation's checkpointer, every other agent with none (a sub-agent's run
-ends when its delegation returns, and nothing resumes it). An agent with
+Every agent is its own graph, built apart from the others, on the manager's
+checkpointer (a sub-agent's runs are on a thread of its instance's own, which
+its follow-ups continue); a tree built without a checkpointer compiles its
+sub-agents with none. An agent with
 sub-agents gets the framework's ``task`` tool (``task_tool.build_task_tool``)
 among its tools: a call hands the brief to the manager's ``Delegations``,
 which runs the sub-agent's graph apart from the caller's stream
@@ -128,10 +129,11 @@ def build_agent_tree(
         prompts: Each agent's system prompt, already resolved.
         settings: The manager's settings: the model side and the tool result
             cap are built from them.
-        checkpointer: The root's checkpointer. Every other agent is compiled
-            with none (``checkpointer=False``): a sub-agent's run ends when
-            its delegation returns, and nothing resumes it or reads its
-            state.
+        checkpointer: The checkpointer every agent is compiled on: a
+            sub-agent's runs are on threads of their own, one per instance
+            (``deepagents/sessions.py::instance_run_config``). None: the
+            root has none, and the other agents are compiled with none
+            (``checkpointer=False``), not left to take a caller's.
         bound: What every agent's permission gate asks first, for a tool
             object the framework built and bound. Defaults to the framework
             registry's identity map; a manager with tool objects of its own
@@ -213,7 +215,7 @@ def build_agent_tree(
             ],
             state_schema=AgentCliState,
             name=name,
-            checkpointer=checkpointer if name == root else False,
+            checkpointer=checkpointer if name == root or checkpointer is not None else False,
         )
 
     built = {name: build(name) for name in config_map}

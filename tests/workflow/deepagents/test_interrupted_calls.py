@@ -7,12 +7,17 @@ answer names it, so its result, the record and every later request pair it
 by that id. A conversation stored before may still hold an id twice: a call
 is answered by a result of its id that follows its model message before the
 next one. What the middleware does alone; whole turns, on both backends, are
-in the contract suite (``TestAReusedCallId``).
+in the contract suite (``TestAReusedCallId``). An instance's next run answers,
+on its own thread, what an earlier run of it left open (``TestAFollowUpAfterAStop``
+there).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,7 +33,20 @@ from langchain_core.messages import (  # noqa: E402
 )
 
 from agentic_cli.workflow.deepagents.middleware import InterruptedCallsMiddleware  # noqa: E402
-from agentic_cli.workflow.interrupts import INTERRUPTED, OpenCalls, interrupted  # noqa: E402
+from agentic_cli.workflow.interrupts import (  # noqa: E402
+    INTERRUPTED,
+    INTERRUPTED_BY_USER,
+    OpenCalls,
+    interrupted,
+)
+from agentic_cli.workflow.sessions import (  # noqa: E402
+    RunRef,
+    SessionRef,
+    reset_active_run,
+    reset_active_turn,
+    set_active_run,
+    set_active_turn,
+)
 from tests.workflow.deepagents.fakes import ScriptedChat  # noqa: E402
 
 
@@ -211,3 +229,61 @@ class TestPositionalPairing:
 
         results = [m for m in patched if isinstance(m, ToolMessage)]
         assert [m.tool_call_id for m in results] == ["call_0", "call_0"]
+
+
+CONVERSATION = SessionRef("app", "u", "s")
+FIRST = RunRef("researcher", "researcher-1", "researcher-1#1", None, 1)
+SECOND = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
+
+
+@contextmanager
+def running(run: RunRef) -> Iterator[None]:
+    """The block runs as ``run``, in a turn of ``CONVERSATION``."""
+    turn, active = set_active_turn(CONVERSATION), set_active_run(run)
+    try:
+        yield
+    finally:
+        reset_active_run(active)
+        reset_active_turn(turn)
+
+
+class TestAnInstancesNextRun:
+    """A sub-agent instance's next run answers, on its own thread, the calls
+    an earlier run of it left open, before its first model call: from the
+    instance's record, and as the user's when that run was stopped (as ADK
+    seals a stopped run's)."""
+
+    LEFT = [HumanMessage("Find X."), _answer(("lookup", "r1"), ("block", "r2"))]
+
+    async def test_a_stopped_runs_calls_keep_what_finished(self):
+        calls = OpenCalls()
+        middleware = InterruptedCallsMiddleware(calls, root=False)
+        finished = ToolMessage('{"success": true}', tool_call_id="r1", name="lookup")
+
+        async def handler(request: Any) -> ToolMessage:
+            return finished
+
+        with running(FIRST):
+            await middleware.awrap_tool_call(
+                SimpleNamespace(tool_call=_call("lookup", "r1")), handler
+            )
+        calls.cancelled(CONVERSATION, instance="researcher-1")
+
+        with running(SECOND):
+            update = middleware.before_agent(
+                {"messages": [*self.LEFT, HumanMessage("Go on.")]}, None
+            )
+
+        patched = update["messages"][1:]
+        assert patched[:2] == self.LEFT and patched[2] is finished
+        assert json.loads(patched[3].content) == interrupted(INTERRUPTED_BY_USER)
+        assert patched[4:] == [HumanMessage("Go on.")]  # no marker: not the main agent
+
+    def test_after_a_crash_they_are_interrupted(self):
+        with running(SECOND):
+            update = InterruptedCallsMiddleware(OpenCalls(), root=False).before_agent(
+                {"messages": [*self.LEFT, HumanMessage("Go on.")]}, None
+            )
+
+        answers = [m for m in update["messages"] if isinstance(m, ToolMessage)]
+        assert [json.loads(m.content) for m in answers] == [interrupted(INTERRUPTED)] * 2

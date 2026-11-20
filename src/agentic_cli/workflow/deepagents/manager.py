@@ -16,7 +16,9 @@ prompt. With ``raw_llm_logging`` on, a turn's every model call is logged
 ``~/.{app_name}/logs/llm_events.jsonl``). A sub-agent runs when its parent's ``task`` call
 delegates to it (``task_tool.build_task_tool``, the framework's
 ``Delegations``): its own graph, apart from its parent's stream, in the run's
-own task (``_run_agent``). A long-running job that finishes
+own task (``_run_agent``), on a checkpointer thread of its instance's own
+(``sessions.instance_run_config``), which the instance's follow-up runs
+continue. A long-running job that finishes
 resumes its conversation with a turn of its own, opened by a notification to
 the root agent (``resume_with_job_result``). The root agent's conversation is
 summarized on demand by ``compact`` (``/compact``), with its own summarization
@@ -82,6 +84,7 @@ from agentic_cli.workflow.deepagents.mcp_tools import MCPSessions, without_clash
 from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.sessions import (
     CheckpointSessions,
+    instance_run_config,
     job_notification,
     run_config,
 )
@@ -737,6 +740,16 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         it has: the last text it wrote and the shared keys it changed, as of
         its last finished step; ``Delegations`` ends it cancelled.
 
+        The run is on its instance's own thread of the manager's checkpointer
+        (``instance_run_config``): a first run starts it with the task
+        message, a follow-up (``run.follow_up``) continues it, its input the
+        message and the caller's mark when set. The calls an earlier run of
+        the instance left open are answered on that thread before its first
+        model call (``InterruptedCallsMiddleware``). The shared keys it
+        changed are compared with the thread's state as the run started it
+        (the stream's first ``values`` chunk), so the instance's earlier
+        mark is no change.
+
         Returns:
             Its last non-empty answer, as Deep Agents' own ``task`` read one
             (Anthropic may end with an empty ``end_turn`` after its final
@@ -753,11 +766,20 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window, still
                 after its summary (``subagent_overflow_message``), with the
                 last text it wrote.
+            RuntimeError: The run has no conversation (its thread needs one).
         """
+        conversation = run.conversation
+        if conversation is None:
+            raise RuntimeError("A sub-agent run runs in a conversation's turn.")
         graph = self._agent_graphs[run.ref.agent]
         task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
-        inputs: dict[str, Any] = {**run.state, "messages": [*(run.history or ()), task]}
-        conversation = run.conversation
+        if run.follow_up:
+            inputs: dict[str, Any] = {
+                **{k: v for k, v in run.state.items() if k in SHARED_KEYS and v},
+                "messages": [task],
+            }
+        else:
+            inputs = {**run.state, "messages": [*(run.history or ()), task]}
         processor = DeepAgentsEventProcessor(
             root=self._root_agent_name,
             agent_models=self._resolved_models,
@@ -776,21 +798,28 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             ledgers=self._usage_ledgers,
         )
         final: dict[str, Any] = {}
+        start: dict[str, Any] | None = None
         detached = var_child_runnable_config.set(None)
         try:
             stream = graph.astream(
-                inputs, {"callbacks": [callback]}, stream_mode=["updates", "values"]
+                inputs,
+                instance_run_config(conversation, run.ref.instance, callbacks=[callback]),
+                stream_mode=["updates", "values"],
             )
             async with contextlib.aclosing(stream) as items:
                 async for mode, payload in items:
                     if mode == "values":
+                        if start is None:
+                            start = payload
                         final = payload
                         continue
                     for event in processor.process((), mode, payload):
                         live_events.report(event)
         except asyncio.CancelledError:
-            # The run's own cancel has stopped it; any other (its turn's)
-            # goes on.
+            # Its instance's next run answers the calls this one left open
+            # as the user's (as ADK seals them). The run's own cancel has
+            # stopped it; any other (its turn's) goes on.
+            self._open_calls.cancelled(conversation, instance=run.ref.instance)
             if not run.control.own_cancel():
                 raise
         except Exception as error:  # noqa: BLE001 - the run fails; its parent reads why
@@ -822,7 +851,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return RunAnswer(
             text=_last_text(answers),
             outcome=answer_outcome(answers[-1]) if answers else None,
-            state=_changed(final, inputs),
+            state=_changed(final, start if start is not None else inputs),
             plan=plan,
             tasks=tasks,
         )
@@ -937,8 +966,20 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             return None
         return await self._sessions.info(self.session_ref(session_id, user_id))
 
+    async def _stored_instances(self, conversation: "SessionRef") -> dict[str, int]:
+        """The highest instance number of each type ``conversation``'s checkpointer keeps.
+
+        The base's hook (``Delegations`` asks it once per conversation per
+        turn): read from the instance threads
+        (``CheckpointSessions.stored_instances``), so a manager after a
+        restart numbers past what another ran there.
+        """
+        if self._sessions is None:
+            return {}
+        return await self._sessions.stored_instances(conversation)
+
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """Delete a conversation and its row in the session index.
+        """Delete a conversation, its row in the session index and its sub-agent instances' threads.
 
         Args:
             session_id: The conversation.
@@ -998,10 +1039,11 @@ def _last_text(answers: list[AIMessage]) -> str:
     return ""
 
 
-def _changed(final: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
+def _changed(final: dict[str, Any], start: dict[str, Any]) -> dict[str, Any]:
     """The shared keys (the outside-content mark) ``final`` holds that changed.
 
-    What the run started from is ``inputs``.
+    What the run started from is ``start``: the thread's state as the run
+    began it.
 
     Deep Agents' ``task`` rule (``deepagents.middleware.subagents._is_unchanged``,
     private, copied): a key returned exactly as it was received is no
@@ -1012,7 +1054,7 @@ def _changed(final: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
         if key not in final:
             continue
         value = final[key]
-        if key in inputs and (value is inputs[key] or (value == inputs[key]) is True):
+        if key in start and (value is start[key] or (value == start[key]) is True):
             continue
         changed[key] = value
     return changed

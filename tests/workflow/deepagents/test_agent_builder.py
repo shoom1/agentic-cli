@@ -8,7 +8,9 @@ framework's declaration; its calls go to the manager's delegations, which
 run the sub-agent on its own graph (here ``fakes.tree_delegations``, as the
 manager's hook does). A sub-agent sees only its task message, shares
 ``plan`` and ``tasks``, and its last text is the result its parent reads in
-the envelope. Only the root has the checkpointer. Every stack has the
+the envelope. Every agent is compiled on the manager's checkpointer (a
+sub-agent's runs are on a thread of its instance's own); a tree built without
+one compiles its sub-agents with none. Every stack has the
 permission gate and, inside it, the tool-error middleware.
 
 The models are scripted (``fakes.ScriptedChat``); nothing reaches a provider.
@@ -215,7 +217,7 @@ class TestTheTree:
         assert coordinator.system_prompt(0) == "You are coordinator."
         assert researcher.system_prompt(0) == "You are researcher."
 
-    async def test_only_the_root_has_the_checkpointer(self, created):
+    async def test_every_agent_is_compiled_on_the_checkpointer(self, created):
         saver = InMemorySaver()
         coordinator = ScriptedChat(script=[ai(calls=[task("researcher", "Find X.")]), ai("Done.")])
         researcher = ScriptedChat(script=[ai("X is 42.")])
@@ -228,12 +230,22 @@ class TestTheTree:
         await _turn(root)
 
         assert created["coordinator"]["checkpointer"] is saver
-        assert created["researcher"]["checkpointer"] is False
+        assert created["researcher"]["checkpointer"] is saver
         assert root.checkpointer is saver
-        # The sub-agent is compiled without one (not left to inherit the
-        # root's): its run ends when its task returns, and it stores nothing.
-        namespaces = {c.config["configurable"]["checkpoint_ns"] async for c in saver.alist(None)}
-        assert namespaces == {""}
+        # The sub-agent's run is on a thread of its own (its instance's), never
+        # a namespace under its caller's.
+        saved = {(c.config["configurable"]["thread_id"], c.config["configurable"]["checkpoint_ns"])
+                 async for c in saver.alist(None)}
+        assert saved == {("t", ""), ("instance:researcher-1", "")}
+
+    def test_without_one_a_sub_agent_never_takes_a_callers(self, created):
+        _tree(
+            [COORDINATOR, RESEARCHER],
+            {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+        )
+
+        assert created["coordinator"]["checkpointer"] is None
+        assert created["researcher"]["checkpointer"] is False
 
 
 class TestDelegation:

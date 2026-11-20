@@ -145,7 +145,8 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
     Pass the result as ``build_agent_tree(delegations=...)`` and the same dict
     as ``graphs=``: each run then runs on its type's graph, built by then,
     from its shared state and its messages (an inheriting run's history,
-    then its task message), apart from its caller's stream, as
+    then its task message), on its instance's own thread when the tree has a
+    checkpointer, apart from its caller's stream, as
     ``DeepAgentsWorkflowManager._run_agent`` runs one; its answer is its
     last text after its task message (an inheriting run's history is not its
     own), and the outside-content mark it changed flows back; its plan and
@@ -162,9 +163,11 @@ def tree_delegations(configs: Sequence[Any], graphs: dict[str, Any]) -> Any:
         task = HumanMessage(content=run.message, id=f"task-{run.ref.run}")
         detached = var_child_runnable_config.set(None)
         try:
-            state = await graphs[run.ref.agent].ainvoke({
-                **run.state, "messages": [*(run.history or ()), task],
-            })
+            state = await graphs[run.ref.agent].ainvoke(
+                {**run.state, "messages": [*(run.history or ()), task]},
+                # Its instance's own thread (used when the tree has a checkpointer).
+                {"configurable": {"thread_id": f"instance:{run.ref.instance}"}},
+            )
         finally:
             var_child_runnable_config.reset(detached)
         ids = [m.id for m in state["messages"]]

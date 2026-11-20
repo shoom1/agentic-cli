@@ -478,7 +478,10 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     Each call is recorded and answered as the run's that made it
     (``OpenCalls``, by the active run: a sub-agent's run is the active one in
     the task it runs in, ``agents/delegate.py``), so a sub-agent's call never
-    answers its parent's delegation of the same id.
+    answers its parent's delegation of the same id. A sub-agent instance's
+    next run answers, on its own thread, what an earlier run of it left
+    open, from the instance's record, as the user's when that run was
+    stopped (as ADK seals a stopped run's).
 
     Everything pairs a result with its call by id, the provider adapters
     too. A provider that numbers its call ids per response (``call_0`` in
@@ -504,7 +507,11 @@ class InterruptedCallsMiddleware(AgentMiddleware):
         messages: list[AnyMessage] = state["messages"]
         if not messages:
             return None
-        by_user = self._root and self._open.take_cancel(get_active_turn())
+        run = get_active_run()
+        if self._root or run is None or run.is_root:
+            by_user = self._root and self._open.take_cancel(get_active_turn())
+        else:
+            by_user = self._open.take_cancel(get_active_turn(), instance=run.instance)
         patched: list[AnyMessage] = []
         updates: dict[str, Any] = {}
         changed = False
