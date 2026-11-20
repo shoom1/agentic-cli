@@ -615,6 +615,33 @@ the start of the entry's title.
   `steer(ref, run_id, message)` and `cancel(..., conversation=)`
   (provisional).
 
+- **Sub-agent records are kept beside their conversation, on both
+  backends, and survive a restart.** A conversation's instances, its runs
+  (each with its brief, its envelope's fields, its tokens by model, its own
+  plan and tasks) and its id counters are written to the conversation's
+  store at each run event that changes them (one write at a time per
+  conversation, the records as they are when it starts; a turn returns once
+  its records are written; a write that fails is warned of once per
+  conversation, `subagent_records_not_saved`, and fails neither the run nor
+  the turn): on ADK in a session of the child app named as the conversation
+  (`<app_name>--agents`, id `<conversation id>`, its `%` and `/`
+  percent-encoded, as in its instances' ids; state key
+  `agentic_cli.agents`, `adk/sessions.py::RECORDS_KEY`), on Deep Agents in
+  the store beside the checkpointer (namespace `("agentic_cli", "agents",
+  <app>, <user>)`, key the session id); the memory store keeps them for the
+  process. They load with the conversation (`load_session`, a turn's start,
+  `/agents`; the manager's `load_agents(ref)`, provisional): a run found
+  working (the app was killed in it) reads `interrupted` and its instance
+  `idle`, so a follow-up continues it, new instances are numbered past them
+  (on Deep Agents from the records' counters and instance ids, the
+  checkpointer's instance threads read only for a conversation whose records
+  name none), and records of another version are ignored with one warning
+  (`subagent_records_ignored`). `AgentRuns.export(ref)` and
+  `restore(ref, data)` (provisional; `RECORDS_VERSION`) are the format, and
+  `AgentRuns(on_change=)` tells each change; a backend keeps them through
+  `BaseWorkflowManager._load_agent_records` and `_save_agent_records` (the
+  base keeps none: its records stay in memory). Deleting the conversation
+  deletes them, after its transcripts and before the conversation.
 - **Sub-agent instances, continued with follow-up runs, on both backends.**
   A delegation starts an instance (`researcher-2`) that outlives its run:
   `idle` once the run ends, it takes follow-ups, each its next run
@@ -785,9 +812,10 @@ the start of the entry's title.
   line). `/agents <id>` shows one instance (`researcher-2`: every run of it)
   or run (`researcher-2#1`): its type, parent and title, then each run's
   status and time, the other fields of its brief (a follow-up's message), the
-  first lines of its result, its error and its tokens by model. The runs are the manager's records, kept in
-  memory with it: a conversation resumed from an earlier run of the app, or
-  after a backend switch, lists none. During a turn each line of the events
+  first lines of its result, its error and its tokens by model. The runs are the conversation's records, kept
+  beside it in its store and loaded with it, so a conversation resumed from
+  an earlier run of the app lists its runs, each with the tokens its record
+  keeps. During a turn each line of the events
   box names the sub-agent run at work (`researcher-2 › Calling: web_fetch`),
   as its tool results in the transcript do; the main agent's lines are
   unchanged.
@@ -800,7 +828,8 @@ the start of the entry's title.
   conversation's ledger (`workflow/usage.py`'s `UsageLedger`;
   `BaseWorkflowManager.usage`, the open conversation's, and `usage_of`, both
   provisional; in memory for the manager's life: a backend switch builds a
-  new manager, and the rows before it do not follow, as with `agent_runs`):
+  new manager, and the rows before it do not follow; each run's totals by
+  model are kept with its record, beside the conversation):
   a row per call (run, agent, purpose, model, input, output, cached,
   cache-write and thinking tokens, latency, the turn as the manager counts
   them, a `cost` None until prices are known), and totals by run, agent,
@@ -1722,7 +1751,9 @@ the start of the entry's title.
 - **A conversation's sub-agent transcripts are deleted with it, on both
   backends, and no first run reuses one.** Each sub-agent instance's
   transcript is, on ADK, a child session of its conversation (app
-  `<app_name>--agents`, id `<conversation id>/<instance>`) and, on Deep
+  `<app_name>--agents`, id `<conversation id>/<instance>`, the conversation
+  id's `%` and `/` percent-encoded, so an app's id holding a `/` shares no
+  id with another conversation's) and, on Deep
   Agents, a checkpointer thread of its own (`[app, user, session,
   "<instance>"]`; every sub-agent is compiled on the manager's checkpointer,
   where it had none), which its follow-ups continue and no conversation
@@ -1731,12 +1762,13 @@ the start of the entry's title.
   `SessionReader` (`/sessions --delete` on another backend's conversation),
   `/new` on the memory store, and a conversation already gone leaves none
   behind (`adk/sessions.py::delete_children`; Deep Agents deletes the
-  instances' threads before the conversation's). Instances are numbered per
-  manager, so each turn's first run is numbered past the instances the
-  conversation's store keeps (`BaseWorkflowManager._stored_instances`,
-  asked once per conversation per turn; `AgentRuns.number_from`), whoever
-  ran them: a manager before a restart or a switch of backend or store, or
-  another process that had the conversation between two turns.
+  instances' threads before the conversation's). Instances are numbered
+  from the conversation's stored records, and each turn's first run past the
+  instances the conversation's store keeps besides
+  (`BaseWorkflowManager._stored_instances`, asked once per conversation per
+  turn; `AgentRuns.number_from`), whoever ran them: a manager before a
+  restart or a switch of backend or store, or another process that had the
+  conversation between two turns.
   `researcher-2` follows a stored `researcher-1`, whose transcript stays as
   it was. A first run whose instance the store keeps all the same fails
   rather than replace it.
@@ -1762,8 +1794,8 @@ the start of the entry's title.
   in 0.6 such keys reached the conversation; nor does a run read the
   conversation's other keys. On ADK each sub-agent type runs on a
   runner of its own over the manager's session service, on a child session
-  of its instance (app `<app_name>--agents`, id `<conversation id>/<instance>`),
-  which no conversation list shows, and, an agent of its own there, its system
+  of its instance (app `<app_name>--agents`, id `<conversation id>/<instance>`,
+  the conversation id's `%` and `/` percent-encoded), which no conversation list shows, and, an agent of its own there, its system
   instruction gets ADK's identity line after its prompt as the root's does
   (`You are an agent. Your internal name is "<name>".`, then its
   description); on Deep Agents each type's graph runs apart from
@@ -3091,6 +3123,16 @@ step; each entry says what to use instead.
   closed instance's are dropped (logged). ADK counts each one stored as its
   child session's append returns, Deep Agents once the model call after it
   holds it.
+- **Deleting a conversation leaves nothing of its sub-agents behind.** Its
+  instances' transcripts are deleted first (on ADK they were deleted after
+  the conversation, so a delete cut short left ones nothing could reach),
+  then its records, then the conversation; the manager forgets the
+  conversation (its sub-agent records, the record of a failed turn's calls
+  and every stop, its usage ledger, its numbering), so a conversation of
+  the same id starts from `researcher-1`. On ADK a conversation's
+  transcripts are found by the instances its records name, where every child
+  session of the user was listed, and the stored instances of one
+  conversation are read under a lock of its own, not one shared by all.
 - **A call a stopped sub-agent run left at its prompt says what stopped it.**
   `Not run: its parent stopped the run before this call ran.` (or `its time
   limit`, `its token limit`) where every stop read "Not run: the user

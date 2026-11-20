@@ -170,7 +170,9 @@ my-app --resume <id>    # that one (-r); an id that is not saved exits with stat
 
 Inside the app, `/resume` opens a picker (Enter opens a conversation, Esc
 keeps the current one) and `/resume <id>` opens one by id; `/sessions` lists them with their titles (the first prompt), turns and
-last update. A resumed conversation shows its last 10 messages again. The
+last update. A resumed conversation shows its last 10 messages again, and
+its sub-agents come back with it (`/agents`): a run the app was stopped in
+reads `interrupted`, and the sub-agent can be continued. The
 model and the settings stay this run's; "Allow for this session" grants,
 sandbox kernels and the task list are not restored. One conversation is
 open in one process at a time: two would lose a turn, so a conversation
@@ -1356,7 +1358,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
 - **On ADK**, each agent is built on its own, with no ADK sub-agents, so no
   agent built from a config is offered `transfer_to_agent`; each sub-agent
   type runs on a runner of its own, each instance on a child session (app
-  `<app_name>--agents`, id `<conversation id>/<instance>`), which its
+  `<app_name>--agents`, id `<conversation id>/<instance>`, the conversation id's
+  `%` and `/` percent-encoded), which its
   follow-up runs continue, which `/sessions` never lists and which is deleted
   with its conversation; an inheriting instance's child session starts with
   the conversation's events, copied once, at its first run.
@@ -1389,7 +1392,15 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   of its own) and deleted with it; calls a stopped or crashed run left open
   are answered before its next run's message: from the record when one
   finished (a crash on Deep Agents leaves no record, so each reads
-  interrupted there).
+  interrupted there). The conversation's records of its instances and runs
+  (each run's brief, result, status and tokens by model, and the id
+  counters) are kept beside it in its store (ADK: a session of the child app
+  named as the conversation; Deep Agents: an item of the store beside the
+  checkpointer), written as each run starts, works and ends, and loaded with
+  it: after a restart its instances are there, a run the app was killed in
+  reads `interrupted` (its instance `idle`, ready to continue), and new
+  instances are numbered past the stored ones. Deleting the conversation
+  deletes them, after the transcripts.
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
   every agent with sub-agents gets three more tools beside `task` (with the
   policy's defaults, `task` alone): `message_agent(agent, message,
