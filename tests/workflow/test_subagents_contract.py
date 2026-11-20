@@ -78,7 +78,7 @@ from agentic_cli.workflow.agents import (
     SubAgentPolicy,
 )
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
-from agentic_cli.workflow.agents.delegate import FollowUpRequest, started_by
+from agentic_cli.workflow.agents.delegate import Delegated, FollowUpRequest, started_by
 from agentic_cli.workflow.agents.roster import ROSTER_CLOSE, ROSTER_HEADER, ROSTER_MAX, ROSTER_OPEN
 from agentic_cli.workflow.agents.slots import SlotPool
 from agentic_cli.workflow.agents.envelope import (
@@ -6005,3 +6005,41 @@ class TestTheEntryPointsRefusals:
 
         HELD["go"].set()
         await asyncio.wait_for(turn, 10)
+
+
+class TestTheMarkAUsersRunBrought:
+    """Each path that carries it to the conversation, pinned alone."""
+
+    async def test_the_manager_holds_the_mark_a_users_run_changed(self, make_crew):
+        crew = make_crew(follow_team(), coordinator=[], researcher=[])
+        key = "outside_content"
+        assert not crew.manager._outside_marks.get(crew.conversation)
+
+        crew.manager._user_ran(
+            crew.conversation, "researcher-1",
+            Delegated(result={"success": True}, state={key: "contract_bring_outside_content"},
+                      run=None),
+        )
+
+        assert crew.manager._outside_marks.get(crew.conversation) == (
+            "contract_bring_outside_content"
+        )
+
+    async def test_the_notice_writes_the_held_mark_before_the_root_answers(self, make_crew):
+        """The root's model call fails: the mark is in the conversation's
+        state all the same, written with the notice."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         fails("overloaded")],
+            researcher=[says("X is 42.")],
+        )
+        await crew.turn()
+        crew.manager._outside_marks.mark(crew.conversation, "contract_bring_outside_content")
+        before = await crew.marked()
+
+        events = [event async for event in crew.manager.tell_root("A notice.")]
+
+        assert before is False
+        assert any(e.type is EventType.ERROR for e in events)
+        assert await crew.marked() is True
