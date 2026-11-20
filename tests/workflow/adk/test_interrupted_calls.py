@@ -10,7 +10,8 @@ each call running by its invocation and id. ADK's seals pair a result with
 a call by id alone, so ``unsealed`` answers, as the turn stops, a call of
 the conversation's they missed; ``left_open`` pairs a result with a call on
 its own branch only, and answers a call a stopped turn left open as the
-user's.
+user's. ``left_open_by`` answers the calls an instance's own agent left open
+before its next run.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from agentic_cli.workflow.adk.interrupted_calls_plugin import (  # noqa: E402
     ABORTED,
     InterruptedCallsPlugin,
     left_open,
+    left_open_by,
     unsealed,
 )
 from agentic_cli.tools.jobs.backends import JobState  # noqa: E402
@@ -300,6 +302,58 @@ class TestLeftOpen:
         assert _answers(answer) == {"c1": {"success": True}, "c2": interrupted(INTERRUPTED)}
         # Its state change is stored with its answer, as with its result.
         assert answer.actions.state_delta == {"seen": True}
+
+
+SECOND = RunRef(
+    agent="researcher", instance="researcher-1", run="researcher-1#2", parent_run=None, depth=1
+)
+
+
+class TestLeftOpenBy:
+    """Before an instance's next run, its child session's calls an earlier
+    run left open are answered as the instance's; the conversation's record
+    and its stop are not its."""
+
+    async def test_its_own_calls_are_answered_from_its_record(self):
+        calls = OpenCalls()
+        plugin = InterruptedCallsPlugin(calls)
+        events = [
+            _calls("coordinator", None, ("task", "c0")),  # an inheriting copy's: not its own
+            _calls("researcher", None, ("contract_lookup", "r1"), ("contract_block", "r2")),
+        ]
+        token = set_active_run(RESEARCHER)
+        try:
+            with turn_of(CONVERSATION):
+                await plugin.after_tool_callback(
+                    tool=_tool("contract_lookup"), tool_args={},
+                    tool_context=_context("r1", state_delta={"seen": True}),
+                    result={"success": True, "value": 42},
+                )
+        finally:
+            reset_active_run(token)
+        calls.cancelled(CONVERSATION)
+
+        with turn_of(CONVERSATION):
+            (answer,) = left_open_by(events, calls, SECOND)
+            stopped = calls.take_cancel(CONVERSATION)
+            kept = calls.recorded("r1", run="researcher-1#2") is not None
+
+        assert (answer.author, answer.branch, answer.error_code) == ("researcher", None, ABORTED)
+        assert _answers(answer) == {
+            "r1": {"success": True, "value": 42}, "r2": interrupted(INTERRUPTED),
+        }
+        assert answer.actions.state_delta == {"seen": True}
+        # The conversation's stop and record are left as they were.
+        assert stopped is True and kept is True
+
+    def test_none_left_open_is_none(self):
+        events = [
+            _calls("researcher", None, ("contract_lookup", "r1")),
+            _results("researcher", None, ("contract_lookup", "r1", {"success": True})),
+        ]
+
+        with turn_of(CONVERSATION):
+            assert left_open_by(events, OpenCalls(), SECOND) == []
 
 
 class TestPositionalPairing:

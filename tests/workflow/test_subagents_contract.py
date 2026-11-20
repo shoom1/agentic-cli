@@ -4151,6 +4151,29 @@ class TestAFollowUp:
         assert before == ""
         assert await crew.instance_mark("researcher-1") == "contract_bring_outside_content"
 
+    @pytest.mark.parametrize("backend", ["adk"], indirect=True)
+    async def test_on_adk_a_child_session_the_store_lost_is_made_again(self, make_crew):
+        """A follow-up whose instance's child session is gone runs on a new
+        one, made as a first run's is: the follow-up's message alone."""
+        from agentic_cli.workflow.adk.sessions import child_app
+
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+        await crew.turn()
+        await crew.manager._session_service.delete_session(
+            app_name=child_app(crew.conversation.app_name), user_id=USER,
+            session_id=f"{SESSION}/researcher-1",
+        )
+
+        await crew.turn("Go on.")
+
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert crew.message_count("researcher", 1) == 1
+
     async def test_a_follow_up_blocks_no_event_loop(self, make_crew):
         crew = make_crew(
             follow_team(),

@@ -47,6 +47,10 @@ answer arrives: ADK stores the answer and runs its calls after the
 callback, under that id. Every runner's chain has this plugin, a sub-agent
 run's too. A conversation stored with an id twice is paired by position:
 a result answers the latest open call of its id before it.
+
+``left_open_by`` answers, before a sub-agent instance's next run (a
+follow-up), the calls its own agent left open on its child session, from the
+record of the instance, whichever run made them.
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ from agentic_cli.workflow.interrupts import (
     interrupted,
 )
 from agentic_cli.workflow.sessions import (
+    RunRef,
     ToolCallRef,
     get_active_run,
     get_active_turn,
@@ -424,6 +429,36 @@ def left_open(events: list[Event], open_calls: OpenCalls) -> list[Event]:
                 id=call.id, name=call.name,
                 response=_as_response(
                     _left_open_answer(open_calls, call.id, place[2], by_user, actions)
+                ),
+            )
+            for call in calls
+        ], INTERRUPTED, actions))
+    return answers
+
+
+def left_open_by(events: list[Event], open_calls: OpenCalls, run: RunRef) -> list[Event]:
+    """The events that answer the calls a sub-agent instance's own agent left open.
+
+    ``events`` are the instance's child session's: before its next run
+    (``run``), a call an earlier run of it left open (a crash's, a stop's the
+    seal did not write) is answered from the instance's record by ``run``
+    (``OpenCalls``: a call that returned keeps its result and the state it
+    changed), else ``INTERRUPTED``. Only the calls the instance's own agent
+    made are answered: an inheriting instance's copy of its parent's
+    conversation holds its parent's open ``task`` call, which is not its.
+    The conversation's stop and record are left as they were
+    (``left_open`` takes the stop and clears nothing either).
+    """
+    answers: list[Event] = []
+    for place, calls in _unanswered(events).items():
+        if place[1] != run.agent:
+            continue
+        actions = EventActions()
+        answers.append(_answer_event(place, [
+            types.FunctionResponse(
+                id=call.id, name=call.name,
+                response=_as_response(
+                    _from_record(open_calls, call.id, run.run, actions, by_user=False)
                 ),
             )
             for call in calls
