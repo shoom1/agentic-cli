@@ -13,13 +13,16 @@ plugins, after ADK has built the request (the summary included):
 - Over the agent's budget B, it drops the oldest whole turns from this
   request (``drop_turns``) until it is under the agent's trigger: a turn
   starts at a user's text, never at a tool result or right after a call, so
-  a call keeps its result; the newest turn stays, and so do the memory index
-  and a summary that open the conversation (``protected_head``). The first
+  a call keeps its result; the newest turn stays, and so do the memory index,
+  the roster of the main agent's sub-agents and a summary that open the
+  conversation (``protected_head``). The first
   kept user content starts with a note, ``FIT_NOTE``, as a part of its own:
   no new message, so no provider sees one more user message in a row. The
   session is untouched: the next request starts from the whole history again.
 - In a sub-agent run's request (``keep_task``: a sub-agent type's chain) the
-  run's task message, its invocation's user content, is never left out
+  run's task message, its invocation's user content, and its instance's
+  brief (the event of its child session whose state delta set ``BRIEF_KEY``:
+  ``brief_of``; a follow-up's message is not the brief) are never left out
   either: a message steered to the run after a tool result starts a turn,
   and the turns between the task message and the first kept one go; that
   turn's opening content joins the task message, after the note, as one
@@ -28,8 +31,8 @@ plugins, after ADK has built the request (the summary included):
   turn.
 - When the newest turn alone is over the budget, nothing it could drop would
   help: the request goes as it is, and the overflow handler answers.
-- As its last step, what opens the conversation (the memory index, a summary:
-  each a user content of its own) is folded into the next content when that
+- As its last step, what opens the conversation (the memory index, the roster, a
+  summary: each a user content of its own) is folded into the next content when that
   is a user's text, as parts before its own (``fold_summary``): a strict chat
   template refuses two user messages in a row.
 
@@ -50,7 +53,7 @@ of one sub-agent type share their runner, and this plugin, at once.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 from google.adk.plugins.base_plugin import BasePlugin
@@ -60,12 +63,15 @@ from agentic_cli.logging import Loggers
 from agentic_cli.memory import INDEX_OPEN
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import ESTIMATE_MARGIN, chars_per_token
+from agentic_cli.workflow.adk.sessions import BRIEF_KEY
+from agentic_cli.workflow.agents.roster import ROSTER_OPEN
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.agents.invocation_context import InvocationContext
+    from google.adk.events import Event
     from google.adk.events.event_actions import EventActions
     from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
@@ -130,7 +136,8 @@ class FitGuardPlugin(BasePlugin):
             list(llm_request.contents), config.model_copy() if config is not None else None
         ))
         task = callback_context.user_content if self._keep_task else None
-        self._fit(llm_request, agent, budget, kind, task)
+        brief = brief_of(callback_context.session.events) if self._keep_task else None
+        self._fit(llm_request, agent, budget, kind, task, brief)
         llm_request.contents = fold_summary(llm_request.contents)
         return None
 
@@ -179,17 +186,20 @@ class FitGuardPlugin(BasePlugin):
     def _fit(
         self, llm_request: "LlmRequest", agent: str, budget: "ContextBudget",
         kind: "ProviderKind", task: types.Content | None = None,
+        brief: types.Content | None = None,
     ) -> None:
         """Leave the oldest turns out of ``llm_request`` when it is over the budget.
 
-        ``task``, a sub-agent run's task message, is never left out.
+        ``task``, a sub-agent run's task message, and ``brief``, its
+        instance's, are never left out.
         """
         estimate = estimate_request_tokens(llm_request, kind)
         if estimate <= budget.budget:
             return
         overhead = overhead_tokens(llm_request, kind)
         contents, dropped = drop_turns(
-            llm_request.contents, target_tokens=budget.trigger - overhead, kind=kind, task=task
+            llm_request.contents, target_tokens=budget.trigger - overhead, kind=kind, task=task,
+            brief=brief,
         )
         if not dropped or overhead + _tokens(_contents_chars(contents), kind) > budget.budget:
             # The newest turn alone is over: the overflow handler answers.
@@ -228,13 +238,13 @@ def overhead_tokens(llm_request: "LlmRequest", kind: "ProviderKind") -> int:
 
 
 def fold_summary(contents: list[types.Content]) -> list[types.Content]:
-    """``contents`` with what opens them (the index, a summary) folded into the next one.
+    """``contents`` with what opens them (the index, the roster, a summary) folded into the next one.
 
-    The index and a summary are user contents of their own. Their parts go
+    The index, the roster and a summary are user contents of their own. Their parts go
     before those of the user's text that follows, the index's first, so no
     provider sees two user messages in a row. When no user text follows (a
-    tool result, a model's turn), an index and a summary become one content.
-    A lone index or summary before no user text is left as it is. ``contents``
+    tool result, a model's turn), they become one content.
+    A lone index, roster or summary before no user text is left as it is. ``contents``
     are never changed in place.
     """
     head = protected_head(contents)
@@ -252,7 +262,7 @@ def fold_summary(contents: list[types.Content]) -> list[types.Content]:
 
 def drop_turns(
     contents: list[types.Content], *, target_tokens: float, kind: "ProviderKind",
-    task: types.Content | None = None,
+    task: types.Content | None = None, brief: types.Content | None = None,
 ) -> tuple[list[types.Content], int]:
     """``contents`` without their oldest whole turns, under ``target_tokens`` if it can be.
 
@@ -260,8 +270,8 @@ def drop_turns(
     content that made no call: so a call and its result stay together. Turns
     go oldest first, the oldest whatever the target (the caller knows the
     request is too big), until the rest, with the note, is under the target;
-    the newest turn always stays, and so do the index and a summary that open
-    the conversation. The first kept user content gets ``FIT_NOTE`` as a part
+    the newest turn always stays, and so do the index, the roster and a
+    summary that open the conversation. The first kept user content gets ``FIT_NOTE`` as a part
     before its own; ``contents`` themselves are left as they are.
 
     ``task`` is a sub-agent run's task message (its invocation's user
@@ -269,6 +279,13 @@ def drop_turns(
     result starts a turn, and once the turns go past the task message, the
     first kept one's opening content joins it, after the note, as one user
     content. An inheriting run's history before it goes first.
+
+    ``brief`` is the run's instance's brief, which stays as the task message
+    does (a follow-up's task message is its own message, and the brief the
+    turn before it): what is kept opens with the first of them, the note,
+    the other when the cut went past it too, then the first kept turn's
+    opening content. One content when they are the same message (a first
+    run's).
 
     Each content is measured once; what goes is subtracted from a running
     sum.
@@ -282,7 +299,7 @@ def drop_turns(
     starts = [i for i in range(len(body)) if _starts_turn(body, i)]
     if not starts or starts[-1] == 0:
         return contents, 0
-    kept = _task_at(body, task)
+    kept = sorted({at for at in (_brief_at(body, brief), _task_at(body, task)) if at is not None})
     sizes = [len(content.model_dump_json(exclude_none=True)) for content in contents]
     remaining = sum(sizes) + _NOTE_CHARS
     sizes = sizes[len(head):]
@@ -291,13 +308,14 @@ def drop_turns(
     previous = 0
     for dropped, cut in enumerate(cuts, start=1):
         remaining -= sum(sizes[previous:cut])
-        if kept is not None and previous <= kept < cut:
-            remaining += sizes[kept]  # the task message stays
+        # The brief and the task message stay.
+        remaining += sum(sizes[at] for at in kept if previous <= at < cut)
         previous = cut
         if _tokens(remaining, kind) < target_tokens:
             break
-    if kept is not None and kept < cut:
-        return [*head, _joined(body[kept], body[cut]), *body[cut + 1:]], dropped
+    before = [body[at] for at in kept if at < cut]
+    if before:
+        return [*head, _joined(before, body[cut]), *body[cut + 1:]], dropped
     return [*head, _noted(body[cut]), *body[cut + 1:]], dropped
 
 
@@ -306,7 +324,7 @@ def keep_newest_turns(
 ) -> tuple[list[types.Content], int]:
     """``contents`` from their ``turns``-th newest turn on, cut as ``drop_turns`` cuts.
 
-    The index and a summary that open them stay, and the first kept user
+    The index, the roster and a summary that open them stay, and the first kept user
     content gets ``FIT_NOTE``. For a retry after a summary: the turns the
     summary kept, what every later call sends besides it.
 
@@ -329,23 +347,55 @@ def _noted(content: types.Content) -> types.Content:
                                                 *(content.parts or [])]})
 
 
-def _joined(task: types.Content, content: types.Content) -> types.Content:
-    """``content`` after ``task`` and ``FIT_NOTE``, as one user content."""
-    return content.model_copy(update={"parts": [*(task.parts or []),
-                                                types.Part.from_text(text=FIT_NOTE),
-                                                *(content.parts or [])]})
+def _joined(kept: Sequence[types.Content], content: types.Content) -> types.Content:
+    """``content`` after the first of ``kept``, ``FIT_NOTE`` and the rest of
+    ``kept``, as one user content."""
+    first, *rest = kept
+    return content.model_copy(update={"parts": [
+        *(first.parts or []),
+        types.Part.from_text(text=FIT_NOTE),
+        *(part for other in rest for part in other.parts or []),
+        *(content.parts or []),
+    ]})
+
+
+def _user_contents_like(contents: list[types.Content], like: types.Content | None) -> list[int]:
+    """Where the user contents with ``like``'s parts are in ``contents``."""
+    if like is None:
+        return []
+    return [
+        i for i, content in enumerate(contents)
+        if content.role == "user" and content.parts == like.parts
+    ]
 
 
 def _task_at(contents: list[types.Content], task: types.Content | None) -> int | None:
     """Where ``task`` (a run's task message) is in ``contents``: the last user
     content with its parts; None for none."""
-    if task is None:
-        return None
-    found = [
-        i for i, content in enumerate(contents)
-        if content.role == "user" and content.parts == task.parts
-    ]
+    found = _user_contents_like(contents, task)
     return found[-1] if found else None
+
+
+def _brief_at(contents: list[types.Content], brief: types.Content | None) -> int | None:
+    """Where ``brief`` (an instance's first message) is in ``contents``: the
+    first user content with its parts; None for none."""
+    found = _user_contents_like(contents, brief)
+    return found[0] if found else None
+
+
+def brief_of(events: Sequence["Event"]) -> types.Content | None:
+    """The brief of the instance whose child session holds ``events``: the
+    content of the first event whose state delta set ``BRIEF_KEY`` (its first
+    run's message), or None.
+
+    A copied conversation (an inheriting instance's) carries no state delta,
+    so a parent's brief is never taken for the child's.
+    """
+    for event in events:
+        delta = event.actions.state_delta if event.actions is not None else None
+        if delta and BRIEF_KEY in delta:
+            return event.content
+    return None
 
 
 def _starts_turn(contents: list[types.Content], i: int) -> bool:
@@ -380,13 +430,18 @@ def is_memory_index(content: types.Content) -> bool:
     return content.role == "user" and bool(first and first.text) and first.text.startswith(INDEX_OPEN)
 
 
+def is_roster(content: types.Content) -> bool:
+    """Whether ``content`` is the roster of sub-agents the main agent's requests carry."""
+    first = content.parts[0] if content.parts else None
+    return content.role == "user" and bool(first and first.text) and first.text.startswith(ROSTER_OPEN)
+
+
 def protected_head(contents: list[types.Content]) -> list[types.Content]:
-    """What opens ``contents`` and is never dropped: the index, then a summary."""
+    """What opens ``contents`` and is never dropped: the index, the roster, then a summary."""
     count = 0
-    if count < len(contents) and is_memory_index(contents[count]):
-        count += 1
-    if count < len(contents) and is_summary(contents[count]):
-        count += 1
+    for opens in (is_memory_index, is_roster, is_summary):
+        if count < len(contents) and opens(contents[count]):
+            count += 1
     return contents[:count]
 
 

@@ -26,6 +26,11 @@ records, as a killed process writes none. Each
 agent's prompt is ``You are <name>.``, by which ADK's fake API tells the
 agents apart.
 
+``make_crew(..., models={...})`` adds ``models`` entries to the settings: an
+agent on a model with a small window (``SMALL_MODEL``) has its long transcript
+summarized (Deep Agents) or trimmed (ADK). ``Crew.opening`` reads the first
+user message an agent's request held, where the main agent's roster goes.
+
 Offline: no provider is reached and no catalog lists (``tests/conftest.py``).
 """
 
@@ -70,6 +75,7 @@ from agentic_cli.workflow.agents import (
 )
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
 from agentic_cli.workflow.agents.delegate import FollowUpRequest, started_by
+from agentic_cli.workflow.agents.roster import ROSTER_CLOSE, ROSTER_HEADER, ROSTER_MAX, ROSTER_OPEN
 from agentic_cli.workflow.agents.slots import SlotPool
 from agentic_cli.workflow.agents.envelope import (
     INTERRUPTED_ERROR,
@@ -480,6 +486,7 @@ class Crew:
     _call_results: Callable[[str, int], list[tuple[str, list[str]]]] | None = None
     _instance_mark: Callable[[str], Awaitable[str]] | None = None
     _models: Callable[[str], list[str]] | None = None
+    _opening: Callable[[str, int], list[str]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -518,6 +525,13 @@ class Crew:
         Deep Agents each build's (``ScriptedModels.built``)."""
         assert self._models is not None
         return self._models(agent)
+
+    def opening(self, agent: str, call: int = -1) -> list[str]:
+        """The text blocks of the first user message ``agent``'s model request
+        ``call`` held, in order: what opens its conversation (the main
+        agent's memory index and roster, folded into it)."""
+        assert self._opening is not None
+        return self._opening(agent, call)
 
     def answer_with(self, answer: Callable[[UserInputRequest], Awaitable[str]]) -> None:
         """Answer every question and permission prompt with ``answer(request)``."""
@@ -636,13 +650,16 @@ class Crew:
 _ASYNC_ANTHROPIC = anthropic.AsyncAnthropic
 
 
-def _settings(store: str = "memory") -> BaseSettings:
-    return BaseSettings(session_store=store, default_model="claude-sonnet-4-6")
+def _settings(store: str = "memory", models: dict[str, Any] | None = None) -> BaseSettings:
+    return BaseSettings(
+        session_store=store, default_model="claude-sonnet-4-6", models=dict(models or {})
+    )
 
 
 def _adk_crew(
     team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
     subagents: SubAgentPolicy | None = None, store: str = "memory",
+    models: dict[str, Any] | None = None,
 ) -> Crew:
     from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
     from agentic_cli.workflow.adk.sessions import child_app
@@ -651,7 +668,7 @@ def _adk_crew(
     monkeypatch.setattr(anthropic, "AsyncAnthropic", _ASYNC_ANTHROPIC)
     route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(claude))
     manager = GoogleADKWorkflowManager(
-        agent_configs=team, settings=_settings(store), subagents=subagents
+        agent_configs=team, settings=_settings(store, models), subagents=subagents
     )
 
     def results_read(name: str, call: int) -> dict[str, str]:
@@ -725,22 +742,33 @@ def _adk_crew(
     def models(name: str) -> list[str]:
         return [body["model"] for sent, body in claude.sent if sent == name]
 
+    def opening(name: str, call: int) -> list[str]:
+        body = [body for sent, body in claude.sent if sent == name][call]
+        first = next(m for m in body["messages"] if m["role"] == "user")
+        content = first["content"]
+        if isinstance(content, str):
+            return [content]
+        return [block["text"] for block in content if block.get("type") == "text"]
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=models,
+        _opening=opening,
     )
 
 
 def _deepagents_crew(
     team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
     subagents: SubAgentPolicy | None = None, store: str = "memory",
+    models: dict[str, Any] | None = None,
 ) -> Crew:
-    from langchain_core.messages import ToolMessage
+    from langchain_core.messages import HumanMessage, ToolMessage
 
     from agentic_cli.workflow.deepagents import manager as deepagents_manager
     from tests.workflow.deepagents.fakes import ScriptedModels
 
+    entries = models
     models = ScriptedModels(**{
         name: [_scripted_answer(step) for step in steps] for name, steps in scripts.items()
     })
@@ -755,7 +783,7 @@ def _deepagents_crew(
             )
     monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
     manager = deepagents_manager.DeepAgentsWorkflowManager(
-        agent_configs=team, settings=_settings(store), subagents=subagents
+        agent_configs=team, settings=_settings(store, entries), subagents=subagents
     )
 
     def results_read(name: str, call: int) -> dict[str, str]:
@@ -833,10 +861,20 @@ def _deepagents_crew(
     def built_models(name: str) -> list[str]:
         return [resolved.ref.model for resolved in models.built if resolved.agent == name]
 
+    def opening(name: str, call: int) -> list[str]:
+        first = next(
+            m for m in models.chats[name].conversation(call) if isinstance(m, HumanMessage)
+        )
+        if isinstance(first.content, str):
+            return [first.content]
+        return [block["text"] for block in first.content
+                if isinstance(block, dict) and block.get("type") == "text"]
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=built_models,
+        _opening=opening,
     )
 
 
@@ -1024,8 +1062,8 @@ def project(tmp_path, monkeypatch) -> Path:
 async def make_crew(backend, project, monkeypatch):
     """``make_crew(team, *, subagents=None, store="memory", **scripts)``: ``team``'s
     manager on ``backend``, with the sub-agent policy ``subagents`` and the
-    session store ``store`` (``"memory"`` or ``"sqlite"``), each agent
-    answering from its script (an agent without one has none); every manager
+    session store ``store`` (``"memory"`` or ``"sqlite"``) and the settings'
+    ``models`` entries, each agent answering from its script (an agent without one has none); every manager
     made is cleaned up after the test."""
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
@@ -1034,13 +1072,13 @@ async def make_crew(backend, project, monkeypatch):
 
     def make(
         team: list[AgentConfig], *, subagents: SubAgentPolicy | None = None,
-        store: str = "memory", **scripts: list[Step],
+        store: str = "memory", models: dict[str, Any] | None = None, **scripts: list[Step],
     ) -> Crew:
         complete = {config.name: list(scripts.get(config.name, ())) for config in team}
         complete[SIDE_CALLS] = list(scripts.get(SIDE_CALLS, ()))
         complete[SUMMARIES] = list(scripts.get(SUMMARIES, ()))
         build = _adk_crew if backend == "adk" else _deepagents_crew
-        crew = build(team, complete, monkeypatch, subagents, store)
+        crew = build(team, complete, monkeypatch, subagents, store, models)
         made.append(crew)
         return crew
 
@@ -1868,7 +1906,7 @@ class TestRawLog:
         settings = BaseSettings(
             session_store="memory", default_model="claude-sonnet-4-6", raw_llm_logging=True
         )
-        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda store: settings)
+        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda store, models=None: settings)
         crew = make_crew(
             team(),
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
@@ -5327,3 +5365,160 @@ class TestADeletedConversation:
         await crew.turn("Again.")
         assert envelope_read(crew.results_read("coordinator")["c4"])["result"] == "Z is 3."
         assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
+
+
+# -- a growing transcript keeps its brief; the main agent's roster ----------------------------
+
+#: A model with a small window: an input budget of 17,000 tokens, summarized at 14,450.
+SMALL_MODEL = "anthropic:claude-haiku-4-5"
+SMALL_ENTRY = {SMALL_MODEL: {"context_window": 20_000, "max_output": 2_000}}
+
+
+@register_tool(capabilities=EXEMPT, description="Read a long page (a contract-test tool).")
+def contract_read_page(n: int = 1) -> dict:
+    """Page ``n``: about 35,000 characters, its number first."""
+    return {"success": True, "page": f"Page {n}: " + "word " * 7_000}
+
+
+class TestALongTranscriptKeepsItsBrief:
+    """An instance's brief is never lost from its requests as its transcript
+    grows: Deep Agents summarizes the instance against its own budget and
+    keeps the brief ahead of the summary; ADK trims its request (its summaries
+    stay the main agent's) and keeps the brief whatever it leaves out. The
+    difference is the libraries': ADK keeps the run's own message too
+    (``keep_task``), where Deep Agents' summary stands for it once it is
+    older than what a summary keeps word for word."""
+
+    async def test_a_follow_up_after_its_summary_or_trim_still_holds_it(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_read_page,), model=SMALL_MODEL)],
+            subagents=FOLLOWING, models=SMALL_ENTRY,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Asked."),
+                         calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_read_page", "r1", n=1)), says("X is 42."),
+                        calls(use("contract_read_page", "r2", n=2)), says("Y is 7.")],
+            summaries=[says("The first page said X is 42.")],
+        )
+
+        await crew.turn()
+        with no_blocking_calls():
+            events = await crew.turn("Find Y too.")
+
+        # Its follow-up's second request was over the researcher's budget...
+        last = crew.bodies("researcher")[-1]
+        assert "Page 1:" not in last and "Page 2:" in last
+        assert [e.metadata["agent"] for e in events
+                if e.type is EventType.CONTEXT_TRIMMED] == ["researcher"]
+        # ...and still held the brief, once.
+        assert last.count("# Task: Find X.") == 1
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+
+
+def roster(*lines: str) -> str:
+    """The roster that lists ``lines``."""
+    return "\n".join([ROSTER_OPEN, ROSTER_HEADER, *lines, ROSTER_CLOSE])
+
+
+class TestTheRoster:
+    """The main agent's requests carry the roster of its open sub-agents when it
+    can continue them (``message_agent``), first in its conversation, after
+    the memory index: a snapshot taken when the conversation's first request
+    asks for it, taken again where the memory index's is (here: the
+    conversation opened again)."""
+
+    async def test_after_a_delegation_once_the_snapshot_is_retaken(self, make_crew):
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Asked."),
+                         says("Still."),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Listed.")],
+            researcher=[says("X is 42.\nMore on X."), says("Y is 7.")],
+        )
+        await crew.turn()
+        await crew.turn("Again.")
+        # Taken before the delegation, at the conversation's first request: none yet.
+        assert not any(ROSTER_OPEN in body for body in crew.bodies("coordinator"))
+
+        await crew.manager.load_session(SESSION, user_id=USER)
+        with no_blocking_calls():
+            await crew.turn("And now?")
+
+        listed = roster("- researcher-1 (researcher, idle): Find X. — X is 42.")
+        # The same snapshot for the whole turn: researcher-2 waits for the next one.
+        assert crew.opening("coordinator", -2) == [listed, "Go."]
+        assert crew.opening("coordinator", -1) == [listed, "Go."]
+
+    async def test_a_summary_retakes_it(self, make_crew):
+        """A coordinator whose long conversation outgrows its small model is
+        summarized; the request that carries the summary carries a new
+        roster, which lists the instance the earlier requests' snapshot,
+        taken before it ran, did not."""
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",), model=SMALL_MODEL),
+             agent("researcher")],
+            subagents=FOLLOWING, models=SMALL_ENTRY,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         says("Asked.", usage=(15_000, 10)), says("Done.")],
+            researcher=[says("X is 42.")],
+            summaries=[says("The first turn was read.")],
+        )
+        await crew.turn("Find X: " + "word " * 8_000)
+        with no_blocking_calls():
+            events = await crew.turn("And now? " + "word " * 4_000)
+
+        assert [e.metadata["agent"] for e in events
+                if e.type is EventType.CONTEXT_TRIMMED] == ["coordinator"]
+        listed = roster("- researcher-1 (researcher, idle): Find X. — X is 42.")
+        assert not any(ROSTER_OPEN in block for block in crew.opening("coordinator", -2))
+        assert crew.opening("coordinator", -1)[0] == listed
+
+    async def test_none_with_the_policys_defaults(self, make_crew):
+        crew = make_crew(
+            parent_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Asked."),
+                         says("Still.")],
+            researcher=[says("X is 42.")],
+        )
+        await crew.turn()
+        await crew.manager.load_session(SESSION, user_id=USER)
+        await crew.turn("And now?")
+
+        assert crew.opening("coordinator", -1) == ["Go."]
+        assert not any(ROSTER_OPEN in body for body in crew.bodies("coordinator"))
+
+    async def test_none_when_every_instance_is_closed(self, make_crew):
+        crew = make_crew(
+            parent_team(continuable=False), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Asked."),
+                         says("Still.")],
+            researcher=[says("X is 42.")],
+        )
+        await crew.turn()
+        await crew.manager.load_session(SESSION, user_id=USER)
+        await crew.turn("And now?")
+
+        assert crew.instances() == [("researcher-1", INSTANCE_CLOSED)]
+        assert crew.opening("coordinator", -1) == ["Go."]
+
+    async def test_at_most_its_cap_newest_first_in_whole_lines(self, make_crew):
+        briefs = [f"Find item {n:02d}: " + "x" * 60 for n in range(1, 13)]
+        result = "R" * 150
+        crew = make_crew(
+            parent_team(), subagents=FOLLOWING,
+            coordinator=[calls(*(delegate("researcher", brief, f"c{n}")
+                                 for n, brief in enumerate(briefs, start=1))),
+                         says("Asked."), says("Listed.")],
+            researcher=[says(result) for _ in briefs],
+        )
+        await crew.turn()
+        await crew.manager.load_session(SESSION, user_id=USER)
+        await crew.turn("And now?")
+
+        lines = [f"- researcher-{n} (researcher, idle): {briefs[n - 1]} — {result}"
+                 for n in range(12, 0, -1)]
+        fits = [line for k, line in enumerate(lines, start=1)
+                if len(roster(*lines[:k])) <= ROSTER_MAX]
+        opened = crew.opening("coordinator", -1)
+        assert opened == [roster(*fits), "Go."]
+        assert 0 < len(fits) < 12 and len(opened[0]) <= ROSTER_MAX

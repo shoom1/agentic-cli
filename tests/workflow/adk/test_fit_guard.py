@@ -22,6 +22,7 @@ import pytest
 
 pytest.importorskip("google.adk")
 
+from google.adk.events import Event  # noqa: E402
 from google.adk.events.event_actions import EventActions  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
@@ -32,9 +33,11 @@ from agentic_cli.workflow.adk import fit_guard_plugin  # noqa: E402
 from agentic_cli.workflow.adk.fit_guard_plugin import (  # noqa: E402
     FIT_NOTE,
     FitGuardPlugin,
+    brief_of,
     drop_turns,
     estimate_request_tokens,
 )
+from agentic_cli.workflow.adk.sessions import BRIEF_KEY  # noqa: E402
 from agentic_cli.workflow.context import ContextBudget  # noqa: E402
 from agentic_cli.workflow.events import EventType, WorkflowEvent  # noqa: E402
 from agentic_cli.workflow.live_events import LiveEvents, reporting  # noqa: E402
@@ -214,6 +217,101 @@ class TestASubAgentRunsTaskMessage:
 
         assert dropped == 1
         assert [part.text for part in kept[0].parts] == [FIT_NOTE, "Also find Z."]
+
+
+class TestAnInstancesBrief:
+    """An instance's brief (its first run's task message) is never left out of
+    a later run's request either (``brief=``): a follow-up's task message is
+    its own message, and the brief is the turn before it."""
+
+    BRIEF = "# Task: Find X.\n\n## Objective\nFind X."
+
+    def follow_up(self) -> list[types.Content]:
+        return [user(self.BRIEF), call("lookup", "c1"), result("lookup", "c1", page=LONG),
+                model("X is 42."), user("Now find Y."), call("lookup", "c2"),
+                result("lookup", "c2", page=LONG)]
+
+    def test_the_turns_after_it_go_and_the_rest_joins_it(self):
+        contents = self.follow_up()
+        task, brief = contents[4], contents[0]
+
+        kept, dropped = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=task, brief=brief)
+        without, _ = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=task)
+
+        assert dropped == 1
+        assert [part.text for part in kept[0].parts] == [self.BRIEF, FIT_NOTE, "Now find Y."]
+        assert kept[1:] == contents[5:]
+        assert [part.text for part in without[0].parts] == [FIT_NOTE, "Now find Y."]
+
+    def test_a_message_steered_after_the_follow_up_joins_both(self):
+        contents = [*self.follow_up(), user("Also find Z."), call("lookup", "c3"),
+                    result("lookup", "c3", z=42)]
+        task, brief = contents[4], contents[0]
+
+        kept, dropped = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=task, brief=brief)
+
+        assert dropped == 2
+        assert [part.text for part in kept[0].parts] == [
+            self.BRIEF, FIT_NOTE, "Now find Y.", "Also find Z."
+        ]
+        assert kept[1:] == contents[8:]
+
+    def test_an_inheriting_instances_history_goes_first(self):
+        contents = [user(LONG), model("A1."), *self.follow_up()]
+        task, brief = contents[6], contents[2]
+
+        kept, dropped = drop_turns(
+            contents, target_tokens=tokens(contents[2:]) + NOTE_ROOM, kind=CLAUDE,
+            task=task, brief=brief,
+        )
+
+        assert dropped == 1
+        assert [part.text for part in kept[0].parts] == [FIT_NOTE, self.BRIEF]
+        assert kept[1:] == contents[3:]
+
+    def test_its_first_run_s_brief_is_its_task(self):
+        brief = user(self.BRIEF)
+        contents = [brief, call("lookup", "c1"), result("lookup", "c1", page=LONG),
+                    user("Also find Z.")]
+
+        kept, dropped = drop_turns(contents, target_tokens=0, kind=CLAUDE, task=brief, brief=brief)
+
+        assert dropped == 1
+        assert [part.text for part in kept[0].parts] == [self.BRIEF, FIT_NOTE, "Also find Z."]
+
+    def test_it_is_the_event_its_first_run_marked(self):
+        brief = user(self.BRIEF)
+        events = [
+            Event(author="user", content=user("Copied from the parent.")),
+            Event(author="user", content=brief,
+                  actions=EventActions(state_delta={BRIEF_KEY: "researcher-1#1"})),
+            Event(author="researcher", content=model("X is 42.")),
+            Event(author="user", content=user("Now find Y."),
+                  actions=EventActions(state_delta={"agentic_cli.outside_content": "web_fetch"})),
+        ]
+
+        assert brief_of(events) == brief
+        assert brief_of(events[:1]) is None and brief_of([]) is None
+
+    async def test_the_plugin_keeps_the_sessions_brief_in_a_sub_agent_types_chain(self):
+        contents = self.follow_up()
+        events = [Event(author="user", content=contents[0],
+                        actions=EventActions(state_delta={BRIEF_KEY: "researcher-1#1"}))]
+        budget = ContextBudget(window=200_000, window_known=True, budget=tokens(contents) - 1,
+                               trigger=tokens(contents[4:]) + NOTE_ROOM, keep=0)
+        plugin = FitGuardPlugin({"researcher": budget}, {"researcher": CLAUDE}, keep_task=True)
+        request = LlmRequest(contents=list(contents))
+        context = SimpleNamespace(
+            agent_name="researcher", invocation_id="i2", actions=EventActions(),
+            user_content=contents[4], session=SimpleNamespace(events=events),
+        )
+
+        with reporting(Recorded()):
+            await plugin.before_model_callback(callback_context=context, llm_request=request)
+
+        assert [part.text for part in request.contents[0].parts] == [
+            self.BRIEF, FIT_NOTE, "Now find Y."
+        ]
 
 
 class TestFoldSummary:

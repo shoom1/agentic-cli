@@ -57,6 +57,7 @@ from agentic_cli.workflow.agents.delegate import (
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.records import RecordsWriter
+from agentic_cli.workflow.agents.roster import Rosters
 from agentic_cli.workflow.agents.runs import INSTANCE_CLOSED, RUN_END_STATUSES, AgentRuns
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
@@ -306,7 +307,11 @@ class BaseWorkflowManager(ABC):
         ``_memory_index_cached`` (never reads) and ``_forget_memory_index``
         (a summary written, ``/resume``, ``/compact``). Each is the manager's
         own method, which forwards to the index, so a subclass may override
-        one. The release clears the snapshots.
+        one. The release clears the snapshots. A root that continues its
+        sub-agents (``_roster_wanted``: it has ``message_agent``) also gets
+        their roster after the index, a snapshot per conversation too
+        (``agents/roster.py``): ``_roster_now`` takes it, and
+        ``_forget_memory_index`` drops it with the index's.
 
     Example:
         A minimal backend: it builds its engine in ``_do_initialize`` and
@@ -809,7 +814,8 @@ class BaseWorkflowManager(ABC):
         marks it again). After it,
         unless it raised: its sub-agent records and their loading
         (``agent_runs``), the calls it recorded (``OpenCalls``: a failed
-        turn's too), its usage ledger and its numbering (``Delegations``), so
+        turn's too), its usage ledger, its main agent's roster and its
+        numbering (``Delegations``), so
         a conversation of the same id starts as a new one.
         """
         writer = self.__dict__.get("_records_writer")
@@ -829,6 +835,7 @@ class BaseWorkflowManager(ABC):
         if open_calls is not None:
             open_calls.forget(conversation)
         self._usage_ledgers.forget(conversation)
+        self._rosters.forget(conversation)
         delegations = self.__dict__.get("_delegations_made")
         if delegations is not None:
             delegations.forget(conversation)
@@ -1425,8 +1432,39 @@ class BaseWorkflowManager(ABC):
         return self._memory_index.cap()
 
     def _forget_memory_index(self, ref: SessionRef | None = None) -> None:
-        """Drop a conversation's snapshot (the turn's by default): its next request takes a new one."""
+        """Drop a conversation's memory index and roster snapshots (the turn's by default).
+
+        Both open the main agent's requests, so they change only where the
+        prompt prefix changes anyway: the next request takes new ones.
+        """
         self._memory_index.forget(ref)
+        self._rosters.forget(ref)
+
+    @property
+    def _rosters(self) -> Rosters:
+        """The roster each conversation's main agent gets (``workflow/agents/roster.py``).
+
+        Made on first use, so a manager built without its constructor has it.
+        """
+        held = vars(self).get("_rosters_held")
+        if held is None:
+            held = self._rosters_held = Rosters(lambda: self.agent_runs)
+        return held
+
+    def _roster_wanted(self, root: str) -> bool:
+        """Whether ``root``'s requests carry the roster of its sub-agents.
+
+        Only a root that can continue them does (it has ``message_agent``:
+        sub-agents and the policy's ``follow_ups``); without the tool it could
+        do nothing with an open instance.
+        """
+        config = next((c for c in self._agent_configs if c.name == root), None)
+        return config is not None and bool(config.sub_agents) and self.subagent_policy.follow_ups
+
+    def _roster_now(self) -> str:
+        """The roster the turn's conversation carries, taken the first time it is
+        asked for; ``""`` for none. It reads only the records in memory."""
+        return self._rosters.now()
 
     def _outside_content_mark(self, ref: SessionRef) -> str | None:
         """The tool that brought outside content into ``ref``'s conversation, or None."""
@@ -2522,6 +2560,7 @@ class BaseWorkflowManager(ABC):
         self._initialized = False
         self._budgets = {}
         self._memory_index.clear()
+        self._rosters.clear()
         catalog, self._catalog = self._catalog, None
 
         not_synchronous: list[TypeError] = []

@@ -14,8 +14,9 @@ ADK: summarize at the smaller of ``context_summarize_at`` of B and the
 ``context_max_tokens`` ceiling, and keep the newest 12% of that word for
 word. A model whose window is unknown counts as 128,000 tokens, not Deep
 Agents' fixed 170,000 tokens or 6 messages, which never fire on a small
-model. The memory index the main agent's requests carry counts toward their
-size (``ReportingSummarizationMiddleware._count_tokens``).
+model. The memory index and the roster of sub-agents the main agent's
+requests carry count toward their size
+(``ReportingSummarizationMiddleware._count_tokens``).
 
 **No archive.** Deep Agents writes the summarized messages to its virtual
 filesystem and gives the model the file's path; with its file tools off the
@@ -43,6 +44,20 @@ agent's run: there is no later call in it to skip for. The main agent's
 ends the turn; a sub-agent's answers its ``task`` call with the error
 (``ToolCallErrorMiddleware``), and its coordinator goes on.
 
+**An instance's brief.** A sub-agent instance's first run marks its task
+message as the instance's brief (``brief_message``); a follow-up's message is
+not marked. A summary of the instance's thread stands for the messages before
+its cut, the brief among them, so it is restated: ``awrap_model_call`` puts the
+request's brief in a context variable for the call, ``_partition_messages``
+notes whether the brief is among the messages kept, and
+``_build_new_messages_with_path`` prepends the brief's text blocks to the
+summary message when it is not. Deep Agents stores that message as the event's
+and sends it first, so the event keeps its shape (one message before the cut),
+its cutoff arithmetic is untouched, and every reader of the event, an
+inheriting child of the instance included, sees the brief. The summary also
+summarizes the brief, which does no harm. The main agent's thread has no
+brief, and its summaries are Deep Agents' own.
+
 **Reporting.** The summary call runs on the agent's own model, tagged
 ``lc_source="summarization"``; the run callback reports its start
 (``CONTEXT_SUMMARIZING``) and its usage. Each summary applied is reported as
@@ -61,7 +76,7 @@ count is the prompt the summary replaced, no evidence: the middleware's
 ``_should_summarize`` then decides on its own estimate of the request
 alone, as ADK's engine stops at a summary. They rest on private Deep Agents
 methods (``_apply_event_to_messages``, ``_compute_state_cutoff``,
-``_build_new_messages_with_path``, ``_should_summarize``, ``_lc_helper``
+``_build_new_messages_with_path``, ``_partition_messages``, ``_should_summarize``, ``_lc_helper``
 and its summary model, and, for a failed summary's range,
 ``_get_effective_messages`` and ``_determine_cutoff_index``); contract tests
 pin them.
@@ -75,6 +90,8 @@ import inspect
 import logging
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import (
@@ -100,6 +117,7 @@ from langchain_core.runnables.config import set_config_context
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.context import (
+    MIN_SAVING,
     ContextBudget,
     FailedSummaries,
     chars_per_token,
@@ -134,6 +152,8 @@ _NO_ARCHIVE = "archive disabled"
 #: the mark's ``kind`` on a summary ``/compact`` wrote.
 _MARK = "agentic_cli"
 COMPACTED = "compact"
+#: The mark's ``kind`` on an instance's brief, its first run's task message.
+BRIEF = "brief"
 
 #: Deep Agents' texts for a history it could not offload (an error log and a
 #: warning), and the per-write warning before them. Matched at the start.
@@ -259,19 +279,24 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     on the strength of a count reported before it, and one that wrote no text
     is not tried again in its turn over the same range (``_should_summarize``).
 
-    Its count of a request includes the memory index the agent's requests
-    carry, which ``MemoryIndexMiddleware`` adds after this middleware. A
-    summary written changes the prompt prefix, so ``on_written`` runs once
-    it is, before the request goes on: the request that carries the new
-    summary carries a new memory index too.
+    Its count of a request includes the memory index and the roster of
+    sub-agents the agent's requests carry, which ``MemoryIndexMiddleware``
+    and ``RosterMiddleware`` add after this middleware. A summary written
+    changes the prompt prefix, so ``on_written`` runs once it is, before the
+    request goes on: the request that carries the new summary carries a new
+    memory index and roster too.
 
     Args:
         agent: The agent whose stack this is.
         index: The memory index the agent's requests carry (``""`` for none);
             it must read no file (the manager's ``_memory_index_cached``).
+        roster: The roster of sub-agents the agent's requests carry (``""``
+            for none), counted as the index is: the manager's ``_roster_now``.
         on_written: Called once a summary is written, before the model is
             called with it (the manager drops the conversation's memory index
-            snapshot).
+            and roster snapshots).
+        budget_tokens: The agent's input budget, which a summary skipped for
+            saving little never lets a request pass.
         **kwargs: ``SummarizationMiddleware``'s arguments.
     """
 
@@ -280,12 +305,16 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         *,
         agent: str | None,
         index: Callable[[], str] | None = None,
+        roster: Callable[[], str] | None = None,
         on_written: Callable[[], None] | None = None,
+        budget_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
         self._index = index
+        self._roster = roster
+        self._budget_tokens = budget_tokens
         self._on_written = on_written
         helper = self._lc_helper
         # Inside the retry: a mapped overflow is never retried as it was sent.
@@ -300,12 +329,14 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
     def _count_tokens(
         self, messages: list["AnyMessage"], system_message: Any, tools: Any
     ) -> int:
-        """The base count, plus the memory index this agent's requests carry
-        (added after this middleware, by ``MemoryIndexMiddleware``)."""
+        """The base count, plus the memory index and the roster this agent's
+        requests carry (added after this middleware, by ``MemoryIndexMiddleware``
+        and ``RosterMiddleware``)."""
         total = super()._count_tokens(messages, system_message, tools)
-        text = self._index() if self._index is not None else ""
-        if text:
-            total += self.token_counter([HumanMessage(content=text)])
+        for added in (self._index, self._roster):
+            text = added() if added is not None else ""
+            if text:
+                total += self.token_counter([HumanMessage(content=text)])
         return total
 
     def _should_summarize(self, messages: list["AnyMessage"], total_tokens: int) -> bool:
@@ -319,15 +350,33 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         alone decides. Otherwise Deep Agents decides. Either way, a range
         whose summary wrote no text earlier in the turn is skipped until it
         has grown (``FailedSummaries``): it would come back empty again.
+
+        In an instance's thread (one with a brief), a summary at the trigger
+        that would stand for less than ``MIN_SAVING`` of it is not written,
+        as ADK's is not (``summary_range``): the brief restated in every
+        summary can keep a request near the trigger, and a summary per call
+        would save nothing. A request over the agent's input budget is
+        summarized whatever it saves, the window known to the profile or not;
+        without a budget nothing is skipped.
         """
         if self._trigger_tokens is not None and _counted_before_the_summary(messages):
             due = total_tokens >= self._trigger_tokens
         else:
             due = super()._should_summarize(messages, total_tokens)
-        if due and self._failures.skips(live_events.current(), *self._range(messages)):
+        if not due:
+            return False
+        start, saving = self._range(messages)
+        small = self._trigger_tokens is not None and saving < MIN_SAVING * self._trigger_tokens
+        # Never past the input budget, whether or not the model's profile gives
+        # Deep Agents one to force a summary with.
+        within = self._budget_tokens is not None and total_tokens <= self._budget_tokens
+        if small and within and _BRIEF.get() is not None:
+            logger.debug("deepagents_summary_saves_little", agent=self.agent, saving=saving)
+            return False
+        if self._failures.skips(live_events.current(), start, saving):
             logger.debug("deepagents_summary_not_retried", agent=self.agent)
             return False
-        return due
+        return True
 
     def _range(self, messages: list["AnyMessage"]) -> tuple[str | None, int]:
         """Where a summary of ``messages`` would start, and its size in tokens.
@@ -342,6 +391,44 @@ class ReportingSummarizationMiddleware(SummarizationMiddleware):
         return start, self.token_counter(summarized)
 
     async def awrap_model_call(
+        self,
+        request: "ModelRequest",
+        handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
+    ) -> Any:
+        # The thread's brief, for a summary this call writes.
+        brief = brief_of(request.messages)
+        token = _BRIEF.set(_Brief(brief) if brief is not None else None)
+        try:
+            return await self._awrap_model_call(request, handler)
+        finally:
+            _BRIEF.reset(token)
+
+    def _partition_messages(
+        self, conversation_messages: list["AnyMessage"], cutoff_index: int
+    ) -> tuple[list["AnyMessage"], list["AnyMessage"]]:
+        """Deep Agents' partition, noting whether the call's brief is among the
+        messages kept: a summary restates it when it is not."""
+        summarized, kept = super()._partition_messages(conversation_messages, cutoff_index)
+        brief = _BRIEF.get()
+        if brief is not None:
+            brief.restate = not any(_same(message, brief.message) for message in kept)
+        return summarized, kept
+
+    def _build_new_messages_with_path(
+        self, summary: str, file_path: str | None
+    ) -> list["AnyMessage"]:
+        """Deep Agents' summary message, opening with the call's brief when the
+        summary stands for it (``_partition_messages``)."""
+        messages = super()._build_new_messages_with_path(summary, file_path)
+        brief = _BRIEF.get()
+        if brief is None or not brief.restate or len(messages) != 1:
+            return messages
+        (message,) = messages
+        return [message.model_copy(update={
+            "content": [*_text_blocks(brief.message.content), *_text_blocks(message.content)]
+        })]
+
+    async def _awrap_model_call(
         self,
         request: "ModelRequest",
         handler: Callable[["ModelRequest"], Awaitable["ModelResponse"]],
@@ -463,6 +550,7 @@ def build_summarization(
     *,
     budget: ContextBudget | None = None,
     index: Callable[[], str] | None = None,
+    roster: Callable[[], str] | None = None,
     on_written: Callable[[], None] | None = None,
 ) -> SummarizationMiddleware:
     """An agent's summarization middleware, on its own model.
@@ -479,18 +567,25 @@ def build_summarization(
             never reads a file. Before a conversation's first request it
             counts nothing, and the provider-reported count, which the base
             class also reads, covers it after.
+        roster: The roster of sub-agents the agent's requests carry, counted
+            as the index is: the manager's ``_roster_now``.
         on_written: Called once a summary is written, before the request
-            that carries it is sent: the manager's ``_forget_memory_index``.
+            that carries it is sent: the manager's ``_forget_memory_index``,
+            which drops the index's and the roster's snapshots.
 
     Raises:
         ContextBudgetError: The model's input budget is too small to work in.
     """
     install_history_filters()
+    if budget is None:
+        budget = context_budget(resolved, settings)
     trigger, keep = summarization_thresholds(resolved, settings, budget)
     return ReportingSummarizationMiddleware(
         agent=resolved.agent,
         index=index,
+        roster=roster,
         on_written=on_written,
+        budget_tokens=budget.budget,
         model=model,
         backend=NoArchiveBackend(),
         trigger=trigger,
@@ -603,6 +698,53 @@ async def write_summary(
             helper._acreate_summary(messages), context=context
         )
     return summary.strip()
+
+
+def brief_message(text: str, *, id: str) -> HumanMessage:
+    """An instance's brief: its first run's task message, marked as the brief.
+
+    The mark is in ``response_metadata``, which no provider adapter sends, as
+    a job notification's is.
+    """
+    return HumanMessage(content=text, id=id, response_metadata={_MARK: {"kind": BRIEF}})
+
+
+def is_brief(message: "AnyMessage") -> bool:
+    """Whether ``message`` is an instance's brief (by its mark, never its text)."""
+    mark = message.response_metadata.get(_MARK)
+    return isinstance(mark, dict) and mark.get("kind") == BRIEF
+
+
+def brief_of(messages: Sequence["AnyMessage"]) -> "AnyMessage | None":
+    """The brief of the thread ``messages`` belong to: the last one marked.
+
+    The last, since an inheriting instance's copied conversation holds its
+    parent's brief before its own.
+    """
+    return next((m for m in reversed(messages) if is_brief(m)), None)
+
+
+@dataclass
+class _Brief:
+    """The brief of the thread a model call is for, and whether a summary it
+    writes restates it (``_partition_messages`` decides)."""
+
+    message: "AnyMessage"
+    restate: bool = False
+
+
+#: The brief of the model call in progress (``awrap_model_call``).
+_BRIEF: ContextVar[_Brief | None] = ContextVar("agentic_cli_summary_brief", default=None)
+
+
+def _same(a: "AnyMessage", b: "AnyMessage") -> bool:
+    """Whether ``a`` and ``b`` are one message: the same object, or the same id."""
+    return a is b or (a.id is not None and a.id == b.id)
+
+
+def _text_blocks(content: Any) -> list[Any]:
+    """``content`` as a list of content blocks."""
+    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
 
 
 def summary_event(

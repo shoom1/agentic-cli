@@ -812,6 +812,28 @@ class ContextOverflowMiddleware(AgentMiddleware):
             raise
 
 
+def _opened_with(request: ModelRequest, text: str) -> ModelRequest:
+    """``request`` with ``text`` as the first text block of its first human message.
+
+    The state keeps its messages as they were; ``text`` empty, or no human
+    message, leaves the request as it is.
+    """
+    if not text:
+        return request
+    messages = list(request.messages)
+    for position, message in enumerate(messages):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            blocks = (
+                [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+            )
+            messages[position] = message.model_copy(
+                update={"content": [{"type": "text", "text": text}, *blocks]}
+            )
+            return request.override(messages=messages)
+    return request
+
+
 class MemoryIndexMiddleware(AgentMiddleware):
     """Puts the memory index first in the main agent's requests (spec §11.3).
 
@@ -832,20 +854,7 @@ class MemoryIndexMiddleware(AgentMiddleware):
 
     @staticmethod
     def _with_index(request: ModelRequest, text: str) -> ModelRequest:
-        if not text:
-            return request
-        messages = list(request.messages)
-        for position, message in enumerate(messages):
-            if isinstance(message, HumanMessage):
-                content = message.content
-                blocks = (
-                    [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
-                )
-                messages[position] = message.model_copy(
-                    update={"content": [{"type": "text", "text": text}, *blocks]}
-                )
-                return request.override(messages=messages)
-        return request
+        return _opened_with(request, text)
 
     async def awrap_model_call(
         self,
@@ -853,6 +862,33 @@ class MemoryIndexMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> Any:
         return await handler(self._with_index(request, await asyncio.to_thread(self._index_for)))
+
+
+class RosterMiddleware(AgentMiddleware):
+    """Puts the roster of the main agent's open sub-agents first in its requests.
+
+    The roster (a snapshot per conversation, ``workflow/agents/roster.py``)
+    becomes the first text block of the first human message of the request
+    passed on; the state keeps its messages as they were. Outside
+    ``MemoryIndexMiddleware``, which then puts the index ahead of it, and
+    inside the summarization, which counts it and drops its snapshot when it
+    writes a summary.
+
+    Args:
+        roster_for: The turn's conversation's roster (``""`` for none); it
+            reads only the records in memory.
+    """
+
+    def __init__(self, roster_for: Callable[[], str]) -> None:
+        super().__init__()
+        self._roster_for = roster_for
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> Any:
+        return await handler(_opened_with(request, self._roster_for()))
 
 
 class ForeignReasoningMiddleware(AgentMiddleware):

@@ -30,8 +30,10 @@ the model side and the tool side.
   summarization counts
   exactly what will be sent (``summarization.py``), every provider's context
   overflow reaches it as one it summarizes on (``ContextOverflowMiddleware``),
-  the memory index, for the main agent with a memory tool
-  (``MemoryIndexMiddleware``), goes first in the request, and on Claude
+  the roster of its sub-agents, for the main agent that continues them
+  (``RosterMiddleware``), then the memory index, for the main agent with a
+  memory tool (``MemoryIndexMiddleware``), go first in the request (the
+  index ahead of the roster), and on Claude
   with ``prompt_caching_enabled`` the cache marks land on the
   final request (``AnthropicPromptCachingMiddleware``: the system prompt, the
   last tool and the conversation, for 5 minutes, as on ADK).
@@ -67,6 +69,7 @@ from agentic_cli.workflow.deepagents.middleware import (
     InterruptedCallsMiddleware,
     MemoryIndexMiddleware,
     PermissionMiddleware,
+    RosterMiddleware,
     RunControlMiddleware,
     SubAgentOutcomeMiddleware,
     ToolCallErrorMiddleware,
@@ -114,6 +117,7 @@ def build_agent_tree(
     memory_index_forget: Callable[[], None] | None = None,
     delegations: "Callable[[], Delegations] | None" = None,
     graphs: "dict[str, CompiledStateGraph] | None" = None,
+    roster: Callable[[], str] | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, each on its own, and return the root.
 
@@ -158,15 +162,19 @@ def build_agent_tree(
             other agent gets one.
         memory_index_cached: The same index, which reads no file: the root's
             summarization counts it in its requests' size.
-        memory_index_forget: Drops the conversation's index snapshot: the
-            root's summarization calls it when it writes a summary, before
-            the request that carries the summary is sent.
+        memory_index_forget: Drops the conversation's index and roster
+            snapshots: the root's summarization calls it when it writes a
+            summary, before the request that carries the summary is sent.
         delegations: The manager's delegations (``BaseWorkflowManager._delegations``):
             given, an agent with sub-agents gets the ``task`` tool, which
             hands each call to them, and every agent but the root
             ``RunControlMiddleware``, which keeps a run's limits. Without it
             no agent delegates (a tree a unit test builds alone).
         graphs: Filled, when given, with every agent's graph, by name.
+        roster: The root's roster of its open sub-agents for its conversation
+            (``""`` for none): given, the root's stack has ``RosterMiddleware``
+            and its summarization counts it (the manager passes it only for a
+            root that continues its sub-agents). No other agent gets one.
 
     Raises:
         AgentGraphError: A delegating agent's own tools include one named
@@ -185,6 +193,7 @@ def build_agent_tree(
             memory_index=memory_index if name == root else None,
             memory_index_cached=memory_index_cached if name == root else None,
             memory_index_forget=memory_index_forget if name == root else None,
+            roster=roster if name == root else None,
         )
         if name != root:
             # Inside the outcome middleware, which reads the answer whose
@@ -290,6 +299,7 @@ def _model_side(
     memory_index: Callable[[], str] | None = None,
     memory_index_cached: Callable[[], str] | None = None,
     memory_index_forget: Callable[[], None] | None = None,
+    roster: Callable[[], str] | None = None,
 ) -> list["AgentMiddleware"]:
     """What shapes each of the agent's model requests, outermost first."""
     if resolved is None or settings is None:
@@ -298,11 +308,14 @@ def _model_side(
         ForeignReasoningMiddleware(resolved.record.kind, agent=resolved.agent),
         build_summarization(
             model, resolved, settings, budget=budget,
-            index=memory_index_cached, on_written=memory_index_forget,
+            index=memory_index_cached, roster=roster, on_written=memory_index_forget,
         ),
         # Inside the summarization: it summarizes on the overflows it raises.
         ContextOverflowMiddleware(),
     ]
+    if roster is not None:
+        # Outside the memory index's, which then goes ahead of it.
+        stack.append(RosterMiddleware(roster))
     if memory_index is not None:
         # Inside the summarization, which counts it, and before the caching.
         stack.append(MemoryIndexMiddleware(memory_index))

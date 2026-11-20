@@ -937,6 +937,22 @@ class TestTheDeepAgentsItRestsOn:
             assert cutoff(event, 3, messages) == 6
             assert cutoff({**event, "cutoff_message_id": "m5"}, 3, messages) == 7
 
+    def test_the_messages_summarized_and_kept_are_its_partition(self):
+        """An instance's summary restates its brief when the brief is not among
+        the messages kept (``_partition_messages``), in the message Deep Agents
+        builds (``_build_new_messages_with_path``), stores as the event's and
+        sends first (``tests/workflow/deepagents/test_brief.py``)."""
+        partition = SummarizationMiddleware._partition_messages
+        build = SummarizationMiddleware._build_new_messages_with_path
+        messages = [HumanMessage("One?", id="h1"), AIMessage("A1", id="a1"),
+                    HumanMessage("Two?", id="h2")]
+
+        assert list(inspect.signature(partition).parameters) == [
+            "self", "conversation_messages", "cutoff_index"
+        ]
+        assert list(inspect.signature(build).parameters) == ["self", "summary", "file_path"]
+        assert partition(_middleware(), messages, 2) == (messages[:2], messages[2:])
+
     def test_the_summary_message_without_an_archive(self):
         middleware = _middleware()
         (message,) = middleware._build_new_messages_with_path("A summary.", None)

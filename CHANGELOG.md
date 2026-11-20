@@ -575,6 +575,48 @@ the start of the entry's title.
 
 ### Added
 
+- **The main agent's requests list its open sub-agents, when it can continue
+  them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
+  (it has `message_agent`) is told which of its own sub-agents are open: a
+  roster after the memory index, `<agents>`, the line `Your sub-agents in
+  this conversation (message_agent continues one):`, then one line per
+  idle, stopped or running instance, newest first, `- <id> (<type>,
+  <status>): <title>` and ` — <the first line of its last result>`, then
+  `</agents>`; at most 2,000 characters, the oldest lines left out, never
+  cut (`agentic_cli.workflow.agents.roster`: `roster_text`, `ROSTER_OPEN`,
+  `ROSTER_CLOSE`, `ROSTER_HEADER`, `ROSTER_MAX`, provisional). It is a
+  snapshot per conversation, taken and dropped where the memory index's is
+  (the conversation opened, a summary written, `/compact`), so the head of
+  the request stays the same for prompt caching; the tool results and
+  notices in the conversation carry what changed since. On ADK it is a user
+  content of its own after the index (`RosterPlugin`): the fit guard never
+  drops it and folds the index, the roster and a summary into the first user
+  text, in that order, and the overflow retry keeps it; on Deep Agents the
+  text block after the index's in the first human message
+  (`RosterMiddleware`), counted by the summarization. With the policy's
+  defaults, and when every sub-agent is closed, there is none. A manager
+  reaches it through `_roster_wanted(root)` and `_roster_now()`;
+  `_forget_memory_index` drops it with the index's.
+- **A sub-agent instance's brief survives its growing transcript, on both
+  backends.** A follow-up's own message is not its instance's brief, so a
+  long transcript could lose the brief from the requests: on Deep Agents a
+  summary of the instance's thread stood for it, on ADK the fit guard could
+  leave it out of a follow-up's request. An instance's first run now marks
+  its message as the brief, and it is kept in every later request. On Deep
+  Agents the instance's own summarization (on its model, against its
+  budget) writes each summary that stands for the brief as a message that
+  opens with the brief's text (`summarization.brief_message`, `is_brief`,
+  `brief_of`); on ADK, where summaries stay the main agent's, the fit guard
+  and the overflow retry keep the brief whatever they leave out, the turns
+  after it joining it as the run's task message does (the event that set
+  `adk/sessions.py::BRIEF_KEY`, `agentic_cli.brief`, in the child session:
+  `fit_guard_plugin.brief_of`; `drop_turns(brief=)`). The difference is the
+  libraries': Deep Agents' summary also stands for a follow-up's own message
+  once it is older than what a summary keeps word for word, where ADK's
+  trim keeps it. An instance's summary that would stand for less than a fifth
+  of its trigger is not written (the brief restated in each summary can keep
+  a long brief near the trigger), as ADK's is not. The main agent's
+  summaries are unchanged.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
   `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them

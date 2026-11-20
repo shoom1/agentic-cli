@@ -84,6 +84,10 @@ TURNS_KEY = "agentic_cli.turns"
 
 #: The state key of a conversation's sub-agent records, in its records session.
 RECORDS_KEY = "agentic_cli.agents"
+#: The state key an instance's first run sets with its message (the run's id),
+#: in its child session: the event that sets it is the instance's brief, which
+#: the fit guard keeps on every later run (``fit_guard_plugin.brief_of``).
+BRIEF_KEY = "agentic_cli.brief"
 #: The author of a records session's events (each a write of the records).
 RECORDS_AUTHOR = "agentic_cli"
 #: The state keys of an instance and a run of the records (then their number).

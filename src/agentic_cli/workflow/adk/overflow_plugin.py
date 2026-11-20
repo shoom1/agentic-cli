@@ -11,14 +11,16 @@ wording) reaches ``OverflowPlugin.on_model_error_callback``:
   as every later call will be: the summary, then the turns it kept
   (``WrittenSummary.kept_turns``, ``fit_guard_plugin.keep_newest_turns``). A
   summary that fails is one warning a turn, as one before a model call is.
-  The memory index that opens the request stays first in the retry, with
-  the summary, and both are folded into its first user text.
+  The memory index and the roster of sub-agents that open the request stay
+  first in the retry, with the summary, and all are folded into its first
+  user text.
 - **A sub-agent** (on its own runner, whose chain has this plugin without a
   main agent) never summarizes; nor does the main agent when the summary
   covers nothing the request holds. The request is then retried with its
   oldest whole turns left out down to half the budget
   (``fit_guard_plugin.drop_turns``); a sub-agent run's task message, its
-  invocation's user content, is never among them (``keep_task``).
+  invocation's user content, is never among them, nor its instance's brief
+  (``keep_task``).
 - The retry is built from the request as the fit guard saw it
   (``FitGuardPlugin.request_as_seen``, this call's own copy, never a parallel
   call's), without the model's context cache: a model's adapter may have
@@ -68,12 +70,13 @@ from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.adk.call_clock import mark_latency
 from agentic_cli.workflow.adk.fit_guard_plugin import (
+    brief_of,
     drop_turns,
     fold_summary,
-    is_memory_index,
     is_summary,
     keep_newest_turns,
     overhead_tokens,
+    protected_head,
     report_trim,
 )
 from agentic_cli.workflow.context import (
@@ -126,7 +129,8 @@ class OverflowPlugin(BasePlugin):
         fit_guard: The app's fit guard, whose copy of each request a retry
             is built from; without one, the request the callback is given.
         keep_task: Whether a trimmed retry keeps its task message (its
-            invocation's user content) whatever it leaves out: a sub-agent
+            invocation's user content) and its instance's brief whatever it
+            leaves out: a sub-agent
             type's chain, whose runs each start from one.
     """
 
@@ -177,13 +181,14 @@ class OverflowPlugin(BasePlugin):
                 target_tokens=budget.budget // 2 - overhead_tokens(request, kind),
                 kind=kind,
                 task=callback_context.user_content if self._keep_task else None,
+                brief=brief_of(callback_context.session.events) if self._keep_task else None,
             )
         if not dropped:
             return self._does_not_fit(agent)
         if summary is not None:
             contents = _with_summary(contents, summary.text)
         report_trim(len(request.contents), len(contents), agent, dropped)
-        # The index and a summary that open the retry join the next user text.
+        # The index, the roster and a summary that open the retry join the next user text.
         contents = fold_summary(contents)
         retry = request.model_copy(update={"contents": contents})
         model = callback_context.get_invocation_context().agent.canonical_model
@@ -259,13 +264,14 @@ class OverflowPlugin(BasePlugin):
 
 
 def _with_summary(contents: list[types.Content], summary: str) -> list[types.Content]:
-    """``contents`` with ``summary`` in place of the one they open with, after the index.
+    """``contents`` with ``summary`` in place of the one they open with, after the index and the roster.
 
-    The memory index, when the contents open with it, stays first. The summary
+    The memory index and the roster, when the contents open with them, stay first. The summary
     stands for the one they open with, and is folded as the fit guard folds
     (``fold_summary``), so no provider sees one more user message in a row.
     """
-    index = contents[:1] if contents and is_memory_index(contents[0]) else []
+    head = protected_head(contents)
+    index = head[:-1] if head and is_summary(head[-1]) else head
     rest = list(contents[len(index):])
     if rest and is_summary(rest[0]):
         remainder = list(rest[0].parts or [])[1:]

@@ -864,6 +864,43 @@ class TestASteeredSubAgentsOverflow:
         assert texts(events)[-1] == "X is 42."
 
 
+class TestAFollowUpsOverflow:
+    async def test_its_retry_keeps_the_instances_brief(self, project, monkeypatch):
+        """A follow-up's task message is its own message: the retry of its
+        refused request leaves out the instance's earlier turns, never its
+        brief, which the follow-up joins."""
+        from agentic_cli.workflow.agents import SubAgentPolicy
+
+        _, status, body = SHAPES["claude-400"]
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        follow = claude_says("")
+        follow["content"] = [{"type": "tool_use", "id": "toolu_c2", "name": "message_agent",
+                              "input": {"agent": "researcher-1", "message": "Now find Y."}}]
+        follow["stop_reason"] = "tool_use"
+        api = Team(coordinator=[delegate(), claude_says("Asked."), follow, claude_says("Done.")],
+                   researcher=[claude_says(f"X is 42. {LONG}"), httpx.Response(status, json=body),
+                               claude_says("Y is 7.")])
+        route(monkeypatch, anthropic, "AsyncAnthropic", api)
+        manager = GoogleADKWorkflowManager(
+            agent_configs=team(inherit_context=False),
+            settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6",
+                                  prompt_caching_enabled=False),
+            subagents=SubAgentPolicy(follow_ups=True),
+        )
+        try:
+            await turn(manager, "Find X, please.")
+            events = await turn(manager, "Now Y.")
+        finally:
+            await manager.cleanup()
+
+        refused, retry = (r.content.decode() for r in api.requests[4:6])
+        assert "X is 42." in refused and "X is 42." not in retry
+        assert "# Task: Find X." in retry
+        assert retry.index("# Task: Find X.") < retry.index(FIT_NOTE) < retry.index("Now find Y.")
+        assert errors(events) == []
+        assert texts(events)[-1] == "Done."
+
+
 async def test_the_handler_comes_before_the_fit_guard(project, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     manager = GoogleADKWorkflowManager(
