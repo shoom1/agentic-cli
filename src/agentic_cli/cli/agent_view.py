@@ -214,10 +214,10 @@ class AgentView:
         the instance's next run, started in a task of its own (``settled``
         waits for it). A closed instance's view refuses it."""
         app = self.app
-        workflow = _workflow(app)
-        if workflow is None:
-            return
-        record = workflow.agent_runs.instance(self.conversation, self.instance)
+        # A workflow that is down (a model switch whose rebuild failed) has no
+        # record to read: the line is the next run all the same, whose start
+        # retries it as a turn of the main conversation does.
+        record = self.record()
         if record is not None and record.status == INSTANCE_CLOSED:
             app.session.add_warning(READ_ONLY.format(instance=self.instance))
             return
@@ -225,7 +225,7 @@ class AgentView:
         if (
             record is not None
             and record.status == INSTANCE_RUNNING
-            and workflow.steer_instance(
+            and app.workflow.steer_instance(
                 self.instance,
                 line,
                 session_id=self.conversation.session_id,
@@ -341,6 +341,11 @@ async def leave_view(app: Any) -> bool:
     app.session.add_message("system", BACK_RULE)
     controller.update_status_bar(app.session)
     logger.info("agent_view_left", instance=view.instance)
+    # A workflow that is down (a model switch whose rebuild failed) is started
+    # again, as a turn would: the run the user did there is still to be told.
+    # Left down, the notice cannot be sent and the warning says why.
+    if not controller.is_ready:
+        await controller.ensure_initialized(app.session)
     workflow = _workflow(app)
     if workflow is None:
         return True

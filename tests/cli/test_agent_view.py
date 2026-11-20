@@ -689,3 +689,61 @@ class TestOneDialogAtATime:
             app.session.add_error.assert_not_called()
         finally:
             dialogs.release_all()
+
+
+# -- a workflow that is down ----------------------------------------------------------------
+
+
+class Starts:
+    """The manager's starts, failing while ``failing`` is set: a model switch
+    whose rebuild fails (and whose way back fails too) leaves the workflow
+    down until a start succeeds."""
+
+    def __init__(self, crew: Crew) -> None:
+        self.failing = True
+        self.tried = 0
+        original = crew.manager._load_models
+
+        async def load() -> None:
+            self.tried += 1
+            if self.failing:
+                raise RuntimeError("scripted start failure")
+            await original()
+
+        crew.manager._load_models = load
+
+
+class TestAWorkflowThatIsDown:
+    """After a model switch whose rebuild failed, the main conversation's line
+    retries the start; a line in a view does too, and ``/back`` still tells the
+    main agent about a run the user started before."""
+
+    async def test_a_line_retries_the_start_as_the_main_conversations_does(self, make_crew):
+        crew, app = await in_a_view(make_crew, researcher=[says("Y is 7.")])
+        starts = Starts(crew)
+        assert not await app.apply_settings({"model": "claude-haiku-4-5"})
+        assert not app._workflow_controller.is_ready
+        starts.failing = False
+
+        await typed(app, "Now find Y.")
+
+        app.session.add_warning.assert_not_called()
+        assert [(r.ref.run, r.status) for r in crew.records()] == [
+            ("researcher-1#1", RUN_COMPLETED), ("researcher-1#2", RUN_COMPLETED),
+        ]
+        assert said(app.session, "add_response")[-1] == "Y is 7."
+
+    async def test_back_retries_the_start_and_tells_the_main_agent(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew, coordinator=[says("Noted.")], researcher=[says("Y is 7.")],
+        )
+        await typed(app, "Now find Y.")
+        starts = Starts(crew)
+        assert not await app.apply_settings({"model": "claude-haiku-4-5"})
+        starts.failing = False
+
+        await typed(app, "/back")
+
+        assert app.agent_view is None
+        assert said(app.session, "add_response")[-1] == "Noted."
+        assert '"result": "Y is 7."' in crew.last_message("coordinator")
