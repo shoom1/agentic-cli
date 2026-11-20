@@ -23,6 +23,32 @@ def _write(tmp_path: Path, text: str, name: str = "agents.yaml") -> Path:
 
 
 class TestLoadAgentsFromYaml:
+    def test_a_one_shot_sub_agent(self, tmp_path):
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [checker]
+              - name: checker
+                instruction: Check once.
+                continuable: false
+            """,
+        )
+        configs = {c.name: c for c in load_agents_from_yaml(path)}
+        assert configs["checker"].continuable is False
+        assert configs["coordinator"].continuable is True
+
+    def test_a_continuable_that_is_not_a_bool_is_rejected(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    continuable: sometimes\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "continuable" in message and "valid boolean" in message
+
     def test_basic_load(self, tmp_path):
         path = _write(
             tmp_path,
@@ -106,6 +132,7 @@ class TestLoadAgentsFromYaml:
         assert cfg.inherit_context is False
         assert cfg.brief_required == ("objective",)
         assert cfg.limits is None
+        assert cfg.continuable is True
 
     def test_a_sub_agents_inherit_context(self, tmp_path):
         path = _write(

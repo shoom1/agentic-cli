@@ -22,6 +22,7 @@ Example YAML::
         inherit_context: false  # true: also see the coordinator's conversation
         brief_required: [objective, deliverable]  # what a delegation must fill
         limits: {max_model_calls: 30, timeout: 600}  # over the policy's, per field
+        continuable: true  # false: one-shot, closed when its run ends
 
 A top-level bare list of agents (without the ``agents:`` key) is also accepted.
 Tool entries stay as strings here and are resolved to callables when the
@@ -93,6 +94,7 @@ class AgentSpec(BaseModel):
     # None: AgentConfig's own default.
     brief_required: list[str] | None = None
     limits: LimitsSpec | None = None
+    continuable: bool = True
 
 
 class AgentsFile(BaseModel):
@@ -182,6 +184,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 skills=list(spec.skills),
                 include_state_tools=spec.include_state_tools,
                 inherit_context=spec.inherit_context,
+                continuable=spec.continuable,
                 **delegation,
             )
         )
