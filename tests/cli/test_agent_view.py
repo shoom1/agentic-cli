@@ -591,9 +591,16 @@ class TestExitInAView:
         app.session.run_async.side_effect = then_exit
         running = asyncio.create_task(app.run())
         exited, _ = await asyncio.wait({running}, timeout=20)
-        if not exited:  # its workflow's cleanup waits for the run in view: unwind it
-            app.agent_view.stop()
-            await running
+        if not exited:
+            # Its workflow's cleanup waits for the run in view: unwind it
+            # without the view's own stop (which is what failed), and bound
+            # the wait, so that this fails the test instead of stalling it.
+            for run in list(app.agent_view._runs):
+                run.cancel()
+            await asyncio.wait({running}, timeout=10)
+            if not running.done():
+                running.cancel()
+                await asyncio.wait({running}, timeout=5)
 
         assert exited, "the app did not exit: the run in view was still working"
         last = crew.records()[-1]
