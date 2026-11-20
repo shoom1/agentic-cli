@@ -12,7 +12,9 @@ run's also says who cancelled it (``cancelled_by``: ``parent``, ``user`` or
 ``limit``). A run that did not complete fully (partial, failed, cancelled,
 interrupted) also names the tasks it left open, so its parent can continue it.
 ``read_envelope`` finds an envelope in a delegation's result as
-either backend's ``TOOL_RESULT`` carries it.
+either backend's ``TOOL_RESULT`` carries it. Once the user has worked with an
+instance directly, the root is told its latest envelope in a notice
+(``view_notice``).
 """
 
 from __future__ import annotations
@@ -34,6 +36,9 @@ TOKEN_LIMIT_ERROR = "token limit reached"
 INTERRUPTED_ERROR = "interrupted before it finished"
 #: Who may cancel a run: its parent, the user, or one of its limits.
 CANCELLED_BY = frozenset({"parent", "user", "limit"})
+
+#: What the root is told once the user has worked with one of its sub-agents directly.
+VIEW_NOTICE = "The user worked with {instance} directly; its latest result: {envelope}"
 
 #: The keys every envelope has, in the order it lists them.
 _KEYS = ("success", "agent", "run", "status", "partial", "result", "error")
@@ -104,6 +109,13 @@ def open_task_descriptions(tasks: Sequence[Mapping[str, Any]]) -> list[str]:
         for task in tasks
         if isinstance(task.get("description"), str) and task.get("status", "pending") != "completed"
     ]
+
+
+def view_notice(instance: str, latest: Mapping[str, Any]) -> str:
+    """The notice that tells the root the user worked with ``instance``: its latest envelope as JSON."""
+    return VIEW_NOTICE.format(
+        instance=instance, envelope=json.dumps(dict(latest), ensure_ascii=False)
+    )
 
 
 def read_envelope(value: Any) -> dict[str, Any] | None:

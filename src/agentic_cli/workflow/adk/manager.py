@@ -70,9 +70,11 @@ from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
 from agentic_cli.workflow.adk.plugins import LLMLoggingPlugin, SentRequestLoggingPlugin
 from agentic_cli.workflow.adk.sessions import (
     BRIEF_KEY,
+    NOTICE_METADATA,
     ServiceSessions,
     child_app,
     child_session_id,
+    is_notice,
     load_records,
     make_session_service,
     save_records,
@@ -1394,14 +1396,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         user_id: str,
         new_message: "types.Content",
         state_delta: dict[str, Any] | None = None,
+        custom_metadata: dict[str, Any] | None = None,
     ) -> AsyncGenerator[WorkflowEvent, None]:
         """Run the ADK runner for one invocation and stream WorkflowEvents.
 
-        Shared by ``process()`` (user message) and ``_deliver_job_notice()``
-        (a job's notice). The caller
-        must already be inside the turn (the base's ``_turn``) with the
+        Shared by ``process()`` (user message), ``_deliver_job_notice()``
+        (a job's notice) and ``_deliver_notice()`` (a notice to the root). The
+        caller must already be inside the turn (the base's ``_turn``) with the
         session prepared. ``state_delta`` is saved with ``new_message`` (a
-        user turn's row).
+        user turn's row). ``custom_metadata`` is stamped on every event of
+        the invocation by ADK (``RunConfig.custom_metadata``).
 
         What is reported from inside a model call (a summary that starts, its
         usage, what it did) is merged into the stream as it happens
@@ -1427,13 +1431,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # Set when the turn is stopped: ADK then answers, as it closes, the
         # calls the invocation leaves open (InterruptedCallsPlugin words them).
         aborted = asyncio.Event()
+        run_config = self._run_config()
+        if custom_metadata:
+            run_config = (run_config or RunConfig()).model_copy(
+                update={"custom_metadata": custom_metadata}
+            )
         with live_events.reporting(live):
             stream = self._runner.run_async(
                 session_id=session_id,
                 user_id=user_id,
                 new_message=new_message,
                 state_delta=state_delta,
-                run_config=self._run_config(),
+                run_config=run_config,
                 abort_signal=aborted,
             )
             try:
@@ -1836,6 +1845,36 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             async for event in events:
                 yield event
 
+    async def _deliver_notice(
+        self, text: str, ref: SessionRef
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the agents on a notice to the root (the base's ``tell_root``).
+
+        One user-role text, run as any user turn but not saved as a typed
+        prompt: its run is marked (``NOTICE_METADATA``), which ADK stamps on
+        the notice's own user event, so ``recent_messages`` and
+        ``typed_prompts`` leave it out. A call still open is answered first.
+        The mark this manager holds for the conversation is written with it
+        when the session's state lacks one: the root has read nothing of what
+        a run the user started brought before this notice.
+        """
+        session = await self._get_or_create_session(ref.user_id, ref.session_id)
+        session = await self._answer_left_open(session)
+        state_delta = self._seed_outside_content(ref, session)
+        mark = self._outside_marks.get(ref)
+        if mark and not session.state.get(OUTSIDE_CONTENT_KEY):
+            state_delta[OUTSIDE_CONTENT_KEY] = mark
+        new_message = types.Content(role="user", parts=[types.Part.from_text(text=text)])
+        async with contextlib.aclosing(self._run_and_stream(
+            session_id=ref.session_id,
+            user_id=ref.user_id,
+            new_message=new_message,
+            state_delta=state_delta or None,
+            custom_metadata=NOTICE_METADATA,
+        )) as events:
+            async for event in events:
+                yield event
+
     @property
     def supports_compact(self) -> bool:
         """True unless the app is built and its main agent is not summarized.
@@ -2005,7 +2044,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         which its parent read as a tool result, not a reply. A
         job notice (``job_notice``) is left out, as on Deep Agents: nobody
         typed it. ADK keeps no mark on the message, so it is known by its
-        header.
+        header. A notice to the root (``tell_root``) is left out by its run's
+        mark (``is_notice``); the root's answer to it is kept.
 
         Args:
             session_id: Session to read.
@@ -2036,7 +2076,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 p.text for p in (getattr(content, "parts", None) or [])
                 if getattr(p, "text", None) and not getattr(p, "thought", False)
             )
-            if role == "user" and text.startswith(JOB_NOTICE_HEADER):
+            if role == "user" and (text.startswith(JOB_NOTICE_HEADER) or is_notice(event)):
                 continue
             if text:
                 out.append(

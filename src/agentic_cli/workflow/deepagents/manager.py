@@ -88,6 +88,7 @@ from agentic_cli.workflow.deepagents.sessions import (
     instance_run_config,
     instance_thread_id,
     job_notification,
+    notice_message,
     run_config,
 )
 from agentic_cli.workflow.deepagents.summarization import (
@@ -543,6 +544,28 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 "messages": [job_notification(record, notice=notice)],
                 "outside_content": JOB_RESULT,
             },
+        )) as events:
+            async for event in events:
+                yield event
+
+    async def _deliver_notice(
+        self, text: str, ref: "SessionRef"
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the root agent on a notice to it (the base's ``tell_root``).
+
+        The turn's input is one ``HumanMessage`` (``sessions.notice_message``)
+        marked so ``recent_messages`` and the conversation's row leave it
+        out. A turn like any other: the pending notices open it, and the mark
+        this manager holds for the conversation (what a run the user started
+        brought) is written into the checkpoint with it, first write wins.
+        """
+        self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
+        mark = self._outside_marks.get(ref)
+        for pending in self._take_notices():
+            yield pending
+        async with contextlib.aclosing(self._run_turn(
+            ref,
+            {"messages": [notice_message(text)], **({"outside_content": mark} if mark else {})},
         )) as events:
             async for event in events:
                 yield event

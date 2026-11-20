@@ -24,6 +24,7 @@ from agentic_cli.workflow.agents.envelope import (
     envelope,
     open_task_descriptions,
     read_envelope,
+    view_notice,
 )
 from agentic_cli.workflow.agents.runs import (
     RUN_CANCELLED,
@@ -189,3 +190,21 @@ class TestReadEnvelope:
     ])
     def test_anything_else_is_none(self, value):
         assert read_envelope(value) is None
+
+
+class TestTheViewNotice:
+    """What the root is told once the user has worked with one of its
+    sub-agents directly: the instance and its latest envelope, as JSON."""
+
+    def test_it_names_the_instance_and_carries_its_envelope_as_json(self):
+        latest = envelope(RESEARCHER, RUN_COMPLETED, result="Y is 7; ünïcode kept.")
+
+        notice = view_notice("researcher-2", latest)
+
+        assert notice == (
+            "The user worked with researcher-2 directly; its latest result: "
+            '{"success": true, "agent": "researcher-2", "run": "researcher-2#1", '
+            '"status": "completed", "partial": false, "result": "Y is 7; ünïcode kept.", '
+            '"error": null}'
+        )
+        assert json.loads(notice.split("its latest result: ", 1)[1]) == latest

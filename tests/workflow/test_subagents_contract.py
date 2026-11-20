@@ -87,6 +87,7 @@ from agentic_cli.workflow.agents.envelope import (
     TIME_LIMIT_ERROR,
     TOKEN_LIMIT_ERROR,
     read_envelope,
+    view_notice,
 )
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import (
@@ -5807,6 +5808,38 @@ class TestTheUsersSteer:
         assert crew.manager.steer_instance("researcher-9", "Who?") is False
 
 
+class TestTheConversationNamed:
+    """Each entry point acts on the open conversation (``session_ref()``), or
+    on the one its ``session_id`` and ``user_id`` name, as ``process`` takes
+    them: the CLI names its own."""
+
+    async def test_each_takes_the_conversation_its_ids_name(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Noted.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+        await crew.turn()
+        crew.manager.session_id = "elsewhere"
+        named = {"session_id": SESSION, "user_id": USER}
+
+        elsewhere = await user_turn(crew, "researcher-1", "Go on.")
+        events = [e async for e in crew.manager.run_instance("researcher-1", "Go on.", **named)]
+
+        assert [e.type for e in elsewhere] == [EventType.ERROR]
+        assert runs_of(events)[-1].metadata["result"] == "Went on."
+        assert crew.manager.instance_result("researcher-1") is None
+        assert crew.manager.instance_result("researcher-1", **named)["result"] == "Went on."
+        assert crew.manager.steer_instance("researcher-1", "Also Z.", **named) is False
+        assert await crew.manager.stop_instance("researcher-1") is False
+        assert await crew.manager.stop_instance("researcher-1", **named) is True
+        assert await crew.manager.close_instance("researcher-1", **named) == ["researcher-1"]
+        told = [e async for e in crew.manager.tell_root("A notice.", **named)]
+        assert [e.content for e in told if e.type is EventType.TEXT] == ["Noted."]
+
+
+
 class TestTheUsersControlOffTheLoop:
     async def test_it_blocks_no_event_loop(self, make_crew):
         crew = make_crew(
@@ -5823,3 +5856,65 @@ class TestTheUsersControlOffTheLoop:
             assert await crew.manager.close_instance("researcher-1") == ["researcher-1"]
 
         assert runs_of(events)[-1].metadata["result"] == "Went on."
+
+
+class TestANoticeToTheRoot:
+    """``tell_root``: a turn of the root on a notice the user did not type
+    (``view_notice``, once the user has worked with an instance), marked as
+    a job's notice is: left out of ``recent_messages`` and of the
+    conversation's row; the mark a user's run brought is written with it."""
+
+    async def test_the_root_answers_it_and_it_is_no_message_the_user_typed(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Noted: Y is 7.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        await crew.turn("Find X.")
+        await user_turn(crew, "researcher-1", "Now find Y.")
+        notice = view_notice("researcher-1", crew.manager.instance_result("researcher-1"))
+
+        events = [event async for event in crew.manager.tell_root(notice)]
+
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Noted: Y is 7."]
+        assert crew.last_message("coordinator") == notice
+        assert '"result": "Y is 7."' in notice
+        recent = await crew.manager.recent_messages(SESSION, user_id=USER)
+        assert [m["content"] for m in recent] == ["Find X.", "Done.", "Noted: Y is 7."]
+        info = await crew.manager.session_info(SESSION, user_id=USER)
+        assert (info.title, info.turns) == ("Find X.", 1)
+
+    async def test_a_mark_a_users_run_brought_reaches_the_conversation_with_it(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", tools=(contract_bring_outside_content,))],
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Noted.")],
+            researcher=[says("X is 42."), calls(use("contract_bring_outside_content", "r1")),
+                        says("Read it.")],
+        )
+        await crew.turn()
+        await user_turn(crew, "researcher-1", "Read the page.")
+        before = await crew.marked()
+
+        [event async for event in crew.manager.tell_root(
+            view_notice("researcher-1", crew.manager.instance_result("researcher-1"))
+        )]
+
+        assert before is False
+        assert await crew.marked() is True
+
+    async def test_it_blocks_no_event_loop(self, make_crew):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         says("Noted.")],
+            researcher=[says("X is 42.")],
+        )
+        await crew.turn()
+
+        with no_blocking_calls():
+            events = [event async for event in crew.manager.tell_root("A notice.")]
+
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Noted."]

@@ -48,7 +48,8 @@ A finished job reports to the conversation in a ``HumanMessage`` of its own
 provider adapter sends. The model reads it as the rest of the conversation;
 ``recent`` leaves it out, because the user did not write it, and so does a
 conversation's row: its title is the first prompt the user typed, its turns
-how many they typed.
+how many they typed. A notice to the root (``notice_message``, ``tell_root``)
+is marked and left out the same way (``is_notice``).
 
 ``open_sessions`` opens a store's conversations from the settings, without
 the manager, for ``workflow/session_readers.py``: the checkpointer and the
@@ -119,6 +120,8 @@ _MARK = "agentic_cli"
 
 #: The mark's ``kind`` on a job notification.
 JOB_RESULT = "job_result"
+#: The mark's ``kind`` on a notice to the root the user did not type.
+NOTICE = "notice"
 
 
 def thread_id(ref: SessionRef) -> str:
@@ -208,6 +211,22 @@ def is_job_notification(message: BaseMessage) -> bool:
     """Whether ``message`` is a job notification (by its mark, never its text)."""
     mark = message.response_metadata.get(_MARK)
     return isinstance(mark, dict) and mark.get("kind") == JOB_RESULT
+
+
+def notice_message(text: str) -> HumanMessage:
+    """The message that tells the root agent ``text``, a notice the user did not type.
+
+    Marked in its ``response_metadata`` as a job notification is, which no
+    provider adapter sends: the model reads it, ``recent`` and a
+    conversation's row leave it out.
+    """
+    return HumanMessage(content=text, response_metadata={_MARK: {"kind": NOTICE}})
+
+
+def is_notice(message: BaseMessage) -> bool:
+    """Whether ``message`` is a message the user did not type: a job notification or a notice to the root."""
+    mark = message.response_metadata.get(_MARK)
+    return isinstance(mark, dict) and mark.get("kind") in (JOB_RESULT, NOTICE)
 
 
 class CheckpointSessions:
@@ -384,12 +403,13 @@ class CheckpointSessions:
 
         Each is ``{"role": "user" | "assistant", "content": <text>}``, the
         message's text blocks joined; tool calls and results, reasoning,
-        messages without text and job notifications are left out.
+        messages without text, job notifications and notices to the root
+        are left out.
         """
         out: list[dict] = []
         for message in _messages(await self._root(ref)):
             if isinstance(message, HumanMessage):
-                if is_job_notification(message):
+                if is_notice(message):
                     continue
                 role = "user"
             elif isinstance(message, AIMessage):
@@ -679,7 +699,7 @@ def _row_of(
     typed = [
         text
         for message in messages
-        if isinstance(message, HumanMessage) and not is_job_notification(message)
+        if isinstance(message, HumanMessage) and not is_notice(message)
         if (text := _text(message))
     ]
     title = session_title(typed[0]) if typed else ""

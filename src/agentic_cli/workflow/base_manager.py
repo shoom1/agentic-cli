@@ -224,8 +224,8 @@ class BaseWorkflowManager(ABC):
 
     Concurrency contract:
         A manager runs **one turn at a time**. ``process()``,
-        ``resume_with_job_result()``, ``compact()`` and ``run_instance()``
-        (the user's follow-up of a sub-agent) enter through
+        ``resume_with_job_result()``, ``compact()``, ``run_instance()``
+        (the user's follow-up of a sub-agent) and ``tell_root()`` enter through
         ``_turn`` and serialize on an internal turn lock, so overlapping
         callers queue rather than interleave — the backend's per-invocation
         event buffers are manager-scoped, and interleaving would let one
@@ -1045,6 +1045,53 @@ class BaseWorkflowManager(ABC):
         from the conversation's own state first. The base has none.
         """
         return {}
+
+    async def tell_root(
+        self, text: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the root agent on ``text``, a notice the user did not type (provisional).
+
+        A turn of the conversation whose input is ``text`` as one user-role
+        message, marked as a job's notice is: ``recent_messages`` (and so
+        fact extraction) and the conversation's title and turns leave it out.
+        The root reads it and may answer; the outside-content mark this
+        manager holds for the conversation (what a run the user started
+        brought) is written with it. A turn that fails yields one ``ERROR``.
+        The notice after the user worked with a sub-agent is
+        ``agents/envelope.py::view_notice``.
+
+        Yields:
+            The turn's ``WorkflowEvent``s.
+
+        Raises:
+            NotImplementedError: The backend cannot (it has no
+                ``_deliver_notice``), raised as iteration starts, before any
+                turn.
+        """
+        if type(self)._deliver_notice is BaseWorkflowManager._deliver_notice:
+            raise NotImplementedError(
+                f"{type(self).__name__} cannot tell its root agent a notice (tell_root)."
+            )
+        async with self._turn(session_id, user_id) as ref:
+            async with contextlib.aclosing(self._deliver_notice(text, ref)) as events:
+                async for event in events:
+                    yield event
+
+    async def _deliver_notice(
+        self, text: str, ref: SessionRef
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Run the root agent on ``text`` as one user-role message marked as a notice (a backend hook).
+
+        The base calls it inside the turn of ``ref``'s conversation (the
+        active turn, the services and the settings set). The message is
+        marked so ``recent_messages`` and the conversation's row leave it
+        out; the mark this manager holds for the conversation is written
+        with it when the conversation's state lacks one; each event goes
+        through ``_apply_event_hook``. Closing the generator stops the run.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot tell its root agent a notice.")
+        if False:  # pragma: no cover - an async generator
+            yield  # type: ignore[misc]
 
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run to its end: the backend's hook (``Delegations``'s).
@@ -2624,7 +2671,7 @@ class BaseWorkflowManager(ABC):
         """Run the block as one turn of a conversation, and yield the conversation.
 
         How every turn-shaped entry point starts (``process``,
-        ``resume_with_job_result``, ``compact``, ``run_instance``): the conversation is
+        ``resume_with_job_result``, ``compact``, ``run_instance``, ``tell_root``): the conversation is
         resolved as ``session_ref`` resolves it (the manager's current
         session and the default user for what is omitted) and named in the
         log context; then turn admission (:meth:`_turn_admission`: the

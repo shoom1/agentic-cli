@@ -41,6 +41,7 @@ from agentic_cli.workflow.adk.sessions import (  # noqa: E402
     CHILD_APP_SUFFIX,
     MAX_KEY,
     TITLE_KEY,
+    NOTICE_METADATA,
     TURNS_KEY,
     child_app,
     child_session_id,
@@ -129,6 +130,12 @@ class TestTypedPrompts:
         ]
 
         assert typed_prompts(events) == ["Plan the trip.", "And the budget?"]
+
+    def test_a_notice_to_the_root_is_none(self):
+        notice = text_event("user", "The user worked with researcher-1 directly.")
+        notice.custom_metadata = dict(NOTICE_METADATA)
+
+        assert typed_prompts([notice, text_event("user", "Go on.")]) == ["Go on."]
 
 
 class TestRows:

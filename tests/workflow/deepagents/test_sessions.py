@@ -53,6 +53,7 @@ from agentic_cli.workflow.deepagents.sessions import (  # noqa: E402
     instance_run_config,
     instance_thread_id,
     job_notification,
+    notice_message,
     ref_from_thread_id,
     run_config,
     thread_id,
@@ -448,6 +449,17 @@ class TestList:
 
         assert (row.title, row.turns) == ("Build it.", 1)
 
+    async def test_a_notice_to_the_root_is_no_turn_and_no_title(self, saver, store):
+        root = _tree(saver, [SOLO], solo=[ai("Noted.")])
+        await root.ainvoke({"messages": [notice_message("The user worked with x-1.")]},
+                           run_config(ref()))
+        await say(saver, ref(), "Build it.")
+
+        (row,) = await CheckpointSessions(saver, store).list("app", "alice")
+
+        assert (row.title, row.turns) == ("Build it.", 1)
+
+
     async def test_the_limit_keeps_the_newest(self, saver, store):
         await say(saver, ref(session="s1"))
         await say(saver, ref(session="s2"))
@@ -658,6 +670,16 @@ class TestRecent:
     async def test_an_unknown_session_has_none(self, saver, store):
         await say(saver, ref())
         assert await CheckpointSessions(saver, store).recent(ref(user="bob"), 20) == []
+
+    async def test_a_notice_to_the_root_is_left_out_and_its_answer_kept(self, saver, store):
+        await say(saver, ref(), "Tell me.", ai("Told."))
+        root = _tree(saver, [SOLO], solo=[ai("Noted.")])
+        await root.ainvoke({"messages": [notice_message("The user worked with x-1.")]},
+                           run_config(ref()))
+
+        recent = await CheckpointSessions(saver, store).recent(ref(), 20)
+
+        assert [m["content"] for m in recent] == ["Tell me.", "Told.", "Noted."]
 
 
 # --- whole managers ---------------------------------------------------------------------

@@ -14,10 +14,11 @@ would change its last-update time and so its place in the list. Its next
 turn saves both, counting the turns it already had.
 
 Only what the user typed is a turn (``typed_prompts``): a text event of the
-user's that is not a job's notice. ADK stores a summary (a compaction) as a
-user event without content, a delegated request not at all, and a job's
-result as a notice (``JOB_NOTICE_HEADER``), or, before the notice, a
-function response; none of them is a typed prompt.
+user's that is not a job's notice and not a notice to the root
+(``NOTICE_METADATA``). ADK stores a summary (a compaction) as a user event
+without content, a delegated request not at all, and a job's result as a
+notice (``JOB_NOTICE_HEADER``), or, before the notice, a function response;
+none of them is a typed prompt.
 
 The session hooks read the session service through ``ServiceSessions``, the
 manager's (``session_exists``, ``list_sessions``, ``session_info``,
@@ -81,6 +82,12 @@ logger = Loggers.workflow()
 TITLE_KEY = "agentic_cli.title"
 #: How many turns the user ran in it.
 TURNS_KEY = "agentic_cli.turns"
+
+#: The mark of a notice to the root's run, which the user did not type
+#: (``tell_root``): passed as ``RunConfig.custom_metadata``, which ADK stamps on
+#: each event of the run, the notice's own user event among them, and stores
+#: with it.
+NOTICE_METADATA = {"agentic_cli": {"kind": "notice"}}
 
 #: The state key of a conversation's sub-agent records, in its records session.
 RECORDS_KEY = "agentic_cli.agents"
@@ -357,12 +364,20 @@ async def stored_instances(
     return counts
 
 
+def is_notice(event: "Event") -> bool:
+    """Whether ``event`` was stored by a notice to the root's run (``NOTICE_METADATA``)."""
+    mark = (event.custom_metadata or {}).get("agentic_cli")
+    return isinstance(mark, dict) and mark.get("kind") == "notice"
+
+
 def typed_prompts(events: list["Event"]) -> list[str]:
     """The texts the user typed, oldest first."""
     prompts: list[str] = []
     for event in events:
         content = event.content
         if event.author != "user" or content is None or content.role != "user":
+            continue
+        if is_notice(event):
             continue
         text = " ".join(part.text for part in content.parts or () if part.text and not part.thought)
         if text.strip() and not text.startswith(JOB_NOTICE_HEADER):
