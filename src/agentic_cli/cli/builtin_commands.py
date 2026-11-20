@@ -220,17 +220,19 @@ class StatusCommand(Command):
             workflow = app.workflow
             if workflow is None:
                 raise RuntimeError("Workflow not initialized")
-            table.add_row("Model", workflow.model)
-            table.add_row("App Name", workflow.app_name)
-            table.add_row("Session ID", workflow.session_id)
-            services = "Initialized" if workflow.is_initialized else "Not initialized"
-            table.add_row("Services", services)
             view = getattr(app, "agent_view", None)
             # In a sub-agent's view, its context is what the user works with.
             rows = (
                 view.context_rows() if view is not None
                 else _context_rows(workflow, getattr(app, "usage_tracker", None))
             )
+            # One Model row: the instance's in a view (its own, when it names one).
+            if view is None or not any(label == "Model" for label, _ in rows):
+                table.add_row("Model", workflow.model)
+            table.add_row("App Name", workflow.app_name)
+            table.add_row("Session ID", workflow.session_id)
+            services = "Initialized" if workflow.is_initialized else "Not initialized"
+            table.add_row("Services", services)
             for label, value in rows:
                 table.add_row(label, value)
         except (RuntimeError, AttributeError):

@@ -462,6 +462,15 @@ class TestTheMainConversationsCommands:
         assert rows["Tokens"] == "1.2k in / 40 out"
         assert "Main Agent" not in rows
 
+    async def test_status_has_one_model_row_the_instances(self, make_crew):
+        crew, app = await in_a_view(make_crew)
+
+        await typed(app, "/status")
+
+        (panel,) = app.session.add_rich.call_args.args
+        models = [value for label, value in rows_of(panel.renderable) if label == "Model"]
+        assert models == [str(crew.manager.agent_models["researcher"].ref)]
+
 
 class TestOffTheLoop:
     async def test_it_blocks_no_event_loop(self, make_crew):
