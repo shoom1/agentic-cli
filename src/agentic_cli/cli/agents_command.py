@@ -14,10 +14,12 @@ the first lines of its result, the plan and the task list it left (its own:
 a run's plan and tasks are not its parent's), its error and its tokens by model.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
-``workflow/agents/runs.py``) and the tokens its usage ledger's
-(``usage_of``), so a run still going shows what it has used so far. Both
-live in memory with the manager: a conversation resumed from an earlier run
-of the app, or after a backend switch (a new manager), lists none. An
+``workflow/agents/runs.py``), kept beside the conversation in its store and
+loaded with it (``load_agents``, asked here too, so a conversation resumed
+from an earlier run of the app lists its runs before its first turn), and
+the tokens its usage ledger's (``usage_of``), so a run still going shows
+what it has used so far; a run from before a restart shows the totals its
+record keeps, by model. An
 instance runs again when it is followed up: a row per run, a follow-up titled
 by its message's first line, and ``/agents <id>`` of an instance shows every
 run of it.
@@ -42,16 +44,12 @@ from agentic_cli.workflow.agents.runs import run_number
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.agents import RunRecord
-    from agentic_cli.workflow.usage import UsageLedger, UsageTotals
+    from agentic_cli.workflow.usage import UsageLedger
 
 #: How many lines of a run's result ``/agents <id>`` shows.
 RESULT_LINES = 3
 #: What ``/agents`` says for a conversation with no run recorded.
-NO_RUNS = (
-    "No sub-agent runs in this conversation yet. Runs are kept while the app "
-    "runs, by its backend: a conversation resumed from an earlier run of the "
-    "app, or after a backend switch, lists none."
-)
+NO_RUNS = "No sub-agent runs in this conversation yet."
 
 
 def _now() -> datetime:
@@ -77,6 +75,12 @@ class AgentsCommand(Command):
         if workflow is None:
             return
         conversation = workflow.session_ref(getattr(app, "session_id", None))
+        try:
+            await workflow.load_agents(conversation)
+        except Exception as error:  # noqa: BLE001 - the runs held are shown all the same
+            app.session.add_warning(
+                f"Sub-agent records not read from the store: {str(error) or type(error).__name__}"
+            )
         runs = workflow.agent_runs
         records = runs.records(conversation)
         ledger = workflow.usage_of(conversation)
@@ -133,7 +137,7 @@ def _table(records: list["RunRecord"], ledger: "UsageLedger") -> Table:
             _status(record),
             _run_number(record),
             Text(record.title),
-            _tokens(ledger.totals(run=record.ref.run)),
+            _tokens(record, ledger),
             _duration(record, now),
         )
     return table
@@ -167,9 +171,8 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
             table.add_row("  Tasks", Text(f"{counts['completed']}/{counts['total']}\n{shown}"))
         if record.error:
             table.add_row("  Error", Text(record.error))
-        by_model = ledger.by_model(run=record.ref.run)
-        for index, (model, totals) in enumerate(by_model.items()):
-            table.add_row("  Tokens" if index == 0 else "", Text(f"{model}: {format_usage(totals)}"))
+        for index, line in enumerate(_tokens_by_model(record, ledger)):
+            table.add_row("  Tokens" if index == 0 else "", Text(line))
     return Panel(
         table, title=f"[bold]{escape(first.ref.instance)}[/bold]", border_style="cyan", expand=False
     )
@@ -218,11 +221,33 @@ def _run_number(record: "RunRecord") -> str:
     return "#" + run_number(record.ref.run or "")
 
 
-def _tokens(totals: "UsageTotals") -> str:
-    """A run's tokens in and out; ``—`` before its first model call ends."""
-    if not totals.calls:
+def _tokens(record: "RunRecord", ledger: "UsageLedger") -> str:
+    """A run's tokens in and out; ``—`` before its first model call ends.
+
+    The ledger's, else (a run from before a restart: the ledger is this
+    manager's) the totals its record keeps.
+    """
+    totals = ledger.totals(run=record.ref.run)
+    if totals.calls:
+        return f"{format_tokens(totals.input)} / {format_tokens(totals.output)}"
+    if not record.usage:
         return "—"
-    return f"{format_tokens(totals.input)} / {format_tokens(totals.output)}"
+    used = record.usage.values()
+    spent_in = sum(model.get("input", 0) for model in used)
+    spent_out = sum(model.get("output", 0) for model in used)
+    return f"{format_tokens(spent_in)} / {format_tokens(spent_out)}"
+
+
+def _tokens_by_model(record: "RunRecord", ledger: "UsageLedger") -> list[str]:
+    """A run's tokens, a line per model: the ledger's, else its record's (no call count)."""
+    by_model = ledger.by_model(run=record.ref.run)
+    if by_model:
+        return [f"{model}: {format_usage(totals)}" for model, totals in by_model.items()]
+    return [
+        f"{model}: {format_tokens(totals.get('input', 0))} in / "
+        f"{format_tokens(totals.get('output', 0))} out"
+        for model, totals in record.usage.items()
+    ]
 
 
 def _duration(record: "RunRecord", now: datetime) -> str:

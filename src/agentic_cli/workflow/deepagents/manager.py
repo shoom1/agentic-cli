@@ -41,6 +41,7 @@ import contextlib
 import functools
 import time
 import uuid
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from deepagents.middleware.summarization import SUMMARIZATION_EVENT_KEY
@@ -85,6 +86,7 @@ from agentic_cli.workflow.deepagents.middleware import answer_outcome
 from agentic_cli.workflow.deepagents.sessions import (
     CheckpointSessions,
     instance_run_config,
+    instance_thread_id,
     job_notification,
     run_config,
 )
@@ -766,6 +768,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window, still
                 after its summary (``subagent_overflow_message``), with the
                 last text it wrote.
+            RunFailed: A first run whose instance's thread the store already
+                keeps: a stored transcript is never another run's.
             RuntimeError: The run has no conversation (its thread needs one).
         """
         conversation = run.conversation
@@ -773,6 +777,21 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
         graph = self._agent_graphs[run.ref.agent]
         task = HumanMessage(content=run.message, id=f"agentic-cli-task-{uuid.uuid4().hex}")
+        if not run.follow_up and self._checkpointer is not None:
+            # A first run never continues a thread the store already keeps
+            # (as ADK refuses to make an existing session): whatever numbered
+            # it, a stored transcript is never another run's.
+            kept = await self._checkpointer.aget_tuple(
+                {"configurable": {
+                    "thread_id": instance_thread_id(conversation, run.ref.instance),
+                    "checkpoint_ns": "",
+                }}
+            )
+            if kept is not None:
+                raise RunFailed(
+                    f"The thread of sub-agent {run.ref.instance} already exists.",
+                    code="THREAD_EXISTS",
+                )
         if run.follow_up:
             inputs: dict[str, Any] = {
                 **{k: v for k, v in run.state.items() if k in SHARED_KEYS and v},
@@ -973,7 +992,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """The highest instance number of each type ``conversation``'s checkpointer keeps.
 
         The base's hook (``Delegations`` asks it once per conversation per
-        turn): read from the instance threads
+        turn): read from the conversation's stored records when they name
+        instances, else from the instance threads
         (``CheckpointSessions.stored_instances``), so a manager after a
         restart numbers past what another ran there.
         """
@@ -981,8 +1001,39 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             return {}
         return await self._sessions.stored_instances(conversation)
 
+    async def _load_agent_records(self, conversation: "SessionRef") -> Any | None:
+        """``conversation``'s records, from the store beside the checkpointer (the
+        base's store hook: ``CheckpointSessions.agent_records``).
+
+        Raises:
+            RuntimeError: The store is not open.
+        """
+        return await self._open_sessions().agent_records(conversation)
+
+    async def _save_agent_records(
+        self, conversation: "SessionRef", data: Mapping[str, Any]
+    ) -> None:
+        """Keep ``data`` as ``conversation``'s records, in the store beside the
+        checkpointer (the base's store hook: ``CheckpointSessions.save_agent_records``).
+
+        Raises:
+            RuntimeError: The store is not open.
+        """
+        await self._open_sessions().save_agent_records(conversation, data)
+
+    def _open_sessions(self) -> CheckpointSessions:
+        sessions = self._sessions
+        if sessions is None:
+            raise RuntimeError("The session store is not open.")
+        return sessions
+
     async def delete_session(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """Delete a conversation, its row in the session index and its sub-agent instances' threads.
+        """Delete a conversation, its sub-agent instances' threads, its sub-agent
+        records and its row in the session index.
+
+        The instances' threads go first, then the records, then the
+        conversation (``CheckpointSessions.delete``); then this manager
+        forgets it (``_deleting``).
 
         Args:
             session_id: The conversation.
@@ -993,7 +1044,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """
         if self._sessions is None:
             return False
-        return await self._sessions.delete(self.session_ref(session_id, user_id))
+        ref = self.session_ref(session_id, user_id)
+        async with self._deleting(ref):
+            deleted = await self._sessions.delete(ref)
+        return deleted
 
     async def recent_messages(
         self, session_id: str, limit: int = 20, *, user_id: str | None = None

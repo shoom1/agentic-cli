@@ -30,6 +30,19 @@ of which holds the whole conversation. A database written before the index is
 scanned once per app and user, on its first listing (the backfill), which then
 leaves a mark under ``("agentic_cli", "session_backfill", <app>, <user>)``.
 
+A conversation's sub-agent records (``AgentRuns.export``: its instances,
+its runs, its id counters) are one item of the same store, under
+``("agentic_cli", "agents", <app>, <user>)``, keyed by the session id
+(``agent_records``, ``save_agent_records``): written at each run event
+that changes them, never a row of the index. ``delete`` deletes the
+instances' threads first, then the records, then the conversation's thread
+and row, so a delete cut short leaves the conversation, by which the rest is
+found again. The instances a conversation keeps, which number a new
+manager's next ones (``stored_instances``), are the records' ids and
+counters and the threads', read cheaply (each thread's first checkpoint
+holds no message), so an instance whose start write was lost is numbered
+past too.
+
 A finished job reports to the conversation in a ``HumanMessage`` of its own
 (``job_notification``), marked in its ``response_metadata``, which no
 provider adapter sends. The model reads it as the rest of the conversation;
@@ -48,7 +61,7 @@ import asyncio
 import contextlib
 import json
 import sqlite3
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -64,6 +77,7 @@ from agentic_cli.workflow.checkpointers import (
     open_store,
     private_sqlite_file,
 )
+from agentic_cli.workflow.agents.runs import stored_instance_ids
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
@@ -83,6 +97,9 @@ _INSTANCE_THREAD = "instance"
 #: and the backfill's marks.
 _ROWS = ("agentic_cli", "sessions")
 _BACKFILLS = ("agentic_cli", "session_backfill")
+#: The namespace of the conversations' sub-agent records (it then takes the
+#: app and the user).
+_AGENTS = ("agentic_cli", "agents")
 
 #: The key of an app and user's backfill mark.
 _MARK_KEY = "done"
@@ -288,16 +305,18 @@ class CheckpointSessions:
         return listed if limit is None else listed[:limit]
 
     async def instances(self, ref: SessionRef) -> list[str]:
-        """The sub-agent instances whose transcript ``ref``'s conversation keeps, sorted.
+        """The sub-agent instances whose transcript thread ``ref``'s conversation keeps, sorted.
 
-        Read from the instance runs' input checkpoints, by their metadata:
-        one per run, never the root's checkpoints (each holds the whole
-        conversation). A thread whose id does not name this conversation and
-        an instance is left out, whatever its metadata says.
+        Read from the instance runs' first input checkpoints, by their
+        metadata (``source`` ``input``, ``step`` -1): one per thread, which
+        holds no message yet, never a checkpoint that holds a transcript (the
+        saver unpickles every checkpoint it returns, and its filter is a
+        metadata equality). A thread whose id does not name this conversation
+        and an instance is left out, whatever its metadata says.
         """
         wanted = {
             "app_name": ref.app_name, "user_id": ref.user_id, "session_id": ref.session_id,
-            "thread_kind": _INSTANCE_THREAD, "source": "input",
+            "thread_kind": _INSTANCE_THREAD, "source": "input", "step": -1,
         }
         found: set[str] = set()
         async for item in self._saver.alist(None, filter=wanted):
@@ -316,27 +335,41 @@ class CheckpointSessions:
     async def stored_instances(self, ref: SessionRef) -> dict[str, int]:
         """The highest instance number of each agent type ``ref``'s conversation keeps.
 
-        Read from the instance threads' ids (``<type>-<n>``, ``AgentRuns``'
+        Read from the instances' ids (``<type>-<n>``, ``AgentRuns``'
         instance ids), as ``adk/sessions.py::stored_instances`` reads ADK's:
         what another manager ran there, which this one numbers past. An
-        instance that names no such number is left out.
+        instance that names no such number is left out. The threads are the
+        floor (``instances``: a thread a start write never named is numbered
+        past too), and the stored records' ids and counters count with them:
+        the counters never fall below an instance kept.
         """
         counts: dict[str, int] = {}
-        for instance in await self.instances(ref):
+        records = await self.agent_records(ref)
+        named = stored_instance_ids(records) or []
+        for instance in sorted({*named, *await self.instances(ref)}):
             agent, _, number = instance.rpartition("-")
             if agent and number.isascii() and number.isdigit():
                 counts[agent] = max(counts.get(agent, 0), int(number))
+        numbered = records.get("numbered") if named else None
+        if isinstance(numbered, Mapping):
+            for agent, count in numbered.items():
+                if isinstance(agent, str) and type(count) is int and count > counts.get(agent, 0):
+                    counts[agent] = count
         return counts
 
     async def delete(self, ref: SessionRef) -> bool:
-        """Delete ``ref``'s thread, its instances' threads and its row.
+        """Delete ``ref``'s thread, its instances' threads, its sub-agent records and its row.
 
-        False if there was no conversation (its instances' threads are
-        deleted whatever else is found). The thread goes with any sub-agent
-        checkpoints an older version stored in it.
+        False if there was no conversation (its instances' threads and its
+        records are deleted whatever else is found: they go first, so a delete
+        cut short leaves the conversation, by which the rest is found again).
+        The instances are found from their threads, not the records, so a
+        thread the records never named goes too. The thread goes with any
+        sub-agent checkpoints an older version stored in it.
         """
         for instance in await self.instances(ref):
             await self._saver.adelete_thread(instance_thread_id(ref, instance))
+        await self.delete_agent_records(ref)
         namespace = _rows_of(ref.app_name, ref.user_id)
         stored = await self._root(ref) is not None
         indexed = await self._store.aget(namespace, ref.session_id) is not None
@@ -367,6 +400,21 @@ class CheckpointSessions:
             if text:
                 out.append({"role": role, "content": text})
         return out[-limit:] if limit > 0 else []
+
+    async def agent_records(self, ref: SessionRef) -> Any | None:
+        """What the store keeps as ``ref``'s sub-agent records; None for none."""
+        item = await self._store.aget(_agents_of(ref.app_name, ref.user_id), ref.session_id)
+        return item.value if item is not None else None
+
+    async def save_agent_records(self, ref: SessionRef, data: Mapping[str, Any]) -> None:
+        """Keep ``data`` as ``ref``'s sub-agent records, replacing what the store kept."""
+        await self._store.aput(
+            _agents_of(ref.app_name, ref.user_id), ref.session_id, dict(data), index=False
+        )
+
+    async def delete_agent_records(self, ref: SessionRef) -> None:
+        """Delete ``ref``'s sub-agent records; none is nothing to do."""
+        await self._store.adelete(_agents_of(ref.app_name, ref.user_id), ref.session_id)
 
     async def outside_content(self, ref: SessionRef) -> str:
         """The conversation's mark in its newest root checkpoint (``""``: none)."""
@@ -573,6 +621,11 @@ def _label(value: str) -> str:
 def _rows_of(app_name: str, user_id: str) -> tuple[str, ...]:
     """The namespace of one app and user's rows."""
     return (*_ROWS, _label(app_name), _label(user_id))
+
+
+def _agents_of(app_name: str, user_id: str) -> tuple[str, ...]:
+    """The namespace of one app and user's sub-agent records."""
+    return (*_AGENTS, _label(app_name), _label(user_id))
 
 
 def _marks_of(app_name: str, user_id: str) -> tuple[str, ...]:

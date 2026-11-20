@@ -348,6 +348,16 @@ class OpenCalls:
             return True
         return False
 
+    def forget(self, key: Any) -> None:
+        """Forget everything of conversation ``key``: its calls, a failed turn's
+        among them, and every stop recorded for it or its instances, with
+        what stopped them (it was deleted)."""
+        self._finished.pop(key, None)
+        self._asking.pop(key, None)
+        self._cancelled.discard(key)
+        self._stopped = {stopped for stopped in self._stopped if stopped[0] != key}
+        self._causes = {k: v for k, v in self._causes.items() if k[0] != key}
+
     def clear(self, key: Any) -> None:
         """Forget conversation ``key``'s calls: its turn ended with every one answered.
 

@@ -1015,7 +1015,8 @@ class TestOnTheRealBackends:
         finally:
             await manager.cleanup()
 
-        assert before == [f"{old}/researcher-1"]
+        # Its sub-agent records are one more child session, named as the conversation.
+        assert sorted(before) == [old, f"{old}/researcher-1"]
         assert after == []
 
     async def test_deep_agents_drops_it(self, project, monkeypatch):

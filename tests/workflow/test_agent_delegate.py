@@ -701,6 +701,62 @@ class TestNumberedPastTheStored:
         assert [r.result["agent"] for r in results] == ["researcher-3", "researcher-4"]
         assert asked == [CONVERSATION, CONVERSATION]
 
+    async def test_one_conversations_ask_never_waits_for_anothers(self):
+        hook, _ = answering()
+        other = SessionRef("app", "u", "t")
+        held = asyncio.Event()
+        asked: list[SessionRef] = []
+
+        async def stored(conversation: SessionRef) -> dict[str, int]:
+            asked.append(conversation)
+            if conversation == CONVERSATION:
+                await held.wait()
+            return {}
+
+        made = delegations(hook, stored=stored)
+        with a_turn():
+            slow = asyncio.create_task(made.delegate(request(call_id="c1")))
+            while not asked:
+                await asyncio.sleep(0)
+            token = set_active_turn(other)
+            try:
+                result = await asyncio.wait_for(made.delegate(request(call_id="c1")), 5)
+            finally:
+                reset_active_turn(token)
+                held.set()
+            await slow
+
+        assert result.result["agent"] == "researcher-1"
+        assert asked == [CONVERSATION, other]
+
+    async def test_a_forgotten_conversation_asks_its_store_again(self):
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 2}, {})
+        made = delegations(hook, stored=stored)
+
+        with a_turn():
+            first = await made.delegate(request(call_id="c1"))
+            pool = made.slots(CONVERSATION)
+            made.forget(CONVERSATION)
+            second = await made.delegate(request(call_id="c2"))
+
+        assert asked == [CONVERSATION, CONVERSATION]
+        assert made.slots(CONVERSATION) is not pool
+        assert [first.result["agent"], second.result["agent"]] == ["researcher-3", "researcher-4"]
+
+    async def test_a_forgotten_conversation_keeps_no_unread_message_or_waiting_close(self):
+        hook, _ = answering()
+        made = delegations(hook)
+        other = SessionRef("app", "u", "t")
+        for conversation in (CONVERSATION, other):
+            made._unread[(conversation, "researcher-1")] = ["steer"]
+            made._closing[(conversation, "researcher-1")] = "closed"
+
+        made.forget(CONVERSATION)
+
+        assert made._unread == {(other, "researcher-1"): ["steer"]}
+        assert made._closing == {(other, "researcher-1"): "closed"}
+
     async def test_the_managers_delegations_ask_its_stored_instances(self):
         """``BaseWorkflowManager._stored_instances``: the base keeps none; a
         backend that stores transcripts says how many of each type."""

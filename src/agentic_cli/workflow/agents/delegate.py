@@ -524,10 +524,10 @@ class Delegations:
         self._open_calls = open_calls
         # Each conversation's turn its stored instances were last read in
         # (its span, ``current_turn_scope``: held here, so no later turn's
-        # can be the same object), and the lock a turn's parallel first runs
-        # wait at while one reads them.
+        # can be the same object), and each conversation's lock, which a
+        # turn's parallel first runs wait at while one reads them.
         self._numbered: dict[SessionRef, object] = {}
-        self._numbering = asyncio.Lock()
+        self._numbering: dict[SessionRef, asyncio.Lock] = {}
         # The working runs' controls, by (conversation, run id).
         self._controls: dict[tuple[SessionRef | None, str], RunControl] = {}
         # Each working run's end (set once it has ended), the messages steered
@@ -856,6 +856,17 @@ class Delegations:
         if control is not None and control.cancelled is not None:
             return control.stop_cause
         return PARENT_CAUSE if self._parent_stopped(conversation, run) else None
+
+    def forget(self, conversation: SessionRef) -> None:
+        """Forget ``conversation`` (it was deleted): its working slots, the messages
+        kept unread and the closes waiting for its runs' ends, and that its
+        store was read, so a conversation of its id asks its store again."""
+        self._numbered.pop(conversation, None)
+        self._numbering.pop(conversation, None)
+        self._pools.pop(conversation, None)
+        for held in (self._unread, self._closing):
+            for key in [k for k in held if k[0] == conversation]:
+                del held[key]
 
     def _yours(self, conversation: SessionRef | None, caller: RunRef | None) -> list[InstanceRecord]:
         """The instances ``caller`` started (the root's, for None), in start order."""
@@ -1194,7 +1205,7 @@ class Delegations:
         turn = current_turn_scope()
         if turn is not None and self._numbered.get(conversation) is turn:
             return
-        async with self._numbering:
+        async with self._numbering.setdefault(conversation, asyncio.Lock()):
             if turn is not None and self._numbered.get(conversation) is turn:
                 return
             try:

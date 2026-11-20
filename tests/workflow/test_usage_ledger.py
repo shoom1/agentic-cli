@@ -205,6 +205,19 @@ class TestTheLedgers:
         assert ledgers.ledger(other).totals() == UsageTotals(input=20, output=2, calls=1)
         assert ledgers.ledger(CONVERSATION) is ledgers.ledger(CONVERSATION)
 
+    def test_a_forgotten_conversations_ledger_starts_again(self):
+        ledgers = UsageLedgers()
+        other = SessionRef(app_name="app", user_id="u", session_id="t")
+        for conversation in (CONVERSATION, other):
+            ledgers.ledger(conversation).record(usage(10, 1))
+            ledgers.ledger(conversation).begin_turn()
+
+        ledgers.forget(CONVERSATION)
+
+        assert ledgers.ledger(CONVERSATION).turns == 0
+        assert ledgers.ledger(CONVERSATION).totals() == UsageTotals()
+        assert ledgers.ledger(other).totals().calls == 1
+
 
 class TestSideCall:
     def test_the_caller_names_what_its_side_calls_are_for(self):
