@@ -3531,3 +3531,180 @@ class TestWhyARunStopped:
             assert made.stop_cause(RESEARCHER) is None  # no working run
         finally:
             reset_active_turn(token)
+
+
+# -- the user's stop and close: any instance of the conversation ---------------------------
+
+
+def finishing() -> tuple[Hook, asyncio.Event, asyncio.Event]:
+    """A hook whose run's work ends (``RunControl.finish``) and which then
+    waits for ``go`` before it answers ``Done.``: a stop that comes meanwhile
+    cancels nothing. The event set once its work has ended, and ``go``."""
+    ended, go = asyncio.Event(), asyncio.Event()
+
+    async def hook(run: AgentRun) -> RunAnswer:
+        run.control.finish()
+        ended.set()
+        await go.wait()
+        return RunAnswer(text="Done.")
+
+    return hook, ended, go
+
+
+class TestTheUsersStop:
+    """``stop_by_user``: the user's stop of any instance of the conversation
+    (``/agent stop``): a running one's run cancelled by the user and waited for
+    to its end, an idle one stopped at once; only the user may start a stopped
+    instance's next run."""
+
+    async def test_a_running_ones_run_is_cancelled_by_the_user_and_waited_for(self):
+        hook, working, _ = blocking("researcher-1#1")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(working["researcher-1#1"].wait(), 5)
+
+        stopped_it = await made.stop_by_user(CONVERSATION, "researcher-1")
+
+        assert stopped_it is True
+        # It returned once the run had ended, outside any turn.
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_STOPPED
+        assert get_active_turn() is None
+        await asyncio.wait_for(turn.task, 5)
+        assert turn.result.result == {
+            "success": False, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_CANCELLED, "partial": True, "result": "Half way.",
+            "error": "stopped by the user", "cancelled_by": "user",
+        }
+        ended = runs_of_status(turn.events, RUN_CANCELLED)[0]
+        assert ended.metadata["instance_status"] == INSTANCE_STOPPED
+
+    async def test_an_idle_one_is_stopped_at_once_and_only_the_user_continues_it(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        await turned(lambda: made.delegate(request()))
+
+        stopped_it, events = await turned(lambda: made.stop_by_user(CONVERSATION, "researcher-1"))
+
+        assert stopped_it is True
+        assert instance_events(events) == [
+            ("researcher-1", INSTANCE_STOPPED, "stopped by the user"),
+        ]
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_STOPPED
+        refused, _ = await turned(lambda: made.follow_up(follow()))
+        assert refused.result["error"] == (
+            "researcher-1 was stopped by the user; only the user can continue it."
+        )
+        went_on, _ = await turned(lambda: made.follow_up(users()))
+        assert went_on.result["status"] == RUN_COMPLETED
+        assert len(asked) == 2
+
+    async def test_a_run_whose_work_had_ended_ends_as_it_went_then_its_instance_is_stopped(
+        self,
+    ):
+        hook, ended, go = finishing()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(ended.wait(), 5)
+
+        stopping = asyncio.create_task(made.stop_by_user(CONVERSATION, "researcher-1"))
+        await asyncio.sleep(0)
+        assert not stopping.done()  # it waits for the run's end
+        go.set()
+
+        assert await asyncio.wait_for(stopping, 5) is True
+        await asyncio.wait_for(turn.task, 5)
+        assert turn.result.result["status"] == RUN_COMPLETED
+        assert runs_of_status(turn.events, RUN_COMPLETED)[0].metadata["instance_status"] == (
+            INSTANCE_IDLE
+        )
+        assert runs.instance(CONVERSATION, "researcher-1").status == INSTANCE_STOPPED
+
+    async def test_a_stopped_closed_or_unknown_one_is_left_as_it_is(self):
+        hook, working = waiting()
+        made = delegations(hook, types=WITH_CHECKER)
+        await stopped(made, working, by="user", error="stopped by the user")
+        made._hook, _ = answering()
+        await turned(lambda: made.delegate(request(CHECK, call_id="c2")))
+
+        async def each() -> list[bool]:
+            return [
+                await made.stop_by_user(CONVERSATION, name)
+                for name in ("researcher-1", "checker-1", "writer-1")
+            ]
+
+        results, events = await turned(each)
+
+        assert (results, events) == ([False, False, False], [])
+
+
+class TestTheUsersClose:
+    """``close_by_user``: the user's close of any instance of the conversation
+    (``/agent close``), with its descendants; a running one's run is stopped by
+    the user first and the instance closes as it ends."""
+
+    async def test_an_idle_one_is_closed_with_its_descendants(self):
+        made: Delegations
+        runs = AgentRuns()
+        made = delegations(with_a_leaf(lambda: made, {}), runs=runs)
+        await turned(lambda: made.delegate(request(PLAN)))
+
+        closed, events = await turned(lambda: made.close_by_user(CONVERSATION, "middle-1"))
+
+        assert closed == ["middle-1", "leaf-1"]
+        assert instance_events(events) == [
+            ("middle-1", INSTANCE_CLOSED, "closed by the user"),
+            ("leaf-1", INSTANCE_CLOSED, "closed by the user"),
+        ]
+
+    async def test_a_running_ones_run_is_stopped_and_it_closes_at_its_end(self):
+        made: Delegations
+        runs = AgentRuns()
+        working = {"middle-1#2": asyncio.Event()}
+        made = delegations(with_a_leaf(lambda: made, working), runs=runs)
+        await turned(lambda: made.delegate(request(PLAN)))
+        turn = Turn(lambda: made.follow_up(users("middle-1")))
+        await asyncio.wait_for(working["middle-1#2"].wait(), 5)
+
+        closed = await made.close_by_user(CONVERSATION, "middle-1")
+
+        assert closed == ["middle-1", "leaf-1"]
+        await asyncio.wait_for(turn.task, 5)
+        ended = runs_of_status(turn.events, RUN_CANCELLED)[-1]
+        assert (ended.run.run, ended.metadata["cancelled_by"], ended.metadata["error"],
+                ended.metadata["instance_status"]) == (
+            "middle-1#2", "user", "stopped by the user", INSTANCE_CLOSED,
+        )
+        assert instance_events(turn.events) == [("leaf-1", INSTANCE_CLOSED, "closed by the user")]
+        assert {i.instance: i.status for i in runs.instances(CONVERSATION)} == {
+            "middle-1": INSTANCE_CLOSED, "leaf-1": INSTANCE_CLOSED,
+        }
+
+    async def test_a_stopped_one_is_closed_and_a_closed_or_unknown_one_is_not(self):
+        hook, working = waiting()
+        made = delegations(hook)
+        await stopped(made, working, by="user", error="stopped by the user")
+
+        async def each() -> list[list[str]]:
+            return [
+                await made.close_by_user(CONVERSATION, name)
+                for name in ("researcher-1", "researcher-1", "writer-1")
+            ]
+
+        results, _ = await turned(each)
+
+        assert results == [["researcher-1"], [], []]
+
+    async def test_neither_blocks_the_event_loop(self):
+        hook, working, _ = blocking("researcher-1#1")
+        made = delegations(hook)
+        turn = Turn(lambda: made.delegate(request()))
+        await asyncio.wait_for(working["researcher-1#1"].wait(), 5)
+
+        with no_blocking_calls():
+            assert await made.stop_by_user(CONVERSATION, "researcher-1") is True
+            assert await made.close_by_user(CONVERSATION, "researcher-1") == ["researcher-1"]
+
+        await asyncio.wait_for(turn.task, 5)
