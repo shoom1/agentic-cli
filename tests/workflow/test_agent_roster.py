@@ -10,7 +10,10 @@ the memory index's, so the head of the request stays the same for caching.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+
+import pytest
 
 from agentic_cli.workflow.agents import (
     INSTANCE_CLOSED,
@@ -22,6 +25,7 @@ from agentic_cli.workflow.agents import (
     AgentRuns,
     InstanceRecord,
     RunRecord,
+    SubAgentPolicy,
 )
 from agentic_cli.workflow.agents.roster import (
     ROSTER_CLOSE,
@@ -38,7 +42,10 @@ from agentic_cli.workflow.sessions import (
     reset_active_turn,
     set_active_turn,
 )
+from tests.conftest import MockContext
+from tests.workflow.test_agent_records import TEAM, _Kept, turn
 
+FOLLOWING = SubAgentPolicy(follow_ups=True)
 REF = SessionRef(app_name="app", user_id="u", session_id="s")
 OTHER = SessionRef(app_name="app", user_id="u", session_id="t")
 AT = datetime(2026, 11, 19, tzinfo=timezone.utc)
@@ -202,3 +209,84 @@ class TestTheSnapshots:
         assert rosters.snapshots == {REF: "a"}
         rosters.clear()
         assert rosters.snapshots == {}
+
+
+# -- the manager: taken in a turn, forgotten where the memory index's is ------------------------
+
+
+@pytest.fixture
+def context():
+    with MockContext(google_api_key="test-key") as made:
+        yield made
+
+
+@pytest.fixture
+async def following(context):
+    """``following(subagents=FOLLOWING)``: a manager whose turn delegates once
+    (``test_agent_records._Kept``), with ``subagents``; cleaned up after the test."""
+    made: list[_Kept] = []
+
+    def make(subagents: SubAgentPolicy | None = FOLLOWING) -> _Kept:
+        manager = _Kept(TEAM, settings=context.settings, stored={}, subagents=subagents)
+        made.append(manager)
+        return manager
+
+    yield make
+    for manager in made:
+        await asyncio.wait_for(manager.cleanup(), 10)
+
+
+def roster_in(manager: _Kept, ref: SessionRef) -> str:
+    """What the manager's ``_roster_now`` gives in ``ref``'s turn."""
+    token = set_active_turn(ref)
+    try:
+        return manager._roster_now()
+    finally:
+        reset_active_turn(token)
+
+
+class TestTheManagersRoster:
+    def test_only_a_main_agent_that_continues_its_sub_agents_gets_one(self, following):
+        assert following()._roster_wanted("lead") is True
+        assert following()._roster_wanted("researcher") is False  # no sub-agents
+        assert following(None)._roster_wanted("lead") is False  # the policy's defaults
+
+    async def test_taken_in_a_turn_and_kept_until_the_memory_index_is_forgotten(self, following):
+        manager = following()
+        await turn(manager, "Find X.")
+        ref = manager.session_ref("s", "u")
+
+        taken = roster_in(manager, ref)
+        assert "- researcher-1 (researcher, idle): Find X. — Done." in taken
+        assert manager._rosters.snapshots == {ref: taken}
+        await turn(manager, "Find Y.")
+        assert roster_in(manager, ref) == taken
+        manager._forget_memory_index(ref)
+        assert "- researcher-2 (researcher, idle): Find Y. — Done." in roster_in(manager, ref)
+
+    async def test_opening_the_conversation_takes_a_new_one(self, following):
+        manager = following()
+        await turn(manager, "Find X.")
+        ref = manager.session_ref("s", "u")
+        assert roster_in(manager, ref)
+
+        await manager.load_session("s", user_id="u")
+
+        assert manager._rosters.snapshots == {}
+
+    async def test_the_release_clears_them_and_a_delete_forgets_its_own(self, following):
+        manager = following()
+        await turn(manager, "Find X.")
+        ref = manager.session_ref("s", "u")
+        other = manager.session_ref("t", "u")
+        roster_in(manager, ref)
+        manager._rosters.snapshots[other] = "kept"
+
+        await manager.delete_session("s", user_id="u")
+        assert manager._rosters.snapshots == {other: "kept"}
+        await manager._release_resources()
+        assert manager._rosters.snapshots == {}
+
+    def test_a_manager_built_without_its_constructor_has_them(self):
+        manager = _Kept.__new__(_Kept)
+        assert isinstance(manager._rosters, Rosters) and manager._rosters is manager._rosters
