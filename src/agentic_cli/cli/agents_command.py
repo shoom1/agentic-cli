@@ -8,7 +8,8 @@ limit ``completed (partial)``), its run, its title, the tokens it used, and how
 long it ran (or has been running). ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent,
 its title, then each run's status, the fields of its brief its parent filled
-(its objective, deliverable, constraints, what was known, when it is done),
+(its objective, deliverable, constraints, what was known, when it is done; a
+follow-up's message in their place),
 the first lines of its result, the plan and the task list it left (its own:
 a run's plan and tasks are not its parent's), its error and its tokens by model.
 
@@ -16,8 +17,10 @@ The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``) and the tokens its usage ledger's
 (``usage_of``), so a run still going shows what it has used so far. Both
 live in memory with the manager: a conversation resumed from an earlier run
-of the app, or after a backend switch (a new manager), lists none. Each
-instance runs once.
+of the app, or after a backend switch (a new manager), lists none. An
+instance runs again when it is followed up: a row per run, a follow-up titled
+by its message's first line, and ``/agents <id>`` of an instance shows every
+run of it.
 """
 
 from __future__ import annotations
@@ -151,6 +154,8 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
         for name in BRIEF_FIELDS:
             if record.brief.get(name):
                 table.add_row(f"  {_label(name)}", Text(record.brief[name]))
+        if record.input:
+            table.add_row("  Message", Text(_first_lines(record.input)))
         if record.result:
             table.add_row("  Result", Text(_first_lines(record.result)))
         if record.plan:
