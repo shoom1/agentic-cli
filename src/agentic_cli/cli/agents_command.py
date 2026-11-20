@@ -1,28 +1,34 @@
-"""``/agents``: the open conversation's sub-agent runs.
+"""``/agents`` and ``/agent``: the open conversation's sub-agents.
 
-``/agents`` lists them in a table, each run followed by the runs it
-started, a level deeper: its instance (``researcher-2``), its type, its
-status (while it works ``running``, ``queued`` waiting for a free working
-slot, or ``needs you`` waiting on the user; a completion cut at its output
-limit ``completed (partial)``), its run, its title, the tokens it used, and how
-long it ran (or has been running). ``/agents <id>`` shows one instance
-(``researcher-2``) or one run (``researcher-2#1``): its type, its parent,
-its title, then each run's status, the fields of its brief its parent filled
-(its objective, deliverable, constraints, what was known, when it is done; a
-follow-up's message in their place),
-the first lines of its result, the plan and the task list it left (its own:
-a run's plan and tasks are not its parent's), its error and its tokens by model.
+``/agents`` is a picker of the conversation's instances: each one's id
+(``researcher-2``), type, status (``running``, ``idle``, ``stopped`` or
+``closed``) and title, each followed by the instances it started, a level
+deeper. Enter shows the one picked, as ``/agents <id>`` does: one instance
+(``researcher-2``) or one run (``researcher-2#1``): its type, its parent, its
+title, then each run's status (while it works ``running``, ``queued`` waiting
+for a free working slot, or ``needs you`` waiting on the user; a completion
+cut at its output limit ``completed (partial)``) and how long it ran (or has
+been running), the fields of its brief its parent filled (its objective,
+deliverable, constraints, what was known, when it is done; a follow-up's
+message in their place), the first lines of its result, the plan and the
+task list it left (its own: a run's plan and tasks are not its parent's),
+its error and its tokens by model.
+
+``/agent <id>`` shows one as well; ``/agent stop <id>`` is the user's stop
+of an instance (its run, if one works, cancelled by the user; only the user
+may start its next run) and ``/agent close <id>`` the user's close of it and
+its own sub-agents (no more runs; its work stays readable). Each says what it
+did, or why not.
 
 The runs are the manager's records (``BaseWorkflowManager.agent_runs``,
 ``workflow/agents/runs.py``), kept beside the conversation in its store and
 loaded with it (``load_agents``, asked here too, so a conversation resumed
-from an earlier run of the app lists its runs before its first turn), and
-the tokens its usage ledger's (``usage_of``), so a run still going shows
+from an earlier run of the app lists its instances before its first turn),
+and the tokens its usage ledger's (``usage_of``), so a run still going shows
 what it has used so far; a run from before a restart shows the totals its
-record keeps, by model. An
-instance runs again when it is followed up: a row per run, a follow-up titled
-by its message's first line, and ``/agents <id>`` of an instance shows every
-run of it.
+record keeps, by model. An instance runs again when it is followed up:
+``/agents <id>`` of an instance shows every run of it. The conversation the
+commands act on is the app's own (``app.session_id``).
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from thinking_prompt import ChoiceField, Dialog
 
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
@@ -43,13 +50,29 @@ from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
 from agentic_cli.workflow.agents.runs import run_number
 
 if TYPE_CHECKING:
-    from agentic_cli.workflow.agents import RunRecord
+    from thinking_prompt import Placement
+
+    from agentic_cli.workflow.agents import InstanceRecord, RunRecord
+    from agentic_cli.workflow.sessions import SessionRef
     from agentic_cli.workflow.usage import UsageLedger
 
 #: How many lines of a run's result ``/agents <id>`` shows.
 RESULT_LINES = 3
 #: What ``/agents`` says for a conversation with no run recorded.
 NO_RUNS = "No sub-agent runs in this conversation yet."
+#: The title of ``/agents``'s picker.
+PICKER_TITLE = "Sub-agents"
+#: What ``/agents <id>`` and ``/agent`` say for an id the conversation has no record of.
+NO_SUCH_AGENT = "No sub-agent {id} in this conversation. Type /agents for the list."
+#: What ``/agent`` alone says, and ``/agent stop`` or ``/agent close`` without an id.
+AGENT_USAGE = "Usage: /agent <id> | /agent stop <id> | /agent close <id>"
+SUBCOMMAND_USAGE = "Usage: /agent {subcommand} <id>"
+#: What ``/agent stop`` says it did.
+STOPPED_TEXT = "Stopped {instance}: only you can start its next run."
+#: What ``/agent close`` says it did (``whose``: ``its`` for one id, ``their`` for more).
+CLOSED_TEXT = "Closed {ids}; /agents {instance} still shows {whose} work."
+#: What ``/agent stop`` and ``/agent close`` say for an instance that is that already.
+ALREADY_TEXT = "{instance} is {status} already."
 
 
 def _now() -> datetime:
@@ -58,51 +81,152 @@ def _now() -> datetime:
 
 
 class AgentsCommand(Command):
-    """List the open conversation's sub-agent runs, or show one."""
+    """Pick one of the open conversation's sub-agents, or show one."""
 
     def __init__(self) -> None:
         super().__init__(
             name="agents",
-            description="List this conversation's sub-agent runs, or show one",
+            description="Pick one of this conversation's sub-agents, or show one",
             usage="/agents [<id>]",
             examples=["/agents", "/agents researcher-2", "/agents researcher-2#1"],
             category=CommandCategory.WORKFLOW,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """The runs in a table, or, with an instance or run id, that one."""
+        """The instances in a picker (Enter shows one), or, with an id, that one."""
         workflow = _workflow(app)
         if workflow is None:
             return
         conversation = workflow.session_ref(getattr(app, "session_id", None))
-        try:
-            await workflow.load_agents(conversation)
-        except Exception as error:  # noqa: BLE001 - the runs held are shown all the same
-            app.session.add_warning(
-                f"Sub-agent records not read from the store: {str(error) or type(error).__name__}"
-            )
-        runs = workflow.agent_runs
-        records = runs.records(conversation)
-        ledger = workflow.usage_of(conversation)
+        await _load(app, workflow, conversation)
         parts = self.parse_args(args).positional.split()
         if parts:
-            wanted = parts[0]
-            found = runs.record(conversation, wanted)
-            if found is None:
-                app.session.add_warning(
-                    f"No sub-agent {wanted} in this conversation. Type /agents for the list."
-                )
-                return
-            # A run's id shows that run; an instance's, each of its runs.
-            mine = [found] if found.ref.run == wanted else [
-                r for r in records if r.ref.instance == found.ref.instance
-            ]
-            app.session.add_rich(_one(mine, ledger))
+            show(app, workflow, conversation, parts[0])
             return
-        if not records:
+        instances = workflow.agent_runs.instances(conversation)
+        if not instances:
             app.session.add_message("system", NO_RUNS)
             return
-        app.session.add_rich(_table(records, ledger))
+        dialog, ids = picker(instances, placement=_placement(app))
+        picked = await app.session.show_dialog(dialog)
+        if picked is not None and picked in ids:
+            show(app, workflow, conversation, ids[picked])
+
+
+class AgentCommand(Command):
+    """Show, stop or close one of the open conversation's sub-agents."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="agent",
+            description="Show, stop or close one of this conversation's sub-agents",
+            usage="/agent <id> | stop <id> | close <id>",
+            examples=["/agent researcher-2", "/agent stop researcher-2", "/agent close researcher-2"],
+            category=CommandCategory.WORKFLOW,
+        )
+
+    async def execute(self, args: str, app: Any) -> None:
+        """``/agent <id>`` shows one; ``stop <id>`` and ``close <id>`` stop and close it."""
+        workflow = _workflow(app)
+        if workflow is None:
+            return
+        conversation = workflow.session_ref(getattr(app, "session_id", None))
+        parts = self.parse_args(args).positional.split()
+        if not parts:
+            app.session.add_warning(AGENT_USAGE)
+            return
+        word = parts[0]
+        if word not in ("stop", "close"):
+            await _load(app, workflow, conversation)
+            show(app, workflow, conversation, word)
+            return
+        if len(parts) < 2:
+            app.session.add_warning(SUBCOMMAND_USAGE.format(subcommand=word))
+            return
+        wanted = parts[1]
+        if not await _load(app, workflow, conversation):
+            return  # records that could not be read: nothing is tried on them
+        ids = {"session_id": conversation.session_id, "user_id": conversation.user_id}
+        if word == "stop":
+            if await workflow.stop_instance(wanted, **ids):
+                app.session.add_success(STOPPED_TEXT.format(instance=wanted))
+                return
+        else:
+            closed = await workflow.close_instance(wanted, **ids)
+            if closed:
+                app.session.add_success(CLOSED_TEXT.format(
+                    ids=", ".join(closed), instance=wanted,
+                    whose="its" if len(closed) == 1 else "their",
+                ))
+                return
+        _left_as_it_is(app, workflow, conversation, wanted)
+
+
+def picker(
+    instances: "list[InstanceRecord]", *, placement: "Placement | None" = None
+) -> tuple[Dialog, dict[str, str]]:
+    """The dialog that lists ``instances``, and the instance id each option stands for.
+
+    One option per instance, ``<id> · <type> · <status> · <title>``, each
+    followed by the instances it started, two spaces deeper. Its only field
+    is a choice list, so Enter on an option closes it with that option, and
+    Esc with None. ``placement`` is where it is drawn (None: the session's).
+    """
+    ids: dict[str, str] = {}
+    for level, one in _instances_in_tree(instances):
+        label = f"{'  ' * level}{one.instance} · {one.agent} · {one.status}"
+        ids[f"{label} · {one.title}" if one.title else label] = one.instance
+    dialog = Dialog(
+        PICKER_TITLE, fields=[ChoiceField("agent", "", options=list(ids))], placement=placement
+    )
+    return dialog, ids
+
+
+def show(app: Any, workflow: Any, conversation: "SessionRef", wanted: str) -> None:
+    """Show the instance or run ``wanted`` (``researcher-2``, ``researcher-2#1``), or say there is none."""
+    runs = workflow.agent_runs
+    found = runs.record(conversation, wanted)
+    if found is None:
+        app.session.add_warning(NO_SUCH_AGENT.format(id=wanted))
+        return
+    # A run's id shows that run; an instance's, each of its runs.
+    mine = [found] if found.ref.run == wanted else [
+        r for r in runs.records(conversation) if r.ref.instance == found.ref.instance
+    ]
+    app.session.add_rich(_one(mine, workflow.usage_of(conversation)))
+
+
+async def _load(app: Any, workflow: Any, conversation: "SessionRef") -> bool:
+    """Load the conversation's records from its store; whether they were read.
+
+    Not read: the user is told, and the runs the manager holds are shown all the same.
+    """
+    try:
+        await workflow.load_agents(conversation)
+    except Exception as error:  # noqa: BLE001 - the runs held are shown all the same
+        app.session.add_warning(
+            f"Sub-agent records not read from the store: {str(error) or type(error).__name__}"
+        )
+        return False
+    return True
+
+
+def _left_as_it_is(app: Any, workflow: Any, conversation: "SessionRef", wanted: str) -> None:
+    """Say why ``/agent stop`` or ``/agent close`` did nothing to ``wanted``."""
+    record = workflow.agent_runs.instance(conversation, wanted)
+    if record is None:
+        app.session.add_warning(NO_SUCH_AGENT.format(id=wanted))
+        return
+    app.session.add_message(
+        "system", ALREADY_TEXT.format(instance=wanted, status=record.status)
+    )
+
+
+def _placement(app: Any) -> "Placement | None":
+    """Where ``/agents``'s picker is drawn: the ``dialog_placement`` setting now
+    (``/settings`` may have changed it since the session started); the session's own without one."""
+    settings = getattr(app, "settings", None)
+    return None if settings is None else settings.dialog_placement
 
 
 def _workflow(app: Any) -> Any:
@@ -116,31 +240,6 @@ def _workflow(app: Any) -> Any:
         state = "failed to start" if failed else "initializing..."
         app.session.add_warning(f"Sub-agent runs not available ({state}).")
     return workflow
-
-
-def _table(records: list["RunRecord"], ledger: "UsageLedger") -> Table:
-    """``/agents``'s table: every run, each followed by the runs it started."""
-    table = Table(title="Sub-agents", show_lines=False, padding=(0, 1))
-    table.add_column("Agent", style="bold cyan", no_wrap=True)
-    table.add_column("Type", no_wrap=True)
-    table.add_column("Status", no_wrap=True)
-    table.add_column("Run", style="dim", no_wrap=True)
-    table.add_column("Title")  # the terminal's own color: readable on every theme
-    table.add_column("Tokens in/out", style="dim", no_wrap=True, justify="right")
-    table.add_column("Time", style="dim", no_wrap=True, justify="right")
-    now = _now()
-    for level, record in _in_tree(records):
-        # Names and titles are data: Text, never markup.
-        table.add_row(
-            Text("  " * level + record.ref.instance),
-            Text(record.ref.agent),
-            _status(record),
-            _run_number(record),
-            Text(record.title),
-            _tokens(record, ledger),
-            _duration(record, now),
-        )
-    return table
 
 
 def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
@@ -178,21 +277,21 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
     )
 
 
-def _in_tree(records: list["RunRecord"]) -> list[tuple[int, "RunRecord"]]:
-    """The runs in the order they started, each followed by the runs it
-    started, one level deeper. A run whose parent is not listed (the root's,
+def _instances_in_tree(instances: "list[InstanceRecord]") -> list[tuple[int, "InstanceRecord"]]:
+    """The instances in the order they started, each followed by the ones it
+    started, one level deeper. One whose parent is not listed (the root's,
     or one gone) is at the top."""
-    listed = {record.ref.run for record in records}
-    started: dict[str | None, list["RunRecord"]] = {}
-    for record in records:
-        parent = record.ref.parent_run if record.ref.parent_run in listed else None
-        started.setdefault(parent, []).append(record)
-    ordered: list[tuple[int, "RunRecord"]] = []
+    listed = {one.instance for one in instances}
+    started: dict[str | None, list["InstanceRecord"]] = {}
+    for one in instances:
+        parent = one.parent if one.parent in listed else None
+        started.setdefault(parent, []).append(one)
+    ordered: list[tuple[int, "InstanceRecord"]] = []
 
     def follow(parent: str | None, level: int) -> None:
-        for record in started.get(parent, ()):
-            ordered.append((level, record))
-            follow(record.ref.run, level + 1)
+        for one in started.get(parent, ()):
+            ordered.append((level, one))
+            follow(one.instance, level + 1)
 
     follow(None, 0)
     return ordered
@@ -219,23 +318,6 @@ def _label(field: str) -> str:
 def _run_number(record: "RunRecord") -> str:
     """The run's number within its instance: ``#1`` of ``researcher-2#1``."""
     return "#" + run_number(record.ref.run or "")
-
-
-def _tokens(record: "RunRecord", ledger: "UsageLedger") -> str:
-    """A run's tokens in and out; ``—`` before its first model call ends.
-
-    The ledger's, else (a run from before a restart: the ledger is this
-    manager's) the totals its record keeps.
-    """
-    totals = ledger.totals(run=record.ref.run)
-    if totals.calls:
-        return f"{format_tokens(totals.input)} / {format_tokens(totals.output)}"
-    if not record.usage:
-        return "—"
-    used = record.usage.values()
-    spent_in = sum(model.get("input", 0) for model in used)
-    spent_out = sum(model.get("output", 0) for model in used)
-    return f"{format_tokens(spent_in)} / {format_tokens(spent_out)}"
 
 
 def _tokens_by_model(record: "RunRecord", ledger: "UsageLedger") -> list[str]:
