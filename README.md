@@ -347,7 +347,9 @@ ADK integrations:
   `context_summarize_at` of the input budget and `context_max_tokens`),
   keeping the current turn and the newest 12% of that word for word; a
   sub-agent's run, on its own child session, is never summarized. The fit guard leaves the
-  oldest turns out of a request still over its agent's budget, and a
+  oldest turns out of a request still over its agent's budget (never the memory index, the
+  roster of sub-agents or a summary that open the main agent's, nor a sub-agent instance's
+  brief, the message its first run started from), and a
   request the provider refuses as too long is summarized or trimmed and
   retried once, then ends in one clear error (see
   [Context management](#context-management)). A native ADK YAML app gets
@@ -406,7 +408,9 @@ What it supports:
   the model's input budget (95% of its context window, less its
   `max_tokens`) and `context_max_tokens` (200,000 tokens), keeping the newest
   12% of that word for word. A model whose window is unknown counts as
-  128,000 tokens. A request the provider refuses as too long is summarized
+  128,000 tokens. A sub-agent instance's summary opens with its brief (the
+  message its first run started from), so the brief survives every summary
+  of its thread. A request the provider refuses as too long is summarized
   and retried once; a conversation that still does not fit ends the turn
   with one error naming the model. A sub-agent's fails only its run, as on
   ADK: the user is warned `<agent>: the request no longer fits <model>'s
@@ -1418,7 +1422,12 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   user's to continue. A run that did not complete fully (partial, failed,
   cancelled) names the tasks it left open in its envelope (`open_tasks`),
   so its parent can continue it; a message sent to a run that ended before
-  reading it reaches its instance's next run.
+  reading it reaches its instance's next run. The main agent's requests then
+  also list its open sub-agents, after the memory index: `<agents>`, one line
+  each, newest first (`- researcher-2 (researcher, idle): Find X. — X is 42.`),
+  `</agents>`, at most 2,000 characters. The list is taken once and kept, as
+  the memory index is, so the prompt stays cached: it is taken again when the
+  conversation is opened, after a summary and after `/compact`.
 - **What the agent graph refuses.** `inherit_context` is for sub-agents only, and
   only for the main agent's own sub-agents that have none of their own. A
   coordinator cannot have a tool of its own named `task` (nor, with
