@@ -302,6 +302,42 @@ async def test_a_running_call_is_answered_as_interrupted_by_the_user(
     assert INTERRUPTED_BY_USER in results(claude.last("Answer"))["toolu_w"]
 
 
+async def test_on_adk_a_cancelled_call_is_no_tool_failure(hermetic, monkeypatch):
+    """From google-adk 2.15 ADK gives every plugin's tool-error callback a
+    cancelled call's ``CancelledError``, for cleanup (``notify_tool_cancelled``):
+    the tool error plugin warns of no failure, which printed a warning and a
+    traceback over the prompt at each Ctrl+C, and the call is the user's
+    interruption."""
+    from agentic_cli.workflow import tool_errors
+    from agentic_cli.workflow.adk import tool_error_plugin
+
+    warned: list[str] = []
+
+    class Warnings:
+        def __getattr__(self, level: str):
+            def log(event: str, **fields) -> None:
+                if level not in ("debug", "info"):
+                    warned.append(event)
+
+            return log
+
+    monkeypatch.setattr(tool_errors, "logger", Warnings())
+    monkeypatch.setattr(tool_error_plugin, "logger", Warnings())
+    claude = serve(monkeypatch, Claude(Answer=[
+        calls(("ic_wait", {}, "toolu_w")), say("Back again."),
+    ]), "adk")
+    manager = solo("adk", ic_wait)
+    try:
+        await cancelled(manager, "Wait for it.")
+        await turn(manager, "Hello again.")
+    finally:
+        await manager.cleanup()
+
+    assert warned == []
+    assert claude.refused == []
+    assert INTERRUPTED_BY_USER in results(claude.last("Answer"))["toolu_w"]
+
+
 #: ``ic_sync_wait`` notes when it starts and sets STARTED, then works until
 #: RELEASE is set.
 SYNC_STARTS: list[float] = []

@@ -5,8 +5,12 @@ returns a response for it, which ends the whole turn. Framework tools return
 ``{"success": False, ...}`` on failure; this plugin gives anything that still
 raises (a bug, or an application's own tool) the same shape, so the model
 reads the error and can recover. ``asyncio.CancelledError`` is not an
-``Exception`` and never reaches the callback, so cancelling a turn still
-cancels it.
+``Exception``: ADK re-raises it whatever the callbacks answer, so cancelling
+a turn still cancels it. From google-adk 2.15 ADK also gives a cancelled
+call's ``CancelledError`` to every plugin's tool-error callback, for cleanup
+only (``notify_tool_cancelled``, the answer ignored). No tool failed, so this
+plugin logs it at debug (``tool_cancelled``) and answers nothing, where a
+warning and its traceback would print over the prompt at each Ctrl+C.
 
 A call to a tool name the agent does not have is the model's own mistake. ADK
 resolves the name to a stand-in (``is_unknown_tool``), lets the before-tool
@@ -85,8 +89,17 @@ class ToolErrorPlugin(BasePlugin):
         tool: "BaseTool",
         tool_args: dict[str, Any],
         tool_context: "ToolContext | None",
-        error: Exception,
-    ) -> dict:
+        error: BaseException,
+    ) -> dict | None:
+        if not isinstance(error, Exception):
+            # A cancel, given for cleanup (google-adk 2.15): ADK re-raises it.
+            logger.debug(
+                "tool_cancelled",
+                tool=tool.name,
+                agent=getattr(tool_context, "agent_name", None),
+                error_type=type(error).__name__,
+            )
+            return None
         if is_unknown_tool(tool) and isinstance(error, ValueError):
             available = _available_tools(error)
             if available is not None:

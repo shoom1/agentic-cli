@@ -4,11 +4,13 @@ ADK turns a Gemini reply with no parts and a finish reason other than STOP
 (``SAFETY``, ``MALFORMED_FUNCTION_CALL``, ``MAX_TOKENS``), or a prompt Gemini
 blocked, into a response with an error code and no content; a STOP reply with
 no parts, or only thoughts, gets ``MODEL_RETURNED_NO_CONTENT``; a Claude
-refusal or a reply cut at its token limit has only its finish reason. None of
-them raises. Only a sub-agent's such reply, or a context overflow, became an
-``ERROR``: the main agent's turn ended with no text and no error. A model
-call that fails is not this: ADK records an error event for it too, and the
-run then raises, which the manager reports once, as the turn's ``ERROR``.
+refusal or a reply cut at its token limit with nothing in it has its finish
+reason, and from google-adk 2.15 that reason as its error code too, with
+ADK's own words for it. None of them raises. Only a sub-agent's such reply,
+or a context overflow, became an ``ERROR``: the main agent's turn ended with
+no text and no error. A model call that fails is not this: ADK records an
+error event for it too, and the run then raises, which the manager reports
+once, as the turn's ``ERROR``.
 """
 
 from __future__ import annotations
@@ -121,6 +123,62 @@ async def test_no_answer_ends_the_turn_with_an_error(monkeypatch, answer, model,
     assert error.metadata["rate_limited"] is False
     assert error.metadata["error_type"] == code
     assert not [event for event in events if event.type is EventType.TEXT]
+
+
+@pytest.mark.parametrize("stop_reason, code", [("refusal", "SAFETY"), ("max_tokens", "MAX_TOKENS")])
+async def test_a_claude_reply_with_nothing_in_it_reads_the_same_on_every_adk(
+    monkeypatch, stop_reason, code
+):
+    """ADK's own words for it ("Claude stopped with SAFETY ('refusal') and no
+    content.", from google-adk 2.15) say no more than the code: the error is
+    the model's and "returned no answer", as on an older ADK."""
+    events = await turn_on(monkeypatch, claude_stopped(stop_reason), "claude-sonnet-4-6")
+
+    (error,) = errors(events)
+    assert error.content == "anthropic:claude-sonnet-4-6 returned no answer"
+    assert (error.metadata["error_code"], error.metadata["error_type"]) == (code, code)
+
+
+@pytest.mark.parametrize("stop_reason, code", [("refusal", "SAFETY"), ("max_tokens", "MAX_TOKENS")])
+def test_adks_claude_adapter_words_a_reply_with_nothing_in_it_so(stop_reason, code):
+    """The contract the event processor reads: ADK's Claude adapter gives such a
+    reply its finish reason, and either no error (before google-adk 2.15) or
+    that reason as its error code, with words the processor leaves out."""
+    from google.adk.models.anthropic_llm import message_to_generate_content_response
+
+    from agentic_cli.workflow.adk.event_processor import ADK_CLAUDE_NO_CONTENT
+
+    message = anthropic.types.Message.model_validate(claude_stopped(stop_reason))
+    response = message_to_generate_content_response(message)
+
+    assert response.finish_reason.value == code
+    if response.error_code is None:
+        assert response.error_message is None
+    else:
+        assert getattr(response.error_code, "value", response.error_code) == code
+        assert ADK_CLAUDE_NO_CONTENT.fullmatch(response.error_message), response.error_message
+
+
+def test_adks_words_for_a_claude_reply_whose_context_filled_up_are_kept():
+    """google-adk 2.15 gives Claude's ``model_context_window_exceeded`` with
+    nothing in it the code ``MAX_TOKENS`` and words that say why ("Claude
+    stopped with MAX_TOKENS ('model_context_window_exceeded') and no
+    content."): the only words saying the context filled up, so the processor
+    keeps them. An older ADK gives the stop no error at all."""
+    from google.adk.models.anthropic_llm import message_to_generate_content_response
+
+    from agentic_cli.workflow.adk.event_processor import ADK_CLAUDE_NO_CONTENT
+
+    message = anthropic.types.Message.model_validate(
+        claude_stopped("model_context_window_exceeded")
+    )
+    response = message_to_generate_content_response(message)
+
+    if response.error_code is None:
+        assert response.error_message is None
+    else:
+        assert "model_context_window_exceeded" in response.error_message
+        assert not ADK_CLAUDE_NO_CONTENT.fullmatch(response.error_message), response.error_message
 
 
 async def test_a_sub_agents_reply_that_is_no_answer_fails_its_run_warned_with_its_code(

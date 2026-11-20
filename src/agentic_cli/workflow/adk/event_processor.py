@@ -7,6 +7,7 @@ logic that runs on every message in the hot path.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Mapping
 from typing import AsyncGenerator, Any, Callable
 
@@ -45,6 +46,16 @@ _NORMAL_FINISH = frozenset(
 #: ADK's code for a reply with nothing in it: no parts, or only thoughts or
 #: blank text (``apply_empty_response_policy``).
 _NO_CONTENT = "MODEL_RETURNED_NO_CONTENT"
+#: ADK's Claude adapter's words for a refusal or a reply cut at its token
+#: limit with nothing in it, from google-adk 2.15 (``anthropic_llm``'s
+#: ``_empty_response_error``): "Claude stopped with SAFETY ('refusal') and no
+#: content.", the reason also its error code. Like ``_NO_CONTENT``'s, they say
+#: no more than the code; an older ADK gives such a reply no error at all.
+#: Its words for another stop say more (``model_context_window_exceeded``, as
+#: ``MAX_TOKENS``: the context filled up), and are kept.
+ADK_CLAUDE_NO_CONTENT = re.compile(
+    r"Claude stopped with (?:SAFETY \('refusal'\)|MAX_TOKENS \('max_tokens'\)) and no content\."
+)
 
 
 class ADKEventProcessor:
@@ -103,13 +114,17 @@ class ADKEventProcessor:
     and an error code of ``NO_ANSWER_CODES``: a safety stop, a blocked prompt,
     a malformed function call, every token spent thinking, nothing at all; or,
     with no error code, a finish reason other than STOP: a Claude refusal, a
-    reply cut at its token limit) ends the turn too, raising nothing: it
-    becomes the turn's ``ERROR``, "<model> returned no answer", its code
-    the error code or finish reason. Both are the turn's one ``ERROR``, with
-    a failed turn's fields (``WorkflowEvent.turn_failed``: ``rate_limited``
-    false, the code as ``error_type``). No other error code of the main agent
-    is mapped: ADK records one for an exception that then leaves the run,
-    which the manager reports as the turn's one ``ERROR``.
+    reply cut at its token limit, which google-adk 2.15 gives an error code
+    too) ends the turn too, raising nothing: it becomes the turn's ``ERROR``,
+    "<model> returned no answer", its code the error code or finish reason,
+    then the reply's error message, unless that is ADK's own words for an
+    empty reply that say no more than the code (``_NO_CONTENT``'s, and
+    ``ADK_CLAUDE_NO_CONTENT``: a Claude refusal's or a cut reply's). Both are
+    the turn's one ``ERROR``, with a failed turn's fields
+    (``WorkflowEvent.turn_failed``: ``rate_limited`` false, the code as
+    ``error_type``). No other error code of the main agent is mapped: ADK
+    records one for an exception that then leaves the run, which the manager
+    reports as the turn's one ``ERROR``.
 
     Every event an agent wrote names its run (``WorkflowEvent.run``): the
     sub-agent run the processor was made for, else the agent's own at depth
@@ -307,7 +322,8 @@ class ADKEventProcessor:
         model = self.models.get(self._agent(adk_event), self._model)
         message = adk_event.error_message
         # ADK's own message for an empty reply says no more than the code.
-        said = f": {message}" if message and code != _NO_CONTENT else ""
+        own = code == _NO_CONTENT or (message and ADK_CLAUDE_NO_CONTENT.fullmatch(message))
+        said = f": {message}" if message and not own else ""
         return f"{model} returned no answer{said}"
 
     def _progress(self, adk_event: Any) -> WorkflowEvent | None:

@@ -120,3 +120,21 @@ class TestAdkPlugin:
 
         assert result == tool_error_result("flaky_tool", error)
         assert tool_error_plugin.tool_error_result is tool_error_result
+
+    async def test_a_cancelled_call_is_no_failure(self, log, monkeypatch):
+        # From google-adk 2.15 ADK gives every plugin's tool-error callback a
+        # cancelled call's CancelledError, for cleanup only: no tool failed.
+        import asyncio
+
+        from agentic_cli.workflow.adk import tool_error_plugin
+
+        monkeypatch.setattr(tool_error_plugin, "logger", log)
+        result = await tool_error_plugin.ToolErrorPlugin().on_tool_error_callback(
+            tool=SimpleNamespace(name="slow_tool"),
+            tool_args={},
+            tool_context=None,
+            error=asyncio.CancelledError(),
+        )
+
+        assert result is None
+        assert [(level, event) for level, event, _ in log.calls] == [("debug", "tool_cancelled")]

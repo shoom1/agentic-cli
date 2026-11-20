@@ -312,11 +312,12 @@ class TestNoProxyCarriesAnUnroutedRequest:
     def test_chat_anthropic(self, mock_context, monkeypatch):
         from langchain_anthropic import chat_models
 
-        # Its HTTP client is cached per host for the process: build this one.
+        # Before langchain-anthropic 1.7.12 its async HTTP client is cached
+        # per host for the process: build this one. From 1.7.12 each model
+        # builds its own, and the function has no cache to go around.
+        build = chat_models._get_default_async_httpx_client
         monkeypatch.setattr(
-            chat_models,
-            "_get_default_async_httpx_client",
-            chat_models._get_default_async_httpx_client.__wrapped__,
+            chat_models, "_get_default_async_httpx_client", getattr(build, "__wrapped__", build)
         )
         claude = chat("anthropic:claude-sonnet-4-6", mock_context.settings)
 
