@@ -15,6 +15,7 @@ import asyncio
 import collections
 import contextlib
 from collections.abc import Awaitable, Callable, Iterator
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -60,6 +61,7 @@ from agentic_cli.workflow.agents.envelope import (
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
+from agentic_cli.workflow.interrupts import OpenCalls
 from agentic_cli.workflow.live_events import LiveEvents, merged
 from agentic_cli.workflow.sessions import (
     RunRef,
@@ -2096,6 +2098,74 @@ class TestARefusedFollowUp:
         }
         assert [r.ref.run for r in runs.records(CONVERSATION)] == ["researcher-1#1"]
 
+    async def test_a_one_shot_instance_left_idle_is_closed_to_follow_ups(self):
+        """A turn that stopped a one-shot run leaves its instance idle in the
+        records (``interrupt_open``); it still cannot be continued."""
+        hook, asked = answering()
+        runs = AgentRuns()
+        ref = runs.run_for(CONVERSATION, None, "c1", "checker")
+        token = set_active_turn(CONVERSATION)
+        try:
+            runs.observe(WorkflowEvent.agent_run(
+                ref, RUN_STARTED, title="Check", call_id="c1", continuable=False
+            ))
+            runs.observe(WorkflowEvent.agent_run(
+                ref, RUN_COMPLETED, call_id="c1", instance_status=INSTANCE_IDLE
+            ))
+        finally:
+            reset_active_turn(token)
+        made = delegations(hook, runs=runs, types=WITH_CHECKER)
+
+        error = await self.refused(made, users("checker-1"), asked)
+
+        assert error == "checker-1 is closed; start a new one with task."
+
+    async def test_an_instance_whose_type_is_gone_is_refused_and_never_left_running(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        ref = runs.run_for(CONVERSATION, None, "c1", "ghost")
+        token = set_active_turn(CONVERSATION)
+        try:
+            runs.observe(WorkflowEvent.agent_run(ref, RUN_STARTED, title="Boo", call_id="c1"))
+            runs.observe(WorkflowEvent.agent_run(
+                ref, RUN_COMPLETED, call_id="c1", instance_status=INSTANCE_IDLE
+            ))
+        finally:
+            reset_active_turn(token)
+        made = delegations(hook, runs=runs)
+
+        error = await self.refused(made, users("ghost-1"), asked)
+
+        assert error == "ghost-1's type 'ghost' is not one of this app's agents."
+        assert runs.instance(CONVERSATION, "ghost-1").status == INSTANCE_IDLE
+
+    async def test_two_at_once_start_one_run(self):
+        answered, _ = answering()
+        runs = AgentRuns()
+        made = delegations(answered, runs=runs)
+        await turned(lambda: made.delegate(request()))
+        hook, working = waiting()
+        made._hook = hook
+
+        async def work():
+            both = asyncio.gather(
+                made.follow_up(follow(call_id="c2")), made.follow_up(follow(call_id="c3"))
+            )
+            await working.wait()
+            made.cancel("researcher-1#2", by="parent", error="no longer needed")
+            return await both
+
+        (first, second), _ = await turned(work)
+
+        assert first.result["status"] == RUN_CANCELLED
+        assert second.result == {
+            "success": False,
+            "error": "researcher-1 is running: an instance runs one run at a time.",
+        }
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == [
+            "researcher-1#1", "researcher-1#2",
+        ]
+
     @pytest.mark.parametrize("message", ["", "  \n"])
     async def test_a_blank_message(self, message):
         hook, asked = answering()
@@ -2202,6 +2272,101 @@ class TestMaxOpen:
         assert [(i.instance, i.status) for i in runs.instances(CONVERSATION)] == [
             ("researcher-1", INSTANCE_STOPPED), ("researcher-2", INSTANCE_CLOSED),
         ]
+
+
+class TestRankedByTheOrderRunsEnded:
+    async def test_equal_timestamps_do_not_make_start_order_the_end_order(self):
+        """``max_open`` closes the instance whose last run ended first, by the
+        order the ends were recorded in, not by the clock."""
+        hook, _ = answering()
+        runs = AgentRuns()
+        real = runs.observe
+        fixed = datetime(2026, 1, 1)
+
+        def same_clock(event: WorkflowEvent) -> None:
+            event.timestamp = fixed
+            real(event)
+
+        runs.observe = same_clock  # type: ignore[method-assign]
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_open=2))
+
+        async def work():
+            await made.delegate(request(call_id="c1"))
+            await made.delegate(request(call_id="c2"))
+            await made.follow_up(follow("researcher-1", call_id="c3"))
+            await made.delegate(request(call_id="c4"))
+
+        await turned(work)
+
+        assert [i.instance for i in runs.instances(CONVERSATION)
+                if i.status == INSTANCE_CLOSED] == ["researcher-2"]
+
+
+class TestAClosedInstancesStop:
+    """A stop recorded for an instance that can never run again is taken, so its
+    calls are freed with the conversation's next clear."""
+
+    async def test_a_one_shot_run_that_was_stopped(self):
+        open_calls = OpenCalls()
+
+        async def hook(run: AgentRun) -> RunAnswer:
+            open_calls.cancelled(CONVERSATION, instance="checker-1")
+            return RunAnswer(text="Done.")
+
+        made = delegations(hook, types=WITH_CHECKER, open_calls=open_calls)
+
+        await turned(lambda: made.delegate(request(CHECK)))
+
+        assert open_calls.take_cancel(CONVERSATION, instance="checker-1") is False
+
+    async def test_an_instance_that_close_closes(self):
+        open_calls = OpenCalls()
+        hook, _ = answering()
+        made = delegations(hook, open_calls=open_calls)
+        await turned(lambda: made.delegate(request()))
+        open_calls.cancelled(CONVERSATION, instance="researcher-1")
+
+        made.close(CONVERSATION, "researcher-1", reason="done")
+
+        assert open_calls.take_cancel(CONVERSATION, instance="researcher-1") is False
+
+
+class TestMaxOpenWithStoppedRuns:
+    async def test_a_run_the_user_stopped_past_it_stays_stopped_and_the_oldest_idle_one_closes(self):
+        hook, _ = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, policy=SubAgentPolicy(max_open=1))
+        await turned(lambda: made.delegate(request()))
+        waiter, working = waiting()
+        made._hook = waiter
+
+        _, events, _ = await stopped(
+            made, working, by="user", error="stopped by the user",
+            asked=request(call_id="c2"), run="researcher-2#1",
+        )
+
+        assert [(i.instance, i.status) for i in runs.instances(CONVERSATION)] == [
+            ("researcher-1", INSTANCE_CLOSED), ("researcher-2", INSTANCE_STOPPED),
+        ]
+        assert events[-2].metadata["instance_status"] == INSTANCE_STOPPED
+        assert instance_events(events) == [("researcher-1", INSTANCE_CLOSED,
+            "more than 1 sub-agents open: the oldest idle one is closed")]
+
+    async def test_with_none_idle_to_close_it_stays_stopped(self):
+        runs = AgentRuns()
+        made = delegations(waiting()[0], runs=runs, policy=SubAgentPolicy(max_open=1))
+        for call_id, name in (("c1", "researcher-1#1"), ("c2", "researcher-2#1")):
+            waiter, working = waiting()
+            made._hook = waiter
+            _, events, _ = await stopped(
+                made, working, by="user", error="stopped by the user",
+                asked=request(call_id=call_id), run=name,
+            )
+
+        assert [(i.instance, i.status) for i in runs.instances(CONVERSATION)] == [
+            ("researcher-1", INSTANCE_STOPPED), ("researcher-2", INSTANCE_STOPPED),
+        ]
+        assert instance_events(events) == []
 
 
 class TestClose:

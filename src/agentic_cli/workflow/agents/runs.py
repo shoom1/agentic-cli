@@ -251,6 +251,9 @@ class AgentRuns:
         self._records: dict[Any, dict[str, RunRecord]] = {}
         # Each conversation's instances, by id, in start order.
         self._instances: dict[Any, dict[str, InstanceRecord]] = {}
+        # Each conversation's runs by the order their ends were recorded in
+        # (1, 2, ...): what ranks instances by when their last run ended.
+        self._ended_in: dict[Any, dict[str, int]] = {}
 
     def run_for(
         self, conversation: SessionRef | None, parent: RunRef | None, call_id: str, agent: str
@@ -393,11 +396,21 @@ class AgentRuns:
         record.usage = dict(metadata.get("usage") or {})
         record.cancelled_by = metadata.get("cancelled_by")
         record.plan, record.tasks = own_plan_and_tasks(metadata)
+        order = self._ended_in.setdefault(conversation, {})
+        order[ref.run] = len(order) + 1
         instance = self._instance_of(conversation, ref, metadata)
         if ref.run not in instance.runs:
             instance.runs.append(ref.run)
         left = metadata.get("instance_status")
         instance.status = left if left in INSTANCE_STATUSES else INSTANCE_IDLE
+
+    def end_order(self, conversation: SessionRef | None, run: str) -> int:
+        """Where ``run``'s end was recorded in ``conversation``: 1 for the first, 0 for none yet.
+
+        The order the ends were recorded in, not their times: the clock may
+        repeat or step back.
+        """
+        return self._ended_in.get(conversation, {}).get(run, 0)
 
     def records(self, conversation: SessionRef | None) -> list[RunRecord]:
         """``conversation``'s runs, in the order they started."""
@@ -422,7 +435,8 @@ class AgentRuns:
         For a turn that ends with runs open (a cancel, a failure): no event
         can tell its consumer any more. ``usage`` gives each run's tokens by
         model, as an end event carries them (the conversation's ledger's
-        ``run_usage``).
+        ``run_usage``). Their instances are left ``idle``, or ``closed`` for
+        a type that is not continuable.
         """
         now = datetime.now()
         ended: list[RunRef] = []
@@ -430,9 +444,11 @@ class AgentRuns:
             if record.status not in RUN_END_STATUSES:
                 record.status = RUN_INTERRUPTED
                 record.ended = now
+                order = self._ended_in.setdefault(conversation, {})
+                order[record.ref.run or ""] = len(order) + 1
                 known = self._instances.get(conversation, {}).get(record.ref.instance)
                 if known is not None and known.status == INSTANCE_RUNNING:
-                    known.status = INSTANCE_IDLE
+                    known.status = INSTANCE_IDLE if known.continuable else INSTANCE_CLOSED
                 if usage is not None and record.ref.run is not None:
                     record.usage = usage(record.ref.run)
                 ended.append(record.ref)
@@ -442,6 +458,7 @@ class AgentRuns:
         """Drop ``conversation``'s runs, records, instances and numbering."""
         self._records.pop(conversation, None)
         self._instances.pop(conversation, None)
+        self._ended_in.pop(conversation, None)
         self._runs = {key: ref for key, ref in self._runs.items() if key[0] != conversation}
         self._numbered = {
             key: count for key, count in self._numbered.items() if key[0] != conversation

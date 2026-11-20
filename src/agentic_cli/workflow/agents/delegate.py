@@ -94,7 +94,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.constants import truncate
@@ -146,6 +145,7 @@ from agentic_cli.workflow.sessions import (
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.agents.policy import SubAgentPolicy
+    from agentic_cli.workflow.interrupts import OpenCalls
     from agentic_cli.workflow.config import AgentConfig
     from agentic_cli.workflow.usage import UsageLedgers
 
@@ -172,6 +172,7 @@ NO_SUB_AGENTS = "You have no sub-agents yet."
 CLOSED_ERROR = "{instance} is closed; start a new one with task."
 STOPPED_ERROR = "{instance} was stopped by the user; only the user can continue it."
 RUNNING_ERROR = "{instance} is running: an instance runs one run at a time."
+TYPE_GONE_ERROR = "{instance}'s type '{agent}' is not one of this app's agents."
 NO_MESSAGE_ERROR = "A follow-up needs a message."
 #: Why an instance past ``SubAgentPolicy.max_open`` is closed.
 MAX_OPEN_REASON = "more than {limit} sub-agents open: the oldest idle one is closed"
@@ -445,6 +446,10 @@ class Delegations:
             used, by model, and its token limit counts its side calls
             (``RunControl``'s ``side_tokens``). None: an end carries no
             usage, and a run's own calls alone count toward its limit.
+        open_calls: The manager's record of its calls (``OpenCalls``): the
+            stop recorded for an instance that is left closed is taken, so
+            its calls are freed (it can never run again to answer them).
+            None: no record.
         stored: How many instances of each type a conversation's store
             already keeps (``BaseWorkflowManager._stored_instances``), asked
             once per conversation per turn, before the turn's first run is
@@ -462,6 +467,7 @@ class Delegations:
         hook: RunHook,
         ledgers: UsageLedgers | None = None,
         stored: StoredInstances | None = None,
+        open_calls: OpenCalls | None = None,
     ) -> None:
         self._runs = runs
         self.policy = policy
@@ -469,6 +475,7 @@ class Delegations:
         self._hook = hook
         self._ledgers = ledgers
         self._stored = stored
+        self._open_calls = open_calls
         # Each conversation's turn its stored instances were last read in
         # (its span, ``current_turn_scope``: held here, so no later turn's
         # can be the same object), and the lock a turn's parallel first runs
@@ -550,6 +557,7 @@ class Delegations:
                 return Delegated(result={"success": False, "error": error}, state={}, run=None)
             instance = self._runs.instance(conversation, request.instance)
             assert instance is not None
+            config = self._types[instance.agent]
             if request.started_by != USER:
                 refused = self._past_runs_per_turn(instance.agent)
                 if refused is not None:
@@ -565,7 +573,7 @@ class Delegations:
                 started_by=request.started_by, mode=BLOCKING, input=request.message,
             ))
             return await self._run(
-                ref, self._types[instance.agent], conversation, request.call_id,
+                ref, config, conversation, request.call_id,
                 message=request.message, state=request.state, history=None, follow_up=True,
             )
 
@@ -622,12 +630,14 @@ class Delegations:
                 instance=request.instance,
                 yours=YOURS.format(instances=names) if yours else NO_SUB_AGENTS,
             )
-        if found.status == INSTANCE_CLOSED:
+        if found.status == INSTANCE_CLOSED or not found.continuable:
             return CLOSED_ERROR.format(instance=found.instance)
         if found.status == INSTANCE_STOPPED and request.started_by != USER:
             return STOPPED_ERROR.format(instance=found.instance)
         if found.status == INSTANCE_RUNNING:
             return RUNNING_ERROR.format(instance=found.instance)
+        if found.agent not in self._types:
+            return TYPE_GONE_ERROR.format(instance=found.instance, agent=found.agent)
         return None
 
     async def _run(
@@ -957,6 +967,8 @@ class Delegations:
             instance_status=left,
         )
         self._emit(end)
+        if left == INSTANCE_CLOSED:
+            self._release_stop(conversation, ref.instance)
         for other in closing:
             record = self._runs.instance(conversation, other)
             if other != ref.instance and record is not None:
@@ -983,9 +995,8 @@ class Delegations:
         if excess <= 0:
             return []
 
-        def ended(record: InstanceRecord) -> Any:
-            last = self._runs.record(conversation, record.instance)
-            return last.ended if last is not None and last.ended is not None else datetime.max
+        def ended(record: InstanceRecord) -> int:
+            return self._runs.end_order(conversation, record.runs[-1]) if record.runs else 0
 
         idle = sorted(
             (i for i in open_ if i.status == INSTANCE_IDLE), key=ended
@@ -1005,12 +1016,18 @@ class Delegations:
                 found.append(record)
         return found
 
+    def _release_stop(self, conversation: SessionRef | None, instance: str) -> None:
+        """Take the stop recorded for ``instance``, closed: nothing will run to answer its calls."""
+        if self._open_calls is not None and conversation is not None:
+            self._open_calls.take_cancel(conversation, instance=instance)
+
     def _close(self, conversation: SessionRef | None, record: InstanceRecord, reason: str) -> None:
         """Report that ``record``'s instance is closed (``AGENT_INSTANCE``)."""
         last = self._runs.record(conversation, record.instance)
         if last is None:  # pragma: no cover - an instance has a run
             return
         logger.info("subagent_closed", instance=record.instance, reason=reason)
+        self._release_stop(conversation, record.instance)
         self._emit(WorkflowEvent.agent_instance(last.ref, INSTANCE_CLOSED, reason=reason))
 
     def _side_tokens(

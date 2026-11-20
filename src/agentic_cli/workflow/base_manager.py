@@ -620,6 +620,7 @@ class BaseWorkflowManager(ABC):
                 hook=self._run_agent,
                 ledgers=self._usage_ledgers,
                 stored=self._stored_instances,
+                open_calls=getattr(self, "_open_calls", None),
             )
         return delegations
 

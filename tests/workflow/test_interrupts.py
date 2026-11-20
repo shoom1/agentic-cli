@@ -97,6 +97,20 @@ class TestOpenCalls:
             assert calls.answer("call_1", by_user=False) == "its result"
             assert calls.answer("call_2", by_user=False) == interrupted(INTERRUPTED)
 
+    def test_a_failed_turn_keeps_a_stopped_instances_prompt_marks(self):
+        """The instance's next run answers a call it was stopped at the prompt of
+        ``NOT_RUN``, as it would had the turn not failed."""
+        calls = OpenCalls()
+        with turn_of(ref("a")):
+            with run_as(RESEARCHER):
+                cancelled_at_its_prompt(calls, "r2")
+        calls.cancelled(ref("a"), instance="researcher-1")
+
+        calls.failed(ref("a"))
+
+        with turn_of(ref("a")):
+            assert calls.answer("r2", by_user=True, run="researcher-1#2") == interrupted(NOT_RUN)
+
     def test_an_answer_stands_until_its_conversation_s_turn_ends(self):
         """The step that answers a call may be stopped before it is saved, and
         the next run answers it again: the same."""

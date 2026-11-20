@@ -321,9 +321,23 @@ class OpenCalls:
         next run takes the stop (``take_cancel(instance=)``): that run
         answers them.
         """
+        self._forget(key, self._finished, self._asking)
+
+    def failed(self, key: Any) -> None:
+        """The turn of conversation ``key`` failed: its next turn answers its calls.
+
+        The finished ones keep their results; the others are answered
+        ``INTERRUPTED``, one that waited at its prompt too, since the user
+        did not cancel it. A stopped sub-agent instance's calls keep their
+        marks, as ``clear`` keeps them.
+        """
+        self._forget(key, self._asking)
+
+    def _forget(self, key: Any, *held: dict[Any, Any]) -> None:
+        """Drop conversation ``key``'s entries in ``held``, but a stopped instance's."""
         kept = {instance for conversation, instance in self._stopped if conversation == key}
-        for held in (self._finished, self._asking):
-            marks = held.pop(key, None)
+        for entries in held:
+            marks = entries.pop(key, None)
             if marks is None:
                 continue
             if isinstance(marks, dict):
@@ -331,16 +345,7 @@ class OpenCalls:
             else:
                 marks = {m for m in marks if m[0] in kept}
             if marks:
-                held[key] = marks
-
-    def failed(self, key: Any) -> None:
-        """The turn of conversation ``key`` failed: its next turn answers its calls.
-
-        The finished ones keep their results; the others are answered
-        ``INTERRUPTED``, one that waited at its prompt too, since the user
-        did not cancel it.
-        """
-        self._asking.pop(key, None)
+                entries[key] = marks
 
     def _unmark(self, key: Any, mark: _Mark) -> None:
         marks = self._asking.get(key)

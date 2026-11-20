@@ -537,6 +537,30 @@ class TestInstances:
 
         assert runs.instance(ONE, "researcher-1").status == INSTANCE_IDLE
 
+    def test_a_turn_that_stops_a_one_shot_run_closes_its_instance(self):
+        runs = AgentRuns()
+        ref = runs.run_for(ONE, None, "c1", "checker")
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_STARTED, title="Check", call_id="c1", continuable=False
+        )))
+
+        runs.interrupt_open(ONE)
+
+        assert runs.instance(ONE, "checker-1").status == INSTANCE_CLOSED
+
+    def test_the_order_runs_ended_in_is_kept(self):
+        runs = AgentRuns()
+        first = started(runs, ONE, "c1", "researcher")
+        second = started(runs, ONE, "c2", "writer")
+        third = started(runs, ONE, "c3", "reader")
+        ended(runs, ONE, second)
+        ended(runs, ONE, first)
+
+        order = [runs.end_order(ONE, ref.run) for ref in (second, first, third)]
+
+        assert 0 < order[0] < order[1] and order[2] == 0
+        assert runs.end_order(TWO, second.run) == 0
+
     def test_they_are_kept_by_conversation_in_start_order(self):
         runs = AgentRuns()
         for call_id, agent in (("c1", "writer"), ("c2", "researcher")):
