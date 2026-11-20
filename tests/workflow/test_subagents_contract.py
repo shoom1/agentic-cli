@@ -15,7 +15,9 @@ message, the calling run and its call, and the conversation's
 outside-content mark; it answers with the envelope as JSON, as ``task``
 does. ``make_crew(..., store="sqlite")`` keeps the conversation in the
 default sqlite store, so a second crew is a restart; ``no_seals`` stops a
-turn as a killed process does (ADK writes no seal), and ``carried_over``
+turn without the abort signal and ``killed_mid_call`` leaves an ADK child
+session as a killed process does (ADK seals a cancelled run itself, as far
+as its version goes), and ``carried_over``
 gives the new manager the instances and runs the first one recorded. Each
 agent's prompt is ``You are <name>.``, by which ADK's fake API tells the
 agents apart.
@@ -4077,6 +4079,32 @@ def no_seals(monkeypatch):
         yield
 
 
+async def killed_mid_call(crew: Crew, instance: str = "researcher-1") -> None:
+    """On ADK, leave ``instance``'s child session as a process killed mid-call
+    leaves it: the events up to the model's first call, and none after it (no
+    result, no seal, however ADK's version seals a cancelled run). Deep Agents
+    needs nothing: its checkpoint is what a killed process leaves."""
+    if crew.backend != "adk":
+        return
+    from agentic_cli.workflow.adk.sessions import child_app
+
+    service = crew.manager._session_service
+    where = dict(
+        app_name=child_app(crew.conversation.app_name), user_id=USER,
+        session_id=f"{SESSION}/{instance}",
+    )
+    session = await service.get_session(**where)
+    kept = []
+    for event in session.events:
+        kept.append(event)
+        if event.author == instance.rpartition("-")[0] and event.get_function_calls():
+            break
+    await service.delete_session(**where)
+    fresh = await service.create_session(**where, state=dict(session.state))
+    for event in kept:
+        await service.append_event(fresh, event)
+
+
 def carried_over(crew: Crew, earlier: Crew) -> None:
     """``crew``'s manager knows the instances and runs ``earlier``'s recorded,
     each ended as it was and its instance idle, as a restart that reads them
@@ -4415,6 +4443,7 @@ class TestAFollowUpAfterAStop:
                 await until(lambda: first.recorded("r1", "researcher-1#1"))
             finally:
                 await first.stop(turn)
+        await killed_mid_call(first)
         await first.manager.cleanup()
 
         second = make_crew(
