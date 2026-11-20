@@ -784,8 +784,9 @@ the start of the entry's title.
   transcript is a checkpointer thread of its own (`[app, user, session,
   "<instance>"]`), which its follow-ups continue, the calls an earlier run
   left open answered as its next run starts: from the record when one
-  returned, as the user's when the run was stopped, `INTERRUPTED` after a
-  crash. A model switch keeps the instances, their transcripts and their
+  returned, with what stopped the run when it was stopped (the user, its
+  parent, a limit), `INTERRUPTED` after a crash. A model switch keeps the
+  instances, their transcripts and their
   records.
 - **`SubAgentPolicy` and `AgentLimits`: an app's sub-agent policy and a
   run's limits, enforced on both backends** (`agentic_cli.workflow`, and
@@ -880,10 +881,14 @@ the start of the entry's title.
   (`cancelled_by`). A run working below a run cancelled so (one it
   started, at any depth) ends `cancelled`, `cancelled_by: "parent"`,
   `error: "its parent's run was stopped"`, its instance idle. A call a
-  stopped run left at its permission prompt says what stopped it: `Not run:
-  its parent stopped the run before this call ran.` (or `its time limit`,
-  `its token limit`), the user's stop `Not run: the user cancelled it.`, on
-  both backends. Ctrl+C still stops the whole turn, every run
+  stopped run left says what stopped it, on both backends: one at its
+  permission prompt `Not run: its parent stopped the run before this call
+  ran.` (or `its time limit`, `its token limit`), the user's stop `Not run:
+  the user cancelled it.`; one that was running `Interrupted: its parent
+  stopped the run before this call finished; it may have partly run. Check
+  before running it again.` (`interrupts.interrupted_by`, `INTERRUPTED_BY`),
+  the user's stop `Interrupted by the user before it finished; …`. Ctrl+C
+  still stops the whole turn, every run
   `interrupted`. `steer(message)` gives a working run a message, added
   after its last message, as the user's, before its next model call, where
   it stays (ADK: in its child session). A steered message is never lost:

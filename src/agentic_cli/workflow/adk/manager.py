@@ -781,8 +781,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     ) -> list:
         """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on.
 
-        ``stop_cause`` is what a seal tells a call at its prompt stopped the
-        run (``InterruptedCallsPlugin``): a sub-agent chain's.
+        ``stop_cause`` is what a seal tells a call at its prompt, or
+        running, stopped the run (``InterruptedCallsPlugin``): a sub-agent
+        chain's.
         """
         from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
 

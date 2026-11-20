@@ -32,9 +32,9 @@ the run's own task, and hands it to the backend's hook as
   stays unstored until its backend says the run's transcript holds it
   (``stored``); ``Delegations`` gives the unstored ones (``unstored``) to
   the instance's next run, so a message is never lost.
-- ``stop_cause`` is what a call the run left at its permission prompt is
-  told stopped the run: its parent, its time limit or its token limit
-  (None for the user's stop).
+- ``stop_cause`` is what a call the run left at its permission prompt, or
+  running, is told stopped the run: its parent, its time limit or its token
+  limit (None for the user's stop).
 
 All of it runs on the event loop; nothing here blocks.
 """
@@ -281,7 +281,10 @@ class RunControl:
 
     @property
     def stop_cause(self) -> str | None:
-        """What stopped the run, for a call it left at its prompt; None while it works or for the user's stop."""
+        """What stopped the run, for a call it left at its prompt or running.
+
+        None while it works, or for the user's stop.
+        """
         if self.cancelled is None:
             return None
         by, error = self.cancelled

@@ -882,8 +882,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                         live_events.report(event)
         except asyncio.CancelledError:
             # Its instance's next run answers the calls this one left open
-            # as the user's (as ADK seals them). The run's own cancel has
-            # stopped it; any other (its turn's) goes on.
+            # with what stopped it, the user or its cause (as ADK seals
+            # them). The run's own cancel has stopped it; any other (its
+            # turn's) goes on.
             self._open_calls.cancelled(
                 conversation, instance=run.ref.instance,
                 cause=self._delegations.stop_cause(run.ref, conversation=conversation),

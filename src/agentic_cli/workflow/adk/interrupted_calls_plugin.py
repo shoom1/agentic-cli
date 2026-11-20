@@ -8,9 +8,9 @@ both marked ``INVOCATION_ABORTED`` and stored through ``on_event_callback``.
 This plugin rewrites them as ``workflow/interrupts.py`` says: a call that
 finished keeps its result (ADK stores parallel calls' results together,
 after the last, so the finished one would be lost), a call at its
-permission prompt was not run (in a sub-agent run its parent or a limit
-stopped, the seal says which: ``stop_cause``), a call whose job was
-submitted runs on, and any other was interrupted by the user; the
+permission prompt was not run, a call whose job was submitted runs on, and
+any other was interrupted, by the user or, in a sub-agent run its parent or
+a limit stopped, by that (the seal says which: ``stop_cause``); the
 content-less event becomes the main agent's reply ``MARKER``.
 
 ADK's seals pair a result with a call by id alone, so a call whose id
@@ -125,8 +125,8 @@ class InterruptedCallsPlugin(BasePlugin):
             sends.
         stop_cause: Asked once for each seal it writes: what stopped the run
             whose runner wrote it (``Delegations.stop_cause``), told to a
-            call that waited at its prompt; None, or None answered, for the
-            user's stop.
+            call that waited at its prompt or was running; None, or None
+            answered, for the user's stop.
     """
 
     def __init__(
@@ -304,7 +304,8 @@ def _from_record(
     the state it changed goes into ``actions``, stored with the answer as
     with its result. Any other is answered as ``OpenCalls.answer`` says:
     ``by_user`` whether the user stopped its turn (a stopped turn's call, by
-    default); ``cause`` what stopped the run, for a call at its prompt.
+    default); ``cause`` what stopped the run, for a call at its prompt or
+    running.
     """
     answer = open_calls.answer(call_id, by_user=by_user, run=run, cause=cause)
     if not isinstance(answer, _Finished):

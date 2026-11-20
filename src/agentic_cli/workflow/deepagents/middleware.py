@@ -472,7 +472,8 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     new input arrives, so that result is kept here as it passes (outermost,
     after the gate, the cap and the error handling). A call that waited at
     its permission prompt was not run; one whose job was submitted runs on;
-    any other was interrupted, by the user when this manager saw the cancel.
+    any other was interrupted, by the user when this manager saw the cancel
+    (in a sub-agent run its parent or a limit stopped, by that).
     On the main agent, a turn the user stopped before any reply leaves
     ``MARKER`` as its reply, so the next turn answers only the new message.
     Each call is recorded and answered as the run's that made it
@@ -480,8 +481,8 @@ class InterruptedCallsMiddleware(AgentMiddleware):
     the task it runs in, ``agents/delegate.py``), so a sub-agent's call never
     answers its parent's delegation of the same id. A sub-agent instance's
     next run answers, on its own thread, what an earlier run of it left
-    open, from the instance's record, as the user's when that run was
-    stopped (as ADK seals a stopped run's).
+    open, from the instance's record, with what stopped that run when it
+    was stopped (as ADK seals a stopped run's).
 
     Everything pairs a result with its call by id, the provider adapters
     too. A provider that numbers its call ids per response (``call_0`` in
