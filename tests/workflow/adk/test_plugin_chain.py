@@ -31,7 +31,7 @@ and these tests pin it whole, so a move anywhere fails one of them:
 
 A native ADK YAML app gets the same chain: only the building of its agents
 differs (``workflow/adk/build.py``). Each sub-agent type's runner has a chain
-of its own in the same order (``_agent_plugin_chain``): no memory index, and
+of its own in the same order (``_agent_plugin_chain``): no memory index, no roster, and
 after the raw log (which records an answer as the model gave it)
 ``run_control``, where the run's limits are kept at its model calls, then
 ``subagent_outcome``, where a sub-agent's refused or cut answer is said so;

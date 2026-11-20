@@ -188,7 +188,7 @@ class OverflowPlugin(BasePlugin):
         if summary is not None:
             contents = _with_summary(contents, summary.text)
         report_trim(len(request.contents), len(contents), agent, dropped)
-        # The index and a summary that open the retry join the next user text.
+        # The index, the roster and a summary that open the retry join the next user text.
         contents = fold_summary(contents)
         retry = request.model_copy(update={"contents": contents})
         model = callback_context.get_invocation_context().agent.canonical_model

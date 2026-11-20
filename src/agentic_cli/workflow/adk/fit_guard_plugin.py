@@ -324,7 +324,7 @@ def keep_newest_turns(
 ) -> tuple[list[types.Content], int]:
     """``contents`` from their ``turns``-th newest turn on, cut as ``drop_turns`` cuts.
 
-    The index and a summary that open them stay, and the first kept user
+    The index, the roster and a summary that open them stay, and the first kept user
     content gets ``FIT_NOTE``. For a retry after a summary: the turns the
     summary kept, what every later call sends besides it.
 
