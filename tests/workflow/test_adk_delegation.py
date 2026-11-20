@@ -1056,7 +1056,9 @@ class TestTheParentsTools:
     framework's, bound to its declaration; by default ``task`` alone."""
 
     @staticmethod
-    async def root_of(configs: list[AgentConfig], policy: SubAgentPolicy) -> LlmAgent:
+    async def root_of(
+        configs: list[AgentConfig], policy: SubAgentPolicy
+    ) -> tuple[LlmAgent, dict[str, LlmAgent]]:
         manager = GoogleADKWorkflowManager(
             agent_configs=configs, subagents=policy,
             settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
@@ -1117,6 +1119,21 @@ class TestTheParentsTools:
             "stop_agent and check_agents, so its own tools cannot include 'check_agents'; "
             "rename that tool."
         )
+
+    async def test_the_error_names_the_first_clash_in_the_order_of_their_names(self, project):
+        """On both backends, whatever the order of the agent's own tools."""
+        def check_agents() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        def message_agent() -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(AgentGraphError, match="cannot include 'message_agent'"):
+            await self.root_of(
+                team(tools=[check_agents, message_agent]), SubAgentPolicy(follow_ups=True)
+            )
 
     async def test_without_follow_ups_an_own_tool_of_one_of_their_names_is_its_own(self, project):
         def check_agents() -> dict:

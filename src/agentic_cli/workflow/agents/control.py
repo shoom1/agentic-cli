@@ -238,6 +238,11 @@ class RunControl:
         self._final = True
 
     @property
+    def stopping(self) -> bool:
+        """Whether the run takes no more steps: it is cancelled, or its work has ended (``finish``)."""
+        return self.cancelled is not None or self._finished
+
+    @property
     def at_step_limit(self) -> bool:
         """Whether the run has made its last allowed model call."""
         limit = self.limits.max_model_calls

@@ -93,8 +93,9 @@ class ADKEventProcessor:
     A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
     its error in ``metadata["error"]``, as on Deep Agents. A ``task`` call's
-    result (and that of each of the parent's other tools) is the JSON text of what the delegation returned
-    (``adk/task_tool.py``), read back as its dict, as Deep Agents reads its
+    result (and that of each of the parent's other tools) is the JSON text
+    of what the delegation returned (``adk/task_tool.py``), read back as its
+    dict, as Deep Agents reads its
     ``ToolMessage``; an envelope (``task``'s, ``message_agent``'s run) is
     shown as every backend shows one (``agents/runs.py::show_as_delegation``).
 

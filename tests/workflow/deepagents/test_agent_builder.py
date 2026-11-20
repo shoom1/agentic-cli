@@ -612,6 +612,24 @@ class TestTheParentsTools:
             "rename that tool."
         )
 
+    def test_the_error_names_the_first_clash_in_the_order_of_their_names(self):
+        """On both backends, whatever the order of the agent's own tools."""
+        def check_agents(agent: str = "") -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        def message_agent(agent: str = "") -> dict:
+            """An application's own."""
+            return {"success": True}
+
+        with pytest.raises(AgentGraphError, match="cannot include 'message_agent'"):
+            _tree(
+                [COORDINATOR, RESEARCHER],
+                {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+                tools={"coordinator": to_langchain_tools([check_agents, message_agent])},
+                policy=SubAgentPolicy(follow_ups=True),
+            )
+
     def test_without_follow_ups_an_own_tool_of_one_of_their_names_is_its_own(self, created):
         def stop_agent(agent: str) -> dict:
             """An application's own."""

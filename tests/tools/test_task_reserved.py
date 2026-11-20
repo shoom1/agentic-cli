@@ -165,3 +165,32 @@ class TestTheParentsToolsAreReserved:
 
         with pytest.raises(ValueError, match=f"'{name}' is ambiguous"):
             resolve_tools([name])
+
+
+@pytest.mark.parametrize("name", FOLLOW_UP_TOOLS)
+def test_the_parents_tools_are_reserved_before_any_tool_registers(name, tmp_path):
+    """A fresh interpreter: the first thing an application can import (the
+    registry) already has each of the parent's tools declared."""
+    code = textwrap.dedent(
+        f"""
+        from agentic_cli.tools.registry import register_tool
+        from agentic_cli.workflow.permissions import EXEMPT
+
+        def run(agent: str) -> dict:
+            \"\"\"An application tool.\"\"\"
+            return {{}}
+
+        try:
+            register_tool(name={name!r}, capabilities=EXEMPT)(run)
+        except ValueError as error:
+            print("refused:", error)
+        else:
+            print("registered")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path, timeout=120
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith(f"refused: Tool '{name}' is already registered")

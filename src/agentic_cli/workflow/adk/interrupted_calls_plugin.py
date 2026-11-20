@@ -10,8 +10,8 @@ finished keeps its result (ADK stores parallel calls' results together,
 after the last, so the finished one would be lost), a call at its
 permission prompt was not run (in a sub-agent run its parent or a limit
 stopped, the seal says which: ``stop_cause``), a call whose job was
-submitted runs on, and any other was interrupted by the user; the content-less event becomes the
-main agent's reply ``MARKER``.
+submitted runs on, and any other was interrupted by the user; the
+content-less event becomes the main agent's reply ``MARKER``.
 
 ADK's seals pair a result with a call by id alone, so a call whose id
 another call's result used, on another branch of the session (a native ADK

@@ -153,7 +153,6 @@ class TestSeals:
         assert _answers(parents) == {"c1": interrupted(INTERRUPTED_BY_USER)}
         assert _answers(its_own) == {"c1": {"success": True, "value": 42}}
 
-
     @pytest.mark.parametrize("cause, text", [
         ("its parent", "Not run: its parent stopped the run before this call ran."),
         (None, NOT_RUN),

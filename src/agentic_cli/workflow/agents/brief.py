@@ -63,7 +63,7 @@ _WHAT_IT_SEES = (
 )
 
 #: The parent's other tools' descriptions, by tool name.
-_FOLLOW_UP_DESCRIPTIONS = {
+_PARENT_TOOL_DESCRIPTIONS = {
     "message_agent": (
         "Send a message to one of your sub-agents that already ran (its id, such as "
         "researcher-2, is in the result task gave you, or in check_agents). An idle one "
@@ -304,7 +304,7 @@ def follow_up_description(name: str) -> str:
     Raises:
         KeyError: ``name`` is not one of them.
     """
-    return _FOLLOW_UP_DESCRIPTIONS[name]
+    return _PARENT_TOOL_DESCRIPTIONS[name]
 
 
 def follow_up_parameters(name: str) -> dict[str, Any]:

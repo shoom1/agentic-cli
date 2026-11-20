@@ -6,8 +6,8 @@ its follow-ups continue); a tree built without a checkpointer compiles its
 sub-agents with none. An agent with
 sub-agents gets the framework's ``task`` tool (``task_tool.build_task_tool``)
 among its tools (with ``SubAgentPolicy.follow_ups``, also the parent's other
-tools, ``task_tool.build_follow_up_tools``): a call hands the brief to the manager's ``Delegations``,
-which runs the sub-agent's graph apart from the caller's stream
+tools, ``task_tool.build_follow_up_tools``): a call hands the brief to the
+manager's ``Delegations``, which runs the sub-agent's graph apart from the caller's stream
 (``DeepAgentsWorkflowManager._run_agent``) and answers with the result
 envelope. Only the configured sub-agents are offered: there is no automatic
 general-purpose sub-agent, and none of Deep Agents' file tools. ``graphs``,
@@ -249,7 +249,9 @@ def _own_tools(
             f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
         )
     if follows:
-        clash = next((tool.name for tool in tools if tool.name in FOLLOW_UP_TOOLS), None)
+        own_names = {tool.name for tool in tools}
+        # The first in ``FOLLOW_UP_TOOLS`` order, as on ADK.
+        clash = next((name for name in FOLLOW_UP_TOOLS if name in own_names), None)
         if clash is not None:
             raise AgentGraphError(FOLLOW_UP_CLASH_ERROR.format(agent=config.name, tool=clash))
     return list(tools)
