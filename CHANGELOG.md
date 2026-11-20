@@ -2980,13 +2980,16 @@ step; each entry says what to use instead.
 
 ### Fixed
 
-- **google-adk 2.15: a Claude refusal reads as before.** From 2.15, ADK's
-  Claude adapter gives a reply with nothing in it (a refusal, or one cut at
-  its token limit) an error code and words of its own ("Claude stopped with
-  SAFETY ('refusal') and no content."), which the turn's `ERROR` repeated
-  after "<model> returned no answer"; they say no more than the code, so
-  they are left out (`ADK_CLAUDE_NO_CONTENT`), as ADK's words for an empty
-  STOP reply are.
+- **google-adk 2.15: a Claude refusal reads as before, and Deep Agents'
+  `load_skill` answers as ADK's.** From 2.15, ADK's Claude adapter gives a
+  reply with nothing in it (a refusal, or one cut at its token limit) an
+  error code and words of its own ("Claude stopped with SAFETY ('refusal')
+  and no content."), which the turn's `ERROR` repeated after "<model>
+  returned no answer"; they say no more than the code, so they are left out
+  (`ADK_CLAUDE_NO_CONTENT`), as ADK's words for an empty STOP reply are.
+  ADK's `load_skill` also lists the skill's resources (`resources`), which
+  the Deep Agents skill tool now does with ADK's own function on an ADK that
+  lists them, so both backends answer alike on every ADK.
 
 - **A provider that reuses tool-call ids no longer leaves a stopped or failed
   call unanswered.** A provider that numbers its call ids per response

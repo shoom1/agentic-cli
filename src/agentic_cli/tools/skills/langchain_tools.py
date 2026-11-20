@@ -6,7 +6,8 @@ with ADK's names, descriptions, argument schemas, results and error texts,
 and the instruction ADK adds to the agent's system prompt for them. They run
 on the skills ``SkillStore`` loaded (ADK ``Skill`` objects; ADK is a core
 dependency), so a resource is read from the skill in memory and no path is
-resolved at call time.
+resolved at call time. ``load_skill`` lists the skill's resources as the
+installed ADK's does (from google-adk 2.15), with ADK's own function.
 
 An ADK error result (``{"error", "error_code"}``) is sent as a failed call:
 the same JSON, with the tool message's ``status="error"``, which is how this
@@ -41,7 +42,7 @@ import base64
 import copy
 import json
 import mimetypes
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from google.adk.skills.prompt import format_skills_as_xml
@@ -235,6 +236,7 @@ class _SkillAnswers:
             self._skills[skill.name] = skill
         self._misses_turn: object = _NO_TURN
         self._misses = 0
+        self._resource_paths = _adk_resource_listing()
 
     # Unknown arguments are ignored, as ADK ignores them.
 
@@ -245,12 +247,15 @@ class _SkillAnswers:
         if not skill_name:
             raise _Failed("Argument 'skill_name' is required.", "INVALID_ARGUMENTS")
         skill = self._skill(skill_name)
-        return {
+        answer: dict[str, Any] = {
             "skill_name": skill_name,
             "instructions": skill.instructions,
             # The JSON ADK's function response is sent as.
             "frontmatter": skill.frontmatter.model_dump(mode="json"),
         }
+        if self._resource_paths is not None and (resources := self._resource_paths(skill)):
+            answer["resources"] = resources
+        return answer
 
     async def load_skill_resource(
         self, skill_name: Any = None, file_path: Any = None, **_: Any
@@ -303,6 +308,21 @@ class _SkillAnswers:
             self._misses_turn, self._misses = turn, 0
         self._misses += 1
         return self._misses
+
+
+def _adk_resource_listing() -> Callable[[Any], list[str]] | None:
+    """How ADK's ``load_skill`` lists a skill's resources, or None: none before google-adk 2.15.
+
+    ADK's own function (``references/<name>``, then ``assets/``, then
+    ``scripts/``), so ``load_skill`` answers as ADK's toolset does on the
+    installed ADK. Imported when the tools are built: a first import during
+    a call would hold the event loop.
+    """
+    try:
+        from google.adk.tools.skill_toolset import _list_skill_resources
+    except ImportError:  # An ADK before 2.15: load_skill lists no resources.
+        return None
+    return _list_skill_resources
 
 
 def _resource(skill: Any, file_path: str) -> str | bytes | None:
