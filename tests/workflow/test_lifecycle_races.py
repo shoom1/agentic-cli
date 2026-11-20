@@ -122,8 +122,13 @@ class _DeepAgentsAdmissionHarness:
             self.backend_at_stream.append(self.manager._root)
             yield WorkflowEvent(type=EventType.TEXT, content=ref.session_id)
 
+        async def _no_records(conversation):
+            return None
+
         self.manager._do_initialize = _do_initialize
         self.manager._run_turn = _run_turn
+        # Its store is a stand-in: it keeps no sub-agent records.
+        self.manager._load_agent_records = _no_records
 
     @staticmethod
     async def _exists(ref) -> bool:

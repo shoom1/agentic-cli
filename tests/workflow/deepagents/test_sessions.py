@@ -13,11 +13,14 @@ session hooks from the checkpointer:
   ``tools:<task-id>``) and threads that are not ours, and ``limit`` keeps the
   newest; one conversation's row is ``info``;
 - deleting removes the whole thread, sub-agents' checkpoints included, every
-  sub-agent instance's thread of the conversation too, and reports an
-  unknown one;
+  sub-agent instance's thread of the conversation (first), then its
+  sub-agent records, then the thread and its row, and reports an unknown one;
 - each sub-agent instance's transcript is a thread of its own
   (``instance_thread_id``), which never lists as a conversation; the
   instances a conversation keeps number a new manager's next ones;
+- a conversation's sub-agent records are one item of the store beside the
+  checkpointer, under ``("agentic_cli", "agents", <app>, <user>)``, never a
+  row of the index;
 - recent messages are the user's and the assistant's text.
 
 Conversations are written by real agent trees on scripted models, into a real
@@ -275,8 +278,103 @@ class TestStoredInstances:
 
         assert await CheckpointSessions(saver, store).stored_instances(ref()) == {}
 
+    async def test_with_records_the_counters_come_from_them_and_no_thread_is_read(
+        self, saver, store, monkeypatch
+    ):
+        """A conversation's records name its instances and hold its counters:
+        the numbering reads that one item, not every instance input
+        checkpoint (each unpickled on the event loop)."""
+        await say(saver, ref())
+        await instance_ran(saver, ref(), "researcher-1")
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), {
+            **records_of(), "numbered": {"researcher": 5, "writer": 2},
+            "instances": [
+                {"instance": "researcher-1"}, {"instance": "writer-2"}, {"instance": "notes"},
+            ],
+        })
+        looked: list[object] = []
+        alist = saver.alist
+
+        def listing(*args, **kwargs):
+            looked.append(args)
+            return alist(*args, **kwargs)
+
+        monkeypatch.setattr(saver, "alist", listing)
+
+        counts = await sessions.stored_instances(ref())
+
+        assert counts == {"researcher": 5, "writer": 2}
+        assert looked == []
+
+    async def test_records_that_name_no_instance_read_the_threads(self, saver, store):
+        await instance_ran(saver, ref(), "researcher-4")
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), records_of("researcher-4#1"))
+
+        assert await sessions.stored_instances(ref()) == {"researcher": 4}
+
+    async def test_records_of_another_version_read_the_threads(self, saver, store):
+        await instance_ran(saver, ref(), "researcher-4")
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), {"v": 99})
+
+        assert await sessions.stored_instances(ref()) == {"researcher": 4}
+
 
 # --- the store --------------------------------------------------------------------------
+
+
+def records_of(*runs: str) -> dict:
+    """Stored records (``AgentRuns.export``'s shape) holding ``runs``' ids alone."""
+    return {"v": 1, "saved": "2026-11-19T10:00:00", "numbered": {}, "instances": [],
+            "runs": [{"run": run} for run in runs]}
+
+
+class TestAgentRecords:
+    """A conversation's sub-agent records are one item of the store beside the
+    checkpointer, under ``("agentic_cli", "agents", <app>, <user>)``, keyed
+    by the session id: never a row of the index, never another's."""
+
+    async def test_written_read_and_written_over(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+
+        assert await sessions.agent_records(ref()) is None
+        with no_blocking_calls():
+            await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+        await sessions.save_agent_records(ref(), records_of("researcher-1#1", "writer-1#1"))
+
+        assert await sessions.agent_records(ref()) == records_of("researcher-1#1", "writer-1#1")
+        for other in (ref(session="s2"), ref(user="bob"), ref(app="other")):
+            assert await sessions.agent_records(other) is None
+        item = await store.aget(("agentic_cli", "agents", '"app"', '"alice"'), "s1")
+        assert item.value == records_of("researcher-1#1", "writer-1#1")
+
+    async def test_names_with_periods_are_kept_apart(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+
+        await sessions.save_agent_records(ref(app="my.app", user="a.b"), records_of("x-1#1"))
+
+        assert await sessions.agent_records(ref(app="my.app", user="a.b")) == records_of("x-1#1")
+        assert await sessions.agent_records(ref(app="my", user="a.b")) is None
+
+    async def test_they_are_no_conversation(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+        await say(saver, ref(session="s2"))
+        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+
+        assert _ids(await sessions.list("app", "alice")) == ["s2"]
+        assert await sessions.info(ref()) is None
+        assert await sessions.exists(ref()) is False
+
+    async def test_deleted(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+
+        await sessions.delete_agent_records(ref())
+        await sessions.delete_agent_records(ref())
+
+        assert await sessions.agent_records(ref()) is None
 
 
 class TestExists:
@@ -461,12 +559,41 @@ class TestDelete:
             instance_thread_id(ref(session="s2"), "researcher-1")
         ]
 
+    async def test_its_records_go_after_its_instances_and_before_it(
+        self, saver, store, monkeypatch
+    ):
+        await say(saver, ref())
+        await instance_ran(saver, ref(), "researcher-1")
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+        await sessions.save_agent_records(ref(session="s2"), records_of("writer-1#1"))
+        done: list[str] = []
+        delete_thread, delete_item = type(saver).adelete_thread, type(store).adelete
+
+        async def deleting_thread(self, thread: str) -> None:
+            done.append("conversation" if thread == thread_id(ref()) else "instance")
+            await delete_thread(self, thread)
+
+        async def deleting_item(self, namespace, key) -> None:
+            done.append(namespace[1])
+            await delete_item(self, namespace, key)
+
+        monkeypatch.setattr(type(saver), "adelete_thread", deleting_thread)
+        monkeypatch.setattr(type(store), "adelete", deleting_item)
+
+        assert await sessions.delete(ref()) is True
+        assert done == ["instance", "agents", "conversation"]
+        assert await sessions.agent_records(ref()) is None
+        assert await sessions.agent_records(ref(session="s2")) == records_of("writer-1#1")
+
     async def test_a_conversation_already_gone_leaves_no_instance_behind(self, saver, store):
         await instance_ran(saver, ref(), "researcher-1")
         sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
 
         assert await sessions.delete(ref()) is False
         assert await threads(saver) == []
+        assert await sessions.agent_records(ref()) is None
 
     async def test_an_unknown_session_is_not_deleted(self, saver, store):
         await say(saver, ref())
@@ -715,5 +842,6 @@ class TestNumberedPastTheStored:
                 await second.cleanup()
 
         assert stored == {"worker": 1}
-        assert runs == ["worker-2#1"]
+        # The first manager's run is in its records, loaded with the conversation.
+        assert runs == ["worker-1#1", "worker-2#1"]
         assert kept == ["worker-1", "worker-2"]
