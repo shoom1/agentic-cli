@@ -354,7 +354,8 @@ async def leave_view(app: Any) -> bool:
     logger.info("agent_view_left", instance=view.instance)
     # A workflow that is down (a model switch whose rebuild failed) is started
     # again, as a turn would: the run the user did there is still to be told.
-    # Left down, the notice cannot be sent and the warning says why.
+    # Left down, the notice cannot be sent: the main agent is not told of that
+    # run, and the warning says only that the workflow did not start.
     if not controller.is_ready:
         await controller.ensure_initialized(app.session)
     workflow = _workflow(app)
