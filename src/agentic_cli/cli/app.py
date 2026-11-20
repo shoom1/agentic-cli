@@ -33,7 +33,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view
 from agentic_cli.cli.commands import Command, CommandRegistry
-from agentic_cli.cli.dialogs import show_dialog
+from agentic_cli.cli.dialogs import serialize_dialogs
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
     NOT_KEPT,
@@ -622,6 +622,17 @@ class BaseCLIApp:
             RuntimeError: If workflow is not yet initialized
         """
         return self._workflow_controller.workflow
+
+    @property
+    def session(self) -> ThinkingPromptSession:
+        """The session the app draws in. Its dialog methods take one lock, so a
+        question of a sub-agent's view run and a command's dialog never open
+        at once (``cli/dialogs.py``); a session assigned later gets it too."""
+        return self._session
+
+    @session.setter
+    def session(self, value: ThinkingPromptSession) -> None:
+        self._session = serialize_dialogs(value)
 
     @property
     def agent_view(self) -> AgentView | None:
@@ -1682,7 +1693,7 @@ class BaseCLIApp:
             rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement,
             backends=any(info.backend != running for info in rows),
         )
-        picked = await show_dialog(self.session, dialog)
+        picked = await self.session.show_dialog(dialog)
         return None if picked is None else ids.get(picked)
 
     async def list_conversations(self, limit: int | None = None) -> "list[SessionInfo]":

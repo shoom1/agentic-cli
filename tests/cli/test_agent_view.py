@@ -19,7 +19,7 @@ view is read-only.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -36,6 +36,7 @@ from agentic_cli.cli.agent_view import (
     TELLING,
     bind_ctrl_c,
 )
+from agentic_cli.cli import agents_command
 from agentic_cli.cli.agents_command import NO_SUCH_AGENT
 from agentic_cli.cli.app import BaseCLIApp
 from agentic_cli.cli.message_processor import CANCELLED_LINE
@@ -46,6 +47,7 @@ from agentic_cli.workflow.agents import (
     INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
+    RUN_INPUT_REQUIRED,
 )
 from agentic_cli.workflow.agents.envelope import view_notice
 from tests.cli.dialog_fakes import autospec_session, opening_boxes
@@ -697,7 +699,13 @@ async def asking_view(make_crew) -> tuple[Crew, BaseCLIApp, Dialogs]:
                     says("Asked.")],
     )
     dialogs = Dialogs()
-    app.session.show_dialog.side_effect = dialogs.show
+
+    async def show_dialog(session, dialog):
+        return await dialogs.show(dialog)
+
+    # A real method, as a real session's is: the app serializes those.
+    app.session.show_dialog = MethodType(show_dialog, app.session)
+    app.session = app.session
     return crew, app, dialogs
 
 
@@ -716,7 +724,7 @@ class TestOneDialogAtATime:
             picker = asyncio.create_task(app.process_input("/agents"))
             await until(lambda: dialogs.shown == ["Sub-agents"])
             HELD["go"].set()
-            await asyncio.sleep(0.3)  # the run reaches its question
+            await until(lambda: crew.records()[-1].status == RUN_INPUT_REQUIRED)
 
             assert dialogs.refused == []
             assert dialogs.shown == ["Sub-agents"]
@@ -732,15 +740,23 @@ class TestOneDialogAtATime:
         finally:
             dialogs.release_all()
 
-    async def test_a_command_waits_for_an_open_question(self, make_crew):
+    async def test_a_command_waits_for_an_open_question(self, make_crew, monkeypatch):
         crew, app, dialogs = await asking_view(make_crew)
+        reached = asyncio.Event()
+        built = agents_command.picker
+
+        def noting(*args, **kwargs):
+            reached.set()
+            return built(*args, **kwargs)
+
+        monkeypatch.setattr(agents_command, "picker", noting)
         try:
             await app.process_input("Ask me.")
             await asyncio.wait_for(HELD["started"].wait(), 10)
             HELD["go"].set()
             await until(lambda: dialogs.shown == ["researcher-1 asks"])
             picker = asyncio.create_task(app.process_input("/agents"))
-            await asyncio.sleep(0.3)  # the command reaches its picker
+            await until(reached.is_set)  # the command has its picker and shows it
 
             assert dialogs.refused == []
             assert dialogs.shown == ["researcher-1 asks"]
@@ -752,6 +768,49 @@ class TestOneDialogAtATime:
 
             assert dialogs.refused == []
             assert crew.records()[-1].status == RUN_COMPLETED
+            app.session.add_error.assert_not_called()
+        finally:
+            dialogs.release_all()
+
+    async def test_an_apps_own_command_waits_for_an_open_question(self, make_crew):
+        """A command of an app that calls ``app.session.show_dialog`` itself
+        is serialized too: the session's dialogs all take the one lock."""
+        from thinking_prompt import Dialog
+
+        from agentic_cli.cli.commands import Command, CommandCategory
+
+        reached = asyncio.Event()
+
+        class Mine(Command):
+            def __init__(self) -> None:
+                super().__init__(
+                    name="mine", description="An app's own dialog", usage="/mine",
+                    category=CommandCategory.WORKFLOW,
+                )
+
+            async def execute(self, args, app) -> None:
+                reached.set()
+                await app.session.show_dialog(Dialog("Mine", fields=[]))
+
+        crew, app, dialogs = await asking_view(make_crew)
+        app.command_registry.register(Mine())
+        try:
+            await app.process_input("Ask me.")
+            await asyncio.wait_for(HELD["started"].wait(), 10)
+            HELD["go"].set()
+            await until(lambda: dialogs.shown == ["researcher-1 asks"])
+            mine = asyncio.create_task(app.process_input("/mine"))
+            await until(reached.is_set)
+
+            assert dialogs.refused == []
+            assert dialogs.shown == ["researcher-1 asks"]
+            dialogs.gate("researcher-1 asks").set()
+            await until(lambda: "Mine" in dialogs.shown)
+            dialogs.gate("Mine").set()
+            await asyncio.wait_for(mine, 10)
+            await settled_or_fail(app)
+
+            assert dialogs.refused == []
             app.session.add_error.assert_not_called()
         finally:
             dialogs.release_all()

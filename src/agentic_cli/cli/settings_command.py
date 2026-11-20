@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 from thinking_prompt import ButtonConfig, Dialog
 
 from agentic_cli.cli.commands import Command, CommandCategory
-from agentic_cli.cli.dialogs import show_dialog
 
 if TYPE_CHECKING:
     from agentic_cli.cli.app import BaseCLIApp
@@ -56,7 +55,7 @@ class SettingsCommand(Command):
             placement=app.settings.dialog_placement,
         )
         # Save returns True; Cancel and Escape return None.
-        if not await show_dialog(app.session, dialog):
+        if not await app.session.show_dialog(dialog):
             app.session.add_message("system", _UNCHANGED)
             return
 
