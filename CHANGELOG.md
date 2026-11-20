@@ -575,29 +575,6 @@ the start of the entry's title.
 
 ### Added
 
-- **The user's control of sub-agents: `/agent stop`, `/agent close`, and the
-  manager's entry points.** `/agent stop <id>` stops one of the
-  conversation's sub-agents: its run, if one works, is cancelled by the user
-  (`cancelled_by: user`), and the instance is `stopped` (an idle one at once):
-  its parent's `message_agent` is refused, and only the user may start its
-  next run. `/agent close <id>` closes it and its own sub-agents: no more
-  runs, its work still shown by `/agents <id>`. `/agent <id>` shows it. Each
-  says what it did, or why not. The manager's entry points (provisional; the
-  open conversation, or the one `session_id`/`user_id` name, any of its
-  instances): `run_instance(instance, message)`, the user's follow-up as a
-  turn of its own (`started_by: user`, counted toward no turn's runs, from the
-  conversation's outside-content mark; stopping its stream, Ctrl+C, is the
-  user's stop of the run, which ends `cancelled` and leaves the instance
-  `stopped`), `stop_instance`, `close_instance` (both written to the store
-  before they return), `steer_instance(instance, message)` (the user's message
-  to a running run, before its next step), `instance_result` (the envelope of
-  the latest run the user started) and `tell_root(text)`, a turn of the root
-  on a notice the user did not type (marked as a job's notice is, so fact
-  extraction and the conversation's title and turns leave it out; the
-  outside-content mark a user's run brought is written with it), whose notice
-  after the user worked with a sub-agent is
-  `agents/envelope.py::view_notice`: "The user worked with <id> directly; its
-  latest result: <envelope as JSON>". On both backends, contract-tested.
 - **The main agent's requests list its open sub-agents, when it can continue
   them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
   (it has `message_agent`) is told which of its own sub-agents are open: a
@@ -640,6 +617,29 @@ the start of the entry's title.
   of its trigger is not written (the brief restated in each summary can keep
   a long brief near the trigger), as ADK's is not. The main agent's
   summaries are unchanged.
+- **The user's control of sub-agents: `/agent stop`, `/agent close`, and the
+  manager's entry points.** `/agent stop <id>` stops one of the
+  conversation's sub-agents: its run, if one works, is cancelled by the user
+  (`cancelled_by: user`), and the instance is `stopped` (an idle one at once):
+  its parent's `message_agent` is refused, and only the user may start its
+  next run. `/agent close <id>` closes it and its own sub-agents: no more
+  runs, its work still shown by `/agents <id>`. `/agent <id>` shows it. Each
+  says what it did, or why not. The manager's entry points (provisional; the
+  open conversation, or the one `session_id`/`user_id` name, any of its
+  instances): `run_instance(instance, message)`, the user's follow-up as a
+  turn of its own (`started_by: user`, counted toward no turn's runs, from the
+  conversation's outside-content mark; stopping its stream, Ctrl+C, is the
+  user's stop of the run, which ends `cancelled` and leaves the instance
+  `stopped`), `stop_instance`, `close_instance` (both written to the store
+  before they return), `steer_instance(instance, message)` (the user's message
+  to a running run, before its next step), `instance_result` (the envelope of
+  the latest run the user started) and `tell_root(text)`, a turn of the root
+  on a notice the user did not type (marked as a job's notice is, so fact
+  extraction and the conversation's title and turns leave it out; the
+  outside-content mark a user's run brought is written with it), whose notice
+  after the user worked with a sub-agent is
+  `agents/envelope.py::view_notice`: "The user worked with <id> directly; its
+  latest result: <envelope as JSON>". On both backends, contract-tested.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
   `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them
