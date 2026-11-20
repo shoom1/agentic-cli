@@ -59,6 +59,8 @@ from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     agent,
     backend,
     calls,
+    contract_ask,
+    contract_hold,
     contract_start_job,
     delegate,
     follow_team,
@@ -565,3 +567,116 @@ class TestExitInAView:
             "researcher-1#2", RUN_CANCELLED, "user",
         )
         assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+
+
+# -- one dialog at a time: a run's question and a command's dialog ------------------------
+
+
+class Dialogs:
+    """``show_dialog`` as thinking-prompt's: one dialog at a time, a second
+    one raises. Each dialog stays open until its title's gate is set."""
+
+    def __init__(self) -> None:
+        self.open: str | None = None
+        self.shown: list[str] = []
+        self.refused: list[str] = []
+        self.gates: dict[str, asyncio.Event] = {}
+        self.released = False
+
+    def gate(self, title: str) -> asyncio.Event:
+        gate = self.gates.setdefault(title, asyncio.Event())
+        if self.released:
+            gate.set()
+        return gate
+
+    def release_all(self) -> None:
+        """Let every dialog, now or later, close: a failing test must not leave
+        a run waiting for the user."""
+        self.released = True
+        HELD["go"].set()
+        for gate in self.gates.values():
+            gate.set()
+
+    async def show(self, dialog):
+        if self.open is not None:
+            self.refused.append(dialog.title)
+            raise RuntimeError("A dialog is already being shown")
+        self.open = dialog.title
+        self.shown.append(dialog.title)
+        try:
+            await self.gate(dialog.title).wait()
+            return None if dialog.title == "Sub-agents" else True
+        finally:
+            self.open = None
+
+
+async def asking_view(make_crew) -> tuple[Crew, BaseCLIApp, Dialogs]:
+    """A view of ``researcher-1`` whose next run holds, then asks the user."""
+    team = [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_hold, contract_ask)),
+    ]
+    crew, app = await in_a_view(
+        make_crew, team=team,
+        researcher=[calls(use("contract_hold", "r1")), calls(use("contract_ask", "r2")),
+                    says("Asked.")],
+    )
+    dialogs = Dialogs()
+    app.session.show_dialog.side_effect = dialogs.show
+    return crew, app, dialogs
+
+
+class TestOneDialogAtATime:
+    """The view's run works outside the input handler, so a command can open
+    a dialog while the run asks its question. Whichever comes second waits
+    for the first: a question is never answered unseen (a second
+    ``show_dialog`` raises, and a permission prompt that raised is a denial),
+    and a command's dialog never fails because a question is open."""
+
+    async def test_a_question_waits_for_an_open_picker(self, make_crew):
+        crew, app, dialogs = await asking_view(make_crew)
+        try:
+            await app.process_input("Ask me.")
+            await asyncio.wait_for(HELD["started"].wait(), 10)
+            picker = asyncio.create_task(app.process_input("/agents"))
+            await until(lambda: dialogs.shown == ["Sub-agents"])
+            HELD["go"].set()
+            await asyncio.sleep(0.3)  # the run reaches its question
+
+            assert dialogs.refused == []
+            assert dialogs.shown == ["Sub-agents"]
+            dialogs.gate("Sub-agents").set()
+            await asyncio.wait_for(picker, 10)
+            await until(lambda: "researcher-1 asks" in dialogs.shown)
+            dialogs.gate("researcher-1 asks").set()
+            await asyncio.wait_for(app.agent_view.settled(), 10)
+
+            assert dialogs.refused == []
+            assert crew.records()[-1].status == RUN_COMPLETED
+            app.session.add_error.assert_not_called()
+        finally:
+            dialogs.release_all()
+
+    async def test_a_command_waits_for_an_open_question(self, make_crew):
+        crew, app, dialogs = await asking_view(make_crew)
+        try:
+            await app.process_input("Ask me.")
+            await asyncio.wait_for(HELD["started"].wait(), 10)
+            HELD["go"].set()
+            await until(lambda: dialogs.shown == ["researcher-1 asks"])
+            picker = asyncio.create_task(app.process_input("/agents"))
+            await asyncio.sleep(0.3)  # the command reaches its picker
+
+            assert dialogs.refused == []
+            assert dialogs.shown == ["researcher-1 asks"]
+            dialogs.gate("researcher-1 asks").set()
+            await until(lambda: "Sub-agents" in dialogs.shown)
+            dialogs.gate("Sub-agents").set()
+            await asyncio.wait_for(picker, 10)
+            await asyncio.wait_for(app.agent_view.settled(), 10)
+
+            assert dialogs.refused == []
+            assert crew.records()[-1].status == RUN_COMPLETED
+            app.session.add_error.assert_not_called()
+        finally:
+            dialogs.release_all()

@@ -33,6 +33,7 @@ from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
 from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view
 from agentic_cli.cli.commands import Command, CommandRegistry
+from agentic_cli.cli.dialogs import show_dialog
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
     NOT_KEPT,
@@ -1681,7 +1682,7 @@ class BaseCLIApp:
             rows, datetime.now(timezone.utc), placement=self._settings.dialog_placement,
             backends=any(info.backend != running for info in rows),
         )
-        picked = await self.session.show_dialog(dialog)
+        picked = await show_dialog(self.session, dialog)
         return None if picked is None else ids.get(picked)
 
     async def list_conversations(self, limit: int | None = None) -> "list[SessionInfo]":

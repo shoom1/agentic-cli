@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from thinking_prompt import ButtonConfig, ChoiceField, Dialog
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.dialogs import show_dialog
 
 if TYPE_CHECKING:
     from thinking_prompt import Placement
@@ -243,7 +244,7 @@ class MemoryCommand(Command):
             memories, problems, waiting, "Stale memories" if stale else "Memory",
             placement=_placement(app),
         )
-        picked = await app.session.show_dialog(dialog)
+        picked = await show_dialog(app.session, dialog)
         key = rows.get(picked) if picked is not None else None
         if key == _PROBLEMS:
             await self._problems(app, problems)
@@ -252,7 +253,7 @@ class MemoryCommand(Command):
 
     async def _problems(self, app: Any, problems: list["Problem"]) -> None:
         body = "\n".join(f"{p.path}\n  {p.kind}: {p.detail}" for p in problems)
-        await app.session.show_dialog(Dialog(
+        await show_dialog(app.session, Dialog(
             "Memory files that cannot be used", body=body, buttons=[ButtonConfig("Close", result=None)],
             placement=_placement(app),
         ))
@@ -263,8 +264,8 @@ class MemoryCommand(Command):
             await self._missing(app, store, memory_id, shown=False)
             return
         versions = await asyncio.to_thread(store.history, memory.id)
-        choice = await app.session.show_dialog(
-            memory_view(memory, bool(versions), placement=_placement(app))
+        choice = await show_dialog(
+            app.session, memory_view(memory, bool(versions), placement=_placement(app))
         )
         if choice == "delete":
             await self._delete(app, store, memory)
@@ -328,7 +329,7 @@ class MemoryCommand(Command):
                 label += " ·"
             rows[label] = version
         title = "Memory history" + (f" of {memory_id}" if memory_id else "")
-        picked = await app.session.show_dialog(Dialog(
+        picked = await show_dialog(app.session, Dialog(
             title, fields=[ChoiceField("version", "", options=list(rows))],
             placement=_placement(app),
         ))
@@ -337,7 +338,7 @@ class MemoryCommand(Command):
             return
         current = await asyncio.to_thread(store.read, version.memory_id)
         unusable = None if current is not None else await asyncio.to_thread(_claiming, store, version.memory_id)
-        choice = await app.session.show_dialog(Dialog(
+        choice = await show_dialog(app.session, Dialog(
             f"Version of {version.memory_id}",
             body=version_body(version, current, unusable),
             buttons=[ButtonConfig("Restore", result="restore"), ButtonConfig("Close", result=None, focused=True)],
@@ -366,7 +367,7 @@ class MemoryCommand(Command):
                 current = await asyncio.to_thread(store.read, proposal.target or "")
                 if current is None:
                     unusable = await asyncio.to_thread(_claiming, store, proposal.target or "")
-            choice = await app.session.show_dialog(Dialog(
+            choice = await show_dialog(app.session, Dialog(
                 f"Memory proposal {number} of {len(proposals)}",
                 body=proposal_body(proposal, current, unusable),
                 buttons=[

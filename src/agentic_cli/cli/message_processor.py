@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from thinking_prompt import ButtonConfig, Dialog, TextField
 
+from agentic_cli.cli.dialogs import dialog_lock
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.workflow.agents.runs import RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
@@ -907,9 +908,12 @@ class MessageProcessor:
                 # The placement is read now: /settings may have changed it
                 # since the session started with its own.
                 try:
-                    response = await self._prompt_user_input(
-                        request, ui, settings.dialog_placement
-                    )
+                    # Behind any dialog a command has open (a view's run
+                    # asks while the prompt takes commands).
+                    async with dialog_lock(ui):
+                        response = await self._prompt_user_input(
+                            request, ui, settings.dialog_placement
+                        )
                 except asyncio.CancelledError:
                     # The asking task alone was stopped (a sub-agent run's
                     # limit, its parent, the user), not the turn: the dialog

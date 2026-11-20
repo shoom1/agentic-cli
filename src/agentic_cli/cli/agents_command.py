@@ -45,6 +45,7 @@ from rich.text import Text
 from thinking_prompt import ChoiceField, Dialog
 
 from agentic_cli.cli.commands import Command, CommandCategory
+from agentic_cli.cli.dialogs import show_dialog
 from agentic_cli.cli.usage_tracker import format_tokens, format_usage
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.agents import RUN_COMPLETED, RUN_INPUT_REQUIRED, RUN_STARTED
@@ -112,7 +113,7 @@ class AgentsCommand(Command):
             app.session.add_message("system", NO_RUNS)
             return
         dialog, ids = picker(instances, placement=_placement(app))
-        picked = await app.session.show_dialog(dialog)
+        picked = await show_dialog(app.session, dialog)
         if picked is not None and picked in ids:
             await app.open_agent_view(ids[picked])
 
