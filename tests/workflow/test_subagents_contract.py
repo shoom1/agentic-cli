@@ -8,7 +8,15 @@ and ``use``), which the harness turns into each backend's. A delegation is a
 ``task`` call on both (``task_arguments``: ``agent_type``, the brief's
 ``title`` and ``objective``, and any other field of the brief), answered
 with the run's envelope as JSON (``agents/envelope.py``; ``envelope_read``
-reads it back). Each agent's prompt is ``You are <name>.``, by which ADK's
+reads it back). A follow-up (an instance's next run) is a call of the
+test-only tool ``contract_follow_up(agent, message)`` (``follow``), which
+hands ``Delegations.follow_up`` what a parent's tool would: the instance, the
+message, the calling run and its call, and the conversation's
+outside-content mark; it answers with the envelope as JSON, as ``task``
+does. ``make_crew(..., store="sqlite")`` keeps the conversation in the
+default sqlite store, so a second crew is a restart; ``no_seals`` stops a
+turn as a killed process does (ADK writes no seal), and ``carried_over``
+gives the new manager the instances and runs the first one recorded. Each agent's prompt is ``You are <name>.``, by which ADK's
 fake API tells the agents apart.
 
 Offline: no provider is reached and no catalog lists (``tests/conftest.py``).
@@ -34,7 +42,11 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
 from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
+from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents import (
+    INSTANCE_CLOSED,
+    INSTANCE_IDLE,
+    INSTANCE_STOPPED,
     RUN_CANCELLED,
     RUN_COMPLETED,
     RUN_FAILED,
@@ -49,6 +61,7 @@ from agentic_cli.workflow.agents import (
     SubAgentPolicy,
 )
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl
+from agentic_cli.workflow.agents.delegate import FollowUpRequest, started_by
 from agentic_cli.workflow.agents.slots import SlotPool
 from agentic_cli.workflow.agents.envelope import (
     INTERRUPTED_ERROR,
@@ -71,6 +84,7 @@ from agentic_cli.workflow.interrupts import (
     NOT_RUN,
     interrupted,
 )
+from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
 from agentic_cli.workflow.permissions import EXEMPT, Capability, PermissionEngine
 from agentic_cli.workflow.permissions import prompt as permission_prompt
 from agentic_cli.workflow.permissions.prompt import ALLOW_ONCE_CHOICE, DENY_CHOICE
@@ -155,6 +169,11 @@ def envelope_read(text: str) -> dict[str, Any]:
     found = json.loads(text)
     assert isinstance(found, dict) and "status" in found, text
     return found
+
+
+def follow(instance: str, message: str, call_id: str) -> Call:
+    """A follow-up of ``instance``: a call of ``contract_follow_up``."""
+    return use("contract_follow_up", call_id, agent=instance, message=message)
 
 
 def use(tool: str, call_id: str, **args: Any) -> Call:
@@ -451,6 +470,8 @@ class Crew:
     _state: Callable[[], Awaitable[dict[str, Any]]] | None = None
     _marked: Callable[[], Awaitable[bool]] | None = None
     _call_results: Callable[[str, int], list[tuple[str, list[str]]]] | None = None
+    _instance_mark: Callable[[str], Awaitable[str]] | None = None
+    _models: Callable[[str], list[str]] | None = None
 
     async def turn(self, text: str = "Go.") -> list[WorkflowEvent]:
         """One turn of the conversation, run to its end; its events."""
@@ -470,6 +491,25 @@ class Crew:
     def records(self) -> list[RunRecord]:
         """The conversation's run records, in the order the runs started."""
         return self.manager.agent_runs.records(self.conversation)
+
+    def instances(self) -> list[tuple[str, str]]:
+        """The conversation's instances and their statuses, in the order they started."""
+        return [
+            (record.instance, record.status)
+            for record in self.manager.agent_runs.instances(self.conversation)
+        ]
+
+    async def instance_mark(self, instance: str) -> str:
+        """The outside-content mark ``instance``'s transcript holds (``""``: none):
+        ADK's child session's state, Deep Agents' instance thread's."""
+        assert self._instance_mark is not None
+        return await self._instance_mark(instance)
+
+    def models(self, agent: str) -> list[str]:
+        """The models ``agent`` was given, as model ids: ADK each request's,
+        Deep Agents each build's (``ScriptedModels.built``)."""
+        assert self._models is not None
+        return self._models(agent)
 
     def answer_with(self, answer: Callable[[UserInputRequest], Awaitable[str]]) -> None:
         """Answer every question and permission prompt with ``answer(request)``."""
@@ -584,21 +624,26 @@ class Crew:
             reset_active_turn(token)
 
 
-def _settings() -> BaseSettings:
-    return BaseSettings(session_store="memory", default_model="claude-sonnet-4-6")
+#: The SDK's own client class, which each ADK crew routes to its fake API.
+_ASYNC_ANTHROPIC = anthropic.AsyncAnthropic
+
+
+def _settings(store: str = "memory") -> BaseSettings:
+    return BaseSettings(session_store=store, default_model="claude-sonnet-4-6")
 
 
 def _adk_crew(
     team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
-    subagents: SubAgentPolicy | None = None,
+    subagents: SubAgentPolicy | None = None, store: str = "memory",
 ) -> Crew:
     from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
     from agentic_cli.workflow.adk.sessions import child_app
 
     claude = _ClaudeTeam(scripts)
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _ASYNC_ANTHROPIC)
     route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(claude))
     manager = GoogleADKWorkflowManager(
-        agent_configs=team, settings=_settings(), subagents=subagents
+        agent_configs=team, settings=_settings(store), subagents=subagents
     )
 
     def results_read(name: str, call: int) -> dict[str, str]:
@@ -662,16 +707,26 @@ def _adk_crew(
     def call_results(name: str, call: int) -> list[tuple[str, list[str]]]:
         return _claude_call_results([body for sent, body in claude.sent if sent == name][call])
 
+    async def instance_mark(instance: str) -> str:
+        session = await manager._session_service.get_session(
+            app_name=child_app(manager.session_ref(SESSION, USER).app_name),
+            user_id=USER, session_id=f"{SESSION}/{instance}",
+        )
+        return (session.state.get(OUTSIDE_CONTENT_KEY) or "") if session is not None else ""
+
+    def models(name: str) -> list[str]:
+        return [body["model"] for sent, body in claude.sent if sent == name]
+
     return Crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
-        _call_results=call_results,
+        _call_results=call_results, _instance_mark=instance_mark, _models=models,
     )
 
 
 def _deepagents_crew(
     team: list[AgentConfig], scripts: dict[str, list[Step]], monkeypatch,
-    subagents: SubAgentPolicy | None = None,
+    subagents: SubAgentPolicy | None = None, store: str = "memory",
 ) -> Crew:
     from langchain_core.messages import ToolMessage
 
@@ -692,7 +747,7 @@ def _deepagents_crew(
             )
     monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
     manager = deepagents_manager.DeepAgentsWorkflowManager(
-        agent_configs=team, settings=_settings(), subagents=subagents
+        agent_configs=team, settings=_settings(store), subagents=subagents
     )
 
     def results_read(name: str, call: int) -> dict[str, str]:
@@ -759,10 +814,21 @@ def _deepagents_crew(
     def call_results(name: str, call: int) -> list[tuple[str, list[str]]]:
         return _messages_call_results(models.chats[name].conversation(call))
 
+    async def instance_mark(instance: str) -> str:
+        from agentic_cli.workflow.deepagents.sessions import instance_thread_id
+
+        thread = instance_thread_id(manager.session_ref(SESSION, USER), instance)
+        saved = await manager._checkpointer.aget_tuple({"configurable": {"thread_id": thread}})
+        values = saved.checkpoint["channel_values"] if saved is not None else {}
+        return values.get("outside_content") or ""
+
+    def built_models(name: str) -> list[str]:
+        return [resolved.ref.model for resolved in models.built if resolved.agent == name]
+
     return Crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
-        _call_results=call_results,
+        _call_results=call_results, _instance_mark=instance_mark, _models=built_models,
     )
 
 
@@ -904,6 +970,25 @@ def contract_start_job() -> dict:
     return {"success": True, "job_id": record.job_id, "state": record.state.value}
 
 
+@register_tool(
+    capabilities=EXEMPT, description="Continue one of your sub-agents (a contract-test tool).",
+)
+async def contract_follow_up(agent: str, message: str) -> str:
+    """Continue ``agent``, one of the caller's sub-agent instances, with ``message``:
+    the follow-up its parent sends (``Delegations.follow_up``); the envelope as JSON."""
+    workflow = get_service(WORKFLOW)
+    caller = get_active_run()
+    call = get_active_tool_call()
+    mark = workflow._outside_marks.get(get_active_turn())
+    key = "outside_content" if workflow.backend_type == "deepagents" else OUTSIDE_CONTENT_KEY
+    delegated = await workflow._delegations.follow_up(FollowUpRequest(
+        instance=agent, message=message, started_by=started_by(caller), caller=caller,
+        call_id=call.call_id if call is not None else None,
+        state={key: mark} if mark else {},
+    ))
+    return json.dumps(delegated.result, ensure_ascii=False)
+
+
 # -- fixtures --------------------------------------------------------------------
 
 
@@ -929,10 +1014,11 @@ def project(tmp_path, monkeypatch) -> Path:
 
 @pytest.fixture
 async def make_crew(backend, project, monkeypatch):
-    """``make_crew(team, *, subagents=None, **scripts)``: ``team``'s manager on
-    ``backend``, with the sub-agent policy ``subagents``, each agent answering
-    from its script (an agent without one has none); every manager made is
-    cleaned up after the test."""
+    """``make_crew(team, *, subagents=None, store="memory", **scripts)``: ``team``'s
+    manager on ``backend``, with the sub-agent policy ``subagents`` and the
+    session store ``store`` (``"memory"`` or ``"sqlite"``), each agent
+    answering from its script (an agent without one has none); every manager
+    made is cleaned up after the test."""
     SEEN.clear()
     BLOCKING["started"] = asyncio.Event()
     HELD["started"], HELD["go"] = asyncio.Event(), asyncio.Event()
@@ -940,13 +1026,13 @@ async def make_crew(backend, project, monkeypatch):
 
     def make(
         team: list[AgentConfig], *, subagents: SubAgentPolicy | None = None,
-        **scripts: list[Step],
+        store: str = "memory", **scripts: list[Step],
     ) -> Crew:
         complete = {config.name: list(scripts.get(config.name, ())) for config in team}
         complete[SIDE_CALLS] = list(scripts.get(SIDE_CALLS, ()))
         complete[SUMMARIES] = list(scripts.get(SUMMARIES, ()))
         build = _adk_crew if backend == "adk" else _deepagents_crew
-        crew = build(team, complete, monkeypatch, subagents)
+        crew = build(team, complete, monkeypatch, subagents, store)
         made.append(crew)
         return crew
 
@@ -993,6 +1079,7 @@ class TestRunIdentity:
             "call_id": "c1", "title": "Find X.",
             "brief": {"title": "Find X.", "objective": "Find X.\nUse what you know."},
             "started_by": "agent:root", "mode": "blocking",
+            "inherit_context": False, "continuable": True,
         }
         assert (ended.metadata["status"], ended.metadata["call_id"], ended.metadata["result"]) == (
             RUN_COMPLETED, "c1", "X is 42.",
@@ -1773,7 +1860,7 @@ class TestRawLog:
         settings = BaseSettings(
             session_store="memory", default_model="claude-sonnet-4-6", raw_llm_logging=True
         )
-        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda: settings)
+        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda store: settings)
         crew = make_crew(
             team(),
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
@@ -2736,10 +2823,9 @@ async def transcripts(crew: Crew) -> list[str]:
 
     ADK keeps each run's transcript in a child session of the conversation's
     (``adk/sessions.py``: app ``child_app(app)``, session
-    ``<conversation>/<instance>``). Deep Agents keeps one only as a
-    checkpoint: a thread of the conversation's own (``[app, user, session,
-    <instance>]``) or a namespace under its thread; a sub-agent is compiled
-    without a checkpointer, so there is none.
+    ``<conversation>/<instance>``). Deep Agents keeps each in a checkpointer
+    thread of its own (``deepagents/sessions.py::instance_thread_id``:
+    ``[app, user, session, <instance>]``).
     """
     conversation = crew.conversation
     if crew.backend == "adk":
@@ -2770,9 +2856,9 @@ async def transcripts(crew: Crew) -> list[str]:
 class TestARunsTranscriptIsNoConversation:
     """A sub-agent run's transcript belongs to its conversation: it never
     lists or opens as a conversation of its own, and deleting the
-    conversation deletes it. (Only ADK keeps one, so only ADK numbers a new
-    manager's instances past the ones a conversation's store keeps:
-    ``tests/workflow/adk/test_child_sessions.py``.)"""
+    conversation deletes it. (Each backend numbers a new manager's instances
+    past the ones a conversation's store keeps: ``tests/workflow/adk/test_child_sessions.py``
+    and ``tests/workflow/deepagents/test_sessions.py``.)"""
 
     @staticmethod
     def two_runs(make_crew) -> Crew:
@@ -2792,8 +2878,7 @@ class TestARunsTranscriptIsNoConversation:
         kept = await transcripts(crew)
         deleted = await manager.delete_session(SESSION, user_id=USER)
 
-        # Deep Agents keeps no sub-agent transcript (no checkpointer).
-        assert kept == (["researcher-1", "researcher-2"] if crew.backend == "adk" else [])
+        assert kept == ["researcher-1", "researcher-2"]
         assert deleted is True
         assert await transcripts(crew) == []
         assert await manager.list_sessions(user_id=USER) == []
@@ -3955,3 +4040,354 @@ class TestCallResults:
         assert _messages_call_results(messages) == [
             ("call_0", ["42"]), (REPEATED + "call_0", ["42"]), (NO_CALL + "call_0", ["43"]),
         ]
+
+
+# -- instances: a follow-up is an instance's next run, on its own transcript -------------
+
+
+def follow_team(**researcher: Any) -> list[AgentConfig]:
+    """A coordinator that continues its researcher (``contract_follow_up``), and
+    the researcher, with ``researcher``'s fields."""
+    return [
+        agent("coordinator", sub_agents=("researcher",),
+              tools=(contract_follow_up, contract_bring_outside_content)),
+        agent("researcher", tools=(contract_lookup, contract_block), **researcher),
+    ]
+
+
+def instance_events(events: list[WorkflowEvent]) -> list[tuple[str, str]]:
+    """Each ``AGENT_INSTANCE`` of the turn: its instance and its status."""
+    return [(e.run.instance, e.metadata["status"]) for e in events
+            if e.type is EventType.AGENT_INSTANCE]
+
+
+@contextlib.contextmanager
+def no_seals(monkeypatch):
+    """In the block, a stopped turn leaves its calls as a killed process does:
+    ADK's runners never get their abort signal, so ADK seals nothing (Deep
+    Agents never seals: it answers at the next run)."""
+    real = live_events.merged
+
+    def merged(source, live, *, on_stop=None):
+        return real(source, live)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(live_events, "merged", merged)
+        yield
+
+
+def carried_over(crew: Crew, earlier: Crew) -> None:
+    """``crew``'s manager knows the instances and runs ``earlier``'s recorded,
+    each ended as it was and its instance idle, as a restart that reads them
+    from the conversation's store would."""
+    token = set_active_turn(crew.conversation)
+    try:
+        for record in earlier.records():
+            crew.manager.agent_runs.observe(WorkflowEvent.agent_run(
+                record.ref, RUN_STARTED, call_id=record.call_id, title=record.title,
+            ))
+            crew.manager.agent_runs.observe(WorkflowEvent.agent_run(
+                record.ref, record.status, call_id=record.call_id,
+                instance_status=INSTANCE_IDLE,
+            ))
+    finally:
+        reset_active_turn(token)
+
+
+SECOND = RunRef(
+    agent="researcher", instance="researcher-1", run="researcher-1#2", parent_run=None, depth=1
+)
+
+
+class TestAFollowUp:
+    async def test_it_sees_the_instances_earlier_work_and_is_its_next_run(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Now find Y.", "c2")),
+                         says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X")), says("X is 42."),
+                        says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c2"]) == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#2",
+            "status": RUN_COMPLETED, "partial": False, "result": "Y is 7.", "error": None,
+        }
+        # Its request holds the first run's work, its message last.
+        (made,) = crew.call_results("researcher", 2)
+        assert made[0] == "r1" and json.loads(made[1][0]) == {"success": True, "value": 42}
+        sent = crew.bodies("researcher")[2]
+        assert "Find X." in sent and "X is 42." in sent
+        assert crew.last_message("researcher", 2) == "Now find Y."
+        started = runs_of(events, RUN_STARTED)[1]
+        assert started.run == SECOND
+        assert (started.metadata["call_id"], started.metadata["started_by"],
+                started.metadata["input"]) == ("c2", "agent:root", "Now find Y.")
+        assert [(r.ref.run, r.status, r.started_by, r.input) for r in crew.records()] == [
+            ("researcher-1#1", RUN_COMPLETED, "agent:root", ""),
+            ("researcher-1#2", RUN_COMPLETED, "agent:root", "Now find Y."),
+        ]
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+        # Its events are its own run's.
+        assert {e.run for e in events if e.type is EventType.TEXT and e.run.instance != "root"} \
+            == {RESEARCHER, SECOND}
+
+    async def test_the_callers_mark_reaches_the_instances_transcript(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(use("contract_bring_outside_content", "c2")),
+                         calls(follow("researcher-1", "Go on.", "c3")), says("Done.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+
+        await crew.turn()
+        before = await crew.instance_mark("researcher-1")
+        await crew.turn("Read it, then go on.")
+
+        assert before == ""
+        assert await crew.instance_mark("researcher-1") == "contract_bring_outside_content"
+
+    async def test_a_follow_up_blocks_no_event_loop(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X")), says("X is 42."),
+                        says("Went on.")],
+        )
+        await crew.turn()
+
+        with no_blocking_calls():
+            await crew.turn("Go on.")
+
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+
+
+class TestARefusedFollowUp:
+    """A follow-up that cannot run is its call's error result: no run starts."""
+
+    async def test_an_unknown_instance_and_a_blank_message(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(follow("researcher-1", "Go on.", "c0")),
+                         calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", " ", "c2")),
+                         calls(follow("researcher-7", "Go on.", "c3")),
+                         says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        read = crew.results_read("coordinator")
+        assert [json.loads(read[call]) for call in ("c0", "c2", "c3")] == [
+            {"success": False, "error": "'researcher-1' is not one of your sub-agents. "
+                                        "You have no sub-agents yet."},
+            {"success": False, "error": "A follow-up needs a message."},
+            {"success": False, "error": "'researcher-7' is not one of your sub-agents. "
+                                        "Yours: researcher-1."},
+        ]
+        assert crew.requests("researcher") == 1
+
+    async def test_a_one_shot_type_is_closed_when_its_run_ends(self, make_crew):
+        crew = make_crew(
+            follow_team(continuable=False),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator")["c2"]) == {
+            "success": False, "error": "researcher-1 is closed; start a new one with task.",
+        }
+        (ended,) = runs_of(events, RUN_COMPLETED)
+        assert ended.metadata["instance_status"] == INSTANCE_CLOSED
+        assert crew.instances() == [("researcher-1", INSTANCE_CLOSED)]
+        assert crew.requests("researcher") == 1
+
+    async def test_one_the_user_stopped_is_refused_to_its_parent(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Wait.", "c1")),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_block", "r1"))],
+        )
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.cancel("researcher-1#1", by="user", error="stopped by the user") is True
+        events = await asyncio.wait_for(turn, 10)
+
+        read = crew.results_read("coordinator")
+        assert envelope_read(read["c1"])["cancelled_by"] == "user"
+        assert json.loads(read["c2"]) == {
+            "success": False,
+            "error": "researcher-1 was stopped by the user; only the user can continue it.",
+        }
+        assert runs_of(events, RUN_CANCELLED)[0].metadata["instance_status"] == INSTANCE_STOPPED
+        assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+
+    async def test_two_at_once_start_one_run(self, make_crew):
+        """One run per instance at a time: of two follow-ups in one answer,
+        one runs and the other is refused."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Find Y.", "c2"),
+                               follow("researcher-1", "Find Z.", "c3")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn()
+
+        read = crew.results_read("coordinator")
+        outcomes = sorted(json.dumps(json.loads(read[call])) for call in ("c2", "c3"))
+        assert sorted(json.loads(o).get("status", "refused") for o in outcomes) == [
+            RUN_COMPLETED, "refused",
+        ]
+        refused = next(json.loads(o) for o in outcomes if "status" not in json.loads(o))
+        assert refused["error"] == "researcher-1 is running: an instance runs one run at a time."
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1", "researcher-1#2"]
+
+
+class TestMaxOpen:
+    async def test_past_it_the_oldest_idle_instance_is_closed(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            subagents=SubAgentPolicy(max_open=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")),
+                         calls(follow("researcher-1", "Go on.", "c3")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert instance_events(events) == [("researcher-1", INSTANCE_CLOSED)]
+        assert crew.instances() == [
+            ("researcher-1", INSTANCE_CLOSED), ("researcher-2", INSTANCE_IDLE),
+        ]
+        assert json.loads(crew.results_read("coordinator")["c3"])["error"] == (
+            "researcher-1 is closed; start a new one with task."
+        )
+
+
+class TestAFollowUpAfterAStop:
+    """Its calls an earlier run left open are answered before the follow-up's
+    message, each once, from the record when it finished, so the provider
+    takes the request: ADK sealed them as the run stopped; Deep Agents answers
+    them on the instance's thread as its next run starts."""
+
+    @staticmethod
+    def stopping(make_crew, **options: Any) -> Crew:
+        return make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         *options.pop("between", ()),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), use("contract_block", "r2")),
+                        says("Went on.")],
+            **options,
+        )
+
+    @staticmethod
+    def answered_once(crew: Crew, call: int) -> dict[str, str]:
+        found = crew.call_results("researcher", call)
+        assert [len(answers) for _, answers in found] == [1] * len(found), found
+        return {call_id: answers[0] for call_id, answers in found}
+
+    async def test_after_ctrl_c(self, make_crew):
+        crew = self.stopping(make_crew)
+
+        turn = crew.start()
+        try:
+            await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+            await until(lambda: crew.recorded("r1", "researcher-1#1"))
+        finally:
+            await crew.stop(turn)
+        await crew.turn("Go on.")
+
+        answers = self.answered_once(crew, 1)
+        assert list(answers) == ["r1", "r2"]
+        assert json.loads(answers["r1"]) == {"success": True, "value": 42}
+        assert INTERRUPTED_BY_USER in answers["r2"]
+        assert crew.last_message("researcher", 1) == "Go on."
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert [(r.ref.run, r.status) for r in crew.records()] == [
+            ("researcher-1#1", RUN_INTERRUPTED), ("researcher-1#2", RUN_COMPLETED),
+        ]
+
+    async def test_after_its_parent_stopped_it_and_the_turn_ended(self, make_crew):
+        crew = self.stopping(make_crew, between=[says("Stopped it.")])
+
+        turn = crew.start()
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        await until(lambda: crew.recorded("r1", "researcher-1#1"))
+        assert crew.cancel("researcher-1#1", by="parent", error="no longer needed") is True
+        await asyncio.wait_for(turn, 10)
+        await crew.turn("Go on.")
+
+        answers = self.answered_once(crew, 1)
+        assert json.loads(answers["r1"]) == {"success": True, "value": 42}
+        assert INTERRUPTED_BY_USER in answers["r2"]
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+
+    async def test_after_a_crash_in_a_new_process(self, make_crew, monkeypatch):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"))],
+            researcher=[calls(use("contract_lookup", "r1", q="X"), use("contract_block", "r2"))],
+        )
+        with no_seals(monkeypatch):
+            turn = first.start()
+            try:
+                await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+                await until(lambda: first.recorded("r1", "researcher-1#1"))
+            finally:
+                await first.stop(turn)
+        await first.manager.cleanup()
+
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("Went on.")],
+        )
+        carried_over(second, first)
+        await second.turn("Go on.")
+
+        answers = self.answered_once(second, 0)
+        assert list(answers) == ["r1", "r2"]
+        assert all(INTERRUPTED in answer for answer in answers.values())
+        assert envelope_read(second.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert [(r.ref.run, r.status) for r in second.records()][-1] == (
+            "researcher-1#2", RUN_COMPLETED,
+        )
+
+
+class TestAFollowUpAfterAModelSwitch:
+    async def test_it_runs_on_the_new_model_with_its_history_and_records(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Now find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn("Find X.")
+        await crew.manager.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
+        await crew.turn("Now Y.")
+
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert "X is 42." in crew.bodies("researcher")[1]
+        assert crew.models("researcher") == ["claude-sonnet-4-6", "claude-haiku-4-5"]
+        assert [(r.ref.run, r.status) for r in crew.records()] == [
+            ("researcher-1#1", RUN_COMPLETED), ("researcher-1#2", RUN_COMPLETED),
+        ]
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
