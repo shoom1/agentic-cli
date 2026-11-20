@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from agentic_cli.cli.agent_view import COMPACT_IN_VIEW, JOBS_WAIT
 from agentic_cli.cli.commands import Command, CommandCategory
 from agentic_cli.cli.conversation import NOT_KEPT
 from agentic_cli.cli.message_processor import _says_so_when_stopped
@@ -219,12 +220,21 @@ class StatusCommand(Command):
             workflow = app.workflow
             if workflow is None:
                 raise RuntimeError("Workflow not initialized")
-            table.add_row("Model", workflow.model)
+            view = getattr(app, "agent_view", None)
+            # In a sub-agent's view, its context is what the user works with,
+            # and one Model row is shown: the instance's, when it names one.
+            view_rows = view.context_rows() if view is not None else None
+            if view_rows is None or not any(label == "Model" for label, _ in view_rows):
+                table.add_row("Model", workflow.model)
             table.add_row("App Name", workflow.app_name)
             table.add_row("Session ID", workflow.session_id)
             services = "Initialized" if workflow.is_initialized else "Not initialized"
             table.add_row("Services", services)
-            for label, value in _context_rows(workflow, getattr(app, "usage_tracker", None)):
+            rows = (
+                view_rows if view_rows is not None
+                else _context_rows(workflow, getattr(app, "usage_tracker", None))
+            )
+            for label, value in rows:
                 table.add_row(label, value)
         except (RuntimeError, AttributeError):
             # Why it did not start (or its last rebuild failed), when it did
@@ -434,7 +444,10 @@ class JobsCommand(Command):
         if parts and parts[0] == "resume":
             # Each finished, resume-flagged job resumes its agent (a turn).
             resume = getattr(app, "resume_finished_jobs", None)
-            if resume is None:
+            if getattr(app, "agent_view", None) is not None:
+                # In a sub-agent's view they wait for /back, which tells them.
+                app.session.add_message("system", JOBS_WAIT)
+            elif resume is None:
                 app.session.add_warning("Resume is not supported by this app.")
             elif await resume() == 0:
                 app.session.add_message("system", "No finished background jobs to resume.")
@@ -794,8 +807,13 @@ class CompactCommand(Command):
 
         One request at a time (the app's turn lock), with the turn's events
         box and status line; Ctrl+C stops it and nothing is written. The rest
-        of the line, if any, is what the summary should keep above all.
+        of the line, if any, is what the summary should keep above all. Refused
+        in a sub-agent's view (``COMPACT_IN_VIEW``): it is the main
+        conversation's.
         """
+        if getattr(app, "agent_view", None) is not None:
+            app.session.add_warning(COMPACT_IN_VIEW)
+            return
         await app.compact(args.strip() or None)
 
 

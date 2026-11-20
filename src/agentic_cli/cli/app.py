@@ -31,7 +31,9 @@ from prompt_toolkit.history import InMemoryHistory
 
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
+from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view
 from agentic_cli.cli.commands import Command, CommandRegistry
+from agentic_cli.cli.dialogs import serialize_dialogs
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
 from agentic_cli.cli.conversation import (
     NOT_KEPT,
@@ -389,6 +391,10 @@ class BaseCLIApp:
     #: and the newer ones passed over; None when it chose nothing then.
     _chosen_at_start: "tuple[Hold | None, list[tuple[str, int]]] | None" = None
 
+    #: The sub-agent's view that is open (``open_agent_view``); None in the
+    #: main conversation.
+    _agent_view: AgentView | None = None
+
     def __init__(
         self,
         app_info: AppInfo,
@@ -616,6 +622,45 @@ class BaseCLIApp:
             RuntimeError: If workflow is not yet initialized
         """
         return self._workflow_controller.workflow
+
+    @property
+    def session(self) -> ThinkingPromptSession:
+        """The session the app draws in. Its dialog methods take one lock, so a
+        question of a sub-agent's view run and a command's dialog never open
+        at once (``cli/dialogs.py``); a session assigned later gets it too."""
+        return self._session
+
+    @session.setter
+    def session(self, value: ThinkingPromptSession) -> None:
+        self._session = serialize_dialogs(value)
+
+    @property
+    def agent_view(self) -> AgentView | None:
+        """The sub-agent's view that is open (provisional), or None in the
+        main conversation: a line typed goes to it, and the prompt and status
+        bar are its."""
+        return self._agent_view
+
+    async def open_agent_view(self, instance: str) -> bool:
+        """Open the view of one of the conversation's sub-agents (provisional).
+
+        What ``/agent <id>`` and Enter in ``/agents``' picker call
+        (``cli/agent_view.py``). In another's view it leaves that one first.
+
+        Returns:
+            Whether the view is open. False, said: an unknown id, records
+            that could not be read, or a workflow that does not run.
+        """
+        return await open_view(self, instance)
+
+    async def leave_agent_view(self) -> bool:
+        """Leave the open sub-agent's view, back to the main conversation
+        (provisional): what ``/back`` calls.
+
+        Returns:
+            Whether a view was left. False, said, when none is open.
+        """
+        return await leave_view(self)
 
     @property
     def workflow_error(self) -> Exception | None:
@@ -897,6 +942,7 @@ class BaseCLIApp:
             NewCommand,
             ModelsCommand,
         )
+        from agentic_cli.cli.agent_view import BackCommand
         from agentic_cli.cli.agents_command import AgentCommand, AgentsCommand
         from agentic_cli.cli.memory_command import MemoryCommand
         from agentic_cli.cli.settings_command import SettingsCommand
@@ -909,6 +955,7 @@ class BaseCLIApp:
         self.command_registry.register(JobsCommand())
         self.command_registry.register(AgentsCommand())
         self.command_registry.register(AgentCommand())
+        self.command_registry.register(BackCommand())
         self.command_registry.register(ResumeSessionCommand())
         self.command_registry.register(SettingsCommand())
         self.command_registry.register(PapersCommand())
@@ -921,6 +968,11 @@ class BaseCLIApp:
     async def process_input(self, user_input: str) -> None:
         """Process user input.
 
+        A command runs as it does anywhere; when a sub-agent's view is open
+        its prompt and status bar are drawn again after it (the command may
+        have changed the instance). A line in a view goes to the view
+        (``AgentView.take``), any other to the conversation.
+
         Args:
             user_input: The raw user input string
         """
@@ -932,6 +984,10 @@ class BaseCLIApp:
         # Route to appropriate handler
         if user_input.startswith("/"):
             await self._handle_command(user_input)
+            if self._agent_view is not None:
+                self._agent_view.refresh()
+        elif self._agent_view is not None:
+            await self._agent_view.take(user_input)
         else:
             await self._handle_message(user_input)
 
@@ -1027,8 +1083,12 @@ class BaseCLIApp:
             one that could not be told now (its conversation's lookup failed,
             before any claim), the failure said. Whether each one was
             delivered is recorded on the job and reported by ``/jobs``; a
-            failed delivery is surfaced to the user by the turn itself.
+            failed delivery is surfaced to the user by the turn itself. 0
+            in a sub-agent's view: the main agent's notices wait for
+            ``/back`` (``leave_agent_view``), which tells them.
         """
+        if self._agent_view is not None:
+            return 0
         return await self._conversation.deliver_finished_jobs(self._turn_parts())
 
     async def _kept_elsewhere(self, record: Any) -> bool:
@@ -1139,6 +1199,7 @@ class BaseCLIApp:
                 install it); nothing changed.
         """
         target = check_backend(backend).value if backend is not None else None
+        await self._leave_view_first()
         async with _says_so_when_stopped(self.session):
             async with self._turn_lock:
                 return await self._new_conversation(target)
@@ -1279,6 +1340,7 @@ class BaseCLIApp:
         if not self._place().kept:  # one conversation at a time: none to go back to
             self.session.add_error(NOT_KEPT)
             return False
+        await self._leave_view_first()
         backend = getattr(session_id, "backend", None)  # the picker's
         async with _says_so_when_stopped(self.session):
             opened = await self._open_conversation(str(session_id), backend)
@@ -1322,6 +1384,12 @@ class BaseCLIApp:
                 f"{len(waiting)} finished jobs wait for this conversation: "
                 "/jobs resume tells them now.",
             )
+
+    async def _leave_view_first(self) -> None:
+        """Leave the open sub-agent's view, if one is: ``/new`` and ``/resume``
+        change the conversation from the main one."""
+        if self._agent_view is not None:
+            await self.leave_agent_view()
 
     async def _tell_its_finished_jobs(self) -> None:
         """Once a conversation is open, its finished jobs resume (``job_auto_resume``).
@@ -2277,6 +2345,13 @@ class BaseCLIApp:
                     return
                 await self.process_input(text)
 
+            # Ctrl+C stops the run in a sub-agent's view, which works outside
+            # the input handler. A session that takes no binding leaves Ctrl+C
+            # to thinking-prompt's own handling in a view: it ends the boxes
+            # and the run goes on, until /exit stops it or it ends.
+            if not bind_ctrl_c(self.session, lambda: self._agent_view):
+                logger.info("agent_view_ctrl_c_not_bound")
+
             # Keep long-running jobs visible in the status bar while the
             # session runs, independent of the agent loop.
             async with job_monitor.running():
@@ -2290,6 +2365,13 @@ class BaseCLIApp:
                 finally:
                     opening.cancel()
                     await asyncio.gather(opening, return_exceptions=True)
+                    # A view's run still working is the user's to stop: it ends,
+                    # cancelled by the user, before the workflow goes (whose
+                    # cleanup waits for that turn).
+                    view = self._agent_view
+                    if view is not None:
+                        view.stop()
+                        await view.settled()
 
             # Propose memories from the session (if enabled) while the workflow
             # is still alive: leaving this context closes the manager, and the

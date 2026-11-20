@@ -342,3 +342,23 @@ async def test_langgraph_shows_no_tokens_by_agent(tmp_path, monkeypatch):
 
     assert [e for e in events if e.type is EventType.LLM_USAGE]  # it reported usage
     assert by_agent(rows) == []
+
+
+async def test_context_rows_that_raise_leave_the_fixed_rows(monkeypatch):
+    """The Model, App Name, Session ID and Services rows are shown before the
+    context rows are read: a failure reading them leaves those, and says the
+    workflow is not available."""
+    from agentic_cli.cli import builtin_commands
+
+    def raising(workflow, tracker):
+        raise RuntimeError("no context")
+
+    monkeypatch.setattr(builtin_commands, "_context_rows", raising)
+    workflow = SimpleNamespace(
+        model="m:1", app_name="app", session_id="s1", is_initialized=True,
+    )
+
+    rows = await status_rows(workflow)
+
+    labels = [label for label, _ in rows]
+    assert labels[:4] == ["Model", "App Name", "Session ID", "Services"]

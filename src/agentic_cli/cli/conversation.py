@@ -590,29 +590,134 @@ class ConversationCore:
             asyncio.CancelledError: Ctrl+C stopped it, as the processor
                 says, or while it waited for the turn lock.
         """
+        return await self._write(
+            parts,
+            lambda: parts.processor.process(
+                message=message,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            ),
+            turns=True,
+            echo=message,
+        )
+
+    async def run_instance(self, instance: str, message: str, parts: TurnParts) -> bool:
+        """Run the user's ``message`` as the next run of a sub-agent, in its view.
+
+        A write to the conversation under the turn lock, as a turn is: held
+        to write, the conversations ``/new`` left dropped around it
+        (``drop_left``), and ``written`` once it reached a ready workflow. It
+        is not ``turned``: the main agent's conversation, whose memories are
+        proposed, holds none of it. The view echoed the line.
+
+        Args:
+            instance: The sub-agent instance (``researcher-2``).
+            message: What the user typed.
+            parts: The app's parts it runs on (the view's own processor).
+
+        Returns:
+            Whether it ran: False when another process has the conversation
+            open (said), and nothing ran.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
+                or while it waited for the turn lock.
+        """
+        return await self._write(
+            parts,
+            lambda: parts.processor.process_instance(
+                instance,
+                message,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            ),
+            turns=False,
+        )
+
+    async def tell_root(self, text: str, parts: TurnParts) -> bool:
+        """Tell the main agent what the user did in a sub-agent's view, as a turn.
+
+        A notice the user did not type (``view_notice``): under the turn
+        lock as ``run_instance``, held to write, ``turned`` (the main agent
+        answered in the conversation) and ``written`` once it reached a
+        ready workflow.
+
+        Args:
+            text: The notice.
+            parts: The app's parts it runs on.
+
+        Returns:
+            Whether it ran: False when another process has the conversation
+            open (said), and nothing ran.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
+                or while it waited for the turn lock.
+        """
+        return await self._write(
+            parts,
+            lambda: parts.processor.process_notice(
+                text,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+            ),
+            turns=True,
+        )
+
+    async def _write(
+        self,
+        parts: TurnParts,
+        run: Callable[[], Awaitable[Any]],
+        *,
+        turns: bool,
+        echo: str | None = None,
+    ) -> bool:
+        """``run()`` under the turn lock: the frame of every write to the conversation.
+
+        ``echo``, the line the user typed, is shown once the lock is taken,
+        and before ``CANCELLED_LINE`` when the wait for it is stopped (a line
+        Ctrl+C stops while it waits is shown and said cancelled, not dropped
+        unseen). The conversation is held to write first; ``turned`` when
+        ``turns`` (the main agent answered in it); ``written`` once ``run``
+        reached a ready workflow (its result's status is not ``UNAVAILABLE``;
+        one that raised or was cancelled counts when the workflow was ready).
+
+        Returns:
+            Whether it ran: False when another process has the conversation
+            open (said).
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
+                or while it waited for the turn lock.
+        """
         ui = parts.ui
         try:
             await self.turn_lock.acquire()
         except asyncio.CancelledError:
-            ui.add_message("user", message)
+            if echo is not None:
+                ui.add_message("user", echo)
             ui.add_message("system", CANCELLED_LINE)
             raise
         try:
-            ui.add_message("user", message)
+            if echo is not None:
+                ui.add_message("user", echo)
             if not self._held_to_write(ui):
                 return False
             async with self._dropping_left(parts):
-                self.turned = True  # the conversation now holds this message
-                reached = False  # the turn reached a ready workflow, which stores it
+                if turns:
+                    self.turned = True
+                reached = False
                 try:
-                    result = await parts.processor.process(
-                        message=message,
-                        workflow_controller=parts.controller,
-                        ui=ui,
-                        settings=parts.settings,
-                        usage_tracker=parts.tracker,
-                        session_id=self.session_id,
-                    )
+                    result = await run()
                     reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
                 except BaseException:
                     reached = parts.controller.is_ready  # it may have begun

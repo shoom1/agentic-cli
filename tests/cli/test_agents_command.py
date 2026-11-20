@@ -1,11 +1,12 @@
 """``/agents``: the open conversation's sub-agent runs (``cli/agents_command.py``).
 
 ``/agents`` is a picker of the instances (id, type, status, title, each
-followed by the ones it started), and Enter shows one as ``/agents <id>``
-does: one instance or run: its type, parent and title, then each run's
+followed by the ones it started), and Enter opens its view, as ``/agent <id>``
+does (``tests/cli/test_agent_view.py``). ``/agents <id>`` shows one instance
+or run: its type, parent and title, then each run's
 status and time, its brief's other fields (a follow-up's message), the first
 lines of its result, its error and its tokens by model. An instance that was
-followed up shows every run in its panel. ``/agent <id>`` shows one,
+followed up shows every run in its panel.
 ``/agent stop <id>`` and ``/agent close <id>`` are the user's stop and close,
 each saying what it did or why not. The runs are a real manager's records,
 filled as its event processors fill them (``AgentRuns.observe`` under the
@@ -197,17 +198,6 @@ class TestThePicker:
             "fetcher-1 · fetcher · idle · Fetch Z.",
         ]
         session.add_rich.assert_not_called()
-
-    async def test_enter_shows_the_one_picked_as_agents_id_does(self, manager):
-        crew_ran(manager)
-
-        picked = await agents(manager, picked=lambda options: options[1])
-        shown = await agents(manager, "writer-1")
-
-        (panel,) = picked.add_rich.call_args.args
-        (same,) = shown.add_rich.call_args.args
-        assert str(panel.title) == "[bold]writer-1[/bold]"
-        assert rows_of(panel.renderable) == rows_of(same.renderable)
 
     async def test_escape_shows_nothing(self, manager):
         crew_ran(manager)
@@ -496,17 +486,9 @@ class TestAfterARestart:
 
 
 class TestTheAgentCommand:
-    """``/agent <id>`` shows one sub-agent; ``/agent stop <id>`` and ``/agent
-    close <id>`` stop and close it, each saying what it did or why not."""
-
-    async def test_an_id_alone_shows_it_as_agents_id_does(self, manager):
-        crew_ran(manager)
-
-        shown = await agent(manager, "researcher-1")
-        same = await agents(manager, "researcher-1")
-
-        (panel,) = shown.add_rich.call_args.args
-        assert rows_of(panel.renderable) == rows_of(same.add_rich.call_args.args[0].renderable)
+    """``/agent stop <id>`` and ``/agent close <id>`` stop and close one
+    sub-agent, each saying what it did or why not (``/agent <id>`` opens its
+    view: ``tests/cli/test_agent_view.py``)."""
 
     async def test_stop_stops_an_idle_one_and_says_only_the_user_continues_it(self, manager):
         crew_ran(manager)

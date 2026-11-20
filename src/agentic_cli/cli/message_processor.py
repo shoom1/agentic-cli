@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from thinking_prompt import ButtonConfig, Dialog, TextField
 
+from agentic_cli.cli.dialogs import dialog_lock
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
 from agentic_cli.workflow.agents.runs import RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
@@ -320,6 +321,9 @@ class _EventProcessingState:
     # names (``get_status``).
     at_work: str | None = None
     line_by: str | None = None
+    # The instance whose view the turn runs in (``process_instance``): its text
+    # is the reply and its lines name nobody, as the main agent's.
+    viewed: str | None = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         # Whichever handler writes the status line, it writes the work of
@@ -349,14 +353,24 @@ _RUN_LINES = {
 }
 
 
-def _at_work(event: "WorkflowEvent") -> str | None:
+def _at_work(event: "WorkflowEvent", viewed: str | None = None) -> str | None:
     """The sub-agent run ``event`` is the work of (its instance), or None.
 
     None for the main agent's own (``root_run``), a depth-0 agent's (a native
     ADK YAML app's transfer target) and the manager's (no run): those lines
-    name nobody, as before.
+    name nobody, as before. None too for the instance in ``viewed``: in its
+    view it is the agent the user works with.
     """
-    return instance_of(getattr(event, "run", None))
+    instance = instance_of(getattr(event, "run", None))
+    return None if instance == viewed else instance
+
+
+def _in_view(event: "WorkflowEvent", state: _EventProcessingState) -> bool:
+    """Whether ``event`` is the work of the instance whose view the turn runs in."""
+    return (
+        state.viewed is not None
+        and instance_of(getattr(event, "run", None)) == state.viewed
+    )
 
 
 # === Message Processor ===
@@ -572,6 +586,117 @@ class MessageProcessor:
                 _source, workflow_controller, ui, settings, usage_tracker
             )
 
+    async def process_instance(
+        self,
+        instance: str,
+        message: str,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+        session_id: str | None = None,
+    ) -> TurnResult:
+        """Run the user's line as the next run of a sub-agent, in its view.
+
+        The source is ``workflow.run_instance`` (``started_by: user``). It is
+        drawn as a turn is (events box, tool results, token accounting,
+        Ctrl+C), but the instance is the agent the user works with: its text
+        is the reply and its lines name nobody (``viewed``), and each event of
+        its run draws the status bar again, which names its status. A
+        follow-up that cannot run is the turn's one ``ERROR``.
+
+        Args:
+            instance: The sub-agent instance in view (``researcher-2``).
+            message: The user's line.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings.
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+            session_id: The conversation, the app's durable session.
+
+        Returns:
+            The turn's outcome; ``TurnResult.delivered`` is True only when the
+            event stream ran to completion.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it (the user's stop of the
+                run): ``CANCELLED_LINE`` has been said, once.
+        """
+        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
+            if not await workflow_controller.ensure_initialized(ui):
+                ui.add_error(
+                    "Cannot process message - workflow not initialized. "
+                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
+                )
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
+                )
+
+            bind_context(user_id=settings.default_user)
+            logger.info(
+                "handling_instance_message", instance=instance, message_length=len(message)
+            )
+
+            def _source(workflow):
+                return workflow.run_instance(
+                    instance,
+                    message,
+                    session_id=session_id,
+                    user_id=settings.default_user,
+                )
+
+            return await self._run_turn(
+                _source, workflow_controller, ui, settings, usage_tracker, viewed=instance
+            )
+
+    async def process_notice(
+        self,
+        text: str,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+        session_id: str | None = None,
+    ) -> TurnResult:
+        """Tell the main agent what the user did in a sub-agent's view.
+
+        A notice the user did not type (``view_notice``): the source is
+        ``workflow.tell_root``, a turn of the main agent whose input is
+        ``text``, drawn as a job's notice turn is (its reply is the reply).
+
+        Args:
+            text: The notice.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings.
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+            session_id: The conversation, the app's durable session.
+
+        Returns:
+            The turn's outcome; ``UNAVAILABLE`` when the workflow is not ready.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as it stops a turn:
+                ``CANCELLED_LINE`` has been said, once.
+        """
+        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
+            if not await workflow_controller.ensure_initialized(ui):
+                return TurnResult(
+                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
+                )
+
+            bind_context(user_id=settings.default_user)
+            logger.info("handling_notice", notice_length=len(text))
+
+            def _source(workflow):
+                return workflow.tell_root(
+                    text, session_id=session_id, user_id=settings.default_user
+                )
+
+            return await self._run_turn(
+                _source, workflow_controller, ui, settings, usage_tracker
+            )
+
     async def process_compact(
         self,
         focus: str | None,
@@ -670,11 +795,15 @@ class MessageProcessor:
         ui: "ThinkingPromptSession",
         settings: "BaseSettings",
         usage_tracker: "UsageTracker | None" = None,
+        *,
+        viewed: str | None = None,
     ) -> TurnResult:
         """Drive one turn from an event-source factory through the UI.
 
-        Shared by ``process`` (user message) and ``process_resume`` (job
-        result). ``source_factory(workflow)`` returns the WorkflowEvent async
+        Shared by ``process`` (user message), ``process_resume`` (job
+        result), ``process_instance`` (a sub-agent's run in its view, whose
+        instance is ``viewed``) and ``process_notice``.
+        ``source_factory(workflow)`` returns the WorkflowEvent async
         generator to consume; everything else (events box, HITL callback,
         Ctrl+C cancel, rate-limit retry, token accounting) is identical.
 
@@ -722,6 +851,7 @@ class MessageProcessor:
         state = _EventProcessingState(
             usage_tracker=usage_tracker,
             workflow_controller=workflow_controller,
+            viewed=viewed,
         )
         workflow = workflow_controller.workflow
         dispatch = self._get_event_dispatch()
@@ -778,9 +908,12 @@ class MessageProcessor:
                 # The placement is read now: /settings may have changed it
                 # since the session started with its own.
                 try:
-                    response = await self._prompt_user_input(
-                        request, ui, settings.dialog_placement
-                    )
+                    # Behind any dialog a command has open (a view's run
+                    # asks while the prompt takes commands).
+                    async with dialog_lock(ui):
+                        response = await self._prompt_user_input(
+                            request, ui, settings.dialog_placement
+                        )
                 except asyncio.CancelledError:
                     # The asking task alone was stopped (a sub-agent run's
                     # limit, its parent, the user), not the turn: the dialog
@@ -813,7 +946,7 @@ class MessageProcessor:
                             async for event in events:
                                 handler = dispatch.get(event.type)
                                 if handler is not None:
-                                    state.at_work = _at_work(event)
+                                    state.at_work = _at_work(event, state.viewed)
                                     await handler(
                                         self, event, state, ui, settings, workflow
                                     )
@@ -1037,12 +1170,13 @@ class MessageProcessor:
         ``metadata["subagent"]`` by the backend) is its work, which its parent
         reads as a tool result: it becomes the events box's status line,
         under its run's name (``researcher-2 › …``, ``get_status``), or its
-        agent's when the event names no run, and is no part of the reply.
+        agent's when the event names no run, and is no part of the reply. In a
+        sub-agent's view the instance in view replies (``_in_view``).
         """
         # Text is already on screen, or in the durable session: replaying the
         # turn would emit it twice.
         state.side_effects_seen = True
-        if event.metadata.get("subagent"):
+        if event.metadata.get("subagent") and not _in_view(event, state):
             line = next(
                 (line.strip() for line in event.content.splitlines() if line.strip()), ""
             )
@@ -1339,11 +1473,15 @@ class MessageProcessor:
         Under the run's name: ``queued`` (waiting for a free working slot),
         ``input_required`` (waiting on the user) and ``running`` each write
         the line (``_RUN_LINES``); a run's start and end write none, nor is
-        anything printed (``/agents`` lists the runs).
+        anything printed (``/agents`` lists the runs). In a sub-agent's view
+        each event of the instance's run draws the status bar again: it names
+        the instance's status.
         """
         line = _RUN_LINES.get(event.metadata.get("status"))
         if line is not None:
             state.status_line = line
+        if _in_view(event, state) and state.workflow_controller is not None:
+            state.workflow_controller.update_status_bar(ui)
 
     async def _handle_llm_usage(
         self,
