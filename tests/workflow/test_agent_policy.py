@@ -85,11 +85,23 @@ class TestSubAgentPolicy:
         assert policy.max_runs_per_turn == 20
         assert policy.limits is DEFAULT_LIMITS
         assert policy.max_open == 20
+        assert policy.follow_ups is False
 
-    def test_max_open_comes_last(self):
-        # Appended: a positional SubAgentPolicy(...) written before it still binds.
-        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-1] == "max_open"
+    def test_max_open_and_follow_ups_come_last(self):
+        # Appended: a positional SubAgentPolicy(...) written before them still binds.
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-2:] == [
+            "max_open", "follow_ups",
+        ]
         assert SubAgentPolicy(max_open=3).max_open == 3
+        assert SubAgentPolicy(follow_ups=True).follow_ups is True
+
+    @pytest.mark.parametrize("value", [1, 0, None, "yes"])
+    def test_follow_ups_is_true_or_false(self, value):
+        with pytest.raises(ValueError) as exc:
+            SubAgentPolicy(follow_ups=value)
+        message = str(exc.value)
+        assert "SubAgentPolicy.follow_ups must be True or False" in message
+        assert repr(value) in message
 
     def test_the_default_limits_are_a_hundred_model_calls(self):
         assert DEFAULT_LIMITS == AgentLimits(max_model_calls=100)

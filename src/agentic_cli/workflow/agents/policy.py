@@ -107,16 +107,24 @@ class SubAgentPolicy:
         max_open: How many sub-agent instances a conversation keeps open
             (``idle`` or ``stopped``) between their runs; past it, as a run
             ends, the oldest idle one (by its last run's end) is closed.
+        follow_ups: Whether every agent with sub-agents gets
+            ``message_agent``, ``stop_agent`` and ``check_agents`` beside
+            ``task``; False, ``task`` alone.
     """
 
     max_active: int = 4
     max_runs_per_turn: int = 20
     limits: AgentLimits = DEFAULT_LIMITS
     max_open: int = 20
+    follow_ups: bool = False
 
     def __post_init__(self) -> None:
         _check_count("SubAgentPolicy", "max_active", self.max_active, optional=False)
         _check_count("SubAgentPolicy", "max_runs_per_turn", self.max_runs_per_turn, optional=False)
+        if not isinstance(self.follow_ups, bool):
+            raise ValueError(
+                f"SubAgentPolicy.follow_ups must be True or False, not {self.follow_ups!r}."
+            )
         if not isinstance(self.limits, AgentLimits):
             raise ValueError(
                 f"SubAgentPolicy.limits must be an AgentLimits, not {self.limits!r}."
