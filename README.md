@@ -1446,7 +1446,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   manager's entry points (provisional, on the open conversation, any of its
   sub-agents): `run_instance(id, message)` (a turn of its own, counted toward
   no turn's runs; stopping the stream is your stop of the run),
-  `stop_instance(id)`, `close_instance(id)`, `steer_instance(id, message)`,
+  `interrupt_instance(id)` (that run ends `interrupted`, as at a process
+  exit, not your stop), `stop_instance(id)`, `close_instance(id)`,
+  `steer_instance(id, message)`,
   `instance_result(id)`, `tell_root(text)` (with `view_notice(id,
   envelope)`'s text, left out of fact extraction and of the conversation's
   title and turns, as a job's notice is).
@@ -1457,7 +1459,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   status, its own `ctx` and tokens (the jobs segment kept). A line you type is
   its next run, streamed as a turn, its text the reply; a line typed while
   that run works is given to it before its next model step. Ctrl+C stops the
-  run (it is then `stopped`; your next line continues it). `/back` prints
+  run (it is then `stopped`; your next line continues it); `/exit` while it
+  works interrupts it, as quitting the app does, and leaves it `idle`, its
+  parent free to continue it. `/back` prints
   `── back to main ──` and, when a run you started there ended, tells the main
   agent its latest result in one notice turn; finished jobs wait while you are
   in a view (`↻N`) and are told after `/back`. In a view `/status` shows the

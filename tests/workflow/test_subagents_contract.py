@@ -5669,6 +5669,42 @@ class TestTheUsersFollowUp:
         assert [call for call, _ in crew.call_results("researcher", -1)] == ["r1"]
         assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
 
+    async def test_an_interrupt_ends_its_run_as_a_turns_cancel_and_the_instance_idle(
+        self, make_crew
+    ):
+        """``interrupt_instance`` (a process exit): no stop of the user's."""
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), calls(use("contract_block", "r1")), says("Went on.")],
+        )
+        await crew.turn()
+        assert crew.manager.interrupt_instance("researcher-1") is False  # none works
+
+        async def view() -> None:
+            async for _ in crew.manager.run_instance("researcher-1", "Wait here."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.manager.interrupt_instance("researcher-1") is True
+        done, _ = await asyncio.wait({viewing}, timeout=10)
+        if not done:
+            await Crew.stop(viewing)
+        assert done, "the interrupted run did not end"
+        assert viewing.cancelled()
+
+        second = crew.records()[-1]
+        assert (second.ref.run, second.status, second.cancelled_by) == (
+            "researcher-1#2", RUN_INTERRUPTED, None,
+        )
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+        assert crew.manager.interrupt_instance("researcher-1") is False
+        # Its parent continues it.
+        await crew.turn("Go on.")
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+
     async def test_one_that_cannot_run_is_one_error_and_nothing_runs(self, make_crew):
         crew = make_crew(
             follow_team(continuable=False),

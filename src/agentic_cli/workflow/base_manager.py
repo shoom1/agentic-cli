@@ -146,6 +146,16 @@ _CLOSING: set[asyncio.Future] = set()
 RECORDS_RELEASE_WAIT = 10.0
 
 
+class _UserRun:
+    """A run the user started (``run_instance``), while its turn lasts: its
+    task once it starts, and whether it is interrupted (``interrupt_instance``),
+    which makes a stop of its stream a turn's cancel, not the user's stop."""
+
+    def __init__(self) -> None:
+        self.work: asyncio.Task[Delegated] | None = None
+        self.interrupted = False
+
+
 def _module_of(klass: type) -> str:
     module = getattr(klass, "__module__", None)
     return module if isinstance(module, str) else ""
@@ -863,6 +873,14 @@ class BaseWorkflowManager(ABC):
     # takes them, on any of its instances, through ``Delegations``.
 
     @property
+    def _user_runs(self) -> dict[tuple[SessionRef, str], _UserRun]:
+        """The runs the user started that are working, by conversation and instance."""
+        held = self.__dict__.get("_user_runs_held")
+        if held is None:
+            held = self.__dict__["_user_runs_held"] = {}
+        return held
+
+    @property
     def _instance_results(self) -> dict[tuple[SessionRef, str], dict[str, Any]]:
         """The latest envelope of each instance the user ran, by conversation and
         instance, as the cap left it (``_user_ran``)."""
@@ -894,7 +912,10 @@ class BaseWorkflowManager(ABC):
 
         Stopping the stream (Ctrl+C cancels the consumer, or it closes the
         generator) is the user's stop of the run: it ends ``cancelled`` by
-        the user and the instance is ``stopped``, inside the turn.
+        the user and the instance is ``stopped``, inside the turn. A run
+        ``interrupt_instance`` interrupts ends as a turn's cancel ends its
+        runs instead: ``interrupted``, the instance ``idle``, the stream
+        raising ``asyncio.CancelledError``.
 
         Yields:
             The run's ``WorkflowEvent``s.
@@ -909,9 +930,14 @@ class BaseWorkflowManager(ABC):
                 state=await self._conversation_state(ref),
             )
             live = live_events.LiveEvents()
+            key = (ref, instance)
+            held = self._user_runs[key] = _UserRun()
 
             def stop_it() -> None:
-                # Its consumer stopped (Ctrl+C): the user's stop of the run alone.
+                # Its consumer stopped (Ctrl+C): the user's stop of the run
+                # alone, unless the run is interrupted (a turn's cancel).
+                if held.interrupted:
+                    return
                 record = self.agent_runs.instance(ref, instance)
                 if record is not None and record.status == INSTANCE_RUNNING and record.runs:
                     self._delegations.cancel(
@@ -919,15 +945,20 @@ class BaseWorkflowManager(ABC):
                     )
 
             async def source() -> AsyncGenerator[WorkflowEvent, None]:
+                if held.interrupted:  # before its run started: none starts
+                    raise asyncio.CancelledError
                 # The run's own task: a stop cancels the run, not its caller,
                 # so it ends cancelled by the user, not interrupted.
-                work = asyncio.create_task(
+                work = held.work = asyncio.create_task(
                     self._delegations.follow_up(request), name=f"user run of {instance}"
                 )
                 try:
                     delegated = await asyncio.shield(work)
                 except asyncio.CancelledError:
-                    stop_it()  # a run that started after the consumer's stop looked
+                    if held.interrupted:
+                        work.cancel()  # the run's caller is cancelled: it ends interrupted
+                    else:
+                        stop_it()  # a run that started after the consumer's stop looked
                     await asyncio.wait([work])
                     if not work.cancelled() and work.exception() is None:
                         self._user_ran(ref, instance, work.result())
@@ -937,14 +968,43 @@ class BaseWorkflowManager(ABC):
                     return
                 self._user_ran(ref, instance, delegated)
 
-            with live_events.reporting(live):
-                async with contextlib.aclosing(
-                    live_events.merged(source(), live, on_stop=stop_it)
-                ) as items:
-                    async for item in items:
-                        event = self._apply_event_hook(item)
-                        if event is not None:
-                            yield event
+            try:
+                with live_events.reporting(live):
+                    async with contextlib.aclosing(
+                        live_events.merged(source(), live, on_stop=stop_it)
+                    ) as items:
+                        async for item in items:
+                            event = self._apply_event_hook(item)
+                            if event is not None:
+                                yield event
+            finally:
+                if self._user_runs.get(key) is held:
+                    del self._user_runs[key]
+
+    def interrupt_instance(
+        self, instance: str, *, session_id: str | None = None, user_id: str | None = None
+    ) -> bool:
+        """Interrupt the run of ``instance`` the user started, as a turn's cancel (provisional).
+
+        What a process exit does to a run: not the user's stop. The run of
+        that ``run_instance`` ends ``interrupted`` and its instance stays
+        ``idle``, so its parent may continue it; its stream then raises
+        ``asyncio.CancelledError``, and its turn records the run and writes
+        the records as it ends (a stop of that stream from now on is no
+        stop of the user's either). Only ``run_instance``'s run: a run of
+        the root's turn ends with that turn.
+
+        Returns:
+            Whether such a run was working (or about to start); False,
+            doing nothing, otherwise.
+        """
+        held = self._user_runs.get((self.session_ref(session_id, user_id), instance))
+        if held is None or held.interrupted or (held.work is not None and held.work.done()):
+            return False
+        held.interrupted = True
+        if held.work is not None:
+            held.work.cancel()
+        return True
 
     def _user_ran(self, ref: SessionRef, instance: str, delegated: Delegated) -> None:
         """Take what a run the user started left: its mark on the conversation, its envelope.

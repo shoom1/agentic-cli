@@ -630,7 +630,10 @@ the start of the entry's title.
   turn of its own (`started_by: user`, counted toward no turn's runs, from the
   conversation's outside-content mark; stopping its stream, Ctrl+C, is the
   user's stop of the run, which ends `cancelled` and leaves the instance
-  `stopped`), `stop_instance`, `close_instance` (both written to the store
+  `stopped`), `interrupt_instance(instance)` (that run ends as a turn's
+  cancel ends its runs, `interrupted`, the instance `idle`, as at a process
+  exit; its stream raises `asyncio.CancelledError`), `stop_instance`,
+  `close_instance` (both written to the store
   before they return), `steer_instance(instance, message)` (the user's message
   to a running run, before its next step), `instance_result` (the envelope of
   the latest run the user started, through the tool result cap) and
@@ -652,7 +655,9 @@ the start of the entry's title.
   next model step (`steer_instance`), not queued. The run works outside the
   input handler, so the prompt stays open to steer it, and Ctrl+C stops it (a
   key binding of the view's own, active only while its run works: the user's
-  stop, the sub-agent `stopped`). `/back` waits for a run still working,
+  stop, the sub-agent `stopped`); `/exit` while it works interrupts it, as a
+  process exit does (`interrupted`, the sub-agent `idle`, so its parent may
+  continue it). `/back` waits for a run still working,
   prints `── back to main ──`, and, when a run you started there ended, the
   main agent gets one notice turn with its latest envelope (`tell_root`),
   drawn as a job's notice is; the main agent's notices (finished jobs) wait

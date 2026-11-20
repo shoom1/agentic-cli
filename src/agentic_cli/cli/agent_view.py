@@ -17,8 +17,10 @@ never queued as a turn. The run works in a task of its own, outside the
 input handler: thinking-prompt takes no line while a handler runs, so the
 prompt stays open for the lines that steer it, and Ctrl+C stops it through
 the binding ``bind_ctrl_c`` adds (the user's stop: the instance is
-``stopped``). A closed instance's view is read-only: no prompt, and a line
-typed there is refused.
+``stopped``). The app's exit interrupts a run still working
+(``AgentView.interrupt``), as a process exit interrupts any run: no stop of
+the user's, so the instance stays ``idle``. A closed instance's view is
+read-only: no prompt, and a line typed there is refused.
 
 ``/back`` leaves: it waits for a run still working, prints ``── back to main
 ──``, and, when a run the user started there ended since the main agent was
@@ -279,6 +281,29 @@ class AgentView:
         for run in working:
             run.cancel()
         return bool(working)
+
+    def interrupt(self) -> bool:
+        """Interrupt the run in view, as a process exit does: no stop of the user's.
+
+        The manager ends it as a turn's cancel (``interrupt_instance``): the
+        run ``interrupted``, the instance ``idle``, so its parent may continue
+        it. A line waiting to run is cancelled before it starts. Whether one
+        was working; ``settled`` waits for it.
+        """
+        working = [run for run in self._runs if not run.done()]
+        if not working:
+            return False
+        try:
+            self.app.workflow.interrupt_instance(
+                self.instance,
+                session_id=self.conversation.session_id,
+                user_id=self.conversation.user_id,
+            )
+        except (RuntimeError, AttributeError):
+            pass  # no workflow runs: no run of it works
+        for run in working:
+            run.cancel()
+        return True
 
     async def settled(self) -> None:
         """Wait until no run the user started here works (none is stopped)."""
