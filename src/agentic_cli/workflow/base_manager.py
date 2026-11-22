@@ -63,6 +63,7 @@ from agentic_cli.workflow.agents.delegate import (
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.records import RecordsWriter
 from agentic_cli.workflow.agents.roster import Rosters
+from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.agents.runs import (
     INSTANCE_CLOSED,
     INSTANCE_RUNNING,
@@ -1803,12 +1804,17 @@ class BaseWorkflowManager(ABC):
     def _roster_wanted(self, root: str) -> bool:
         """Whether ``root``'s requests carry the roster of its sub-agents.
 
-        Only a root that can continue them does (it has ``message_agent``:
-        sub-agents and the policy's ``follow_ups``); without the tool it could
-        do nothing with an open instance.
+        Only a root that can continue them does (it has ``message_agent``: it
+        can have sub-agents, its own or types started at run time, and the
+        policy's ``follow_ups``); without the tool it could do nothing with an
+        open instance.
         """
         config = next((c for c in self._agent_configs if c.name == root), None)
-        return config is not None and bool(config.sub_agents) and self.subagent_policy.follow_ups
+        return (
+            config is not None
+            and self.subagent_policy.follow_ups
+            and can_have_children(config, self._agent_configs, self.subagent_policy, root=True)
+        )
 
     def _roster_now(self) -> str:
         """The roster the turn's conversation carries, taken the first time it is

@@ -1,8 +1,14 @@
 """Deep Agents' ``task`` tool: the framework's delegation, as a LangChain tool.
 
-``build_task_tool`` makes a delegating agent's ``task``. Its schema and its
-description are the framework's (``agents/brief.py``: ``task_parameters``,
-``task_description``), as ADK's ``TaskTool``'s are, and a call hands its
+``build_task_tool`` makes the ``task`` of an agent that can have sub-agents
+(its own, or types it may start at run time: ``agents/spawn.py``). Its
+schema and its description are the framework's, made for the types the run
+that calls it may start (``Delegations.task_offer``: ``agents/brief.py``'s
+``task_parameters`` and ``task_description``), as ADK's ``TaskTool``'s are:
+the root's are fixed when it is built (depth 0), a sub-agent's are rewritten
+for each of its model calls (``RunControlMiddleware``), and a call from a run
+that may start nothing gets the answer for a tool it does not have. A call
+hands its
 arguments, as the model wrote them, to the manager's ``Delegations``
 (``agents/delegate.py``): it reads the brief, runs the sub-agent
 (``DeepAgentsWorkflowManager._run_agent``, apart from this agent's stream)
@@ -45,19 +51,22 @@ from langgraph.types import Command
 
 from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents.brief import (
     follow_up_description,
     follow_up_parameters,
-    task_description,
     task_parameters,
 )
 from agentic_cli.workflow.agents.delegate import DelegationRequest
 from agentic_cli.workflow.agents.follow_ups import call_follow_up_tool
+from agentic_cli.workflow.deepagents.middleware import error_tool_message
 from agentic_cli.workflow.sessions import get_active_run
+from agentic_cli.workflow.tool_errors import unknown_tool_result
 
 if TYPE_CHECKING:
     from agentic_cli.workflow.agents.delegate import Delegations
-    from agentic_cli.workflow.config import AgentConfig
+
+logger = Loggers.workflow()
 
 #: The state a run shares with its caller (``state.AgentCliState``): the
 #: outside-content mark alone, which starts from the caller's and comes back
@@ -67,20 +76,34 @@ SHARED_KEYS = ("outside_content",)
 
 
 def build_task_tool(
-    agent: str, types: Mapping[str, AgentConfig], delegations: Callable[[], Delegations]
+    agent: str, delegations: Callable[[], Delegations], *, root: bool = True
 ) -> StructuredTool:
-    """``agent``'s ``task`` tool, which starts a run of one of ``types``.
+    """``agent``'s ``task`` tool, which starts a run of a type the calling run may start.
+
+    Its schema and description are the offer at the agent's first depth (the
+    root's 0, any other agent's 1), made once with the warnings; a
+    sub-agent's are rewritten for each model call.
 
     Args:
         agent: The delegating agent's name.
-        types: Its sub-agents, by name: what ``agent_type`` may name.
         delegations: The manager's delegations, asked for at each call.
+        root: Whether the agent is the root.
     """
+    offer = delegations().task_offer(agent, 0 if root else 1, warn=True)
 
     async def task(runtime: ToolRuntime, **arguments: Any) -> Command:
         state = runtime.state
+        caller = get_active_run()
+        if not delegations().offered(agent, caller.depth if caller is not None else 0):
+            # A run that may start nothing is offered no task: a call of the
+            # name gets the answer for a tool it does not have, as on ADK.
+            logger.info("tool_not_found", tool=TASK_TOOL, agent=agent)
+            others = [tool.name for tool in runtime.tools or () if tool.name != TASK_TOOL]
+            call = {"name": TASK_TOOL, "args": arguments, "id": runtime.tool_call_id}
+            answer = error_tool_message(unknown_tool_result(TASK_TOOL, others), call)
+            return Command(update={"messages": [answer]})
         delegated = await delegations().delegate(DelegationRequest(
-            caller=get_active_run(),
+            caller=caller,
             caller_agent=agent,
             call_id=runtime.tool_call_id,
             arguments=arguments,
@@ -97,8 +120,8 @@ def build_task_tool(
     tool = StructuredTool.from_function(
         coroutine=task,
         name=TASK_TOOL,
-        description=task_description(types, delegations().policy),
-        args_schema=task_parameters(types),
+        description=offer.description if offer is not None else "",
+        args_schema=offer.parameters if offer is not None else task_parameters({}),
         infer_schema=False,
     )
     bind_tool_identity(tool, get_registry().get(TASK_TOOL))

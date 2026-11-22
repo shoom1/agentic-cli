@@ -52,6 +52,7 @@ from google.adk.agents import LlmAgent  # noqa: E402
 from google.adk.apps import App  # noqa: E402
 from google.adk.events import Event  # noqa: E402
 from google.adk.models.anthropic_llm import AnthropicLlm  # noqa: E402
+from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.adk.tools import BaseTool, LongRunningFunctionTool  # noqa: E402
 from google.adk.tools.agent_tool import AgentTool  # noqa: E402
@@ -87,10 +88,13 @@ from agentic_cli.workflow.agents.brief import (  # noqa: E402
     follow_up_parameters,
     task_message,
 )
+from agentic_cli.workflow.agents.delegate import Delegations  # noqa: E402
 from agentic_cli.workflow.agents.envelope import read_envelope  # noqa: E402
+from agentic_cli.workflow.agents.runs import AgentRuns  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
+from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, http_library  # noqa: E402
@@ -1187,7 +1191,7 @@ class TestPermissionIdentity:
         manager = manager_for(team())
         await manager.initialize_services()
         try:
-            tool = Delegate("coordinator", {"researcher": team()[1]}, lambda: manager._delegations)
+            tool = Delegate("coordinator", lambda: manager._delegations)
         finally:
             await manager.cleanup()
         # A subclass may run anything: only an exact TaskTool is bound.
@@ -1215,6 +1219,81 @@ def _last_user_text(body: dict) -> str:
     return content if isinstance(content, str) else "".join(
         block.get("text", "") for block in content if block["type"] == "text"
     )
+
+
+class TestTaskDeclaredPerRun:
+    """``TaskTool`` declares, for each request, what the run that asks may
+    start (``Delegations.task_offer``, by its depth): nothing at all once it
+    may start nothing."""
+
+    @staticmethod
+    def tools(policy: SubAgentPolicy) -> tuple[Delegations, TaskTool, TaskTool]:
+        configs = [
+            AgentConfig(name="coordinator", prompt="p", sub_agents=["researcher"]),
+            AgentConfig(name="researcher", prompt="p", description="Finds facts."),
+            AgentConfig(name="helper", prompt="p", description="Helps.",
+                        spawnable_by=frozenset({"agent"})),
+        ]
+
+        async def hook(run):  # pragma: no cover - no run starts here
+            raise AssertionError("no run starts")
+
+        made = Delegations(runs=AgentRuns(), policy=policy,
+                           types={c.name: c for c in configs}, hook=hook)
+        return (made, TaskTool("coordinator", lambda: made),
+                TaskTool("researcher", lambda: made, root=False))
+
+    @staticmethod
+    def declared(tool: TaskTool, depth: int | None) -> types.FunctionDeclaration | None:
+        """``tool``'s declaration in a run at ``depth`` (None: the root's own request)."""
+        run = None if depth is None else RunRef(
+            agent="researcher", instance="researcher-1", run="researcher-1#1",
+            parent_run=None, depth=depth,
+        )
+        token = set_active_run(run)
+        try:
+            return tool._get_declaration()
+        finally:
+            reset_active_run(token)
+
+    def test_the_roots_own_request_is_offered_what_depth_0_may_start(self):
+        made, root, _ = self.tools(SubAgentPolicy(spawn_sources={"agent"}))
+
+        declared = self.declared(root, None)
+
+        offer = made.task_offer("coordinator", 0)
+        assert (declared.name, declared.description, declared.parameters_json_schema) == (
+            TASK_TOOL, offer.description, offer.parameters,
+        )
+        assert offer.parameters["properties"]["agent_type"]["enum"] == ["researcher", "helper"]
+        assert root.description == offer.description
+
+    def test_a_sub_agents_request_is_its_runs(self):
+        made, _, researcher = self.tools(
+            SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2)
+        )
+
+        declared = self.declared(researcher, 1)
+
+        assert declared.parameters_json_schema == made.task_offer("researcher", 1).parameters
+        assert declared.parameters_json_schema["properties"]["agent_type"]["enum"] == ["helper"]
+
+    def test_a_run_that_may_start_nothing_is_declared_no_task(self):
+        _, _, researcher = self.tools(SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2))
+
+        assert self.declared(researcher, 2) is None
+        # Built at its first depth (1): what that run is offered.
+        assert "- helper: Helps." in researcher.description
+
+    def test_the_default_policy_declares_its_own_sub_agents(self):
+        made, root, _ = self.tools(SubAgentPolicy())
+
+        declared = self.declared(root, None)
+
+        assert declared.parameters_json_schema["properties"]["agent_type"]["enum"] == [
+            "researcher"
+        ]
+        assert declared.description == made.task_offer("coordinator", 0).description
 
 
 class TestJobs:
@@ -1392,6 +1471,20 @@ class TestTheADKItRestsOn:
         assert {"list_skills", "load_skill", "load_skill_resource"} <= {
             t.name for t in toolset._tools
         }
+
+    def test_a_tool_declared_none_is_not_offered(self):
+        """``TaskTool`` declares no ``task`` to a run that may start nothing:
+        ADK adds a tool to a request only for a declaration, so the model is
+        offered none and a call of the name finds no tool (ADK's stand-in)."""
+
+        class Undeclared(_Probe):
+            def _get_declaration(self):
+                return None
+
+        request = LlmRequest()
+        request.append_tools([Undeclared()])
+
+        assert (request.tools_dict, request.config.tools) == ({}, None)
 
     def test_a_base_tool_is_made_from_its_name_and_description(self):
         parameters = inspect.signature(BaseTool.__init__).parameters

@@ -85,6 +85,7 @@ from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool, follow_up_
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
+from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
 from agentic_cli.tools._core.delegation import (
     FOLLOW_UP_CLASH_ERROR,
@@ -488,7 +489,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         service_map: dict,
         *,
         root: bool,
-        types: "Mapping[str, AgentConfig] | None" = None,
+        delegates: bool = False,
     ) -> Agent:
         """Construct one ``LlmAgent`` from a config, on its own.
 
@@ -496,10 +497,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         initialization resolved for it, built by the model factory.
 
         No agent has ADK ``sub_agents``, so ADK offers none of them
-        ``transfer_to_agent``. An agent that delegates (``types``: its
-        sub-agents, by name) gets the framework's ``task`` tool
-        (``adk/task_tool.py::TaskTool``), whose calls run each sub-agent on
-        that sub-agent type's own runner (``_run_agent``); with
+        ``transfer_to_agent``. An agent that delegates (``delegates``: it has
+        sub-agents, or may start types at run time, ``spawn.can_have_children``)
+        gets the framework's ``task`` tool (``adk/task_tool.py::TaskTool``),
+        which declares for each request what the run that asks may start, and
+        whose calls run each sub-agent on that type's own runner
+        (``_run_agent``); with
         ``SubAgentPolicy.follow_ups`` it also gets ``message_agent``,
         ``stop_agent`` and ``check_agents`` (``FollowUpTool``). Only the root's
         long-running tools are wrapped: a pending one would pause a
@@ -517,14 +520,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         tools = self._assemble_agent_tools(config, service_map)
         if root:
             tools = self._wrap_long_running(tools)
-        if types:
+        if delegates:
             names = _tool_names(tools)
             if TASK_TOOL in names:
                 raise AgentGraphError(
                     f"Agent {config.name!r} delegates to sub-agents through a tool named "
                     f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
                 )
-            tools = [*tools, TaskTool(config.name, types, lambda: self._delegations)]
+            tools = [*tools, TaskTool(config.name, lambda: self._delegations, root=root)]
             if self.subagent_policy.follow_ups:
                 clash = next((name for name in FOLLOW_UP_TOOLS if name in names), None)
                 if clash is not None:
@@ -576,6 +579,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         agents: dict[str, LlmAgent] = {}
         service_map = self._get_service_tool_map()
+        configs = list(graph.config_map.values())
 
         from agentic_cli.config import SettingsContext
 
@@ -583,15 +587,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         with SettingsContext(self._settings):
             for name in graph.build_order:
                 config = graph.config_map[name]
-                types = {sub: graph.config_map[sub] for sub in config.sub_agents}
+                root = name == graph.root_name
+                delegates = can_have_children(config, configs, self.subagent_policy, root=root)
                 agents[name] = self._build_agent(
-                    config, service_map, root=name == graph.root_name, types=types
+                    config, service_map, root=root, delegates=delegates
                 )
                 logger.debug(
                     "agent_created",
                     name=name,
-                    type="coordinator" if types else "leaf",
-                    sub_agents=list(types),
+                    type="coordinator" if delegates else "leaf",
+                    sub_agents=list(config.sub_agents),
                 )
 
         self._agents = agents

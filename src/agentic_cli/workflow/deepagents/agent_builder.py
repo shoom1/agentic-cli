@@ -4,8 +4,10 @@ Every agent is its own graph, built apart from the others, on the manager's
 checkpointer (a sub-agent's runs are on a thread of its instance's own, which
 its follow-ups continue); a tree built without a checkpointer compiles its
 sub-agents with none. An agent with
-sub-agents gets the framework's ``task`` tool (``task_tool.build_task_tool``)
-among its tools (with ``SubAgentPolicy.follow_ups``, also the parent's other
+sub-agents, its own or types it may start at run time
+(``spawn.can_have_children``), gets the framework's ``task`` tool
+(``task_tool.build_task_tool``) among its tools (the root's offer fixed when it is
+built, a sub-agent's rewritten for each model call by ``RunControlMiddleware``; with ``SubAgentPolicy.follow_ups``, also the parent's other
 tools, ``task_tool.build_follow_up_tools``): a call hands the brief to the
 manager's ``Delegations``, which runs the sub-agent's graph apart from the caller's stream
 (``DeepAgentsWorkflowManager._run_agent``) and answers with the result
@@ -61,6 +63,7 @@ from langchain_anthropic.middleware import AnthropicPromptCachingMiddleware
 from agentic_cli.models import CacheMechanism
 from agentic_cli.tools._core.delegation import FOLLOW_UP_CLASH_ERROR, FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
+from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError
 from agentic_cli.workflow.deepagents.middleware import (
     ActiveToolCallMiddleware,
@@ -218,16 +221,13 @@ def build_agent_tree(
                 (name, middleware) for middleware in model_side
                 if isinstance(middleware, ReportingSummarizationMiddleware)
             )
-        follows = (
-            bool(config.sub_agents) and delegations is not None
-            and delegations().policy.follow_ups
+        delegates = delegations is not None and can_have_children(
+            config, configs, delegations().policy, root=name == root
         )
-        own = _own_tools(
-            config, tools.get(name, []), delegates=bool(config.sub_agents), follows=follows
-        )
-        if config.sub_agents and delegations is not None:
-            types = {sub: config_map[sub] for sub in config.sub_agents}
-            own = [*own, build_task_tool(name, types, delegations)]
+        follows = delegates and delegations is not None and delegations().policy.follow_ups
+        own = _own_tools(config, tools.get(name, []), delegates=delegates, follows=follows)
+        if delegates and delegations is not None:
+            own = [*own, build_task_tool(name, delegations, root=name == root)]
             if follows:
                 own = [*own, *build_follow_up_tools(delegations)]
         return create_agent(
