@@ -51,7 +51,7 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.config import AgentConfig
-from agentic_cli.workflow.agents.control import KEPT_TOOLS
+from agentic_cli.workflow.agents.control import configured_tool_names
 from agentic_cli.workflow.agents.delegate import (
     STOPPED_BY_USER_ERROR,
     USER,
@@ -1270,8 +1270,7 @@ class BaseWorkflowManager(ABC):
         config = next((c for c in self._agent_configs if c.name == agent), None)
         if config is None:
             return frozenset()
-        names = (getattr(tool, "__name__", "") for tool in self._build_tools(config, {}))
-        return frozenset(name for name in names if name and name not in KEPT_TOOLS)
+        return configured_tool_names(self._build_tools(config, {}))
 
     @property
     def settings(self) -> "BaseSettings":
@@ -2608,7 +2607,9 @@ class BaseWorkflowManager(ABC):
         }
 
     def _compute_choice_budgets(self) -> "dict[tuple[str, str], ContextBudget]":
-        """Each model choice's context numbers, by ``(agent, choice)``; none for a backend that manages none.
+        """Each model choice's context numbers, by ``(agent, choice)``.
+
+        None for a backend that manages none.
 
         Called right after ``_compute_budgets``, with the same failure: a
         choice whose model leaves too small an input budget to work in.
@@ -2714,7 +2715,10 @@ class BaseWorkflowManager(ABC):
             "models_resolved",
             default=str(default.ref),
             agents={name: str(model.ref) for name, model in resolved.items()},
-            choices={f"{name}/{choice}": str(model.ref) for (name, choice), model in choices.items()},
+            choices={
+                f"{name}/{choice}": str(model.ref)
+                for (name, choice), model in choices.items()
+            },
         )
 
     def _resolve_extra_models(

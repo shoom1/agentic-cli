@@ -146,7 +146,8 @@ def model_references(
     In order: the manager's own model (``manager_model``), ``default_model``,
     each ``model_roles`` value (so the model of each mapped role an agent
     names), then each agent's model that is a reference or a bare model id,
-    and each of its model choices that is one. One that does not parse is left out: validation reports it.
+    and each of its model choices that is one. One that does not parse is left
+    out: validation reports it.
     """
     return tuple(_named_references(settings, agent_configs, manager_model))
 
@@ -223,7 +224,10 @@ def computed_roles(
 
 
 def _agent_models(agent_configs: Iterable["AgentConfig"]) -> list[ModelRef | RoleRef]:
-    """Each agent's model that names one (None runs on the default), then its choices; those that parse."""
+    """Each agent's model that names one (None runs on the default), then its choices.
+
+    Those that parse.
+    """
     models: list[ModelRef | RoleRef] = []
     for config in agent_configs:
         model = _agent_model(config)

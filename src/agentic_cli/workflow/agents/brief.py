@@ -460,7 +460,8 @@ def _type_line(name: str, config: AgentConfig, *, warn: bool = False) -> str:
 
     The notes say that an inheriting type sees the caller's conversation and
     which brief fields the type needs beyond the title and the objective, and
-    names its model choices, last. A type without a description is "The <name> agent.", logged when ``warn``.
+    names its model choices, last. A type without a description is "The <name>
+    agent.", logged when ``warn``.
     """
     description = config.description.strip()
     if not description:

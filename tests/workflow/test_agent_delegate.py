@@ -58,6 +58,7 @@ from agentic_cli.workflow.agents.delegate import (
     RunAnswer,
     RunFailed,
     StartRequest,
+    ToolsUnlistedError,
     started_by,
     waiting_on_user,
 )
@@ -3009,6 +3010,7 @@ def stop_result(agent: str, status: str, stopped: str | None, closed: list[str])
 def with_a_leaf(made: Callable[[], Delegations], working: dict[str, asyncio.Event]) -> Hook:
     """A hook in which ``middle``'s first run delegates to ``leaf`` once; the
     runs named in ``working`` work until cancelled; any other answers."""
+
     async def hook(run: AgentRun) -> RunAnswer:
         if run.ref.run in working:
             working[run.ref.run].set()
@@ -4111,6 +4113,7 @@ NARROW = {"agent_type": "choosy", "title": "Look", "objective": "Look X up.",
 
 def own_tools(names: dict[str, set[str]], asked: list[str] | None = None):
     """A backend's hook for each type's own tools (``_agent_tool_names``), recording who asked."""
+
     async def tool_names(agent: str) -> frozenset[str]:
         if asked is not None:
             asked.append(agent)
@@ -4307,3 +4310,108 @@ class TestAFollowUpKeepsThem:
 
         assert tools_asked == []
         assert [run.model for run in asked] == ["fast", "fast"]
+
+    async def test_the_model_is_checked_before_the_tools(self):
+        """An instance whose type lost its model choice and a tool is told of the model."""
+        hook, asked = answering()
+        names = {"choosy": {"lookup", "fetch_page"}}
+        made = delegations(hook, types=CHOOSING, tool_names=own_tools(names))
+        await turned(lambda: made.delegate(request({**NARROW, "tools": ["lookup"]})))
+        made._types["choosy"] = AgentConfig(name="choosy", prompt="p",
+                                            model_choices=("anthropic:claude-haiku-4-5",))
+        names["choosy"] = {"fetch_page"}
+
+        result, _ = await turned(lambda: made.follow_up(follow("choosy-1")))
+
+        assert result.result["error"] == (
+            "choosy-1 was started with the model fast, which 'choosy' no longer has; "
+            "start a new one with task."
+        )
+        assert len(asked) == 1
+
+    async def test_two_messages_at_once_to_a_narrowed_one_start_one_run_and_steer_the_other(self):
+        """As for an instance not narrowed, though a narrowed one's tool names are
+        asked for first, and by a hook that suspends every time."""
+        taken: list[list[str]] = []
+        hook, asked = answering()
+
+        async def watching(run: AgentRun) -> RunAnswer:
+            taken.append(run.control.take_steering())
+            run.control.stored()
+            return await hook(run)
+
+        names = own_tools(OWN)
+
+        async def suspending(agent: str):
+            await asyncio.sleep(0)
+            return await names(agent)
+
+        runs = AgentRuns()
+        made = delegations(watching, runs=runs, types=CHOOSING, tool_names=suspending)
+
+        async def work():
+            await made.delegate(request(NARROW))
+            return await asyncio.gather(
+                made.message(follow("choosy-1", "Find Y.", call_id="c2")),
+                made.message(follow("choosy-1", "Find Z.", call_id="c3")),
+            )
+
+        (first, second), _ = await turned(work)
+
+        assert (first.result["run"], first.result["status"]) == ("choosy-1#2", RUN_COMPLETED)
+        assert second.result["status"] == "running" and second.result["run"] == "choosy-1#2"
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == ["choosy-1#1", "choosy-1#2"]
+
+
+UNLISTED = ("The tools of 'choosy' could not be listed just now "
+            "(OSError: the server is down); try again.")
+
+
+def unlisting(agent: str, *, fail: list[bool]):
+    """A tool-names hook whose listing fails while ``fail[0]`` holds."""
+
+    async def tool_names(name: str) -> frozenset[str]:
+        if fail[0]:
+            raise ToolsUnlistedError(agent, OSError("the server is down"))
+        return frozenset(OWN.get(name, ()))
+
+    return tool_names
+
+
+class TestAListingThatFails:
+    """A backend that cannot list a type's tools says so: the call's error
+    result, no run started and none counted, and the next ask lists again."""
+
+    async def test_a_task_call_naming_tools_is_told_to_try_again(self):
+        hook, asked = answering()
+        fail = [True]
+        made = delegations(hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail))
+
+        async def work():
+            refused = await made.delegate(request(NARROW))
+            return refused, runs_this_turn()
+
+        (result, counted), events = await turned(work)
+
+        assert result.result == {"success": False, "error": UNLISTED}
+        assert (counted, events, asked) == (0, [], [])
+        fail[0] = False
+        result, _ = await turned(lambda: made.delegate(request(NARROW)))
+        assert result.result["status"] == RUN_COMPLETED
+
+    @pytest.mark.parametrize("how", ["follow_up", "message"])
+    async def test_a_narrowed_ones_follow_up_is_told_so(self, how):
+        hook, asked = answering()
+        fail = [False]
+        made = delegations(hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail))
+        await turned(lambda: made.delegate(request(NARROW)))
+        fail[0] = True
+
+        result, events = await turned(lambda: getattr(made, how)(follow("choosy-1")))
+
+        assert result.result == {"success": False, "error": UNLISTED}
+        assert (events, len(asked)) == ([], 1)
+
+    def test_the_cause_is_cut_to_200_characters(self):
+        error = ToolsUnlistedError("choosy", ValueError("x" * 500))
+        assert len(error.reason) <= 203 and error.reason.startswith("ValueError: xxx")

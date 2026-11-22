@@ -339,8 +339,8 @@ def validate_settings(
     The static half of model validation:
 
     - every reference parses: ``default_model``, ``model_roles`` and each
-      agent's ``model`` and each of its ``model_choices`` (a role must map to a model, never another role);
-      ``models`` keys are checked when the settings load;
+      agent's ``model`` and each of its ``model_choices`` (a role must map to
+      a model, never another role); ``models`` keys are checked when the settings load;
     - every provider a reference names is built in or defined in
       ``model_providers``;
     - every provider a model will run on can be called: the default model's,

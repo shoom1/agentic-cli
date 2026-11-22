@@ -28,6 +28,18 @@ from agentic_cli.workflow.mcp import MCPServerConfig  # noqa: E402
 from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
+from tests.workflow.test_subagents_contract import (  # noqa: E402,F401 - fixtures
+    CHOICE,
+    FOLLOWING,
+    agent,
+    backend,
+    calls,
+    delegate,
+    envelope_read,
+    make_crew,
+    message,
+    says,
+)
 
 #: The stdio MCP server the Deep Agents tests start; it records its pid.
 SERVER = Path(__file__).parent / "deepagents" / "mcp_server.py"
@@ -132,6 +144,73 @@ async def test_a_sub_agents_mcp_tools_are_listed_when_first_asked_and_stop_with_
 
     assert alive(pid_dir) == [], "a server outlived cleanup()"
 
+
+async def test_a_listing_that_fails_is_said_so_and_asked_again(
+    project, pid_dir, monkeypatch
+):
+    """A toolset whose listing fails does not leave its names out of the answer
+    (the type would seem to lack them): the manager raises, and the next ask lists
+    again. A ``task`` call naming tools is told to try again, no run started."""
+    from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+
+    from agentic_cli.workflow.agents.delegate import (
+        DelegationRequest,
+        ToolsUnlistedError,
+    )
+    from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn
+
+    route(monkeypatch, anthropic, "AsyncAnthropic",
+          FakeAPI(anthropic_message({"type": "text", "text": "ok"})))
+    server = MCPServerConfig(
+        name="atlas", command=sys.executable, args=[str(SERVER)], timeout=30,
+        env={"MCP_TEST_PID_DIR": str(pid_dir)}, tool_name_prefix="atlas",
+    )
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["researcher"]),
+            AgentConfig(name="researcher", prompt="Find.", description="Finds.",
+                        mcp_servers=[server]),
+        ],
+        settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+    )
+    real = McpToolset.get_tools_with_prefix
+    failing = [True]
+
+    async def listing(self, *args, **kwargs):
+        if failing[0]:
+            raise OSError("the server is down")
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(McpToolset, "get_tools_with_prefix", listing)
+    try:
+        await manager.initialize_services()
+
+        with pytest.raises(ToolsUnlistedError) as caught:
+            await manager._agent_tool_names("researcher")
+        assert caught.value.reason == "OSError: the server is down"
+
+        conversation = SessionRef(manager.app_name, "u", "s")
+        token = set_active_turn(conversation)
+        try:
+            refused = await manager._delegations.delegate(DelegationRequest(
+                caller=None, caller_agent="lead", call_id="c1",
+                arguments={"agent_type": "researcher", "title": "T", "objective": "O",
+                           "tools": ["atlas_lookup"]},
+            ))
+        finally:
+            reset_active_turn(token)
+        assert refused.result == {"success": False, "error": (
+            "The tools of 'researcher' could not be listed just now "
+            "(OSError: the server is down); try again."
+        )}
+        assert refused.run is None
+
+        failing[0] = False
+        assert await manager._agent_tool_names("researcher") == {"atlas_add", "atlas_lookup"}
+    finally:
+        await manager.cleanup()
+
+
 async def test_a_native_apps_toolset_outlives_its_runner_and_serves_the_next(
     project, pid_dir, monkeypatch
 ):
@@ -184,3 +263,45 @@ async def test_a_native_apps_toolset_outlives_its_runner_and_serves_the_next(
     assert alive(pid_dir) == [], "a server outlived cleanup()"
     tools = [sorted(t["name"] for t in json.loads(r.content).get("tools", [])) for r in api.requests]
     assert tools == [["add", "lookup"], ["add", "lookup"]]
+
+
+async def test_a_model_choices_runner_is_released_with_the_backend(
+    make_crew, backend, pid_dir
+):
+    """A sub-agent type with an MCP server and a model choice, run on the
+    choice: the release closes what the variant holds. ADK's variant has a
+    toolset (a server) of its own, stopped by a model switch and by cleanup
+    and started again by the next run; Deep Agents' variant graph is dropped
+    by the release, the manager's MCP sessions its tools."""
+    server = MCPServerConfig(
+        name="atlas", command=sys.executable, args=[str(SERVER)], timeout=30,
+        env={"MCP_TEST_PID_DIR": str(pid_dir)}, tool_name_prefix="atlas",
+    )
+    crew = make_crew(
+        [agent("coordinator", sub_agents=("researcher",)),
+         agent("researcher", mcp_servers=[server], model_choices=(CHOICE,))],
+        subagents=FOLLOWING,
+        coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
+                     says("Asked."),
+                     calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+        researcher=[says("X is 42."), says("Y is 7.")],
+    )
+    manager = crew.manager
+    try:
+        await crew.turn()
+        assert alive(pid_dir)
+        assert len(manager._variant_graphs if backend == "deepagents"
+                   else manager._variant_runners) == 1
+
+        await manager.reinitialize(model="claude-opus-4-7", preserve_sessions=True)
+        if backend == "adk":
+            assert alive(pid_dir) == []  # no runner of the old build is left open
+        await crew.turn("Find Y too.")
+        assert alive(pid_dir)
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+    finally:
+        await manager.cleanup()
+
+    assert alive(pid_dir) == [], "a server outlived cleanup()"
+    assert getattr(manager, "_variant_graphs", {}) == {}
+    assert dict(getattr(manager, "_variant_runners", {})) == {}

@@ -505,7 +505,10 @@ def _model(workflow: Any, record: "InstanceRecord") -> Any:
 
 
 def _budget(workflow: Any, record: "InstanceRecord") -> Any:
-    """The instance's context budget (its model choice's, when it has one); None when its manager manages none."""
+    """The instance's context budget (its model choice's, when it has one).
+
+    None when its manager manages none.
+    """
     try:
         if record.model is not None:
             return workflow.context_budget(record.agent, model=record.model)
@@ -528,7 +531,8 @@ def _last_prompt(workflow: Any, conversation: "SessionRef", record: "InstanceRec
 
 def _context(workflow: Any, conversation: "SessionRef", record: "InstanceRecord") -> str:
     """The status bar's ``ctx`` for the instance: its last prompt against its
-    own trigger (its model choice's, when it has one), as the main agent's is shown (``UsageTracker.format_context``)."""
+    own trigger (its model choice's, when it has one), as the main agent's is
+    shown (``UsageTracker.format_context``)."""
     budget = _budget(workflow, record)
     return UsageTracker(
         last_prompt_tokens=_last_prompt(workflow, conversation, record),

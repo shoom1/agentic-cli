@@ -575,6 +575,7 @@ class TestAnInstanceOnAModelChoice:
             SMALL_MODEL, format_tokens(budget.trigger)
         )
 
+
 class TestOffTheLoop:
     async def test_it_blocks_no_event_loop(self, make_crew):
         crew = make_crew(

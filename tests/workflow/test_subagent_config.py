@@ -63,6 +63,7 @@ class TestTheFields:
 
     def test_no_model_choices_by_default(self):
         assert AgentConfig(name="a", prompt="p").model_choices == ()
+
     def test_only_its_parent_starts_it_by_default(self):
         assert AgentConfig(name="a", prompt="p").spawnable_by is None
 

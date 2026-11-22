@@ -107,6 +107,7 @@ class TestAnInstancesStatus:
         event = WorkflowEvent.agent_run(RESEARCHER, "started", title="Find X.")
 
         assert "tools" not in event.metadata and "model" not in event.metadata
+
     def test_a_follow_ups_start_carries_its_input(self):
         second = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
 

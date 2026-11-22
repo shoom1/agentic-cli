@@ -471,6 +471,7 @@ class TestInstances:
 
         record = runs.instance(ONE, "researcher-1")
         assert (record.tools, record.model) == ((), "fast")
+
     def test_a_childs_parent_is_its_parent_runs_instance(self):
         runs = AgentRuns()
         middle = started(runs, ONE, "c1", "middle")
@@ -915,6 +916,7 @@ class TestExportAndRestore:
 
         with pytest.raises(ValueError, match="do not read"):
             AgentRuns().restore(ONE, data)
+
     def test_the_instances_records_name(self):
         runs = AgentRuns()
         a_conversation(runs)

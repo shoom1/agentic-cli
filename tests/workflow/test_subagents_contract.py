@@ -552,6 +552,7 @@ class Crew:
         ADK each request's, Deep Agents the model each request's chat was built for."""
         assert self._sent_models is not None
         return self._sent_models(agent)
+
     def opening(self, agent: str, call: int = -1) -> list[str]:
         """The text blocks of the first user message ``agent``'s model request
         ``call`` held, in order: what opens its conversation (the main
@@ -823,6 +824,7 @@ def _deepagents_crew(
             models.chats[name] = _team_chat()(
                 label=chat.label, script=chat.script, summaries=summaries
             )
+
     def chat_for(resolved: Any, *, settings: Any, app_name: str) -> Any:
         # Each agent's chat, as built for this model: what its requests went to.
         chat = models(resolved, settings=settings, app_name=app_name)
@@ -6584,6 +6586,7 @@ class TestANarrowedRun:
 
         assert crew.tool_names("researcher", 1) == NARROWED
         assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+
 
 class TestWhatATypeCannotTake:
     """A ``task`` call whose ``tools`` are not some of the type's own, or whose

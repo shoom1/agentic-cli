@@ -319,6 +319,7 @@ class TestLoadAgentsFromYaml:
             load_agents_from_yaml(path)
         message = str(exc.value)
         assert "agents.0.model_choices" in message and "valid list" in message
+
     def test_brief_required_is_a_list(self, tmp_path):
         path = _write(
             tmp_path,

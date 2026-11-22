@@ -682,6 +682,7 @@ class TestSettingsValidation:
             "Anthropic or OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so "
             "the newest fast-tier model is used.",
         ]
+
     def test_a_malformed_agent_model_is_an_error(self, temp_workspace: Path):
         settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
         agents = [AgentConfig(name="writer", prompt="p", model="gemini")]

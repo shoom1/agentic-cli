@@ -142,7 +142,7 @@ from agentic_cli.workflow.agents.brief import (
     task_message,
     task_offer,
 )
-from agentic_cli.workflow.agents.control import KEPT_TOOLS, PARENT_CAUSE, RunControl
+from agentic_cli.workflow.agents.control import PARENT_CAUSE, RunControl, configured_tool_names
 from agentic_cli.workflow.agents.envelope import (
     CANCELLED_BY,
     INTERRUPTED_ERROR,
@@ -224,6 +224,10 @@ CLOSED_ERROR = "{instance} is closed; start a new one with task."
 STOPPED_ERROR = "{instance} was stopped by the user; only the user can continue it."
 RUNNING_ERROR = "{instance} is running: an instance runs one run at a time."
 TYPE_GONE_ERROR = "{instance}'s type '{agent}' is not one of this app's agents."
+#: What a call is told when its backend could not list the type's tools just now.
+TOOLS_UNLISTED_ERROR = (
+    "The tools of '{agent_type}' could not be listed just now ({error}); try again."
+)
 #: A follow-up to an instance started with a model or tools its type no longer has
 #: (``what``: ``the model <m>`` or ``the tools <a>, <b>``).
 CHOICE_GONE_ERROR = (
@@ -259,12 +263,33 @@ MAX_OPEN_REASON = "more than {limit} sub-agents open: the oldest idle one is clo
 _OPEN = frozenset({INSTANCE_IDLE, INSTANCE_STOPPED})
 
 
+class ToolsUnlistedError(Exception):
+    """A backend's ``tool_names`` hook could not list a type's tools (an MCP server's, say).
+
+    Raised instead of answering with the names without them, which would read
+    as tools the type lacks; asking again lists again.
+
+    Attributes:
+        agent: The type.
+        reason: ``<Type>: <message>`` of what failed, cut to 200 characters.
+    """
+
+    def __init__(self, agent: str, cause: BaseException) -> None:
+        self.agent = agent
+        self.reason = truncate(f"{type(cause).__name__}: {cause}", 200)
+        super().__init__(f"The tools of {agent!r} could not be listed: {self.reason}")
+
+
 def started_by(caller: RunRef | None) -> str:
     """Who starts a run its parent delegated: ``agent:<the caller's instance>``.
 
     ``agent:root`` for the root's own calls (no run, or ``root_run``).
     """
     return f"agent:{caller.instance if caller is not None else 'root'}"
+
+
+#: ``follow_up``'s ``_own`` when ``message`` has not asked for the tool names (None is an answer).
+_UNFETCHED = object()
 
 
 def _refused(error: str) -> Delegated:
@@ -768,7 +793,11 @@ class Delegations:
             )
 
     async def follow_up(
-        self, request: FollowUpRequest, *, _reserved: list[bool] | None = None
+        self,
+        request: FollowUpRequest,
+        *,
+        _reserved: list[bool] | None = None,
+        _own: "frozenset[str] | None | object" = _UNFETCHED,
     ) -> Delegated:
         """Run the instance ``request`` names once more, to its end; its envelope.
 
@@ -786,13 +815,21 @@ class Delegations:
         tools is refused (``CHOICE_GONE_ERROR``). Everything up to the run's
         start event is one synchronous step, so two follow-ups of one
         instance cannot both start: the type's tool names a narrowed instance
-        is checked against are awaited before it, which suspends only where
-        a backend lists them for the first time.
+        is checked against are awaited before it (once: ``message`` hands over
+        the names it asked for, ``_own``), which suspends only where a
+        backend lists them for the first time. Tools its backend could not
+        list just now are the error result, as any refusal.
         """
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
-        own = await self._instance_tools(conversation, request.instance)
+        try:
+            own = (
+                await self._instance_tools(conversation, request.instance)
+                if _own is _UNFETCHED else _own
+            )
+        except BriefError as error:
+            return _refused(str(error))
         with _as_turn(conversation):
             error = self._follow_up_refused(conversation, request, own_tools=own)
             if error is not None:
@@ -889,13 +926,16 @@ class Delegations:
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
-        own = await self._instance_tools(conversation, request.instance)
+        try:
+            own = await self._instance_tools(conversation, request.instance)
+        except BriefError as error:
+            return _refused(str(error))
         with _as_turn(conversation):
             if not isinstance(request.message, str) or not request.message.strip():
                 return _refused(MESSAGE_NEEDED_ERROR)
             control = self._working_control(conversation, request)
             if control is None:
-                return await self.follow_up(request, _reserved=_reserved)
+                return await self.follow_up(request, _reserved=_reserved, _own=own)
             ref = control.ref
             if (conversation, ref.instance) in self._closing:
                 return _refused(CLOSED_ERROR.format(instance=ref.instance))
@@ -1321,14 +1361,22 @@ class Delegations:
         return None
 
     async def _own_tools(self, config: AgentConfig) -> Collection[str]:
-        """The names of ``config``'s own tools: its backend's, else its configured tools'."""
-        if self._tool_names is not None:
+        """The names of ``config``'s own tools: its backend's, else its configured tools'.
+
+        The one place the backend's hook is asked.
+
+        Raises:
+            BriefError: The backend could not list them just now
+                (``ToolsUnlistedError``): the text is the call's error result.
+        """
+        if self._tool_names is None:
+            return configured_tool_names(config.tools)
+        try:
             return await self._tool_names(config.name)
-        names = (
-            tool if isinstance(tool, str) else getattr(tool, "__name__", "")
-            for tool in config.tools
-        )
-        return frozenset(name for name in names if name and name not in KEPT_TOOLS)
+        except ToolsUnlistedError as error:
+            raise BriefError(
+                TOOLS_UNLISTED_ERROR.format(agent_type=config.name, error=error.reason)
+            ) from error
 
     async def _instance_tools(
         self, conversation: SessionRef | None, instance: str
@@ -1338,6 +1386,9 @@ class Delegations:
         What a follow-up checks the instance's tools against. Awaited before
         the follow-up's synchronous step, and only for an instance that has
         tools to check, so any other never waits.
+
+        Raises:
+            BriefError: The backend could not list them just now.
         """
         record = self._runs.instance(conversation, instance)
         if record is None or record.tools is None:

@@ -45,7 +45,7 @@ All of it runs on the event loop; nothing here blocks.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -72,6 +72,22 @@ KEPT_TOOLS = frozenset({
     "save_plan", "get_plan", "save_tasks", "get_tasks",
     "task", "message_agent", "stop_agent", "check_agents",
 })
+
+
+def configured_tool_names(tools: Iterable[Any]) -> frozenset[str]:
+    """The names a type's configured tools go by, ``KEPT_TOOLS`` left out.
+
+    A callable by its ``__name__``, a registered name as written and a dotted
+    import path by its last part (what the callable it imports is called); the
+    one rule for ``Delegations`` and for a manager's ``_agent_tool_names``.
+    """
+    names = (
+        tool.strip().rsplit(".", 1)[-1] if isinstance(tool, str) else getattr(tool, "__name__", "")
+        for tool in tools
+    )
+    return frozenset(name for name in names if name and name not in KEPT_TOOLS)
+
+
 #: Who cancels a run at one of its limits.
 LIMIT = "limit"
 #: What stopped a run, as a call it left at its prompt is told.

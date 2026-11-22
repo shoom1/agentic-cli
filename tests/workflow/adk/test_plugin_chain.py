@@ -221,6 +221,7 @@ async def test_a_model_choices_runner_has_its_types_chain_on_the_choices_numbers
 
     assert (manager._variant_runners, manager._variant_agents) == ({}, {})
 
+
 async def test_a_main_agent_that_continues_its_sub_agents_gets_the_roster(project):
     """With the policy's ``follow_ups`` the main agent has ``message_agent``:
     its chain carries the roster, before the memory index; a sub-agent type's

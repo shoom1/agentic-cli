@@ -216,6 +216,7 @@ class TestSkillsIntegration:
             assert await mgr._agent_tool_names("nobody") == frozenset()
         finally:
             await mgr.cleanup()
+
     def test_yaml_loader_parses_skills(self, tmp_path):
         from agentic_cli.workflow.agent_loader import load_agents_from_yaml
 

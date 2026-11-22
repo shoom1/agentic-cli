@@ -751,6 +751,7 @@ class TestInTheManager:
         finally:
             await manager.cleanup()
         assert manager._own_tool_names == {}
+
     async def test_a_model_switch_rebuilds_them(self, ctx, monkeypatch):
         models = scripted(monkeypatch, writer=_steps(("load_skill", {"skill_name": "pdf-tools"})))
         manager = _manager(ctx.settings, [_writer()])

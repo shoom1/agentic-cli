@@ -490,6 +490,7 @@ def test_a_role_choice_is_computed():
 
     assert model_services.computed_roles(settings, agents) == ("fast",)
 
+
 def test_model_references_skip_what_does_not_parse():
     """Validation reports each of them, before any catalog is built."""
     agents = _agents("x y", "Lab:qwen3", "lab:", "")

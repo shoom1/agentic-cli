@@ -333,6 +333,7 @@ class TestTaskDescription:
             "- checker (its brief also needs: known; model choices: fast, "
             "anthropic:claude-haiku-4-5): Checks a claim."
         )
+
     def test_an_inheriting_type_says_so(self):
         text = task_description({"notes": NOTES, "researcher": RESEARCHER}, SubAgentPolicy())
         assert "- notes (sees this conversation, so the brief need not repeat it): " in text

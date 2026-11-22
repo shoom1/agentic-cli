@@ -206,6 +206,7 @@ class TestAModelChoicesBudget:
             await manager.cleanup()
         assert manager._choice_budgets == {}
 
+
 class TestANativeAdkApp:
     async def test_the_configs_the_factory_passes_through_are_ignored(self, ctx, tmp_path):
         # ``create_workflow_manager_from_settings`` hands a native app's configs to

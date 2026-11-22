@@ -269,6 +269,7 @@ class TestOne:
         assert rows_of(panel.renderable)[:3 + len(shown)] == [
             ("Type", "researcher"), ("Parent", "root"), ("Title", "Find X."), *shown,
         ]
+
     async def test_a_runs_own_plan_and_tasks_after_its_result(self, manager):
         runs = Runs(manager, manager.session_ref("s1"))
         ref = runs.start("researcher", "c1", "Find X.", at=0)

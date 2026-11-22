@@ -84,7 +84,13 @@ from agentic_cli.workflow.adk.sessions import (
 from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool, follow_up_tools
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.agents.control import KEPT_TOOLS
-from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
+from agentic_cli.workflow.agents.delegate import (
+    AgentRun,
+    RunAnswer,
+    RunFailed,
+    ToolsUnlistedError,
+    failure_reason,
+)
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.context import OVERFLOW_ERROR_CODE
@@ -315,6 +321,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         # The model choice each working run on one is on, by (conversation,
         # run id): what the raw log names the run's calls by (``_chosen_model``).
+        # Keyed by the conversation too: a RunRef does not name it, and run ids
+        # (``researcher-1#1``) repeat across conversations.
         self._chosen_runs: dict[tuple["SessionRef | None", str], "ResolvedModel"] = {}
 
         logger.debug(
@@ -364,8 +372,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         Its tools as its model sees them (callables, ADK tools, a skill
         toolset's tools) and each MCP toolset's, which ADK lists by connecting:
         done when first asked, once a build (the toolset stays connected for the
-        agent's runs, and its runner stops it). A listing that fails is logged
-        and asked again next time. The state and delegation tools are left out.
+        agent's runs, and its runner stops it; for a narrowed run on a model
+        choice that is one more idle connection, the type's own, until the
+        release). The state and delegation tools are left out.
+
+        Raises:
+            ToolsUnlistedError: A toolset's listing failed (logged, and
+                listed again at the next ask): its names left out would read
+                as tools the type lacks.
         """
         built = self._agents.get(agent)
         if built is None:
@@ -384,7 +398,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     found = {t.name for t in await tool.get_tools_with_prefix()}
                 except Exception as exc:  # noqa: BLE001 - a server that will not list
                     logger.warning("mcp_tools_unlisted", agent=agent, error=str(exc))
-                    continue
+                    raise ToolsUnlistedError(agent, exc) from exc
                 # The toolset is kept with its names: its id is only its own while it lives.
                 kept = listed[id(tool)] = (tool, found)
             names |= kept[1]
@@ -923,10 +937,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             reply_agents=replies,
             budgets=budgets,
             kinds=kinds,
-            models=(
-                self._agent_model_refs() if models is self._resolved_models
-                else {name: str(model.ref) for name, model in models.items()}
-            ),
+            models={
+                **self._agent_model_refs(),
+                **{name: str(model.ref) for name, model in models.items()},
+            },
             summarize_now=self._summarize_now,
             fit_guard=fit_guard,
             keep_task=keep_task,

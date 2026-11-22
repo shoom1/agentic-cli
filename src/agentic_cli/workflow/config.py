@@ -459,7 +459,9 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
 
 
 def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> None:
-    """Each agent's ``brief_required``, ``limits``, ``continuable`` and ``model_choices`` are what they say, and the root sets none.
+    """Each agent's delegation fields are what they say, and the root sets none.
+
+    ``brief_required``, ``limits``, ``continuable`` and ``model_choices``.
 
     Raises:
         AgentGraphError: Naming the agent(s), the value and what to change.

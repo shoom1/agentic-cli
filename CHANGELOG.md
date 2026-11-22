@@ -610,7 +610,9 @@ the start of the entry's title.
   else is the call's error result, and no run starts nor counts toward the
   turn's ("The tools for 'researcher' must be some of its own: lookup.",
   "The model for 'researcher' must be one of its model choices: fast.",
-  "'researcher' has no model choices; leave model out."). `task`'s schema
+  "'researcher' has no model choices; leave model out."; a backend that
+  cannot list the type's MCP tools just now says so, "The tools of
+  'researcher' could not be listed just now (OSError: …); try again."). `task`'s schema
   always has `tools` (with the default policy it is otherwise as it was),
   and `model` when a type it offers has choices, which its line names
   (`- researcher (model choices: fast): …`). The instance keeps them
@@ -630,7 +632,8 @@ the start of the entry's title.
   default, for a type only its parent starts) and the policy's
   `spawn_sources` (the same three, `frozenset()` by default: nothing is
   started at run time, and an app keeps its `task` as it was, but for the
-  `tools` argument every call has: see **`task`'s `tools` and `model`…**). An agent's `task` call is the `"agent"` source: `task` lists, after
+  `tools` argument every call has: see **`task`'s `tools` and `model`…**).
+  An agent's `task` call is the `"agent"` source: `task` lists, after
   the caller's own sub-agents, the types agents may start, each with its
   description (`agentic_cli.workflow.agents.spawn`, provisional: `spawnable`,
   `may_spawn`, `can_have_children`; the manager's delegations'

@@ -20,6 +20,7 @@ from agentic_cli.workflow.agents.control import (
     TIME_LIMIT_CAUSE,
     TOKEN_LIMIT_CAUSE,
     RunControl,
+    configured_tool_names,
 )
 from agentic_cli.workflow.agents.envelope import TIME_LIMIT_ERROR, TOKEN_LIMIT_ERROR
 from agentic_cli.workflow.agents.policy import AgentLimits
@@ -444,3 +445,20 @@ class TestTheToolsItKeeps:
         assert KEPT_TOOLS == {
             *(name for name, _ in state_tools._STATE_TOOLS), TASK_TOOL, *FOLLOW_UP_TOOLS,
         }
+
+
+class TestConfiguredToolNames:
+    """The names a type's configured tools go by: one rule for every caller."""
+
+    def test_a_name_a_dotted_path_and_a_callable_each_by_its_own(self):
+        def lookup():
+            return {}
+
+        names = configured_tool_names(
+            ["web_fetch", "my_pkg.tools.custom_tool", lookup, "  padded  "]
+        )
+
+        assert names == {"web_fetch", "custom_tool", "lookup", "padded"}
+
+    def test_the_state_and_delegation_tools_are_left_out(self):
+        assert configured_tool_names(["save_plan", "task", "lookup", ""]) == {"lookup"}

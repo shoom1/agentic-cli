@@ -1284,3 +1284,34 @@ class TestCatalogLifecycle:
             await manager.cleanup()
 
         assert ticks >= 5
+
+
+async def test_the_base_names_a_configured_types_tools_as_its_delegations_do(providers):
+    """``_agent_tool_names`` before a backend builds anything: a registered name, a
+    dotted path and a callable are named alike by the manager and by a
+    ``Delegations`` with no backend hook; the plan's tools are left out."""
+    from types import SimpleNamespace
+
+    from agentic_cli.tools import read_file
+    from agentic_cli.workflow.agents.delegate import Delegations
+
+    configs = [
+        AgentConfig(name="coordinator", prompt="p", sub_agents=["writer"]),
+        AgentConfig(name="writer", prompt="p", tools=[
+            read_file, "web_fetch", "agentic_cli.tools.glob_tool.glob",
+        ]),
+    ]
+    manager = adk(configs, settings())
+
+    names = await manager._agent_tool_names("writer")
+
+    assert names == {"read_file", "web_fetch", "glob"}
+    assert await Delegations._own_tools(
+        SimpleNamespace(_tool_names=None), configs[1]
+    ) == names
+    assert await manager._agent_tool_names("nobody") == frozenset()
+    # The manager has resolved its configs' strings; a Delegations over raw ones names alike.
+    raw = AgentConfig(name="writer", prompt="p", tools=[
+        "web_fetch", "agentic_cli.tools.glob_tool.glob", read_file,
+    ])
+    assert await Delegations._own_tools(SimpleNamespace(_tool_names=None), raw) == names
