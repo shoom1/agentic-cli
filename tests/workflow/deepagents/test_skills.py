@@ -487,6 +487,26 @@ class TestMakeSkillTools:
             assert "cannot be shown" in status["status"]
             assert "injected" not in status["status"]
 
+    def test_with_a_skill_that_starts_an_agent_they_are_declared_as_before(
+        self, skills_dir, tmp_path
+    ):
+        """Loading such a skill starts its agent, through the same tools: the
+        model is offered what ADK offers, and each tool is bound as before."""
+        from langchain_core.utils.function_calling import convert_to_openai_tool
+
+        from tests.workflow.test_skills import _agents, _starting_skill
+
+        skills = [*_skills(skills_dir), *SkillStore().resolve([str(_starting_skill(tmp_path))])]
+
+        tools, instruction = make_skill_tools(skills, agents=_agents())
+
+        plain, _ = make_skill_tools(skills)
+        assert [convert_to_openai_tool(t) for t in tools] == [
+            convert_to_openai_tool(t) for t in plain
+        ]
+        assert instruction == SKILLS_INSTRUCTION
+        assert [identify_tool(t) for t in tools] == [identify_tool(t) for t in plain]
+
     def test_duplicate_skill_names_raise_as_on_adk(self, skills_dir):
         skill = _skills(skills_dir)[0]
 

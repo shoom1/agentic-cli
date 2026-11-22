@@ -52,7 +52,7 @@ from agentic_cli.config import BaseSettings
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.registry import ToolDefinition, identify_tool
-from agentic_cli.tools.skills import SkillStore
+from agentic_cli.tools.skills import SkillAgents, SkillStore
 from agentic_cli.tools.skills.langchain_tools import SKILL_TOOL_NAMES, make_skill_tools
 from agentic_cli.workflow.base_manager import BaseWorkflowManager, Closer
 from agentic_cli.workflow.checkpointers import (
@@ -394,7 +394,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """``config``'s skills as skill tools, and the instruction its prompt gets.
 
         The skills resolve as on ADK: an absolute path to a skill folder, or a
-        name under ``skills_dirs``.
+        name under ``skills_dirs``. A skill that names an agent type starts it
+        when loaded, as on ADK.
 
         Raises:
             ValueError: A skill cannot be found or loaded (``SkillStore``).
@@ -411,7 +412,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             )
         skills = SkillStore(self._settings.skills_dirs or []).resolve(config.skills)
         skill_tools, instruction = make_skill_tools(
-            skills, provider=self._resolved_models[config.name].record.kind
+            skills,
+            provider=self._resolved_models[config.name].record.kind,
+            # The base validated the graph before this build, so the root is set.
+            agents=SkillAgents(
+                config.name, lambda: self._delegations,
+                root=config.name == self._root_agent_name,
+            ),
         )
         logger.debug(
             "skill_tools_attached", agent=config.name, skills=[s.name for s in skills]
