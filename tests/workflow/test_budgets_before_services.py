@@ -157,6 +157,55 @@ class TestEachBackendFailsBeforeBuildingAnything:
             await manager.cleanup()
 
 
+def _choosing(choice: str) -> list[AgentConfig]:
+    """A lead, and an agent whose tool needs a service (the jobs) with ``choice`` as its model choice."""
+    from agentic_cli.tools.jobs.tools import job_status
+
+    return [
+        AgentConfig(name="lead", prompt="p", sub_agents=["a"]),
+        AgentConfig(name="a", prompt="p", tools=[job_status], model_choices=(choice,)),
+    ]
+
+
+class TestAModelChoicesBudget:
+    """A model choice gets its own context numbers when the models resolve: one
+    too small to work in fails the start as an agent's own model does."""
+
+    @pytest.mark.parametrize(("path", "store_opener"), BACKENDS)
+    async def test_a_choice_too_small_to_work_in_builds_no_service(
+        self, ctx, monkeypatch, path, store_opener
+    ):
+        cls = _backend(path)
+        spy = _Spy(monkeypatch, cls, store_opener)
+        manager = cls(_choosing(SMALL), settings=ctx.settings)
+
+        with pytest.raises(ContextBudgetError, match=r"'a'.*gemini-3\.8-flash"):
+            await manager.initialize_services()
+
+        assert (spy.built, spy.stores) == ([], [])
+        assert not manager.is_initialized
+        assert (manager._budgets, manager._choice_budgets) == ({}, {})
+
+    @pytest.mark.parametrize(("path", "store_opener"), BACKENDS)
+    async def test_a_choice_s_numbers_are_its_model_s(self, ctx, path, store_opener):
+        cls = _backend(path)
+        manager = cls(_choosing("google:gemini-2.5-flash"), settings=ctx.settings)
+        try:
+            await manager.initialize_services()
+
+            choice = manager.choice_models[("a", "google:gemini-2.5-flash")]
+            assert manager.context_budget("a", model="google:gemini-2.5-flash") == (
+                context_budget(choice, ctx.settings)
+            )
+            assert manager.context_budget("a") == context_budget(
+                manager.agent_models["a"], ctx.settings
+            )
+            with pytest.raises(KeyError, match="model choice 'fast'"):
+                manager.context_budget("a", model="fast")
+        finally:
+            await manager.cleanup()
+        assert manager._choice_budgets == {}
+
 class TestANativeAdkApp:
     async def test_the_configs_the_factory_passes_through_are_ignored(self, ctx, tmp_path):
         # ``create_workflow_manager_from_settings`` hands a native app's configs to

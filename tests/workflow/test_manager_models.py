@@ -388,6 +388,103 @@ class TestResolution:
             await manager.cleanup()
 
 
+class TestModelChoices:
+    """Each agent's ``model_choices`` resolve with the agents' models, all or
+    nothing, each with the agent's own generation settings: what a
+    delegation may run the agent on instead (``choice_models``)."""
+
+    async def test_each_choice_resolves_as_a_model_would(self, providers, monkeypatch):
+        keys(monkeypatch, "google")
+        manager = adk(
+            team("gemini-2.5-pro", model_choices=("fast", "google:gemini-2.5-flash")),
+            settings(model_roles={"fast": "google:gemini-2.5-flash-lite"}),
+        )
+
+        assert manager.choice_models == {}
+        await manager.initialize_services()
+        try:
+            assert {key: str(m.ref) for key, m in manager.choice_models.items()} == {
+                ("writer", "fast"): "google:gemini-2.5-flash-lite",
+                ("writer", "google:gemini-2.5-flash"): "google:gemini-2.5-flash",
+            }
+            # Each is the agent's, under its name; its own model is unchanged.
+            assert {m.agent for m in manager.choice_models.values()} == {"writer"}
+            assert str(manager.agent_models["writer"].ref) == "google:gemini-2.5-pro"
+            assert set(manager.agent_models) == {"coordinator", "writer"}
+        finally:
+            await manager.cleanup()
+
+    async def test_a_role_no_setting_maps_is_computed_and_its_provider_listed(
+        self, providers, monkeypatch
+    ):
+        """``fast`` as a choice is what ``fast`` as a model is: the start lists the
+        provider whose newest fast-tier model it takes, as it does for an agent
+        on that role."""
+        keys(monkeypatch, "anthropic")
+        manager = adk(team(model_choices=("fast",)), settings(default_model="claude-opus-4-7"))
+
+        await manager.initialize_services()
+        try:
+            assert providers.calls == ["anthropic"]
+            assert str(manager.choice_models[("writer", "fast")].ref) == (
+                "anthropic:claude-haiku-4-5"
+            )
+        finally:
+            await manager.cleanup()
+
+    async def test_a_choice_that_cannot_run_is_reported_with_the_rest_and_nothing_kept(
+        self, providers, monkeypatch
+    ):
+        keys(monkeypatch, "google")
+        configs = [
+            AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b"]),
+            AgentConfig(name="a", prompt="p", model="anthropic:claude-sonnet-4-5"),
+            AgentConfig(name="b", prompt="p", model_choices=("anthropic:claude-haiku-4-5",)),
+        ]
+        manager = adk(configs, settings())
+
+        with pytest.raises(SettingsValidationError) as caught:
+            await manager.initialize_services(validate=False)  # past the static check
+
+        message = str(caught.value)
+        assert "Agent 'a': model 'anthropic:claude-sonnet-4-5' needs the anthropic" in message
+        assert "Agent 'b': model 'anthropic:claude-haiku-4-5' needs the anthropic" in message
+        assert (manager.choice_models, manager._resolved_models) == ({}, {})
+        assert not manager.is_initialized
+
+    async def test_a_choice_takes_the_agent_s_generation_settings(
+        self, providers, monkeypatch
+    ):
+        """A thinking level the choice's model lacks fails the start, as on the agent's own."""
+        keys(monkeypatch, "anthropic")
+        writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))
+        manager = adk(
+            team("anthropic:claude-opus-4-7", model_settings=writer,
+                 model_choices=("anthropic:claude-haiku-4-5",)),
+            settings(),
+        )
+
+        with pytest.raises(SettingsValidationError) as caught:
+            await manager.initialize_services(validate=False)
+
+        assert str(caught.value).startswith(
+            "Agent 'writer': thinking mode 'xhigh' is not available on "
+            "anthropic:claude-haiku-4-5"
+        )
+
+    async def test_a_model_switch_resolves_them_again(self, providers, monkeypatch):
+        keys(monkeypatch, "google")
+        manager = adk(team(model_choices=("default",)), settings(default_model="gemini-2.5-pro"))
+
+        await manager.initialize_services()
+        try:
+            await manager.reinitialize(model="gemini-2.5-flash", preserve_sessions=True)
+            assert str(manager.choice_models[("writer", "default")].ref) == (
+                "google:gemini-2.5-flash"
+            )
+        finally:
+            await manager.cleanup()
+
 # --- the manager's own model (R4) ------------------------------------------------------
 
 

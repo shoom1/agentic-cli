@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import functools
 import inspect
 import warnings
@@ -490,6 +491,10 @@ class BaseWorkflowManager(ABC):
         # no context.
         self._root_agent_name: str | None = None
         self._budgets: dict[str, "ContextBudget"] = {}
+        # Each agent's model choices, resolved with its model and given their
+        # own numbers, by (agent, choice as written).
+        self._choice_models: dict[tuple[str, str], ResolvedModel] = {}
+        self._choice_budgets: dict[tuple[str, str], "ContextBudget"] = {}
 
         # User input handling (callback-only), context-local — see
         # set_input_callback(). One ContextVar per manager; there are only ever
@@ -2292,6 +2297,12 @@ class BaseWorkflowManager(ABC):
         return MappingProxyType(self._resolved_models)
 
     @property
+    def choice_models(self) -> Mapping[tuple[str, str], ResolvedModel]:
+        """Each agent's model choices' models, by ``(agent, choice)``, the choice
+        as ``AgentConfig.model_choices`` writes it; empty before initialization."""
+        return MappingProxyType(self._choice_models)
+
+    @property
     def root_agent_name(self) -> str | None:
         """The root agent's name, from the validated agent graph.
 
@@ -2300,7 +2311,9 @@ class BaseWorkflowManager(ABC):
         """
         return self._root_agent_name if self._initialized else None
 
-    def context_budget(self, agent_name: str | None = None) -> "ContextBudget":
+    def context_budget(
+        self, agent_name: str | None = None, *, model: str | None = None
+    ) -> "ContextBudget":
         """An agent's context numbers, as its backend summarizes and trims by them.
 
         Its window (or the 128k floor), input budget, summary trigger and the
@@ -2310,13 +2323,16 @@ class BaseWorkflowManager(ABC):
 
         Args:
             agent_name: The agent; None for the root agent (``root_agent_name``).
+            model: One of the agent's model choices, as ``AgentConfig.model_choices``
+                writes it: its numbers instead of the agent's own model's.
 
         Raises:
             RuntimeError: Before initialization, or after cleanup.
             KeyError: ``agent_name`` names no agent whose context this manager
                 manages: one whose model did not resolve (a native ADK YAML
-                app's). LangGraph manages none: every name is unknown there,
-                the root's included.
+                app's), or a ``model`` that is none of its choices.
+                LangGraph manages none: every name is unknown there, the
+                root's included.
         """
         if not self._initialized:
             raise RuntimeError(
@@ -2324,6 +2340,13 @@ class BaseWorkflowManager(ABC):
                 "budgets are computed when it initializes."
             )
         name = self.root_agent_name if agent_name is None else agent_name
+        if model is not None:
+            if (name, model) not in self._choice_budgets:
+                raise KeyError(
+                    f"No context budget for agent {name!r}'s model choice {model!r}: "
+                    "this manager does not manage it."
+                )
+            return self._choice_budgets[(name, model)]
         if name is None or name not in self._budgets:
             who = "the root agent" if name is None else f"agent {name!r}"
             raise KeyError(f"No context budget for {who}: this manager does not manage it.")
@@ -2480,6 +2503,7 @@ class BaseWorkflowManager(ABC):
             # small to work in (ContextBudgetError) fails here too, before a
             # service or a session store is built.
             self._budgets = self._compute_budgets()
+            self._choice_budgets = self._compute_choice_budgets()
             if services is not None:
                 # Another manager's, published as its: only what they lack
                 # is built, and the rollback below drops them unclosed.
@@ -2537,6 +2561,24 @@ class BaseWorkflowManager(ABC):
         return {
             name: context_budget(model, self._settings)
             for name, model in self._resolved_models.items()
+        }
+
+    def _compute_choice_budgets(self) -> "dict[tuple[str, str], ContextBudget]":
+        """Each model choice's context numbers, by ``(agent, choice)``; none for a backend that manages none.
+
+        Called right after ``_compute_budgets``, with the same failure: a
+        choice whose model leaves too small an input budget to work in.
+
+        Raises:
+            ContextBudgetError: Naming the agent and the model.
+        """
+        if not self._manages_context():
+            return {}
+        from agentic_cli.workflow.context import context_budget
+
+        return {
+            key: context_budget(model, self._settings)
+            for key, model in self._choice_models.items()
         }
 
     def _validate_model_settings(self) -> None:
@@ -2608,15 +2650,27 @@ class BaseWorkflowManager(ABC):
                 default = model
             else:
                 resolved[config.name] = model
+        # A choice runs as the agent's model would: its name, its settings.
+        choices: dict[tuple[str, str], ResolvedModel] = {}
+        for config in self._agent_configs:
+            for choice in config.model_choices:
+                try:
+                    choices[(config.name, choice)] = self._resolve_for(
+                        dataclasses.replace(config, model=choice), roles, self._catalog, providers
+                    )
+                except ModelResolutionError as exc:
+                    errors.append(str(exc))
         if errors:
             raise SettingsValidationError("\n".join(dict.fromkeys(errors)))
         resolved.update(self._resolve_extra_models(roles, providers))
 
         self._default_model, self._resolved_models = default, resolved
+        self._choice_models = choices
         logger.info(
             "models_resolved",
             default=str(default.ref),
             agents={name: str(model.ref) for name, model in resolved.items()},
+            choices={f"{name}/{choice}": str(model.ref) for (name, choice), model in choices.items()},
         )
 
     def _resolve_extra_models(
@@ -2914,6 +2968,7 @@ class BaseWorkflowManager(ABC):
 
         self._initialized = False
         self._budgets = {}
+        self._choice_budgets = {}
         self._memory_index.clear()
         self._rosters.clear()
         catalog, self._catalog = self._catalog, None
@@ -3046,6 +3101,7 @@ class BaseWorkflowManager(ABC):
         self._model_override = model
         self._default_model = None
         self._resolved_models = {}
+        self._choice_models = {}
 
     @abstractmethod
     async def process(
