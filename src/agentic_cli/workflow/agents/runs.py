@@ -199,6 +199,12 @@ class InstanceRecord:
         status: One of ``INSTANCE_STATUSES``.
         runs: Its run ids, oldest first.
         continuable: Whether its type takes follow-ups, as it was when it started.
+        tools: The type's own tools its first run's delegation narrowed it to
+            (``task``'s ``tools``; empty for none of them); None for all of
+            them. Every run of it keeps them.
+        model: The model choice its first run's delegation ran it on, as the
+            type writes it (``task``'s ``model``); None for the type's own
+            model. Every run of it keeps it.
     """
 
     instance: str
@@ -210,6 +216,8 @@ class InstanceRecord:
     status: str
     runs: list[str] = field(default_factory=list)
     continuable: bool = True
+    tools: tuple[str, ...] | None = None
+    model: str | None = None
 
 
 def own_plan_and_tasks(state: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -490,7 +498,7 @@ class AgentRuns:
 
         ``{"v": RECORDS_VERSION, "saved": <now, ISO>, "numbered": {type: n},
         "instances": [...], "runs": [...]}``: each instance's fields
-        (``InstanceRecord``) and each run's (``RunRecord``, its ``ref``'s
+        (``InstanceRecord``, its ``tools`` a list) and each run's (``RunRecord``, its ``ref``'s
         fields first, its times as ISO text, and ``end``: where its end was
         recorded, 0 for none yet), in the order they started, and the
         highest instance number of each type. ``saved`` is when this was
@@ -503,7 +511,7 @@ class AgentRuns:
                 agent: count for (owner, agent), count in self._numbered.items()
                 if owner == conversation
             },
-            "instances": [asdict(one) for one in self.instances(conversation)],
+            "instances": [_instance_value(one) for one in self.instances(conversation)],
             "runs": [
                 _run_value(record, self.end_order(conversation, record.ref.run or ""))
                 for record in self.records(conversation)
@@ -603,6 +611,7 @@ class AgentRuns:
         instances = self._instances.setdefault(conversation, {})
         record = instances.get(ref.instance)
         if record is None:
+            tools = metadata.get("tools")
             record = instances[ref.instance] = InstanceRecord(
                 instance=ref.instance,
                 agent=ref.agent,
@@ -612,6 +621,8 @@ class AgentRuns:
                 title=metadata.get("title") or "",
                 status=INSTANCE_RUNNING,
                 continuable=bool(metadata.get("continuable", True)),
+                tools=tuple(tools) if tools is not None else None,
+                model=metadata.get("model"),
             )
         return record
 
@@ -638,6 +649,14 @@ def stored_instance_ids(data: Any) -> list[str] | None:
         value["instance"] for value in instances
         if isinstance(value, Mapping) and isinstance(value.get("instance"), str)
     ]
+
+
+def _instance_value(instance: InstanceRecord) -> dict[str, Any]:
+    """An instance's record as ``export`` writes it: JSON-safe, its tools a list."""
+    value = asdict(instance)
+    if instance.tools is not None:
+        value["tools"] = list(instance.tools)
+    return value
 
 
 def _run_value(record: RunRecord, end: int) -> dict[str, Any]:
@@ -721,7 +740,25 @@ def _instance_from(value: Any) -> InstanceRecord:
         status=status,
         runs=list(runs),
         continuable=_get(value, "continuable", bool),
+        # Written since records first kept them: missing in older ones (all
+        # of the type's tools, its own model).
+        tools=_tools(value.get("tools")),
+        model=_get_new(value, "model", str, _NONE),
     )
+
+
+def _tools(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if type(value) is not list or not all(type(name) is str for name in value):
+        raise TypeError("tools that are not a list of names")
+    return tuple(value)
+
+
+def _get_new(value: Mapping[str, Any], name: str, *kinds: type) -> Any:
+    """``value[name]`` as ``_get`` reads it, None when it is missing (a field
+    added since a version's first records)."""
+    return _get(value, name, *kinds) if name in value else None
 
 
 def _run_from(value: Any) -> RunRecord:

@@ -90,6 +90,23 @@ class TestAnInstancesStatus:
 
         assert (event.metadata["inherit_context"], event.metadata["continuable"]) == (True, False)
 
+    def test_a_first_runs_start_carries_the_tools_and_model_it_was_given(self):
+        event = WorkflowEvent.agent_run(
+            RESEARCHER, "started", title="Find X.", tools=("lookup", "fetch"), model="fast"
+        )
+
+        assert (event.metadata["tools"], event.metadata["model"]) == (["lookup", "fetch"], "fast")
+
+    def test_none_of_its_own_tools_is_said_too(self):
+        event = WorkflowEvent.agent_run(RESEARCHER, "started", title="Find X.", tools=[])
+
+        assert event.metadata["tools"] == []
+        assert "model" not in event.metadata
+
+    def test_no_tools_or_model_unless_given(self):
+        event = WorkflowEvent.agent_run(RESEARCHER, "started", title="Find X.")
+
+        assert "tools" not in event.metadata and "model" not in event.metadata
     def test_a_follow_ups_start_carries_its_input(self):
         second = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
 
