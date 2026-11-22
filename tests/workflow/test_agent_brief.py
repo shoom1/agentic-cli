@@ -22,14 +22,17 @@ import pytest
 from agentic_cli.workflow.agents import brief as brief_module
 from agentic_cli.workflow.agents.brief import (
     BRIEF_FIELDS,
+    DEPTH_SENTENCE,
     INHERITED_CONTEXT_NOTE,
     Brief,
     BriefError,
+    TaskOffer,
     follow_up_description,
     follow_up_parameters,
     read_brief,
     task_description,
     task_message,
+    task_offer,
     task_parameters,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy
@@ -335,6 +338,42 @@ class TestTaskDescription:
         assert paragraphs[2] == "At most 2 at once. One more limit."
         assert paragraphs[3].startswith("The agents you can hand a task to:")
         assert seen == [policy]
+
+    def test_the_depth_sentence_follows_the_limits(self, logged):
+        text = task_description(TYPES, SubAgentPolicy(), depth_sentence=True)
+        assert DEPTH_SENTENCE == "Sub-agents cannot start sub-agents."
+        assert text.split("\n\n")[2] == (
+            "At most 4 sub-agents work at once; more calls in one response wait for a free "
+            "slot. At most 20 runs per turn. Sub-agents cannot start sub-agents."
+        )
+        assert text.replace(" Sub-agents cannot start sub-agents.", "") == (
+            task_description(TYPES, SubAgentPolicy())
+        )
+
+    def test_it_can_be_made_without_a_warning(self, logged):
+        text = task_description({"notes": NOTES}, SubAgentPolicy(), warn=False)
+        assert text.endswith(": The notes agent.")
+        assert logged == []
+
+
+class TestTaskOffer:
+    """What ``task`` offers one run: the types, the schema and the description,
+    made together from the same types."""
+
+    def test_its_parts(self, logged):
+        offer = task_offer(TYPES, SubAgentPolicy(max_active=2))
+
+        assert offer == TaskOffer(
+            types=TYPES, parameters=task_parameters(TYPES),
+            description=task_description(TYPES, SubAgentPolicy(max_active=2)),
+        )
+        assert logged == []  # made per run: it warns only when asked
+
+    def test_with_the_depth_sentence_and_the_warning(self, logged):
+        offer = task_offer({"notes": NOTES}, SubAgentPolicy(), depth_sentence=True, warn=True)
+
+        assert DEPTH_SENTENCE in offer.description
+        assert [e["event"] for e in logged] == ["subagent_without_description"]
 
 
 AGENT_ID = "The sub-agent's id, such as researcher-2."

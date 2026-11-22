@@ -9,7 +9,8 @@ start a run is a ``BriefError``, whose text is the call's error result.
 ``task_message`` lays a brief out as the first message of the run it starts
 (the system prompt stays the type's own); an inheriting type's ends with
 ``INHERITED_CONTEXT_NOTE``. ``task_parameters`` and ``task_description`` are
-``task``'s schema and description, the same for both backends;
+``task``'s schema and description, the same for both backends, made for the
+types one run may start (``task_offer``, ``Delegations.offered``);
 ``follow_up_parameters`` and ``follow_up_description`` are the parent's other
 tools' (``message_agent``, ``stop_agent``, ``check_agents``).
 """
@@ -61,6 +62,9 @@ _WHAT_IT_SEES = (
     "A sub-agent sees only the brief you write, unless its line below says it sees "
     "this conversation: put in the brief everything it needs to know."
 )
+
+#: Added to ``task``'s limits when what a run starts could not start more.
+DEPTH_SENTENCE = "Sub-agents cannot start sub-agents."
 
 #: The parent's other tools' descriptions, by tool name.
 _PARENT_TOOL_DESCRIPTIONS = {
@@ -278,7 +282,13 @@ def task_parameters(types: Mapping[str, AgentConfig]) -> dict[str, Any]:
     }
 
 
-def task_description(types: Mapping[str, AgentConfig], policy: SubAgentPolicy) -> str:
+def task_description(
+    types: Mapping[str, AgentConfig],
+    policy: SubAgentPolicy,
+    *,
+    depth_sentence: bool = False,
+    warn: bool = True,
+) -> str:
     """``task``'s description, as the model reads it.
 
     What a delegation is (the sub-agent works on its own and returns its
@@ -286,15 +296,48 @@ def task_description(types: Mapping[str, AgentConfig], policy: SubAgentPolicy) -
     sees (the brief alone, unless its type inherits the conversation), the
     limits in force (``limit_sentences``), and each of ``types`` with its
     description. A type without a description is offered as "The <name>
-    agent.", with one warning logged for it.
+    agent.", with one warning logged for it (none when ``warn`` is False).
+    ``depth_sentence`` ends the limits with ``DEPTH_SENTENCE``.
     """
     paragraphs = [_DELEGATION, _WHAT_IT_SEES]
     limits = limit_sentences(policy)
+    if depth_sentence:
+        limits = [*limits, DEPTH_SENTENCE]
     if limits:
         paragraphs.append(" ".join(limits))
-    lines = "\n".join(_type_line(name, config, warn=True) for name, config in types.items())
+    lines = "\n".join(_type_line(name, config, warn=warn) for name, config in types.items())
     paragraphs.append(f"The agents you can hand a task to:\n{lines}")
     return "\n\n".join(paragraphs)
+
+
+@dataclass(frozen=True)
+class TaskOffer:
+    """What ``task`` offers one run: the types it may start, the schema and the description."""
+
+    types: Mapping[str, AgentConfig]
+    parameters: dict[str, Any]
+    description: str
+
+
+def task_offer(
+    types: Mapping[str, AgentConfig],
+    policy: SubAgentPolicy,
+    *,
+    depth_sentence: bool = False,
+    warn: bool = False,
+) -> TaskOffer:
+    """The offer for ``types``: schema and description made together from the same types.
+
+    ``warn`` logs a type without a description once; an offer made for each
+    run leaves it off.
+    """
+    return TaskOffer(
+        types=dict(types),
+        parameters=task_parameters(types),
+        description=task_description(
+            types, policy, depth_sentence=depth_sentence, warn=warn
+        ),
+    )
 
 
 def follow_up_description(name: str) -> str:
