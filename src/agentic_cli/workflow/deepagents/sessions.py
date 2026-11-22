@@ -522,13 +522,19 @@ class CheckpointSessions:
         version = mark.value.get("v") if mark is not None else None
         return isinstance(version, int) and version >= _BACKFILL_VERSION
 
+    async def _is_kept_row(self, namespace: tuple[str, ...], session_id: str) -> bool:
+        """Whether the index's row of ``session_id`` is one ``keep`` wrote."""
+        item = await self._store.aget(namespace, session_id)
+        return item is not None and _is_kept(item.value)
+
     async def _fill(self, app_name: str, user_id: str) -> dict[str, SessionInfo]:
         """Index the app and user's conversations from their checkpoints, once.
 
         Scans the saver (``_scan``), writes the row of each conversation the
         index lacks or holds an older row of, and marks the app and user
         done, in one batch. The rows are read after the scan, so a newer one
-        that another process's turn wrote meanwhile is kept. A failed write
+        that another process's turn wrote meanwhile is kept, and so is a row
+        ``keep`` wrote. A failed write
         is logged at debug, and the next listing scans again.
 
         Returns:
@@ -540,6 +546,8 @@ class CheckpointSessions:
         writes: list[PutOp] = []
         for session_id, row in scanned.items():
             held = rows.get(session_id)
+            if held is not None and await self._is_kept_row(namespace, session_id):
+                continue  # ``keep``'s row is left as it is
             if held is None or held.updated < row.updated:
                 rows[session_id] = row
                 writes.append(PutOp(namespace, session_id, _value(row), index=False))

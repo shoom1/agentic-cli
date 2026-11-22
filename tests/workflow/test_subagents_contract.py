@@ -7624,6 +7624,26 @@ class TestTheUsersStartStoresItsConversation:
         assert [r.getMessage() for r in caplog.records
                 if "unknown agent" in r.getMessage()] == []
 
+    async def test_a_new_conversation_and_its_instance_are_unmarked(self, make_crew):
+        """Storing the conversation is no outside content: a memory write in it is
+        approved as in any new conversation, not per call."""
+        from agentic_cli.workflow.sessions import reset_active_turn, set_active_turn
+
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+
+        await user_start(crew, "helper", "Objective title.")
+        await crew.turn("First typed prompt.")
+
+        assert not crew.manager._outside_marks.get(crew.conversation)
+        assert not await crew.marked()
+        assert await crew.instance_mark("helper-1") == ""
+        token = set_active_turn(crew.conversation)
+        try:
+            assert crew.manager._per_call_capabilities(crew.manager.settings) == {}
+        finally:
+            reset_active_turn(token)
+
     async def test_a_refusal_stores_nothing(self, make_crew):
         crew = make_crew(user_team(), subagents=STARTING, store="sqlite")
 
