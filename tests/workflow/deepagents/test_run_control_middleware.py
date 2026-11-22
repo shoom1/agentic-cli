@@ -8,9 +8,11 @@ both backends, are in the contract suite (``TestTheStepLimit``,
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("deepagents")
 
@@ -31,6 +33,7 @@ from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
 )
 from agentic_cli.workflow.deepagents.task_tool import build_task_tool  # noqa: E402
 from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
+from agentic_cli.workflow.tool_errors import unknown_tool_result  # noqa: E402
 
 CALL = {"name": "lookup", "args": {"q": "X"}, "id": "r1", "type": "tool_call"}
 
@@ -261,3 +264,17 @@ async def test_the_roots_calls_keep_their_task():
     _, task, lookup, middleware = _offering(DEEPER)
 
     assert await _offered(middleware, _request([lookup, task]), None) == [lookup, task]
+
+
+async def test_a_task_call_by_a_run_offered_nothing_is_logged_at_info():
+    """The model's mistake, as at the permission gate: nothing over the prompt."""
+    _, task, lookup, _ = _offering(SubAgentPolicy())
+    runtime = SimpleNamespace(state={}, tools=[lookup, task], tool_call_id="t1")
+
+    with capture_logs() as logs:
+        result = await task.coroutine(runtime, agent_type="researcher")
+
+    (message,) = result.update["messages"]
+    assert message.status == "error"
+    assert json.loads(message.content) == unknown_tool_result("task", ["lookup"])
+    assert [(log["log_level"], log["event"]) for log in logs] == [("info", "tool_not_found")]

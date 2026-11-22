@@ -622,7 +622,9 @@ the start of the entry's title.
   `task`'s description says so after its limits: "Sub-agents cannot start
   sub-agents."
 - **The main agent's requests list its open sub-agents, when it can continue
-  them.** With `SubAgentPolicy(follow_ups=True)` a main agent that can have sub-agents (its own, or types it may start at run time; it has `message_agent`) is told which of its own sub-agents are open: a
+  them.** With `SubAgentPolicy(follow_ups=True)` a main agent that can have
+  sub-agents (its own, or types it may start at run time; it has
+  `message_agent`) is told which of its own sub-agents are open: a
   roster after the memory index, `<agents>`, the line `Your sub-agents in
   this conversation (message_agent continues one):`, then one line per
   idle, stopped or running instance, newest first, `- <id> (<type>,
@@ -720,7 +722,9 @@ the start of the entry's title.
   session through `self.session`, not as a class attribute with a value.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
-  `SubAgentPolicy(follow_ups=True)`.** Every agent that can have sub-agents (its own, or types it may start at run time) gets them beside `task`; with the policy at its defaults (`follow_ups` False) an
+  `SubAgentPolicy(follow_ups=True)`.** Every agent that can have sub-agents
+  (its own, or types it may start at run time) gets them beside `task`; with
+  the policy at its defaults (`follow_ups` False) an
   agent gets `task` alone. The names are declared by the framework, exempt,
   as `task` is (`tools/_core/delegation.py`: `FOLLOW_UP_TOOLS`), so an app's
   `register_tool(name="message_agent")` (or either other) raises, an agent
@@ -1942,7 +1946,11 @@ the start of the entry's title.
   rather than replace it.
 - **One `task` tool on both backends, which takes a brief.** **Breaking:**
   ADK offered one tool per sub-agent (`researcher(request=...)`) and Deep
-  Agents its own `task(description=, subagent_type=)`; now every agent with sub-agents (or types it may start at run time: see Added: **Agent types started at run time…**) is offered the framework's `task`, the same on both (`workflow/agents/brief.py`): `agent_type`, one of the types the calling run may start (its own sub-agents first),
+  Agents its own `task(description=, subagent_type=)`; now every agent with
+  sub-agents (or types it may start at run time: see Added: **Agent types
+  started at run time…**) is offered the framework's `task`, the same on both
+  (`workflow/agents/brief.py`): `agent_type`, one of the types the calling run
+  may start (its own sub-agents first),
   each listed in the tool's description with what it does and the brief
   fields it requires, then the brief, `title` and `objective` (required),
   `deliverable`, `constraints`, `known` and `done_when`. The run's first

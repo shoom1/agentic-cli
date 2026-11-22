@@ -53,6 +53,7 @@ from typing import Any
 import anthropic
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
@@ -6384,6 +6385,59 @@ class TestTheDefaultPolicyKeepsTask:
         await crew.turn()
 
         assert crew.declared("coordinator") == TEAM_TASK
+
+
+DEEPER = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2)
+
+
+class TestTheOfferIsTheRuns:
+    """What a model is offered is its run's offer, not the one its agent was
+    built with: a type that runs at several depths."""
+
+    async def test_a_run_below_the_depth_it_was_built_for_is_offered_less(self, make_crew):
+        crew = make_crew(
+            [*team(),
+             agent("checker", tools=(contract_lookup,)),
+             agent("planner", sub_agents=("checker",), spawnable_by=frozenset({"agent"}))],
+            subagents=DEEPER,
+            coordinator=[calls(delegate("planner", "Plan X.", "c1")), says("Done.")],
+            # planner-1 (depth 1), then planner-2 (depth 2), then planner-1 again.
+            planner=[calls(delegate("planner", "Plan more.", "p1")), says("Planned more."),
+                     says("Planned.")],
+        )
+
+        await crew.turn()
+
+        assert [r.ref.instance for r in crew.records()] == ["planner-1", "planner-2"]
+        # Depth 1: its own checker, then the types agents may start.
+        assert agent_types(crew.declared("planner", call=0)) == ["checker", "planner"]
+        # Depth 2 may start none: its own sub-agent alone, and no depth sentence for it.
+        deep = crew.declared("planner", call=1)
+        assert agent_types(deep) == ["checker"]
+        assert "- planner:" not in deep["description"]
+        assert "Sub-agents cannot start" not in deep["description"]
+
+    async def test_the_missing_description_is_warned_of_at_build_and_not_for_each_call(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [*team(), agent("helper", tools=(contract_lookup,), description="",
+                            spawnable_by=frozenset({"agent"}))],
+            subagents=DEEPER,
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[calls(delegate("helper", "Help more.", "h1")), says("Helped more."),
+                    says("Helped.")],
+        )
+
+        with capture_logs() as logs:
+            await crew.turn()
+
+        assert crew.requests("helper") == 3 and crew.requests("coordinator") == 2
+        # One for each agent built with task (the coordinator, the researcher and the
+        # helper: each offers the helper), at build; none for a request.
+        assert [log["agent"] for log in logs if log["event"] == "subagent_without_description"] == [
+            "helper", "helper", "helper",
+        ]
 
 
 class TestAParentOfRunTimeTypesOnly:

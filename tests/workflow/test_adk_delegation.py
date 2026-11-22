@@ -94,9 +94,9 @@ from agentic_cli.workflow.agents.runs import AgentRuns  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.context import context_budget  # noqa: E402
 from agentic_cli.workflow.events import EventType  # noqa: E402
-from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
 from agentic_cli.workflow.permissions.prompt import DENY_CHOICE  # noqa: E402
+from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, http_library  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 from tests.workflow.test_skills import _make_skill  # noqa: E402
@@ -1203,24 +1203,6 @@ class TestPermissionIdentity:
         assert _denied(await _gate(AgentTool(stranger)))
 
 
-# --- jobs -----------------------------------------------------------------------------
-
-
-def _record(call_id: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        job_id="j1", tool="delegation_probe_start_job", call_id=call_id,
-        call_name="delegation_probe_start_job", session_id="s", user_id="u",
-        state=JobState.SUCCEEDED, exit_code=0, error=None,
-    )
-
-
-def _last_user_text(body: dict) -> str:
-    content = body["messages"][-1]["content"]
-    return content if isinstance(content, str) else "".join(
-        block.get("text", "") for block in content if block["type"] == "text"
-    )
-
-
 class TestTaskDeclaredPerRun:
     """``TaskTool`` declares, for each request, what the run that asks may
     start (``Delegations.task_offer``, by its depth): nothing at all once it
@@ -1294,6 +1276,24 @@ class TestTaskDeclaredPerRun:
             "researcher"
         ]
         assert declared.description == made.task_offer("coordinator", 0).description
+
+
+# --- jobs -----------------------------------------------------------------------------
+
+
+def _record(call_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        job_id="j1", tool="delegation_probe_start_job", call_id=call_id,
+        call_name="delegation_probe_start_job", session_id="s", user_id="u",
+        state=JobState.SUCCEEDED, exit_code=0, error=None,
+    )
+
+
+def _last_user_text(body: dict) -> str:
+    content = body["messages"][-1]["content"]
+    return content if isinstance(content, str) else "".join(
+        block.get("text", "") for block in content if block["type"] == "text"
+    )
 
 
 class TestJobs:

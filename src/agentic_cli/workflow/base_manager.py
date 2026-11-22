@@ -63,13 +63,13 @@ from agentic_cli.workflow.agents.delegate import (
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
 from agentic_cli.workflow.agents.records import RecordsWriter
 from agentic_cli.workflow.agents.roster import Rosters
-from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.agents.runs import (
     INSTANCE_CLOSED,
     INSTANCE_RUNNING,
     RUN_END_STATUSES,
     AgentRuns,
 )
+from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,

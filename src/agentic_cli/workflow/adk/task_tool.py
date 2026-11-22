@@ -10,9 +10,9 @@ may start (``Delegations.task_offer``, ``agents/brief.py``'s
 ``task_parameters`` and ``task_description``), as Deep Agents' ``task``'s is,
 and none at all for a run that may start nothing: ADK adds a tool to a
 request only for a declaration, so the model is offered no ``task``, and a
-call of the name gets ADK's answer for a tool it does not have. A call hands its arguments, as the model
-wrote them, to the manager's ``Delegations`` (``agents/delegate.py``): it
-reads the brief, runs the sub-agent and returns the result envelope.
+call of the name gets ADK's answer for a tool it does not have. A call
+hands its arguments, as the model wrote them, to the manager's
+``Delegations`` (``agents/delegate.py``): it reads the brief, runs the sub-agent and returns the result envelope.
 
 The call's result is the envelope as JSON text, which ADK stores as
 ``{"result": <text>}``: every model adapter sends that text whole (ADK's

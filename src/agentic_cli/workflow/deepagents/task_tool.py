@@ -8,9 +8,8 @@ that calls it may start (``Delegations.task_offer``: ``agents/brief.py``'s
 the root's are fixed when it is built (depth 0), a sub-agent's are rewritten
 for each of its model calls (``RunControlMiddleware``), and a call from a run
 that may start nothing gets the answer for a tool it does not have. A call
-hands its
-arguments, as the model wrote them, to the manager's ``Delegations``
-(``agents/delegate.py``): it reads the brief, runs the sub-agent
+hands its arguments, as the model wrote them, to the manager's
+``Delegations`` (``agents/delegate.py``): it reads the brief, runs the sub-agent
 (``DeepAgentsWorkflowManager._run_agent``, apart from this agent's stream)
 and returns the result envelope. The call is answered with the envelope as
 JSON (unescaped, as ADK's), one ``ToolMessage``, and the shared state the run
@@ -49,9 +48,9 @@ from langchain_core.tools import StructuredTool
 from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
+from agentic_cli.logging import Loggers
 from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
-from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents.brief import (
     follow_up_description,
     follow_up_parameters,

@@ -1145,9 +1145,9 @@ class RunControlMiddleware(AgentMiddleware):
       depth), or the tool is left out when it may start nothing, as ADK
       declares one per request.
 
-    The summarization inside it counts the note and the rewritten tools; the outcome middleware
-    outside it reads an answer whose calls were dropped as the run's final
-    one. The root's calls (no active run) and a run without a control are
+    The summarization inside it counts the note and the rewritten tools; the
+    outcome middleware outside it reads an answer whose calls were dropped as
+    the run's final one. The root's calls (no active run) and a run without a control are
     left alone.
 
     Args:

@@ -246,6 +246,13 @@ class TestFreeTypes:
         with pytest.raises(AgentGraphError, match="'reader' set inherit_context=True and have"):
             validate_agent_graph(configs, policy=AGENTS)
 
+    def test_a_free_inheriting_type_without_sub_agents_is_valid(self):
+        configs = with_free(AgentConfig(
+            name="reader", prompt="p", inherit_context=True, spawnable_by={"agent"},
+        ))
+        graph = validate_agent_graph(configs, policy=AGENTS)
+        assert (graph.root_name, graph.free_types) == ("lead", ("reader",))
+
     def test_a_free_types_own_sub_agent_does_not_inherit(self):
         configs = with_free(
             AgentConfig(name="planner", prompt="p", sub_agents=["reader"], spawnable_by={"agent"}),
@@ -358,6 +365,15 @@ class TestAFreeTypeNoSourceCanStart:
             policy=AGENTS,
         )
         assert logged == []
+
+    def test_each_validation_says_so_again(self, logged):
+        # A model switch validates the same configs once more: a warning each time.
+        configs = with_free(AgentConfig(name="helper", prompt="p", spawnable_by={"user"}))
+
+        validate_agent_graph(configs, policy=AGENTS)
+        validate_agent_graph(configs, policy=AGENTS)
+
+        assert [e["event"] for e in logged] == ["subagent_type_unreachable"] * 2
 
     def test_a_sub_agent_its_parent_starts_is_not(self, logged):
         validate_agent_graph(team(writer={"spawnable_by": {"user"}}), policy=AGENTS)

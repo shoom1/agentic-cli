@@ -3741,7 +3741,7 @@ def at(depth: int, agent: str = "middle") -> RunRef:
 
 class TestWhatARunMayStart:
     """``offered``: a run's own sub-agents in their order, then, while the
-    run is above ``max_spawn_depth`` and does not inherit, the types agents
+    run's depth is below ``max_spawn_depth`` and it does not inherit, the types agents
     may start at run time; an inheriting one only for the root."""
 
     def test_with_the_default_policy_its_own_sub_agents(self):
@@ -3832,6 +3832,30 @@ class TestTheTaskOffer:
     def test_the_depth_sentence(self, policy, types, caller, depth, says):
         made = delegations(answering()[0], types=types, policy=policy)
         assert (DEPTH_SENTENCE in made.task_offer(caller, depth).description) is says
+
+
+class TestTheOffersWarning:
+    """``task_offer`` warns of a type without a description only when asked
+    (a build asks, a per-request offer does not)."""
+
+    @staticmethod
+    def logged(warn: bool) -> list[str]:
+        from structlog.testing import capture_logs
+
+        types = {
+            "lead": AgentConfig(name="lead", prompt="p", sub_agents=["notes"]),
+            "notes": AgentConfig(name="notes", prompt="p"),
+        }
+        made = delegations(answering()[0], types=types)
+        with capture_logs() as logs:
+            assert made.task_offer("lead", 0, warn=warn) is not None
+        return [log["event"] for log in logs]
+
+    def test_when_asked(self):
+        assert self.logged(True) == ["subagent_without_description"]
+
+    def test_not_by_default(self):
+        assert self.logged(False) == []
 
 
 class TestADelegationToATypeStartedAtRunTime:

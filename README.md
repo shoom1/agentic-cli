@@ -393,7 +393,8 @@ manager = DeepAgentsWorkflowManager(
 ```
 
 What it supports:
-- **Delegation through `task`**: a coordinator (an agent with `sub_agents`, or with types it may start at run time)
+- **Delegation through `task`**: a coordinator (an agent with `sub_agents`, or
+  with types it may start at run time)
   gets the framework's `task` tool, as on ADK (see
   [Sub-agent context](#sub-agent-context)). Each sub-agent's graph runs
   apart from its coordinator's, in a task of its own, from the brief the
@@ -1297,7 +1298,12 @@ discovery and service creation. Duplicate names, unknown `sub_agents`
 references, self-references, delegation cycles, a sub-agent shared by two
 parents, and **more than one root** raise `AgentGraphError` naming the
 offending agents. Exactly one agent may be unreferenced: the runner starts from
-a single root, so agents under any other root would never run. An agent that sets `spawnable_by` and is in no `sub_agents` list is a free type, started at run time only, and no root however it is listed; the root may not set `spawnable_by`, and a `spawnable_by` that is empty or names a source other than `agent`, `skill` and `user` raises too (a free type the app's policy lets no source start is a warning: `validate_agent_graph(configs, policy=...)`).
+a single root, so agents under any other root would never run. An agent that
+sets `spawnable_by` and is in no `sub_agents` list is a free type, started at
+run time only, and no root however it is listed; the root may not set
+`spawnable_by`, and a `spawnable_by` that is empty or names a source other
+than `agent`, `skill` and `user` raises too (a free type the app's policy lets
+no source start is a warning: `validate_agent_graph(configs, policy=...)`).
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
 on an agent below another sub-agent, and an `inherit_context` that is not True
 or False, raise it too, and, when the agents are built, so does a coordinator
@@ -1315,7 +1321,8 @@ signatures, `async def` factories, and non-string results raise
 
 A sub-agent is a task its parent hands off and gets back in the same turn, on
 both backends. The parent calls the framework's `task` tool, the same on both:
-`agent_type`, one of its own sub-agents (or of the types it may start at run time, below), and a brief, `title` and `objective`
+`agent_type`, one of its own sub-agents (or of the types it may start at run
+time, below), and a brief, `title` and `objective`
 (required), `deliverable`, `constraints`, `known` (what the parent already
 knows that the task needs) and `done_when`. The sub-agent's run starts from its
 task message, the brief as sections (`# Task: <title>`, `## Objective`, …); it
@@ -1421,8 +1428,9 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
 - **Starting agents at run time.** A type may also be started while the app
   runs, by an agent's `task` call, when the app allows it twice: the type's
   `spawnable_by={"agent"}` and the policy's
-  `subagents=SubAgentPolicy(spawn_sources={"agent"})` (both empty by default:
-  `task` lists the caller's own sub-agents alone). `task` then lists, after
+  `subagents=SubAgentPolicy(spawn_sources={"agent"})` (off by default:
+  `spawnable_by` is unset and `spawn_sources` empty, so `task` lists the
+  caller's own sub-agents alone). `task` then lists, after
   them, every type agents may start, each with its description, so a main
   agent needs no `sub_agents` of its own; a type in no `sub_agents` list is a
   free type, never the root. Such a run is a delegation like any other
@@ -1446,7 +1454,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   )
   ```
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
-  every agent that can have sub-agents (its own, or types it may start at run time) gets three more tools beside `task` (with the
+  every agent that can have sub-agents (its own, or types it may start at run
+  time) gets three more tools beside `task` (with the
   policy's defaults, `task` alone): `message_agent(agent, message,
   interrupt=false)` sends one of its sub-agents a message, which an idle
   one runs as a follow-up (the envelope comes back as `task`'s does) and a
@@ -1497,7 +1506,10 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   the view first; a closed sub-agent's view has no prompt (`/back` only).
   The run's questions and a command's dialogs open one at a time, each
   waiting for the other ([Customizing the CLI](#customizing-the-cli)).
-- **What the agent graph refuses.** `inherit_context` is for sub-agents only, and only for the main agent's own sub-agents that have none of their own. `spawnable_by` is for sub-agents only, and names `agent`, `skill` or `user`. A
+- **What the agent graph refuses.** `inherit_context` is for sub-agents only,
+  and only for the main agent's own sub-agents that have none of their own.
+  `spawnable_by` is for sub-agents only, and names `agent`, `skill` or `user`.
+  A
   coordinator cannot have a tool of its own named `task` (nor, with
   `follow_ups`, one named `message_agent`, `stop_agent` or `check_agents`).
   Each raises `AgentGraphError` at startup.

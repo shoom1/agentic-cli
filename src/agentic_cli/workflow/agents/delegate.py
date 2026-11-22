@@ -6,9 +6,10 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 ``delegate``:
 
 - reads the brief against what the calling run may start (``brief.read_brief``;
-  ``offered``: its own sub-agents, then, above ``max_spawn_depth``, the types
-  agents start at run time, ``agents/spawn.py``): a brief that cannot start a run is the call's error result, and nothing
-  else happens (no run, no record, no event);
+  ``offered``: its own sub-agents, then, while the run's depth is below
+  ``max_spawn_depth``, the types agents start at run time,
+  ``agents/spawn.py``): a brief that cannot start a run is the call's error
+  result, and nothing else happens (no run, no record, no event);
 
 Then ``start``, the one entry for an instance's first run, whoever starts it
 (a ``StartRequest``: the type, the brief, who starts it):
@@ -675,7 +676,11 @@ class Delegations:
         """Run a first run of ``request.agent_type`` to its end; its envelope.
 
         A call past the runs its turn may start (when ``request.counted``)
-        is the error result, and nothing else happens. A caller that is a
+        is the error result, and nothing else happens. Otherwise the run is
+        named (its instance ``<type>-<n>``, numbered past the stored
+        instances, and its run ``<instance>#1``, under the caller's run) and
+        starts with its ``AGENT_RUN`` event, which carries
+        ``request.started_by``. A caller that is a
         run lends its slot while it waits for this one. A cancel of the
         caller's task (the turn's) ends the run ``interrupted`` once it has
         stopped, and goes on.
