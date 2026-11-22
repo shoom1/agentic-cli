@@ -190,6 +190,39 @@ class TestTheTree:
         assert created["coordinator"]["checkpointer"] is not None
         assert len(coordinator.requests) == 1 and researcher.requests == []
 
+    async def test_a_free_type_listed_first_is_no_root(self, created):
+        helper = AgentConfig(name="helper", prompt="p", spawnable_by=frozenset({"agent"}))
+        coordinator = ScriptedChat(script=[ai("Hello.")])
+        free = ScriptedChat(script=[])
+
+        root = _tree(
+            [helper, COORDINATOR, RESEARCHER],
+            {"helper": free, "coordinator": coordinator, "researcher": ScriptedChat()},
+            checkpointer=InMemorySaver(),
+        )
+        await _turn(root)
+
+        assert len(coordinator.requests) == 1 and free.requests == []
+        # Built as a sub-agent is: a run's control in its stack.
+        assert RunControlMiddleware in [type(m) for m in created["helper"]["middleware"]]
+
+    async def test_the_root_given_is_the_root(self, created):
+        coordinator = ScriptedChat(script=[ai("Hello.")])
+        other = ScriptedChat(script=[])
+        alone = AgentConfig(name="alone", prompt="p")
+
+        root = _tree(
+            [alone, COORDINATOR, RESEARCHER],
+            {"alone": other, "coordinator": coordinator, "researcher": ScriptedChat()},
+            checkpointer=InMemorySaver(), root="coordinator",
+        )
+        await _turn(root)
+
+        assert len(coordinator.requests) == 1 and other.requests == []
+        assert RunControlMiddleware not in [
+            type(m) for m in created["coordinator"]["middleware"]
+        ]
+
     async def test_a_single_agent_is_its_own_root(self, created):
         solo = ScriptedChat(script=[ai("Hi.")])
         saver = InMemorySaver()

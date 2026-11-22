@@ -6185,3 +6185,45 @@ class TestATypeNotOffered:
             ("checker-1", 2, RUN_COMPLETED),
         ]
         assert crew.requests("helper") == 1
+
+
+class TestAFreeTypeListedFirst:
+    """A free type is never the root, wherever it is listed: the turn starts at
+    the agent nobody delegates to that is no free type, on both backends."""
+
+    async def test_in_the_configs(self, make_crew):
+        crew = make_crew(
+            [helper(tools=(contract_lookup,)), *team()], subagents=SPAWNING,
+            coordinator=[says("Hello.")], helper=[says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.manager.root_agent_name == "coordinator"
+        assert (crew.requests("coordinator"), crew.requests("helper")) == (1, 0)
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Hello."]
+
+    async def test_in_agent_yaml(self, make_crew, project):
+        from agentic_cli.workflow.agent_loader import load_agents_from_yaml
+
+        path = project / "agents.yaml"
+        path.write_text(
+            "agents:\n"
+            "  - name: helper\n    instruction: You are helper.\n"
+            "    description: Helps with one thing.\n    include_state_tools: false\n"
+            "    spawnable_by: [agent]\n"
+            "  - name: coordinator\n    instruction: You are coordinator.\n"
+            "    include_state_tools: false\n    sub_agents: [researcher]\n"
+            "  - name: researcher\n    instruction: You are researcher.\n"
+            "    include_state_tools: false\n",
+            encoding="utf-8",
+        )
+        crew = make_crew(
+            load_agents_from_yaml(path), subagents=SPAWNING,
+            coordinator=[says("Hello.")], helper=[says("[never asked]")],
+        )
+
+        await crew.turn()
+
+        assert crew.manager.root_agent_name == "coordinator"
+        assert (crew.requests("coordinator"), crew.requests("helper")) == (1, 0)

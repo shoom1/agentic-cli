@@ -570,7 +570,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # validates its own.
         graph, self._validated_graph = getattr(self, "_validated_graph", None), None
         if graph is None:
-            graph = validate_agent_graph(self._agent_configs, backend=self.backend_type)
+            graph = validate_agent_graph(
+                self._agent_configs, backend=self.backend_type, policy=self.subagent_policy
+            )
 
         agents: dict[str, LlmAgent] = {}
         service_map = self._get_service_tool_map()
@@ -1175,7 +1177,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._required_managers = self._detect_required_managers()
             return AgentGraph(config_map={}, build_order=(), root_name=root.name)
         self._validated_graph = validate_agent_graph(
-            self._agent_configs, backend=self.backend_type
+            self._agent_configs, backend=self.backend_type, policy=self.subagent_policy
         )
         return self._validated_graph
 

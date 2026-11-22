@@ -369,7 +369,10 @@ class BaseWorkflowManager(ABC):
                     return []  # the backend's plan and task tools
 
                 def _validate_agent_graph(self) -> AgentGraph:
-                    return validate_agent_graph(self._agent_configs, backend=self.backend_type)
+                    return validate_agent_graph(
+                        self._agent_configs, backend=self.backend_type,
+                        policy=self.subagent_policy,
+                    )
 
                 async def _do_initialize(self) -> None:
                     self._engine = object()  # build the backend's agents or graph

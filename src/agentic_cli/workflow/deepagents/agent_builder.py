@@ -118,11 +118,13 @@ def build_agent_tree(
     delegations: "Callable[[], Delegations] | None" = None,
     graphs: "dict[str, CompiledStateGraph] | None" = None,
     roster: Callable[[], str] | None = None,
+    root: str | None = None,
 ) -> "CompiledStateGraph":
     """Build every agent, each on its own, and return the root.
 
     Validates nothing: the manager runs ``validate_agent_graph`` first, so
-    ``configs`` is a tree with one root (the agent nobody delegates to).
+    ``configs`` holds one root (the agent nobody delegates to that is no
+    free type) and the free types, which are built as any sub-agent is.
 
     Args:
         configs: The agents.
@@ -175,6 +177,9 @@ def build_agent_tree(
             (``""`` for none): given, the root's stack has ``RosterMiddleware``
             and its summarization counts it (the manager passes it only for a
             root that continues its sub-agents). No other agent gets one.
+        root: The root's name (the validated graph's ``AgentGraph.root_name``).
+            None: the first agent nobody delegates to that sets no
+            ``spawnable_by``.
 
     Raises:
         AgentGraphError: A delegating agent's own tools include one named
@@ -182,7 +187,11 @@ def build_agent_tree(
     """
     config_map = {config.name: config for config in configs}
     delegated = {sub for config in configs for sub in config.sub_agents}
-    root = next(config.name for config in configs if config.name not in delegated)
+    if root is None:
+        root = next(
+            config.name for config in configs
+            if config.name not in delegated and config.spawnable_by is None
+        )
 
     def build(name: str) -> "CompiledStateGraph":
         config = config_map[name]

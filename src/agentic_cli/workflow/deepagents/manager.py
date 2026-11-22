@@ -235,7 +235,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
     def _validate_agent_graph(self) -> AgentGraph:
         """Reject an unbuildable agent graph before anything is allocated."""
-        return validate_agent_graph(self._agent_configs, backend=self.backend_type)
+        return validate_agent_graph(
+            self._agent_configs, backend=self.backend_type, policy=self.subagent_policy
+        )
 
     def _manages_context(self) -> bool:
         """Every agent is summarized by its own context numbers."""
@@ -312,6 +314,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             roster=self._roster_now if roster_wanted else None,
             delegations=lambda: self._delegations,
             graphs=graphs,
+            root=root,
         )
         self._agent_graphs = graphs
         self._root_summarization = summarizers.get(root)
