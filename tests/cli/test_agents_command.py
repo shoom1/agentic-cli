@@ -25,7 +25,14 @@ import pytest
 from rich.console import Console
 
 from agentic_cli.cli import agents_command
-from agentic_cli.cli.agents_command import AGENT_USAGE, NO_RUNS, AgentCommand, AgentsCommand
+from agentic_cli.cli.agents_command import (
+    AGENT_USAGE,
+    NEW_USAGE,
+    NO_RUNS,
+    AgentCommand,
+    AgentsCommand,
+)
+from agentic_cli.cli.builtin_commands import HelpCommand
 from agentic_cli.cli.commands import CommandCategory, CommandRegistry
 from agentic_cli.config import BaseSettings
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager
@@ -585,6 +592,10 @@ class TestTheAgentCommand:
         assert not any(s.add_success.called for s in said)
 
     async def test_without_an_id_it_says_how(self, manager):
+        assert AGENT_USAGE == (
+            "Usage: /agent <id> | /agent new <type> <objective> | /agent stop <id> "
+            "| /agent close <id>"
+        )
         said = [await agent(manager, args) for args in ("", "stop", "close")]
 
         assert [s.add_warning.call_args.args for s in said] == [
@@ -607,6 +618,55 @@ class TestTheAgentCommand:
         assert manager.agent_runs.instance(manager.session_ref("s1"), "researcher-1").status == (
             "idle"
         )
+
+
+class TestNew:
+    """``/agent new <type> <objective>``: the type, then the rest of the line
+    as typed, handed to the app's ``start_agent`` (``tests/cli/test_agent_view.py``
+    runs it)."""
+
+    @staticmethod
+    async def new(manager, args: str):
+        """``/agent <args>`` in an app that records what it was asked to start."""
+        started: list[tuple[str, str]] = []
+
+        async def start_agent(agent_type: str, objective: str) -> bool:
+            started.append((agent_type, objective))
+            return True
+
+        app = SimpleNamespace(workflow=manager, session_id="s1", session=autospec_session(),
+                              start_agent=start_agent)
+        await AgentCommand().execute(args, app)
+        return app.session, started
+
+    async def test_the_objective_is_the_rest_of_the_line_as_typed(self, manager):
+        _, started = await self.new(manager, 'new  researcher  Find --all of "X",\tnow. ')
+
+        assert started == [("researcher", 'Find --all of "X",\tnow.')]
+
+    @pytest.mark.parametrize("args", ["new", "new researcher", "new researcher   "])
+    async def test_without_a_type_or_an_objective_it_says_how(self, manager, args):
+        session, started = await self.new(manager, args)
+
+        assert NEW_USAGE == "Usage: /agent new <type> <objective>"
+        session.add_warning.assert_called_once_with(NEW_USAGE)
+        assert started == []
+
+    async def test_help_shows_it_with_an_example(self):
+        registry = CommandRegistry()
+        registry.register(HelpCommand())
+        registry.register(AgentCommand())
+        session = autospec_session()
+
+        await HelpCommand().execute("agent", SimpleNamespace(command_registry=registry,
+                                                             session=session))
+
+        console = Console(file=io.StringIO(), record=True, width=120)
+        console.print(*session.add_rich.call_args.args)
+        text = console.export_text()
+        assert "/agent <id> | new <type> <objective> | stop <id> | close <id>" in text
+        assert "/agent new researcher Find what changed in the 2.0 release." in text
+        assert "start a new one" in text
 
 
 class _Down:
@@ -641,10 +701,11 @@ class TestWithoutAWorkflow:
             "Sub-agent runs not available (failed to start)."
         )
 
-    async def test_agent_says_the_same(self):
+    @pytest.mark.parametrize("args", ["stop researcher-1", "new researcher Find X."])
+    async def test_agent_says_the_same(self, args):
         app = _Down(None)
 
-        await AgentCommand().execute("stop researcher-1", app)
+        await AgentCommand().execute(args, app)
 
         app.session.add_warning.assert_called_once_with(
             "Sub-agent runs not available (initializing...)."
@@ -664,4 +725,13 @@ def test_it_is_a_built_in_workflow_command():
     one = registry.get("agent")
     assert isinstance(one, AgentCommand)
     assert one.category is CommandCategory.WORKFLOW
-    assert one.usage == "/agent <id> | stop <id> | close <id>"
+    assert one.usage == "/agent <id> | new <type> <objective> | stop <id> | close <id>"
+    assert one.description == (
+        "Open one of this conversation's sub-agents, start a new one, or stop or close one"
+    )
+    assert one.examples == [
+        "/agent researcher-2",
+        "/agent new researcher Find what changed in the 2.0 release.",
+        "/agent stop researcher-2",
+        "/agent close researcher-2",
+    ]

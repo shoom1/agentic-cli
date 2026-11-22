@@ -17,9 +17,11 @@ task list it left (its own: a run's plan and tasks are not its parent's),
 its error and its tokens by model.
 
 ``/agent <id>`` opens one's view (``cli/agent_view.py``: the user works with
-it directly, ``/back`` returns); ``/agent stop <id>`` is the user's stop
-of an instance (its run, if one works, cancelled by the user; only the user
-may start its next run) and ``/agent close <id>`` the user's close of it and
+it directly, ``/back`` returns); ``/agent new <type> <objective>`` starts a
+new instance of a type the user may start (its objective the rest of the
+line, as typed), whose view opens with its first run; ``/agent stop <id>`` is
+the user's stop of an instance (its run, if one works, cancelled by the user;
+only the user may start its next run) and ``/agent close <id>`` the user's close of it and
 its own sub-agents (no more runs; its work stays readable). Each says what it
 did, or why not.
 
@@ -70,8 +72,12 @@ PICKER_TITLE = "Sub-agents"
 #: What ``/agents <id>`` and ``/agent`` say for an id the conversation has no record of.
 NO_SUCH_AGENT = "No sub-agent {id} in this conversation. Type /agents for the list."
 #: What ``/agent`` alone says, and ``/agent stop`` or ``/agent close`` without an id.
-AGENT_USAGE = "Usage: /agent <id> | /agent stop <id> | /agent close <id>"
+AGENT_USAGE = (
+    "Usage: /agent <id> | /agent new <type> <objective> | /agent stop <id> | /agent close <id>"
+)
 SUBCOMMAND_USAGE = "Usage: /agent {subcommand} <id>"
+#: What ``/agent new`` says without a type or an objective.
+NEW_USAGE = "Usage: /agent new <type> <objective>"
 #: What ``/agent stop`` says it did.
 STOPPED_TEXT = "Stopped {instance}: only you can start its next run."
 #: What ``/agent stop`` says when the instance ended up closed (a type that takes no more runs).
@@ -121,23 +127,40 @@ class AgentsCommand(Command):
 
 
 class AgentCommand(Command):
-    """Open, stop or close one of the open conversation's sub-agents."""
+    """Open, start, stop or close one of the open conversation's sub-agents."""
 
     def __init__(self) -> None:
         super().__init__(
             name="agent",
-            description="Open one of this conversation's sub-agents, or stop or close one",
-            usage="/agent <id> | stop <id> | close <id>",
-            examples=["/agent researcher-2", "/agent stop researcher-2", "/agent close researcher-2"],
+            description=(
+                "Open one of this conversation's sub-agents, start a new one, or stop or close one"
+            ),
+            usage="/agent <id> | new <type> <objective> | stop <id> | close <id>",
+            examples=[
+                "/agent researcher-2",
+                "/agent new researcher Find what changed in the 2.0 release.",
+                "/agent stop researcher-2",
+                "/agent close researcher-2",
+            ],
             category=CommandCategory.WORKFLOW,
         )
 
     async def execute(self, args: str, app: Any) -> None:
-        """``/agent <id>`` opens its view; ``stop <id>`` and ``close <id>`` stop and close it."""
+        """``/agent <id>`` opens its view; ``new <type> <objective>`` starts one
+        and opens its view; ``stop <id>`` and ``close <id>`` stop and close it."""
         workflow = _workflow(app)
         if workflow is None:
             return
         conversation = workflow.session_ref(getattr(app, "session_id", None))
+        words = args.split(None, 1)
+        if words and words[0] == "new":
+            # The objective is the rest of the line, as typed.
+            rest = words[1].split(None, 1) if len(words) > 1 else []
+            if len(rest) < 2 or not rest[1].strip():
+                app.session.add_warning(NEW_USAGE)
+                return
+            await app.start_agent(rest[0], rest[1].strip())
+            return
         parts = self.parse_args(args).positional.split()
         if not parts:
             app.session.add_warning(AGENT_USAGE)
