@@ -1292,6 +1292,7 @@ configs = [coordinator, researcher, analyst]
 | `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field: each of its runs works under them, and one past a limit ends (see [Sub-agent context](#sub-agent-context)). Not on the root |
 | `continuable` | bool | Whether an instance of this agent takes follow-ups after its run (`True`, the default) or is closed when its run ends (`False`, one-shot); see [Sub-agent context](#sub-agent-context). Not `False` on the root |
 | `spawnable_by` | frozenset[str] \| None | Who may start this agent at run time besides its parent: a set of `"agent"` (another agent's `task` call), `"skill"` and `"user"`, each also enabled by the app's `SubAgentPolicy.spawn_sources`; `None` (the default): only its parent. One in no `sub_agents` list is a free type, never the root; see [Sub-agent context](#sub-agent-context). Not on the root |
+| `model_choices` | tuple[str, ...] | The models a delegation may run this agent on instead of its own (`task`'s `model`): references, bare ids or roles, as `model` takes them (`("fast",)`); each is resolved, with the agent's `model_settings`, and given its own context numbers at startup. Empty (the default): its own model alone; see [Sub-agent context](#sub-agent-context). Not on the root |
 
 The agent graph is validated before anything is allocated — ahead of model
 discovery and service creation. Duplicate names, unknown `sub_agents`
@@ -1304,6 +1305,8 @@ run time only, and no root however it is listed; the root may not set
 `spawnable_by`, and a `spawnable_by` that is empty or names a source other
 than `agent`, `skill` and `user` raises too (a free type the app's policy lets
 no source start is a warning: `validate_agent_graph(configs, policy=...)`).
+`model_choices` on the root, one that is no tuple or list of texts, and a choice
+named twice raise it too.
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
 on an agent below another sub-agent, and an `inherit_context` that is not True
 or False, raise it too, and, when the agents are built, so does a coordinator
@@ -1324,7 +1327,8 @@ both backends. The parent calls the framework's `task` tool, the same on both:
 `agent_type`, one of its own sub-agents (or of the types it may start at run
 time, below), and a brief, `title` and `objective`
 (required), `deliverable`, `constraints`, `known` (what the parent already
-knows that the task needs) and `done_when`. The sub-agent's run starts from its
+knows that the task needs) and `done_when`, and optionally `tools` and `model`
+(below). The sub-agent's run starts from its
 task message, the brief as sections (`# Task: <title>`, `## Objective`, …); it
 has a plan and a task list of its own (it starts with none, and what it saves
 stays with it: `/agents <id>` shows them), and works with its own prompt,
@@ -1452,6 +1456,26 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
       [coordinator, fact_checker], settings,
       subagents=SubAgentPolicy(spawn_sources={"agent"}),
   )
+  ```
+- **Narrowing a run, and a cheaper model.** Any `task` call may give
+  `tools`, some of the type's own tools (its registered, skill and MCP
+  tools, by name; its plan's tools and the delegation tools always stay):
+  the run is offered only those, and a call of another is answered as one
+  of a tool it does not have. A type's `model_choices` are the models a call
+  may pick instead of its own (`model`, named in the type's line in `task`'s
+  description); each is resolved and given its context numbers at startup,
+  and runs as the type's agent built on it (ADK: a runner of its own;
+  Deep Agents: a graph of its own), within its own window. Anything else is
+  the call's error result, naming what it may be, and no run starts. The
+  instance keeps both: its follow-ups, and its runs after a restart, run
+  with them, and `/agents <id>` shows them.
+
+  ```python
+  researcher = AgentConfig(name="researcher", prompt="Find facts.",
+                           description="Finds facts.", tools=[web_search, web_fetch],
+                           model="strong", model_choices=("fast",))
+  # The coordinator's call: {"agent_type": "researcher", "title": "Look it up",
+  #   "objective": "...", "tools": ["web_search"], "model": "fast"}
   ```
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
   every agent that can have sub-agents (its own, or types it may start at run
@@ -1648,6 +1672,7 @@ are `AgentConfig`'s, and an unknown one is an error:
 | `sub_agents`, `inherit_context` | The agents it may delegate to, and what a sub-agent sees: `false` (its task alone, the default) or `true` (its parent's conversation too; see [Sub-agent context](#sub-agent-context)) |
 | `brief_required`, `limits`, `continuable` | As on `AgentConfig`: `brief_required: [objective, deliverable]`, `limits: {max_model_calls: 30, timeout: 600, max_tokens: 200000}` (each limit read as written), `continuable: false` (one-shot) |
 | `spawnable_by` | Who may start it at run time, a list: `spawnable_by: [agent]` (read as a set; with no `sub_agents` naming it, a free type) |
+| `model_choices` | The models a delegation may run it on instead of its own, a list: `model_choices: [fast]` (read as a tuple) |
 | `include_state_tools` | `true` by default: the plan and task tools are added |
 
 - **A tool is a name, resolved when the manager is built.** A bare name is
