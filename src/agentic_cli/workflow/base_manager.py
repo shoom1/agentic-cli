@@ -69,6 +69,7 @@ from agentic_cli.workflow.agents.runs import (
     RUN_END_STATUSES,
     AgentRuns,
 )
+from agentic_cli.workflow.agents.spawn import can_have_children
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -369,7 +370,10 @@ class BaseWorkflowManager(ABC):
                     return []  # the backend's plan and task tools
 
                 def _validate_agent_graph(self) -> AgentGraph:
-                    return validate_agent_graph(self._agent_configs, backend=self.backend_type)
+                    return validate_agent_graph(
+                        self._agent_configs, backend=self.backend_type,
+                        policy=self.subagent_policy,
+                    )
 
                 async def _do_initialize(self) -> None:
                     self._engine = object()  # build the backend's agents or graph
@@ -1800,12 +1804,17 @@ class BaseWorkflowManager(ABC):
     def _roster_wanted(self, root: str) -> bool:
         """Whether ``root``'s requests carry the roster of its sub-agents.
 
-        Only a root that can continue them does (it has ``message_agent``:
-        sub-agents and the policy's ``follow_ups``); without the tool it could
-        do nothing with an open instance.
+        Only a root that can continue them does (it has ``message_agent``: it
+        can have sub-agents, its own or types started at run time, and the
+        policy's ``follow_ups``); without the tool it could do nothing with an
+        open instance.
         """
         config = next((c for c in self._agent_configs if c.name == root), None)
-        return config is not None and bool(config.sub_agents) and self.subagent_policy.follow_ups
+        return (
+            config is not None
+            and self.subagent_policy.follow_ups
+            and can_have_children(config, self._agent_configs, self.subagent_policy, root=True)
+        )
 
     def _roster_now(self) -> str:
         """The roster the turn's conversation carries, taken the first time it is

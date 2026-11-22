@@ -575,9 +575,56 @@ the start of the entry's title.
 
 ### Added
 
+- **Agent types started at run time: `AgentConfig.spawnable_by`, free types
+  and `SubAgentPolicy.spawn_sources`, on both backends.** A type may be
+  started while the app runs, besides by its parent in the configured tree,
+  when the app allows it twice: the type's `spawnable_by` (a set of `"agent"`,
+  `"skill"`, `"user"`; the agent YAML's `spawnable_by: [agent]`; None, the
+  default, for a type only its parent starts) and the policy's
+  `spawn_sources` (the same three, `frozenset()` by default: nothing is
+  started at run time, and an app keeps its `task` as it was, byte for
+  byte). An agent's `task` call is the `"agent"` source: `task` lists, after
+  the caller's own sub-agents, the types agents may start, each with its
+  description (`agentic_cli.workflow.agents.spawn`, provisional: `spawnable`,
+  `may_spawn`, `can_have_children`; the manager's delegations'
+  `offered(agent, depth)`), so an agent with no sub-agents of its own gets
+  `task` when there is a type it may start, and, with `follow_ups`, the
+  parent's tools and the roster. A run is numbered, recorded and run as a
+  delegation is: `<type>-<n>`, `started_by: agent:<instance>`, parent the
+  caller, its envelope the call's result. A type in no `sub_agents` list
+  that sets `spawnable_by` is a free type (`AgentGraph.free_types`, in config
+  order): never the root, wherever it is listed, in configs or YAML, and built
+  as any sub-agent is (ADK: a runner of its own; Deep Agents: a graph of its
+  own). An inheriting type is offered to the root alone. `validate_agent_graph`
+  takes the policy (`policy=`, keyword; the managers pass theirs) and raises
+  `AgentGraphError` for a root that sets `spawnable_by` ("Agent 'lead' is the
+  root agent and cannot set spawnable_by: only a sub-agent type is started at
+  run time."; with every unreferenced agent free, "Agent graph has no root:
+  …"), a source that is not one of the three ("Agent 'helper' has
+  spawnable_by {'agents'}: each source must be one of 'agent', 'skill',
+  'user'.") and an empty one; a free type no source the policy enables can
+  start is a warning (`subagent_type_unreachable`), since an app may enable
+  sources per install. `SubAgentPolicy` keeps `spawn_sources` as a frozenset
+  and refuses, with a `ValueError`, a source other than the three
+  (`SubAgentPolicy.spawn_sources has {'agents'}: each source must be one of
+  'agent', 'skill', 'user'.`).
+- **`SubAgentPolicy.max_spawn_depth`: from how deep a run may start a type at
+  run time** (1 by default, a positive int): a run at depth `d` (the root is
+  0) is offered the types agents may start only while `d` is below it, so by
+  default the root alone starts them, and a type started at depth 1 starts
+  none; the configured tree keeps the depth it declares. `task` is offered
+  for each run, on both backends: a type that runs at several depths lists
+  what its run may start (ADK declares it for each request; Deep Agents
+  rewrites a sub-agent's for each model call), a run offered nothing has no
+  `task` (a call of it gets the answer for a tool the agent does not have),
+  and a call naming a type its run is not offered is refused as an unknown
+  `agent_type`, no run started. When no run a call starts may start one,
+  `task`'s description says so after its limits: "Sub-agents cannot start
+  sub-agents."
 - **The main agent's requests list its open sub-agents, when it can continue
-  them.** With `SubAgentPolicy(follow_ups=True)` a main agent with sub-agents
-  (it has `message_agent`) is told which of its own sub-agents are open: a
+  them.** With `SubAgentPolicy(follow_ups=True)` a main agent that can have
+  sub-agents (its own, or types it may start at run time; it has
+  `message_agent`) is told which of its own sub-agents are open: a
   roster after the memory index, `<agents>`, the line `Your sub-agents in
   this conversation (message_agent continues one):`, then one line per
   idle, stopped or running instance, newest first, `- <id> (<type>,
@@ -675,8 +722,9 @@ the start of the entry's title.
   session through `self.session`, not as a class attribute with a value.
 - **A parent's tools that continue its sub-agents, `message_agent`,
   `stop_agent` and `check_agents`, on both backends, with
-  `SubAgentPolicy(follow_ups=True)`.** Every agent with sub-agents gets them
-  beside `task`; with the policy at its defaults (`follow_ups` False) an
+  `SubAgentPolicy(follow_ups=True)`.** Every agent that can have sub-agents
+  (its own, or types it may start at run time) gets them beside `task`; with
+  the policy at its defaults (`follow_ups` False) an
   agent gets `task` alone. The names are declared by the framework, exempt,
   as `task` is (`tools/_core/delegation.py`: `FOLLOW_UP_TOOLS`), so an app's
   `register_tool(name="message_agent")` (or either other) raises, an agent
@@ -1898,16 +1946,18 @@ the start of the entry's title.
   rather than replace it.
 - **One `task` tool on both backends, which takes a brief.** **Breaking:**
   ADK offered one tool per sub-agent (`researcher(request=...)`) and Deep
-  Agents its own `task(description=, subagent_type=)`; now every agent
-  with sub-agents is offered the framework's `task`, the same on both
-  (`workflow/agents/brief.py`): `agent_type`, one of its own sub-agents,
+  Agents its own `task(description=, subagent_type=)`; now every agent with
+  sub-agents (or types it may start at run time: see Added: **Agent types
+  started at run time…**) is offered the framework's `task`, the same on both
+  (`workflow/agents/brief.py`): `agent_type`, one of the types the calling run
+  may start (its own sub-agents first),
   each listed in the tool's description with what it does and the brief
   fields it requires, then the brief, `title` and `objective` (required),
   `deliverable`, `constraints`, `known` and `done_when`. The run's first
   message is the task message, `# Task: <title>` and a section per filled
   field (`## Objective`, `## Deliverable`, `## Constraints`, `## What is
   already known`, `## Done when`). A call whose brief misses a field its
-  type requires, or names a type that is not the caller's, starts no run:
+  type requires, or names a type its run may not start, starts no run:
   its result is `{"success": false, "error": ...}` naming what to fix. A
   instance's first run starts with no plan and no tasks (its follow-ups continue its own), and what it saves stays with it (the
   status bar's task list is the conversation's alone). On ADK nothing else

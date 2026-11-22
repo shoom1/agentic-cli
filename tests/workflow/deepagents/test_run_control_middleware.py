@@ -1,29 +1,39 @@
 """Deep Agents: a sub-agent run's limits at its model calls (``RunControlMiddleware``).
 
-What the middleware does to a request and an answer, alone. Whole turns, on
+What the middleware does to a request and an answer, alone: a run's limits, and the
+``task`` its request offers (what the run may start). Whole turns, on
 both backends, are in the contract suite (``TestTheStepLimit``,
 ``TestTheTokenLimit``).
 """
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
+from structlog.testing import capture_logs
 
 pytest.importorskip("deepagents")
 
+from langchain.agents.middleware import ModelRequest  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
+from langchain_core.tools import StructuredTool  # noqa: E402
 
+from agentic_cli.workflow.agents import AgentRuns, SubAgentPolicy  # noqa: E402
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl  # noqa: E402
+from agentic_cli.workflow.agents.delegate import Delegations  # noqa: E402
 from agentic_cli.workflow.agents.envelope import TOKEN_LIMIT_ERROR  # noqa: E402
 from agentic_cli.workflow.agents.policy import AgentLimits  # noqa: E402
+from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     RunControlMiddleware,
     with_note,
     without_calls,
 )
-from agentic_cli.workflow.sessions import RunRef  # noqa: E402
+from agentic_cli.workflow.deepagents.task_tool import build_task_tool  # noqa: E402
+from agentic_cli.workflow.sessions import RunRef, reset_active_run, set_active_run  # noqa: E402
+from agentic_cli.workflow.tool_errors import unknown_tool_result  # noqa: E402
 
 CALL = {"name": "lookup", "args": {"q": "X"}, "id": "r1", "type": "tool_call"}
 
@@ -168,3 +178,103 @@ async def test_steered_messages_are_stored_once_a_model_call_holds_them():
     await middleware.awrap_model_call(SimpleNamespace(messages=update["messages"]), handler)
 
     assert control.unstored() == []
+
+
+# -- task, offered for each model call what the run may start -------------------------
+
+
+def _hook():
+    async def hook(run):  # pragma: no cover - no run starts here
+        raise AssertionError("no run starts")
+
+    return hook
+
+
+def _offering(policy: SubAgentPolicy):
+    """A researcher's task, an own tool, the middleware and the delegations, under ``policy``."""
+    configs = [
+        AgentConfig(name="coordinator", prompt="p", sub_agents=["researcher"]),
+        AgentConfig(name="researcher", prompt="p", description="Finds facts."),
+        AgentConfig(name="helper", prompt="p", description="Helps.",
+                    spawnable_by=frozenset({"agent"})),
+    ]
+    made = Delegations(runs=AgentRuns(), policy=policy,
+                       types={c.name: c for c in configs}, hook=_hook())
+    task = build_task_tool("researcher", lambda: made, root=False)
+    lookup = StructuredTool.from_function(lambda q="": "42", name="lookup", description="Look up.")
+    return made, task, lookup, RunControlMiddleware(lambda: made)
+
+
+def _request(tools: list) -> ModelRequest:
+    return ModelRequest(
+        model=None, messages=[HumanMessage("# Task: Find X.")], system_message=None,
+        tool_choice=None, tools=tools, response_format=None, state={}, runtime=None,
+    )
+
+
+async def _offered(middleware, request: ModelRequest, run: RunRef | None) -> list:
+    """The tools ``request`` offers once the middleware has it, in ``run``."""
+    seen: list = []
+
+    async def handler(sent):
+        seen.append(list(sent.tools))
+        return AIMessage("Done.")
+
+    token = set_active_run(run)
+    try:
+        await middleware.awrap_model_call(request, handler)
+    finally:
+        reset_active_run(token)
+    (tools,) = seen
+    return tools
+
+
+DEEPER = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2)
+
+
+async def test_a_runs_task_offers_what_the_run_may_start():
+    made, task, lookup, middleware = _offering(DEEPER)
+    request = _request([lookup, task])
+
+    tools = await _offered(middleware, request, REF)
+
+    assert [tool.name for tool in tools] == ["lookup", "task"]
+    offer = made.task_offer("researcher", 1)
+    assert (tools[1].description, tools[1].args_schema) == (offer.description, offer.parameters)
+    assert tools[1].args_schema["properties"]["agent_type"]["enum"] == ["helper"]
+    assert request.tools == [lookup, task]  # the request it was given is as it was
+
+
+async def test_a_run_that_may_start_nothing_is_offered_no_task():
+    _, task, lookup, middleware = _offering(DEEPER)
+    deep = RunRef(agent="researcher", instance="researcher-2", run="researcher-2#1",
+                  parent_run="helper-1#1", depth=2)
+
+    assert await _offered(middleware, _request([lookup, task]), deep) == [lookup]
+
+
+async def test_an_apps_own_tool_named_task_is_left_alone():
+    _, _, lookup, middleware = _offering(SubAgentPolicy())
+    own = StructuredTool.from_function(lambda: "mine", name="task", description="An app's own.")
+
+    assert await _offered(middleware, _request([lookup, own]), REF) == [lookup, own]
+
+
+async def test_the_roots_calls_keep_their_task():
+    _, task, lookup, middleware = _offering(DEEPER)
+
+    assert await _offered(middleware, _request([lookup, task]), None) == [lookup, task]
+
+
+async def test_a_task_call_by_a_run_offered_nothing_is_logged_at_info():
+    """The model's mistake, as at the permission gate: nothing over the prompt."""
+    _, task, lookup, _ = _offering(SubAgentPolicy())
+    runtime = SimpleNamespace(state={}, tools=[lookup, task], tool_call_id="t1")
+
+    with capture_logs() as logs:
+        result = await task.coroutine(runtime, agent_type="researcher")
+
+    (message,) = result.update["messages"]
+    assert message.status == "error"
+    assert json.loads(message.content) == unknown_tool_result("task", ["lookup"])
+    assert [(log["log_level"], log["event"]) for log in logs] == [("info", "tool_not_found")]

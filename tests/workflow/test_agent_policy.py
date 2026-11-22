@@ -19,6 +19,7 @@ import agentic_cli.workflow as workflow
 from agentic_cli.workflow import agents
 from agentic_cli.workflow.agents.policy import (
     DEFAULT_LIMITS,
+    SPAWN_SOURCES,
     AgentLimits,
     SubAgentPolicy,
     as_policy,
@@ -87,9 +88,9 @@ class TestSubAgentPolicy:
         assert policy.max_open == 20
         assert policy.follow_ups is False
 
-    def test_max_open_and_follow_ups_come_last(self):
+    def test_max_open_and_follow_ups_come_after_the_first_ones(self):
         # Appended: a positional SubAgentPolicy(...) written before them still binds.
-        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-2:] == [
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][3:5] == [
             "max_open", "follow_ups",
         ]
         assert SubAgentPolicy(max_open=3).max_open == 3
@@ -139,6 +140,57 @@ class TestSubAgentPolicy:
         assert SubAgentPolicy(limits=AgentLimits(timeout=60)).limits.max_model_calls is None
         kept = SubAgentPolicy(limits=AgentLimits(timeout=60).over(DEFAULT_LIMITS)).limits
         assert kept == AgentLimits(max_model_calls=100, timeout=60)
+
+
+class TestRunTimeStarts:
+    """``spawn_sources``: who may start an agent type at run time (none by
+    default); ``max_spawn_depth``: from how deep a run may start one."""
+
+    def test_the_defaults(self):
+        policy = SubAgentPolicy()
+        assert policy.spawn_sources == frozenset()
+        assert policy.max_spawn_depth == 1
+
+    def test_the_sources(self):
+        assert SPAWN_SOURCES == ("agent", "skill", "user")
+
+    def test_they_come_after_follow_ups(self):
+        # Appended: a positional SubAgentPolicy(...) written before them still binds.
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-2:] == [
+            "spawn_sources", "max_spawn_depth",
+        ]
+
+    @pytest.mark.parametrize("given", [{"agent", "user"}, ["user", "agent"], ("agent", "user"),
+                                       frozenset({"agent", "user"})])
+    def test_a_set_list_or_tuple_of_sources_is_kept_as_a_frozenset(self, given):
+        policy = SubAgentPolicy(spawn_sources=given)
+        assert policy.spawn_sources == frozenset({"agent", "user"})
+        assert type(policy.spawn_sources) is frozenset
+        hash(policy)  # still hashable, as a frozen dataclass
+
+    def test_every_source_may_be_named(self):
+        assert SubAgentPolicy(spawn_sources=SPAWN_SOURCES).spawn_sources == frozenset(SPAWN_SOURCES)
+
+    @pytest.mark.parametrize("value", [{"agents"}, ["agent", "tool"], {1}, "agent", None, True])
+    def test_a_source_that_is_not_one_of_the_three_is_refused(self, value):
+        with pytest.raises(ValueError) as exc:
+            SubAgentPolicy(spawn_sources=value)
+        assert str(exc.value) == (
+            f"SubAgentPolicy.spawn_sources has {value!r}: each source must be one of "
+            "'agent', 'skill', 'user'."
+        )
+
+    def test_a_depth_is_kept(self):
+        assert SubAgentPolicy(max_spawn_depth=3).max_spawn_depth == 3
+
+    @pytest.mark.parametrize("value", [0, -1, 1.0, None, "2", True])
+    def test_max_spawn_depth_is_a_count(self, value):
+        with pytest.raises(ValueError) as exc:
+            SubAgentPolicy(max_spawn_depth=value)
+        assert str(exc.value) == f"SubAgentPolicy.max_spawn_depth must be a positive int, not {value!r}."
+
+    def test_policies_with_the_same_sources_are_equal(self):
+        assert SubAgentPolicy(spawn_sources=["agent"]) == SubAgentPolicy(spawn_sources={"agent"})
 
 
 class TestAsPolicy:

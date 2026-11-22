@@ -1,12 +1,18 @@
 """ADK's ``task`` tool: the framework's delegation, as an ADK tool.
 
-A delegating agent built from configs gets one ``TaskTool``, whatever its
-sub-agents (its sub-agents are no ADK ``sub_agents``: each runs on a runner
-of its own, ``GoogleADKWorkflowManager._run_agent``). Its declaration is the
-framework's (``agents/brief.py``: ``task_parameters``, ``task_description``),
-as Deep Agents' ``task``'s is, and a call hands its arguments, as the model
-wrote them, to the manager's ``Delegations`` (``agents/delegate.py``): it
-reads the brief, runs the sub-agent and returns the result envelope.
+An agent built from configs that can have sub-agents (its own, or types it may
+start at run time: ``agents/spawn.py::can_have_children``) gets one
+``TaskTool``, whatever its sub-agents (they are no ADK ``sub_agents``: each
+runs on a runner of its own, ``GoogleADKWorkflowManager._run_agent``). Its
+declaration is the framework's, made for each request (ADK asks the tool for
+it per model call, in the run's own context): what the run that asks may start
+(``Delegations.task_offer``, ``agents/brief.py``'s ``task_parameters`` and
+``task_description``), as Deep Agents' ``task``'s is, and none at all for a
+run that may start nothing: ADK adds a tool to a request only for a
+declaration, so the model is offered no ``task``, and a call of the name gets
+ADK's answer for a tool it does not have. A call hands its arguments, as the
+model wrote them, to the manager's ``Delegations`` (``agents/delegate.py``):
+it reads the brief, runs the sub-agent and returns the result envelope.
 
 The call's result is the envelope as JSON text, which ADK stores as
 ``{"result": <text>}``: every model adapter sends that text whole (ADK's
@@ -45,7 +51,7 @@ does.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from google.adk.events import Event, EventActions
@@ -57,8 +63,6 @@ from agentic_cli.tools.registry import bind_tool_identity, get_registry
 from agentic_cli.workflow.agents.brief import (
     follow_up_description,
     follow_up_parameters,
-    task_description,
-    task_parameters,
 )
 from agentic_cli.workflow.agents.delegate import DelegationRequest
 from agentic_cli.workflow.agents.follow_ups import call_follow_up_tool
@@ -69,7 +73,6 @@ if TYPE_CHECKING:
     from google.adk.tools.tool_context import ToolContext
 
     from agentic_cli.workflow.agents.delegate import Delegations
-    from agentic_cli.workflow.config import AgentConfig
 
 #: The state a run shares with its caller: the outside-content mark alone (a
 #: security mark: memory writes in a marked conversation are approved per
@@ -79,32 +82,43 @@ SHARED_KEYS = (OUTSIDE_CONTENT_KEY,)
 
 
 class TaskTool(BaseTool):
-    """A delegating agent's ``task``, which starts a run of one of its sub-agents.
+    """An agent's ``task``, which starts a run of a type the calling run may start.
+
+    Its ``description`` is the offer at the agent's first depth (the root's
+    0, any other agent's 1); the declaration each request carries is the
+    offer for the run that asks.
 
     Args:
-        agent: The delegating agent's name.
-        types: Its sub-agents, by name: what ``agent_type`` may name.
+        agent: The agent's name.
         delegations: The manager's delegations, asked for at each call.
+        root: Whether the agent is the root.
     """
 
     def __init__(
         self,
         agent: str,
-        types: Mapping[str, AgentConfig],
         delegations: Callable[[], Delegations],
+        *,
+        root: bool = True,
     ) -> None:
-        super().__init__(name=TASK_TOOL, description=task_description(types, delegations().policy))
+        offer = delegations().task_offer(agent, 0 if root else 1, warn=True)
+        super().__init__(
+            name=TASK_TOOL, description=offer.description if offer is not None else ""
+        )
         self._agent = agent
-        self._parameters = task_parameters(types)
         self._delegations = delegations
         if type(self) is TaskTool:
             bind_tool_identity(self, get_registry().get(TASK_TOOL))
 
-    def _get_declaration(self) -> types.FunctionDeclaration:
+    def _get_declaration(self) -> types.FunctionDeclaration | None:
+        run = get_active_run()
+        offer = self._delegations().task_offer(self._agent, run.depth if run is not None else 0)
+        if offer is None:
+            return None
         return types.FunctionDeclaration(
             name=self.name,
-            description=self.description,
-            parameters_json_schema=self._parameters,
+            description=offer.description,
+            parameters_json_schema=offer.parameters,
         )
 
     async def run_async(self, *, args: dict[str, Any], tool_context: "ToolContext") -> str:

@@ -53,6 +53,7 @@ from typing import Any
 import anthropic
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from agentic_cli.config import BaseSettings
 from agentic_cli.constants import TOOL_SUMMARY_MAX_LENGTH, truncate
@@ -493,6 +494,7 @@ class Crew:
     _instance_mark: Callable[[str], Awaitable[str]] | None = None
     _models: Callable[[str], list[str]] | None = None
     _opening: Callable[[str, int], list[str]] | None = None
+    _declared: Callable[[str, str, int], dict[str, Any] | None] | None = None
     #: The turns ``start`` started: one a failed test left running is stopped
     #: before its manager is cleaned up (the cleanup waits for its turn).
     started: list["asyncio.Task[Any]"] = field(default_factory=list)
@@ -594,6 +596,13 @@ class Crew:
         """The tools ``agent``'s model request ``call`` offered, by name, in order."""
         assert self._tool_names is not None
         return self._tool_names(agent, call)
+
+    def declared(self, agent: str, tool: str = "task", call: int = 0) -> dict[str, Any] | None:
+        """How ``agent``'s model request ``call`` offered ``tool``: its
+        ``description`` and ``parameters`` (its JSON schema), as sent; None
+        when the request did not offer it."""
+        assert self._declared is not None
+        return self._declared(agent, tool, call)
 
     def message_count(self, agent: str, call: int = 0) -> int:
         """How many messages ``agent``'s model request ``call`` held, its system prompt aside."""
@@ -723,6 +732,13 @@ def _adk_crew(
         body = [body for sent, body in claude.sent if sent == name][call]
         return [tool["name"] for tool in body.get("tools", [])]
 
+    def declared(name: str, tool: str, call: int) -> dict[str, Any] | None:
+        body = [body for sent, body in claude.sent if sent == name][call]
+        found = next((t for t in body.get("tools", []) if t["name"] == tool), None)
+        if found is None:
+            return None
+        return {"description": found["description"], "parameters": found["input_schema"]}
+
     def message_count(name: str, call: int) -> int:
         return len([body for sent, body in claude.sent if sent == name][call]["messages"])
 
@@ -767,7 +783,7 @@ def _adk_crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=models,
-        _opening=opening,
+        _opening=opening, _declared=declared,
     )
 
 
@@ -841,6 +857,12 @@ def _deepagents_crew(
     def tool_names(name: str, call: int) -> list[str]:
         return models.chats[name].tool_names(call)
 
+    def declared(name: str, tool: str, call: int) -> dict[str, Any] | None:
+        found = next((t for t in models.chats[name].bound[call] if t["name"] == tool), None)
+        if found is None:
+            return None
+        return {"description": found["description"], "parameters": found["parameters"]}
+
     def message_count(name: str, call: int) -> int:
         return len(models.chats[name].conversation(call))
 
@@ -887,7 +909,7 @@ def _deepagents_crew(
         "deepagents", manager, manager.session_ref(SESSION, USER), results_read, requests,
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=built_models,
-        _opening=opening,
+        _opening=opening, _declared=declared,
     )
 
 
@@ -6088,3 +6110,353 @@ class TestTheMarkAUsersRunBrought:
         assert before is False
         assert any(e.type is EventType.ERROR for e in events)
         assert await crew.marked() is True
+
+
+# -- types started at run time -------------------------------------------------------
+
+#: Agents may start a type at run time: from the root alone (``max_spawn_depth`` 1).
+SPAWNING = SubAgentPolicy(spawn_sources={"agent"})
+
+
+def helper(**fields: Any) -> AgentConfig:
+    """A free type agents may start: ``spawnable_by`` set, in no ``sub_agents`` list."""
+    return agent("helper", spawnable_by=fields.pop("spawnable_by", frozenset({"agent"})),
+                 description="Helps with one thing.", **fields)
+
+
+def spawn_team(**fields: Any) -> list[AgentConfig]:
+    """``team()`` and the helper agents may start, which looks things up."""
+    return [*team(), helper(tools=(contract_lookup,), **fields)]
+
+
+class TestATypeStartedAtRunTime:
+    async def test_the_root_starts_one(self, make_crew):
+        crew = make_crew(
+            spawn_team(), subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "helper-1", "run": "helper-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Helped.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.ref.instance, record.ref.depth, record.ref.parent_run,
+                record.started_by) == ("helper-1", 1, None, "agent:root")
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.agent, instance.parent, instance.depth, instance.status) == (
+            "helper", "root", 1, INSTANCE_IDLE
+        )
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+
+    async def test_the_roots_task_lists_it_and_its_requests_carry_none(self, make_crew):
+        crew = make_crew(
+            spawn_team(), subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        await crew.turn()
+
+        declared = crew.declared("coordinator")
+        assert agent_types(declared) == ["researcher", "helper"]
+        assert declared["description"].split("\n\n")[2:] == [
+            SPAWN_LIMITS,
+            "The agents you can hand a task to:\n- researcher: The researcher.\n"
+            "- helper: Helps with one thing.",
+        ]
+        # At the depth limit (1): what the root starts is offered no task.
+        assert crew.tool_names("helper") == ["contract_lookup"]
+
+    async def test_one_level_down_it_starts_another_whose_requests_carry_no_task(
+        self, make_crew
+    ):
+        crew = make_crew(
+            spawn_team(), subagents=SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            # helper-1, then helper-2 (the same type's script), then helper-1 again.
+            helper=[calls(delegate("helper", "Help more.", "h1")), says("Helped more."),
+                    says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert [(r.ref.instance, r.ref.depth, r.ref.parent_run, r.started_by)
+                for r in crew.records()] == [
+            ("helper-1", 1, None, "agent:root"),
+            ("helper-2", 2, "helper-1#1", "agent:helper-1"),
+        ]
+        assert envelope_read(crew.results_read("helper", 2)["h1"])["result"] == "Helped more."
+        assert crew.tool_names("helper", 0) == ["contract_lookup", "task"]
+        assert agent_types(crew.declared("helper", call=0)) == ["helper"]
+        assert SPAWN_LIMITS in crew.declared("helper", call=0)["description"]
+        assert crew.tool_names("helper", 1) == ["contract_lookup"]
+        # What the root starts may start more: no depth sentence there.
+        assert "Sub-agents cannot start" not in crew.declared("coordinator")["description"]
+
+    async def test_a_run_past_the_depth_that_calls_task_gets_the_unknown_tool_answer(
+        self, make_crew
+    ):
+        crew = make_crew(
+            spawn_team(), subagents=SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[calls(delegate("helper", "Help more.", "h1")),
+                    calls(delegate("helper", "And more.", "h2")), says("Could not."),
+                    says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert json.loads(crew.results_read("helper", 2)["h2"]) == {
+            "success": False,
+            "error": "task failed: ValueError: Tool 'task' not found.\n"
+                     "Available tools: contract_lookup",
+        }
+        assert [r.ref.instance for r in crew.records()] == ["helper-1", "helper-2"]
+
+
+class TestATypeNotOffered:
+    """What a run is not offered it cannot start: a call naming it is an
+    unknown type, and no run starts."""
+
+    @pytest.mark.parametrize("sources, starts", [({"agent", "user"}, True), ({"user"}, False)])
+    async def test_only_while_the_policy_lets_agents_start_it(self, make_crew, sources, starts):
+        crew = make_crew(
+            spawn_team(spawnable_by=frozenset({"agent", "user"})),
+            subagents=SubAgentPolicy(spawn_sources=sources),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        events = await crew.turn()
+
+        read = json.loads(crew.results_read("coordinator")["c1"])
+        if starts:
+            assert (read["status"], read["agent"]) == (RUN_COMPLETED, "helper-1")
+        else:
+            assert read == {
+                "success": False,
+                "error": "Unknown agent_type 'helper': the agents you can delegate to are "
+                         "researcher.",
+            }
+            assert (runs_of(events), crew.records(), crew.requests("helper")) == ([], [], 0)
+
+    async def test_past_the_depth_while_a_static_tree_delegates_at_every_level(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", sub_agents=("checker",)),
+             agent("checker", tools=(contract_lookup,)),
+             helper()],
+            subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help.", "c1")),
+                         calls(delegate("researcher", "Find X.", "c2")), says("Done.")],
+            researcher=[calls(delegate("helper", "Help.", "r1")),
+                        calls(delegate("checker", "Check X.", "r2")), says("X is 42.")],
+            checker=[says("Checked.")],
+            helper=[says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator", 1)["c1"])["agent"] == "helper-1"
+        assert json.loads(crew.results_read("researcher", 1)["r1"]) == {
+            "success": False,
+            "error": "Unknown agent_type 'helper': the agents you can delegate to are checker.",
+        }
+        assert [(r.ref.instance, r.ref.depth, r.status) for r in crew.records()] == [
+            ("helper-1", 1, RUN_COMPLETED), ("researcher-1", 1, RUN_COMPLETED),
+            ("checker-1", 2, RUN_COMPLETED),
+        ]
+        assert crew.requests("helper") == 1
+
+
+class TestAFreeTypeListedFirst:
+    """A free type is never the root, wherever it is listed: the turn starts at
+    the agent nobody delegates to that is no free type, on both backends."""
+
+    async def test_in_the_configs(self, make_crew):
+        crew = make_crew(
+            [helper(tools=(contract_lookup,)), *team()], subagents=SPAWNING,
+            coordinator=[says("Hello.")], helper=[says("[never asked]")],
+        )
+
+        events = await crew.turn()
+
+        assert crew.manager.root_agent_name == "coordinator"
+        assert (crew.requests("coordinator"), crew.requests("helper")) == (1, 0)
+        assert [e.content for e in events if e.type is EventType.TEXT] == ["Hello."]
+
+    async def test_in_agent_yaml(self, make_crew, project):
+        from agentic_cli.workflow.agent_loader import load_agents_from_yaml
+
+        path = project / "agents.yaml"
+        path.write_text(
+            "agents:\n"
+            "  - name: helper\n    instruction: You are helper.\n"
+            "    description: Helps with one thing.\n    include_state_tools: false\n"
+            "    spawnable_by: [agent]\n"
+            "  - name: coordinator\n    instruction: You are coordinator.\n"
+            "    include_state_tools: false\n    sub_agents: [researcher]\n"
+            "  - name: researcher\n    instruction: You are researcher.\n"
+            "    include_state_tools: false\n",
+            encoding="utf-8",
+        )
+        crew = make_crew(
+            load_agents_from_yaml(path), subagents=SPAWNING,
+            coordinator=[says("Hello.")], helper=[says("[never asked]")],
+        )
+
+        await crew.turn()
+
+        assert crew.manager.root_agent_name == "coordinator"
+        assert (crew.requests("coordinator"), crew.requests("helper")) == (1, 0)
+
+
+#: ``task``'s declaration for ``team()``'s coordinator, as both backends send it
+#: with the default policy: what an app that starts no type at run time keeps.
+TEAM_TASK = {
+    "description": (
+        "Hand a task to a sub-agent. The sub-agent works on it on its own, with its own "
+        "tools, and returns its result to you as this call's result; the user does not see "
+        "it, so tell the user what it means yourself. Several task calls in one response "
+        "run in parallel.\n\n"
+        "A sub-agent sees only the brief you write, unless its line below says it sees this "
+        "conversation: put in the brief everything it needs to know.\n\n"
+        "At most 4 sub-agents work at once; more calls in one response wait for a free "
+        "slot. At most 20 runs per turn.\n\n"
+        "The agents you can hand a task to:\n- researcher: The researcher."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "agent_type": {
+                "type": "string", "enum": ["researcher"],
+                "description": "The agent to hand the task to:\n- researcher: The researcher.",
+            },
+            "title": {
+                "type": "string",
+                "description": "A few words naming the task, shown to the user while it runs.",
+            },
+            "objective": {"type": "string", "description": "What the sub-agent is to do."},
+            "deliverable": {"type": "string", "description": "What to return and in what form."},
+            "constraints": {"type": "string", "description": "Limits on how to do it."},
+            "known": {
+                "type": "string",
+                "description": (
+                    "What you already know that the sub-agent needs: facts found, decisions "
+                    "made, file paths and URLs, what was tried."
+                ),
+            },
+            "done_when": {"type": "string", "description": "The criteria for the task to be done."},
+        },
+        "required": ["agent_type", "title", "objective"],
+    },
+}
+#: The limits paragraph of ``task``'s description when what a run starts may start none.
+SPAWN_LIMITS = (
+    "At most 4 sub-agents work at once; more calls in one response wait for a free slot. "
+    "At most 20 runs per turn. Sub-agents cannot start sub-agents."
+)
+
+
+def agent_types(declared: dict[str, Any] | None) -> list[str]:
+    """The types a ``task`` declaration offers."""
+    assert declared is not None
+    return declared["parameters"]["properties"]["agent_type"]["enum"]
+
+
+class TestTheDefaultPolicyKeepsTask:
+    """With nothing started at run time, ``task`` is what it was, byte for byte."""
+
+    async def test_its_schema_and_description(self, make_crew):
+        crew = make_crew(team(), coordinator=[says("Hi.")])
+
+        await crew.turn()
+
+        assert crew.declared("coordinator") == TEAM_TASK
+
+    async def test_with_a_free_type_no_source_may_start(self, make_crew):
+        crew = make_crew(spawn_team(), coordinator=[says("Hi.")])
+
+        await crew.turn()
+
+        assert crew.declared("coordinator") == TEAM_TASK
+
+
+DEEPER = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2)
+
+
+class TestTheOfferIsTheRuns:
+    """What a model is offered is its run's offer, not the one its agent was
+    built with: a type that runs at several depths."""
+
+    async def test_a_run_below_the_depth_it_was_built_for_is_offered_less(self, make_crew):
+        crew = make_crew(
+            [*team(),
+             agent("checker", tools=(contract_lookup,)),
+             agent("planner", sub_agents=("checker",), spawnable_by=frozenset({"agent"}))],
+            subagents=DEEPER,
+            coordinator=[calls(delegate("planner", "Plan X.", "c1")), says("Done.")],
+            # planner-1 (depth 1), then planner-2 (depth 2), then planner-1 again.
+            planner=[calls(delegate("planner", "Plan more.", "p1")), says("Planned more."),
+                     says("Planned.")],
+        )
+
+        await crew.turn()
+
+        assert [r.ref.instance for r in crew.records()] == ["planner-1", "planner-2"]
+        # Depth 1: its own checker, then the types agents may start.
+        assert agent_types(crew.declared("planner", call=0)) == ["checker", "planner"]
+        # Depth 2 may start none: its own sub-agent alone, and no depth sentence for it.
+        deep = crew.declared("planner", call=1)
+        assert agent_types(deep) == ["checker"]
+        assert "- planner:" not in deep["description"]
+        assert "Sub-agents cannot start" not in deep["description"]
+
+    async def test_the_missing_description_is_warned_of_at_build_and_not_for_each_call(
+        self, make_crew
+    ):
+        crew = make_crew(
+            [*team(), agent("helper", tools=(contract_lookup,), description="",
+                            spawnable_by=frozenset({"agent"}))],
+            subagents=DEEPER,
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[calls(delegate("helper", "Help more.", "h1")), says("Helped more."),
+                    says("Helped.")],
+        )
+
+        with capture_logs() as logs:
+            await crew.turn()
+
+        assert crew.requests("helper") == 3 and crew.requests("coordinator") == 2
+        # One for each agent built with task (the coordinator, the researcher and the
+        # helper: each offers the helper), at build; none for a request.
+        assert [log["agent"] for log in logs if log["event"] == "subagent_without_description"] == [
+            "helper", "helper", "helper",
+        ]
+
+
+class TestAParentOfRunTimeTypesOnly:
+    async def test_with_follow_ups_it_gets_the_parents_tools_and_the_roster(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", tools=(contract_whoami,)), helper()],
+            subagents=SubAgentPolicy(follow_ups=True, spawn_sources={"agent"}),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Asked."),
+                         says("Listed.")],
+            helper=[says("Helped.")],
+        )
+        await crew.turn()
+        assert crew.tool_names("coordinator") == [
+            "contract_whoami", "task", "message_agent", "stop_agent", "check_agents",
+        ]
+
+        await crew.manager.load_session(SESSION, user_id=USER)
+        await crew.turn("And now?")
+
+        assert crew.opening("coordinator", -1) == [
+            roster("- helper-1 (helper, idle): Help with X. — Helped."), "Go.",
+        ]

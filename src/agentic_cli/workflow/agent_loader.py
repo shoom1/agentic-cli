@@ -23,6 +23,9 @@ Example YAML::
         brief_required: [objective, deliverable]  # what a delegation must fill
         limits: {max_model_calls: 30, timeout: 600}  # over the policy's, per field
         continuable: true  # false: one-shot, closed when its run ends
+      - name: fact_checker
+        instruction: Check one claim.
+        spawnable_by: [agent]  # in no sub_agents: a type agents start at run time
 
 A top-level bare list of agents (without the ``agents:`` key) is also accepted.
 Tool entries stay as strings here and are resolved to callables when the
@@ -95,6 +98,8 @@ class AgentSpec(BaseModel):
     brief_required: list[str] | None = None
     limits: LimitsSpec | None = None
     continuable: bool = True
+    # None: only its parent starts it.
+    spawnable_by: list[str] | None = None
 
 
 class AgentsFile(BaseModel):
@@ -171,6 +176,8 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
             delegation["brief_required"] = tuple(spec.brief_required)
         if spec.limits is not None:
             delegation["limits"] = spec.limits.to_limits()
+        if spec.spawnable_by is not None:
+            delegation["spawnable_by"] = frozenset(spec.spawnable_by)
         configs.append(
             AgentConfig(
                 name=spec.name,

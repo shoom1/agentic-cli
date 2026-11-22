@@ -70,6 +70,7 @@ from langgraph.types import Command
 from agentic_cli.logging import Loggers
 from agentic_cli.models import ProviderKind
 from agentic_cli.paths import resolve_path
+from agentic_cli.tools._core.delegation import TASK_TOOL
 from agentic_cli.tools.registry import ToolDefinition, get_registry, identify_tool
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE
 from agentic_cli.workflow.agents.outcome import (
@@ -85,6 +86,7 @@ from agentic_cli.workflow.outside_content import OutsideContentMarks, brings_out
 from agentic_cli.workflow.permissions.capabilities import _CapabilityExempt
 from agentic_cli.workflow.service_registry import PERMISSION_ENGINE, get_service
 from agentic_cli.workflow.sessions import (
+    RunRef,
     ToolCallRef,
     get_active_run,
     get_active_turn,
@@ -1136,12 +1138,17 @@ class RunControlMiddleware(AgentMiddleware):
       that reports no usage counts none of its own;
     - on the run's last call (``RunControl.final_call``: its step limit's,
       or one past its token limit that makes calls) the answer's tool calls
-      are dropped (``without_calls``), so the agent ends with that answer.
+      are dropped (``without_calls``), so the agent ends with that answer;
+    - the framework's ``task`` the request offers (found by identity, never an
+      app's own tool of that name) is the run's: its description and schema
+      are what the run may start (``Delegations.task_offer``, by the run's
+      depth), or the tool is left out when it may start nothing, as ADK
+      declares one per request.
 
-    The summarization inside it counts the note; the outcome middleware
-    outside it reads an answer whose calls were dropped as the run's final
-    one. The root's calls (no active run) and a run without a control are
-    left alone.
+    The summarization inside it counts the note and the rewritten tools; the
+    outcome middleware outside it reads an answer whose calls were dropped as
+    the run's final one. The root's calls (no active run) and a run without a
+    control are left alone.
 
     Args:
         delegations: The manager's delegations, asked at each call for the
@@ -1167,6 +1174,9 @@ class RunControlMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> Any:
+        run = get_active_run()
+        if run is not None:
+            request = self._with_task_offered(request, run)
         control = self._control()
         if control is None:
             return await handler(request)
@@ -1184,6 +1194,36 @@ class RunControlMiddleware(AgentMiddleware):
         if control.final_call:
             response = _mapped(response, without_calls)
         return response
+
+    def _with_task_offered(self, request: ModelRequest, run: RunRef) -> ModelRequest:
+        """``request`` with the framework's ``task`` as ``run`` is offered it.
+
+        The request it was given is not changed: the tool is replaced by a
+        copy with the offer's description and schema, or left out when the run
+        may start nothing. A request that offers no framework ``task`` is
+        returned as it is. The graph's tool node runs the tool it was built
+        with, by name, and LangChain checks no call against a dict schema, so
+        a call of a type the copy lists reaches ``Delegations.delegate``.
+        """
+        framework = get_registry().get(TASK_TOOL)
+        tools = list(request.tools)
+        index = next(
+            (
+                i for i, tool in enumerate(tools)
+                if isinstance(tool, BaseTool) and identify_tool(tool) is framework
+            ),
+            None,
+        )
+        if index is None:
+            return request
+        offer = self._delegations().task_offer(run.agent, run.depth)
+        if offer is None:
+            del tools[index]
+        else:
+            tools[index] = tools[index].model_copy(
+                update={"description": offer.description, "args_schema": offer.parameters}
+            )
+        return request.override(tools=tools)
 
 
 def with_note(messages: list[AnyMessage], note: str) -> list[AnyMessage]:
