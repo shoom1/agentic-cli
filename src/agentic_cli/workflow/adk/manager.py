@@ -472,14 +472,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return [save_plan, get_plan, save_tasks, get_tasks]
 
     def _assemble_agent_tools(
-        self, config: "AgentConfig", service_map: dict
+        self, config: "AgentConfig", service_map: dict, *, root: bool = False
     ) -> list:
         """Build an agent's tools: framework tools + state tools + MCP toolsets.
 
         MCP servers declared on the config are materialized into ADK
         ``McpToolset`` objects (ADK connects lazily) and appended after the
-        regular tools. Skills are appended as a ``SkillToolset``. The caller is
-        responsible for ``_wrap_long_running`` over the result.
+        regular tools. Skills are appended as a ``SkillToolset``, built for
+        this agent (``root``: whether it is the root, as its skills that start
+        agents are checked from its first depth). The caller is responsible
+        for ``_wrap_long_running`` over the result.
         """
         tools = self._build_tools(config, service_map)
         mcp_servers = getattr(config, "mcp_servers", None) or []
@@ -494,14 +496,21 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         skill_refs = getattr(config, "skills", None) or []
         if skill_refs:
-            toolset = self._build_skill_toolset(skill_refs)
+            toolset = self._build_skill_toolset(skill_refs, agent=config.name, root=root)
             if toolset is not None:
                 tools.append(toolset)
                 logger.debug("skill_toolset_attached", agent=config.name)
         return tools
 
-    def _build_skill_toolset(self, skill_refs: list[str]):
+    def _build_skill_toolset(
+        self, skill_refs: list[str], *, agent: str | None = None, root: bool = False
+    ):
         """Resolve skill refs and build an ADK SkillToolset (discovery/read only).
+
+        Given the loading ``agent``, a skill that names an agent type starts
+        it when loaded (``tools/skills/agents.py``), and one its first run
+        could not start is warned of, once for each skill the build's agents
+        (a type and its model choices) share.
 
         This path supplies no code executor, so ``run_skill_script`` is not
         exposed: only the discovery/read tools and the L1 metadata injection.
@@ -515,7 +524,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         skills = store.resolve(skill_refs)
         if not skills:
             return None
-        return make_skill_toolset(skills)
+        agents = None
+        if agent is not None:
+            from agentic_cli.tools.skills import SkillAgents
+
+            agents = SkillAgents(
+                agent, lambda: self._delegations, root=root,
+                warned=getattr(self, "_skill_warned", None),
+            )
+        return make_skill_toolset(skills, agents=agents)
 
     def _wrap_long_running(self, tools: list[Callable]) -> list:
         """Wrap tools flagged ``long_running`` as ADK ``LongRunningFunctionTool``.
@@ -595,7 +612,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             model if model is not None else self._resolved_models[config.name],
             settings=self._settings, app_name=self.app_name,
         )
-        tools = self._assemble_agent_tools(config, service_map)
+        tools = self._assemble_agent_tools(config, service_map, root=root)
         if root:
             tools = self._wrap_long_running(tools)
         if delegates:
@@ -659,6 +676,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         agents: dict[str, LlmAgent] = {}
         variants: dict[tuple[str, str], LlmAgent] = {}
+        # What this build's skill checks warned of: an agent built once more
+        # for each model choice has skills of its own, and warns once.
+        self._skill_warned: set[tuple[str, str]] = set()
         service_map = self._get_service_tool_map()
         configs = list(graph.config_map.values())
 

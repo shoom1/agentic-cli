@@ -35,9 +35,14 @@ MESSAGE_AGENT_TOOL = "message_agent"
 STOP_AGENT_TOOL = "stop_agent"
 CHECK_AGENTS_TOOL = "check_agents"
 FOLLOW_UP_TOOLS = (MESSAGE_AGENT_TOOL, STOP_AGENT_TOOL, CHECK_AGENTS_TOOL)
+#: The skill tool whose call starts a run when its skill names an agent type
+#: (``tools/skills/agents.py``); registered with the other skill tools
+#: (``tools/skills/permissions.py``).
+LOAD_SKILL_TOOL = "load_skill"
 #: The tools whose result is a run's envelope, which the event processors
-#: show as a delegation (``agents/runs.py::show_as_delegation``).
-ENVELOPE_TOOLS = (TASK_TOOL, MESSAGE_AGENT_TOOL)
+#: show as a delegation (``agents/runs.py::show_as_delegation``). A
+#: ``load_skill`` result that is no envelope is shown as any result is.
+ENVELOPE_TOOLS = (TASK_TOOL, MESSAGE_AGENT_TOOL, LOAD_SKILL_TOOL)
 FOLLOW_UP_CLASH_ERROR = (
     "Agent {agent!r} continues its sub-agents through tools named message_agent, "
     "stop_agent and check_agents, so its own tools cannot include {tool!r}; rename that tool."
