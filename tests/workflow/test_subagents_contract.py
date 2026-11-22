@@ -355,15 +355,22 @@ def _team_chat() -> type:
     Deep Agents summarizes an agent's conversation on that agent's model; the
     scenarios script the summaries apart, as ADK sends them apart.
     """
+    from pydantic import Field
+
     from tests.workflow.deepagents.fakes import ScriptedChat
 
     class TeamChat(ScriptedChat):
         #: The chat that answers summary requests (Any: not copied by pydantic).
         summaries: Any = None
+        #: The model id this copy was built for, and each request's, in order:
+        #: a copy (``model_copy``) shares the script, the requests and this list.
+        model_id: str = ""
+        sent_models: list[str] = Field(default_factory=list)
 
         def _answer(self, messages):
             if self.summaries is not None and SUMMARY_MARKER in (messages[-1].text or ""):
                 return self.summaries._answer(messages)
+            self.sent_models.append(self.model_id)
             return super()._answer(messages)
 
     return TeamChat
@@ -495,6 +502,7 @@ class Crew:
     _models: Callable[[str], list[str]] | None = None
     _opening: Callable[[str, int], list[str]] | None = None
     _declared: Callable[[str, str, int], dict[str, Any] | None] | None = None
+    _sent_models: Callable[[str], list[str]] | None = None
     #: The turns ``start`` started: one a failed test left running is stopped
     #: before its manager is cleaned up (the cleanup waits for its turn).
     started: list["asyncio.Task[Any]"] = field(default_factory=list)
@@ -539,6 +547,11 @@ class Crew:
         assert self._models is not None
         return self._models(agent)
 
+    def sent_models(self, agent: str) -> list[str]:
+        """The model each of ``agent``'s requests went to, as a model id, in order:
+        ADK each request's, Deep Agents the model each request's chat was built for."""
+        assert self._sent_models is not None
+        return self._sent_models(agent)
     def opening(self, agent: str, call: int = -1) -> list[str]:
         """The text blocks of the first user message ``agent``'s model request
         ``call`` held, in order: what opens its conversation (the main
@@ -783,7 +796,7 @@ def _adk_crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=models,
-        _opening=opening, _declared=declared,
+        _opening=opening, _declared=declared, _sent_models=models,
     )
 
 
@@ -810,7 +823,14 @@ def _deepagents_crew(
             models.chats[name] = _team_chat()(
                 label=chat.label, script=chat.script, summaries=summaries
             )
-    monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
+    def chat_for(resolved: Any, *, settings: Any, app_name: str) -> Any:
+        # Each agent's chat, as built for this model: what its requests went to.
+        chat = models(resolved, settings=settings, app_name=app_name)
+        if resolved.agent is None:
+            return chat
+        return chat.model_copy(update={"model_id": resolved.ref.model})
+
+    monkeypatch.setattr(deepagents_manager, "build_chat_model", chat_for)
     manager = deepagents_manager.DeepAgentsWorkflowManager(
         agent_configs=team, settings=_settings(store, entries), subagents=subagents
     )
@@ -910,6 +930,7 @@ def _deepagents_crew(
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=built_models,
         _opening=opening, _declared=declared,
+        _sent_models=lambda name: list(models.chats[name].sent_models),
     )
 
 
@@ -6594,3 +6615,163 @@ class TestWhatATypeCannotTake:
         assert envelope_read(crew.results_read("coordinator", 2)["c2"])["result"] == "Y is 7."
         assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+
+
+#: A cheaper model the researcher may be run on: a model choice.
+CHOICE = "anthropic:claude-haiku-4-5"
+
+
+class TestAModelChoice:
+    """``task``'s ``model``: the run goes to the choice's model (its type's agent
+    built on it), its usage is that model's, and its instance keeps it."""
+
+    async def test_task_offers_it_and_names_a_types_choices(self, make_crew):
+        from agentic_cli.workflow.agents.brief import MODEL_DESCRIPTION
+
+        crew = make_crew(narrow_team(model_choices=("fast", CHOICE)),
+                         coordinator=[says("Hi.")])
+
+        await crew.turn()
+
+        parameters = crew.declared("coordinator")["parameters"]
+        assert list(parameters["properties"])[-2:] == ["tools", "model"]
+        assert parameters["properties"]["model"] == {
+            "type": "string", "description": MODEL_DESCRIPTION,
+        }
+        assert parameters["properties"]["agent_type"]["description"] == (
+            "The agent to hand the task to:\n- researcher (model choices: fast, "
+            "anthropic:claude-haiku-4-5): The researcher."
+        )
+
+    async def test_its_requests_go_to_the_choices_model_and_its_usage_is_under_it(
+        self, make_crew
+    ):
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE),
+                               delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42.", usage=(100, 10)), says("Y is 7.", usage=(80, 8))],
+        )
+
+        with no_blocking_calls():
+            await crew.turn()
+
+        by_run = {r.ref.run: r for r in crew.records()}
+        assert sorted(crew.sent_models("researcher")) == ["claude-haiku-4-5", "claude-sonnet-4-6"]
+        assert by_run["researcher-1#1"].usage == {CHOICE: {"input": 100, "output": 10}}
+        assert by_run["researcher-2#1"].usage == {
+            "anthropic:claude-sonnet-4-6": {"input": 80, "output": 8},
+        }
+        assert crew.ledger().by_model(run="researcher-1#1") == {
+            CHOICE: UsageTotals(input=100, output=10, calls=1),
+        }
+        assert [(i.instance, i.model) for i in crew.manager.agent_runs.instances(
+            crew.conversation
+        )] == [("researcher-1", CHOICE), ("researcher-2", None)]
+
+    async def test_a_follow_up_runs_on_it_after_a_model_switch_too(self, make_crew):
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
+                         says("Asked."), calls(message("researcher-1", "Now find Y.", "c2")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn()
+        await crew.manager.reinitialize(model="claude-opus-4-7", preserve_sessions=True)
+        await crew.turn("Find Y too.")
+
+        assert crew.sent_models("researcher") == ["claude-haiku-4-5", "claude-haiku-4-5"]
+        assert crew.sent_models("coordinator")[-1] == "claude-opus-4-7"
+        assert "X is 42." in crew.bodies("researcher")[1]
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+
+
+class TestAModelChoiceInTheRawLog:
+    async def test_its_calls_records_name_the_choices_model(self, make_crew, monkeypatch):
+        settings = BaseSettings(
+            session_store="memory", default_model="claude-sonnet-4-6", raw_llm_logging=True
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_settings", lambda store, models=None: settings)
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
+                         says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        log = Path.home() / f".{settings.app_name}" / "logs" / "llm_events.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert {
+            (r["metadata"]["agent"], r["metadata"]["model"]) for r in records
+            if r["type"] in ("llm_request", "llm_response")
+        } == {("coordinator", "anthropic:claude-sonnet-4-6"), ("researcher", CHOICE)}
+
+
+class TestChoicesKeptAcrossARestart:
+    """An instance on a model choice and narrowed tools, continued after a
+    restart (its records restored by a new manager): its follow-up runs on
+    the same model with the same tools."""
+
+    async def test_the_follow_up_runs_as_its_first_run_did(self, make_crew):
+        first = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING, store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE,
+                                        tools=["contract_lookup"])), says("Asked.")],
+            researcher=[says("X is 42.")],
+        )
+        await first.turn()
+        await first.manager.cleanup()
+        second = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING, store="sqlite",
+            coordinator=[calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+            researcher=[says("Y is 7.")],
+        )
+
+        await second.manager.initialize_services()
+        await second.manager.load_session(SESSION, user_id=USER)
+        (instance,) = second.manager.agent_runs.instances(second.conversation)
+        await second.turn("Find Y too.")
+
+        assert (instance.tools, instance.model) == (("contract_lookup",), CHOICE)
+        assert second.sent_models("researcher") == ["claude-haiku-4-5"]
+        assert second.tool_names("researcher") == NARROWED
+        assert envelope_read(second.results_read("coordinator")["c2"])["result"] == "Y is 7."
+
+
+class TestAChoicesSmallerWindow:
+    """A model choice whose window is smaller than its type's own: an
+    inheriting run on it, over a long conversation, is kept within the
+    choice's numbers (ADK's fit guard trims it, Deep Agents summarizes it),
+    where on the type's own model it is sent whole."""
+
+    @pytest.mark.parametrize("chosen", [SMALL_MODEL, None], ids=["the-choice", "its-own"])
+    async def test_its_requests_fit_the_choices_budget(self, make_crew, chosen):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("reader",)),
+             agent("reader", inherit_context=True, model_choices=(SMALL_MODEL,))],
+            models=SMALL_ENTRY,
+            coordinator=[says("Noted."), says("Noted again."),
+                         calls(delegate("reader", "Sum it up.", "c1",
+                                        **({"model": chosen} if chosen else {}))),
+                         says("Done.")],
+            reader=[says("It was words.")],
+            summaries=[says("The user sent many words twice.")],
+        )
+        await crew.turn("First: " + "word " * 8_000)
+        await crew.turn("Second: " + "word " * 8_000)
+
+        events = await crew.turn("Have the reader sum it up.")
+
+        sent = crew.bodies("reader")[-1]
+        trimmed = [e.metadata["agent"] for e in events if e.type is EventType.CONTEXT_TRIMMED]
+        if chosen:
+            assert crew.sent_models("reader") == ["claude-haiku-4-5"]
+            assert "First: word" not in sent and trimmed == ["reader"]
+        else:
+            assert crew.sent_models("reader") == ["claude-sonnet-4-6"]
+            assert "First: word" in sent and trimmed == []
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "It was words."

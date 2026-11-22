@@ -186,6 +186,41 @@ async def test_a_delegating_app(project):
     assert logs == [shared]
 
 
+async def test_a_model_choices_runner_has_its_types_chain_on_the_choices_numbers(project):
+    """A sub-agent type with model choices has a runner of its own for each:
+    its agent built on the choice's model, and the type's chain, in which
+    every plugin that reads an agent's numbers, kind or model by name reads
+    the choice's under the type's name. The release closes it."""
+    choice = "claude-haiku-4-5"
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"]),
+            AgentConfig(name="helper", prompt="Help.", description="Helps.",
+                        model_choices=(choice,)),
+        ],
+        settings=_settings(extras=True),
+    )
+
+    try:
+        await manager.initialize_services()
+        own = manager._agent_runners["helper"]
+        chosen = manager._variant_runners[("helper", choice)]
+        plugins = {plugin.name: plugin for plugin in chosen.app.plugins}
+        budget = manager.context_budget("helper", model=choice)
+        agent = chosen.app.root_agent
+        assert set(manager._variant_runners) == {("helper", choice)}
+        assert [p.name for p in chosen.app.plugins] == [p.name for p in own.app.plugins]
+        assert (agent.name, agent.model.model) == ("helper", choice)
+        assert own.app.root_agent.model.model == MODEL
+        assert plugins["fit_guard"]._budgets["helper"] == budget
+        assert plugins["context_overflow"]._budgets["helper"] == budget
+        assert plugins["context_overflow"]._models["helper"] == f"anthropic:{choice}"
+        assert manager.context_budget("helper") != budget
+    finally:
+        await manager.cleanup()
+
+    assert (manager._variant_runners, manager._variant_agents) == ({}, {})
+
 async def test_a_main_agent_that_continues_its_sub_agents_gets_the_roster(project):
     """With the policy's ``follow_ups`` the main agent has ``message_agent``:
     its chain carries the roster, before the memory index; a sub-agent type's

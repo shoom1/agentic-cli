@@ -51,7 +51,7 @@ from agentic_cli.workflow.agents.brief import (  # noqa: E402
 )
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
-from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
+from agentic_cli.workflow.deepagents.agent_builder import Variant, build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
     PermissionMiddleware,
@@ -675,3 +675,42 @@ class TestTheParentsTools:
         )
 
         assert [tool.name for tool in created["coordinator"]["tools"]] == ["stop_agent", "task"]
+
+
+class TestAVariant:
+    """One more graph of a sub-agent type on another model (a model choice's):
+    built as the type's is, its tools and prompt the type's, on its own model."""
+
+    async def test_it_runs_on_its_own_model_as_a_sub_agent(self, monkeypatch):
+        made: list[dict] = []
+        real = agent_builder.create_agent
+
+        def spy(*args, **kwargs):
+            made.append(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(agent_builder, "create_agent", spy)
+        own = ScriptedChat(script=[ai("From its own.")])
+        cheaper = ScriptedChat(script=[ai("From the choice.")])
+        variant_graphs: dict = {}
+        tools = {"researcher": to_langchain_tools([save_plan])}
+
+        _tree(
+            [COORDINATOR, RESEARCHER],
+            {"coordinator": ScriptedChat(), "researcher": own},
+            tools=tools, checkpointer=InMemorySaver(),
+            variants={("researcher", "fast"): Variant(config=RESEARCHER, chat_model=cheaper,
+                                                      resolved=None)},
+            variant_graphs=variant_graphs,
+        )
+        await variant_graphs[("researcher", "fast")].ainvoke(
+            {"messages": [HumanMessage("# Task: Find X.")]},
+            {"configurable": {"thread_id": "v"}},
+        )
+
+        assert (len(own.requests), len(cheaper.requests)) == (0, 1)
+        *_, variant = made
+        assert [m["name"] for m in made] == ["coordinator", "researcher", "researcher"]
+        assert (variant["model"], variant["system_prompt"]) == (cheaper, "You are researcher.")
+        assert [tool.name for tool in variant["tools"]] == ["save_plan"]
+        assert RunControlMiddleware in [type(m) for m in variant["middleware"]]

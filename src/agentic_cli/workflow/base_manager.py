@@ -1235,6 +1235,28 @@ class BaseWorkflowManager(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} runs no sub-agent")
 
+    def _run_models(
+        self, run: AgentRun
+    ) -> "tuple[Mapping[str, ResolvedModel], Mapping[str, ContextBudget]]":
+        """The agents' models and context numbers a sub-agent ``run`` reads, by agent name.
+
+        Those of the manager's, except that a run on a model choice
+        (``run.model``) has its type's entries the choice's: its backend's
+        event processing, usage and overflow messages then name and count
+        the model the run went to, under the type's name.
+
+        Raises:
+            KeyError: ``run.model`` is not one of its type's model choices.
+        """
+        if run.model is None:
+            return self._resolved_models, self._budgets
+        key = (run.ref.agent, run.model)
+        models = {**self._resolved_models, run.ref.agent: self._choice_models[key]}
+        budgets = dict(self._budgets)
+        if key in self._choice_budgets:
+            budgets[run.ref.agent] = self._choice_budgets[key]
+        return models, budgets
+
     async def _agent_tool_names(self, agent: str) -> frozenset[str]:
         """The names a ``task`` call's ``tools`` may give for ``agent`` (a backend hook).
 

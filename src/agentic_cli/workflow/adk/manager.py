@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from agentic_cli.models import Provider, ResolvedModel, RoleMap
+    from agentic_cli.workflow.context import ContextBudget
     from agentic_cli.workflow.adk.build import ADKBuild
     from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.sessions import SessionRef
@@ -240,6 +241,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     #: is no app; class defaults, as above (read-only: each build sets its own).
     _agents: "Mapping[str, LlmAgent]" = MappingProxyType({})
     _agent_runners: "Mapping[str, Runner]" = MappingProxyType({})
+    #: Each sub-agent type built once more on each of its model choices, and the
+    #: runner of each, by (type, choice): what a run on a choice runs on.
+    _variant_agents: "Mapping[tuple[str, str], LlmAgent]" = MappingProxyType({})
+    _variant_runners: "Mapping[tuple[str, str], Runner]" = MappingProxyType({})
 
     def __init__(
         self,
@@ -307,6 +312,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # The raw LLM log's plugin (made in _init_plugins), whose buffer a
         # turn drains: the reference exists before process() is called.
         self._llm_logging_plugin: LLMLoggingPlugin | None = None
+
+        # The model choice each working run on one is on, by (conversation,
+        # run id): what the raw log names the run's calls by (``_chosen_model``).
+        self._chosen_runs: dict[tuple["SessionRef | None", str], "ResolvedModel"] = {}
 
         logger.debug(
             "workflow_manager_created",
@@ -384,7 +393,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _detach_backend(self) -> list[Closer]:
         """The runners and the agents, and the LLM logging plugin.
 
-        The conversation's runner and each sub-agent type's: a runner closes
+        The conversation's runner and each sub-agent type's, and each of a
+        type's model choices': a runner closes
         its agent's toolsets (an MCP server stops with its toolset) and
         plugins; the session service it only flushes, so one a model switch
         keeps stays open. They close before the session service (the base
@@ -393,6 +403,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self.__dict__.pop("_mcp_tool_names", None)
         runner, self._runner = self._runner, None
         runners, self._agent_runners = self._agent_runners, MappingProxyType({})
+        chosen_runners, self._variant_runners = self._variant_runners, MappingProxyType({})
+        self._variant_agents = MappingProxyType({})
         self._agents = MappingProxyType({})
         self._root_agent = None
         self._build = None
@@ -408,6 +420,13 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             *(
                 (f"runner {name}", functools.partial(self._aclose_owned, owned, f"runner {name}"))
                 for name, owned in runners.items()
+            ),
+            *(
+                (
+                    f"runner {name} on {choice}",
+                    functools.partial(self._aclose_owned, owned, f"runner {name} on {choice}"),
+                )
+                for (name, choice), owned in chosen_runners.items()
             ),
         ]
 
@@ -524,11 +543,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         *,
         root: bool,
         delegates: bool = False,
+        model: "ResolvedModel | None" = None,
     ) -> Agent:
         """Construct one ``LlmAgent`` from a config, on its own.
 
         Its model, generation settings and thinking come from the model
-        initialization resolved for it, built by the model factory.
+        initialization resolved for it, built by the model factory; ``model``
+        is one of its model choices' instead (the agent is built whole once
+        more, its own MCP toolsets and delegation tools, never cloned: two
+        runners would close a shared toolset).
 
         No agent has ADK ``sub_agents``, so ADK offers none of them
         ``transfer_to_agent``. An agent that delegates (``delegates``: it has
@@ -549,7 +572,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 known only once they connect, excepted).
         """
         built = build_adk_model(
-            self._resolved_models[config.name], settings=self._settings, app_name=self.app_name
+            model if model is not None else self._resolved_models[config.name],
+            settings=self._settings, app_name=self.app_name,
         )
         tools = self._assemble_agent_tools(config, service_map)
         if root:
@@ -591,7 +615,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         shapes the framework refuses failed there with the offending agent
         named. Called outside an initialization, it validates the graph
         itself. Every agent is kept by name (``_agents``): each sub-agent
-        type gets a runner of its own (``_do_initialize``).
+        type gets a runner of its own (``_do_initialize``), and so does each
+        of its model choices, an agent built once more on that model
+        (``_variant_agents``, by (type, choice)).
 
         Prompt factories are called under this manager's settings context (see
         ``AgentConfig.get_prompt``), so a prompt that reads settings sees the
@@ -612,6 +638,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
 
         agents: dict[str, LlmAgent] = {}
+        variants: dict[tuple[str, str], LlmAgent] = {}
         service_map = self._get_service_tool_map()
         configs = list(graph.config_map.values())
 
@@ -626,6 +653,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 agents[name] = self._build_agent(
                     config, service_map, root=root, delegates=delegates
                 )
+                if not root:
+                    for choice in config.model_choices:
+                        variants[(name, choice)] = self._build_agent(
+                            config, service_map, root=False, delegates=delegates,
+                            model=self._choice_models[(name, choice)],
+                        )
                 logger.debug(
                     "agent_created",
                     name=name,
@@ -634,6 +667,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 )
 
         self._agents = agents
+        self._variant_agents = variants
         root_agent = agents[graph.root_name]
         logger.info("agents_created", root=root_agent.name, total=len(agents))
         return root_agent
@@ -686,6 +720,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 # its usage by that model's provider kind.
                 models=self._agent_model_refs(),
                 kinds=self._agent_kinds(),
+                # A run on a model choice: its calls name that model.
+                chosen=self._chosen_model,
             )
             plugins.append(self._llm_logging_plugin)
             logger.info("llm_logging_plugin_enabled")
@@ -756,8 +792,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             roster=self._roster_wanted(root.name),
         )
 
-    def _agent_plugin_chain(self, agent: LlmAgent) -> list:
+    def _agent_plugin_chain(
+        self,
+        agent: LlmAgent,
+        *,
+        model: "ResolvedModel | None" = None,
+        budget: "ContextBudget | None" = None,
+    ) -> list:
         """The plugin chain of a sub-agent type's runner: the app's, made for a sub-agent.
+
+        ``model`` and ``budget`` are a model choice's, for the runner of the
+        type built on it: every plugin that reads an agent's model, kind or
+        context numbers by name reads the choice's under the type's name.
 
         Its own instances, in the app's order, but for what a sub-agent is:
 
@@ -793,9 +839,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         ]
         if self._llm_logging_plugin is not None:
             head.append(self._llm_logging_plugin)
+        kinds = self._agent_kinds()
+        models = budgets = None
+        if model is not None:
+            kinds[agent.name] = model.record.kind.value
+            models = {**self._resolved_models, agent.name: model}
+            if budget is not None:
+                budgets = {**self._budgets, agent.name: budget}
         head.append(RunControlPlugin(
             lambda: self._delegations.control(get_active_run()),
-            self._agent_kinds().get(agent.name),
+            kinds.get(agent.name),
         ))
         head.append(SubAgentOutcomePlugin())
         return self._chain(
@@ -806,6 +859,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             skip_agents=frozenset(),
             memory_index=False,
             stop_cause=lambda: self._delegations.stop_cause(get_active_run()),
+            models=models,
+            budgets=budgets,
         )
 
     def _chain(
@@ -819,8 +874,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         memory_index: bool,
         stop_cause: Callable[[], str | None] | None = None,
         roster: bool = False,
+        models: "Mapping[str, ResolvedModel] | None" = None,
+        budgets: "Mapping[str, ContextBudget] | None" = None,
     ) -> list:
         """A plugin chain in the order ``_plugin_chain`` gives, from its ``head`` on.
+
+        ``models`` and ``budgets`` are the agents' models and context numbers
+        the plugins read (the manager's by default): a model choice's runner
+        passes its own with the choice's under its type's name.
 
         ``stop_cause`` is what a seal tells a call at its prompt, or
         running, stopped the run (``InterruptedCallsPlugin``): a sub-agent
@@ -828,7 +889,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         from agentic_cli.workflow.adk.foreign_reasoning_plugin import ForeignReasoningPlugin
 
-        kinds = {name: model.record.kind for name, model in self._resolved_models.items()}
+        models = self._resolved_models if models is None else models
+        budgets = self._budgets if budgets is None else budgets
+        kinds = {name: model.record.kind for name, model in models.items()}
         clock = CallClock()
         plugins: list = [MainAgentPlugin(), CallLatencyPlugin(clock), *head]
         plugins.append(ForeignReasoningPlugin({name: kind.value for name, kind in kinds.items()}))
@@ -854,13 +917,16 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # A sub-agent type's chain (no main agent): a run's task message is
         # never trimmed, whatever was steered to it after.
         keep_task = root is None
-        fit_guard = FitGuardPlugin(self._budgets, kinds, keep_task=keep_task)
+        fit_guard = FitGuardPlugin(budgets, kinds, keep_task=keep_task)
         plugins.append(OverflowPlugin(
             root=root,
             reply_agents=replies,
-            budgets=self._budgets,
+            budgets=budgets,
             kinds=kinds,
-            models=self._agent_model_refs(),
+            models=(
+                self._agent_model_refs() if models is self._resolved_models
+                else {name: str(model.ref) for name, model in models.items()}
+            ),
             summarize_now=self._summarize_now,
             fit_guard=fit_guard,
             keep_task=keep_task,
@@ -957,6 +1023,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             )
             for name, agent in self._agents.items()
             if name != build.root.name
+        }
+        # And of each model choice: the type built on it, the type's chain on
+        # the choice's numbers.
+        self._variant_runners = {
+            key: NoAfterTurnCompactionRunner(
+                app=App(
+                    name=child_app(self.app_name),
+                    root_agent=agent,
+                    plugins=self._agent_plugin_chain(
+                        agent, model=self._choice_models[key],
+                        budget=self._choice_budgets.get(key),
+                    ),
+                    context_cache_config=build.cache,
+                    events_compaction_config=None,
+                ),
+                session_service=self._session_service,
+            )
+            for key, agent in self._variant_agents.items()
         }
         # A call's usage names its agent's own model and context numbers (the
         # default model stands in for an agent without one); only the agents
@@ -1086,7 +1170,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         """
         if not self._settings.prompt_caching_enabled:
             return None
-        models = list(self._resolved_models.values())
+        models = [*self._resolved_models.values(), *self._choice_models.values()]
         if not any(m is not None and m.record.cache in _CACHING for m in models):
             return None
         return ContextCacheConfig(
@@ -1575,6 +1659,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run on its type's runner, on a child session (the base's hook).
 
+        A run on a model choice (``run.model``) runs on the runner of its type
+        built on that model (``_variant_runners``), its usage and context the
+        choice's (``_run_models``).
+
         In the run's own task (``agents/delegate.py``): the child session
         (``child_app``, ``child_session_id``: the conversation's id and the
         run's instance) is made with the state the run starts from (the
@@ -1623,19 +1711,34 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             app, conversation.user_id, session_id, run
         )
         build = self._build
+        # A run on a model choice runs on its type built on that model, its
+        # usage and context the choice's under the type's name.
+        _, budgets = self._run_models(run)
+        models, kinds = dict(build.models), self._agent_kinds()
+        chosen = self._choice_models[(run.ref.agent, run.model)] if run.model is not None else None
+        if chosen is not None:
+            models[run.ref.agent] = str(chosen.ref)
+            kinds[run.ref.agent] = chosen.record.kind.value
         processor = ADKEventProcessor(
             model=self.model,
             root=build.root.name,
-            models=build.models,
-            budgets=self._budgets,
+            models=models,
+            budgets=budgets,
             reply_agents=build.reply_agents,
-            kinds=self._agent_kinds(),
+            kinds=kinds,
             ledgers=self._usage_ledgers,
             run=run.ref,
         )
         aborted = asyncio.Event()
         raised: BaseException | None = None
-        stream = self._agent_runners[run.ref.agent].run_async(
+        runner = (
+            self._agent_runners[run.ref.agent] if chosen is None
+            else self._variant_runners[(run.ref.agent, run.model)]
+        )
+        key = (conversation, run.ref.run or "")
+        if chosen is not None:
+            self._chosen_runs[key] = chosen
+        stream = runner.run_async(
             user_id=conversation.user_id,
             session_id=session_id,
             new_message=types.Content(role="user", parts=[types.Part.from_text(text=run.message)]),
@@ -1662,6 +1765,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             raised = _plugin_cause(error) if isinstance(error, RuntimeError) else error
             logger.debug("subagent_failed", run=run.ref.run, exc_info=raised)
         finally:
+            self._chosen_runs.pop(key, None)
             self._report_raw_log()
         # Its work has ended: a limit or a stop landing during the read of
         # its state below must not discard the answer it made.
@@ -1697,6 +1801,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             text=processor.answer, outcome=processor.outcome, state=_changed(state, start),
             **own,
         )
+
+    def _chosen_model(self, agent: str | None) -> "ResolvedModel | None":
+        """The model choice the run in progress is on, when it is ``agent``'s run; else None.
+
+        What the raw LLM log names a call's model by (``LLMLoggingPlugin``):
+        the one plugin serves every runner, and names a model by agent name.
+        """
+        run = get_active_run()
+        if run is None or run.agent != agent:
+            return None
+        return self._chosen_runs.get((get_active_turn(), run.run or ""))
 
     async def _child_session(
         self, app: str, user_id: str, session_id: str, run: AgentRun

@@ -9,7 +9,7 @@ Provides framework-level cross-cutting concerns as ADK Plugins:
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from google.adk.agents.invocation_context import InvocationContext
     from google.adk.models import LlmRequest, LlmResponse
 
+    from agentic_cli.models import ResolvedModel
+
 logger = Loggers.workflow()
 
 
@@ -41,8 +43,9 @@ class LLMLoggingPlugin(BasePlugin):
     call's ``LLM_USAGE``, credited to its agent, and a second copy would count
     every call twice (as on Deep Agents, where logging adds no usage).
 
-    Each record names the model of the agent that made the call (``models``),
-    else the request's own model or ``model_name``; that agent
+    Each record names the model of the agent that made the call (``models``;
+    ``chosen``: the model choice a run of that agent is on), else the
+    request's own model or ``model_name``; that agent
     (``metadata["agent"]``); and, for a sub-agent's call, its run
     (``WorkflowEvent.run``, the active run the framework's delegation set
     for the run's task, ``agents/delegate.py``, which the log writes as
@@ -71,6 +74,9 @@ class LLMLoggingPlugin(BasePlugin):
         models: Each agent's model reference, by agent name
         kinds: Each agent's model's provider kind, by agent name; an agent
             it does not hold is an unknown kind's
+        chosen: The model a call's agent is running on when that is a model
+            choice, not its own (None: the agent's own); the manager answers
+            it for the run in progress
         app_name: Application name for log directory (~/.{app_name}/logs/)
         max_events: Maximum events to buffer in memory (oldest are dropped)
         include_messages: Whether to include full message history
@@ -89,11 +95,13 @@ class LLMLoggingPlugin(BasePlugin):
         log_requests: bool = True,
         models: Mapping[str, str] | None = None,
         kinds: Mapping[str, str] | None = None,
+        chosen: Callable[[str | None], ResolvedModel | None] | None = None,
     ) -> None:
         super().__init__(name="llm_logging")
         self.model_name = model_name
         self.models: Mapping[str, str] = models or {}
         self.kinds: Mapping[str, str] = kinds or {}
+        self.chosen = chosen
         self.app_name = app_name
         self.max_events = max_events
         self.include_messages = include_messages
@@ -137,7 +145,7 @@ class LLMLoggingPlugin(BasePlugin):
         self.clock.start(callback_context)
 
         # The calling agent's model, else the one the request names
-        model = self.models.get(agent) or llm_request.model or self.model_name
+        model = self._model_of(agent)[0] or llm_request.model or self.model_name
 
         # Extract messages if enabled
         messages = None
@@ -193,7 +201,8 @@ class LLMLoggingPlugin(BasePlugin):
 
         # Get author from context if available
         author = getattr(callback_context, "agent_name", None)
-        model = self.models.get(author) or self.model_name
+        model, kind = self._model_of(author)
+        model = model or self.model_name
 
         # Extract text content
         content = None
@@ -237,7 +246,7 @@ class LLMLoggingPlugin(BasePlugin):
             usage_event = adk_usage_event(
                 model,
                 llm_response.usage_metadata,
-                self.kinds.get(author),
+                kind,
                 invocation_id=invocation_id,
                 latency_ms=latency_ms,
             )
@@ -292,6 +301,14 @@ class LLMLoggingPlugin(BasePlugin):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _model_of(self, agent: str | None) -> tuple[str | None, str | None]:
+        """``agent``'s model reference and its provider kind: the model choice a run
+        of it is on when there is one, else its own."""
+        chosen = self.chosen(agent) if self.chosen is not None else None
+        if chosen is not None:
+            return str(chosen.ref), chosen.record.kind.value
+        return self.models.get(agent), self.kinds.get(agent)
 
     def _write_to_log(self, event: WorkflowEvent) -> None:
         """Write event to JSON Lines log file."""
