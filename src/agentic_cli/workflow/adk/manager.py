@@ -75,6 +75,7 @@ from agentic_cli.workflow.adk.sessions import (
     child_app,
     child_session_id,
     is_notice,
+    keep_conversation,
     load_records,
     make_session_service,
     save_records,
@@ -2008,6 +2009,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._seed_outside_content(ref, session)
         mark = self._outside_marks.get(ref)
         return {OUTSIDE_CONTENT_KEY: mark} if mark else {}
+
+    async def _keep_conversation(self, ref: SessionRef, objective: str) -> None:
+        """Store the conversation when it is not yet (``keep_conversation``)."""
+        await keep_conversation(self._session_service, ref, objective)
 
     async def _inherited_history(self, ref: SessionRef) -> list[Any]:
         """``ref``'s conversation as an inheriting run the user starts reads it.

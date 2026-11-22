@@ -762,18 +762,26 @@ class TestAStartInItsView:
         ui = _Watched()
         workflow = _Viewing(events, ui)
         opened: list[tuple[str, int]] = []
+        order: list[str] = []
+        controller = ReplayController(workflow)
+        controller.update_status_bar = lambda ui: order.append("drawn")  # a view's events draw it
 
         async def opens(instance: str) -> None:
+            order.append("opens")
             opened.append((instance, len(workflow.lines)))
 
         result = await MessageProcessor().process_start(
-            "helper", "Help.", workflow_controller=ReplayController(workflow), ui=ui,
+            "helper", "Help.", workflow_controller=controller, ui=ui,
             settings=_settings(), session_id="s1", opens=opens,
         )
 
         assert result.delivered
         assert workflow.asked == [("start_instance", "helper", "Help.", "s1", "tester")]
         assert opened == [("helper-1", 0)]  # before its start was drawn
+        # The start is drawn (the status bar) only once the view opened; so is each
+        # later event of the run, never before.
+        assert order[:2] == ["opens", "drawn"]
+        assert order.count("opens") == 1
         assert workflow.lines == [
             "Processing...", "Calling: lookup", "checker-1 › Calling: check",
             "checker-1 › Calling: check", "checker-1 › Calling: check",

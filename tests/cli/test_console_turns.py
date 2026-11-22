@@ -622,3 +622,13 @@ def test_agent_new_opens_the_view_its_run_streams_there_and_back_tells_the_main_
     assert steered < transcript.index("── back to main ──")
     assert transcript.count("Told: The user worked with researcher-1 directly") == 1
     assert "Busy" not in transcript
+
+
+def test_a_conversation_whose_only_work_is_agent_new_is_named_at_exit(console):
+    """Nothing was said to the main agent: the exit still names how to come
+    back to the conversation the new sub-agent worked in."""
+    console.type_line("/agent new researcher look")
+    console.expect("Researched: look")
+    console.exit()
+
+    assert "Resume this conversation" in console.transcript

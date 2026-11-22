@@ -244,6 +244,7 @@ class ScriptedManager:
                 f"You cannot start '{agent_type}' here. Types you can start: researcher."
             )
             return
+        self._sessions.add(session_id)  # stored, as the real manager's start stores it
         conversation = self.session_ref(session_id)  # one user here
         ref = self.agent_runs.run_for(conversation, None, None, agent_type)
         started = WorkflowEvent.agent_run(

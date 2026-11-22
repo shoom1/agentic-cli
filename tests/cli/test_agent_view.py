@@ -1185,6 +1185,19 @@ class TestANewInstancesView:
         assert (record.status, record.cancelled_by) == (RUN_INTERRUPTED, None)
         assert crew.instances() == [("helper-1", INSTANCE_IDLE)]
 
+    async def test_a_conversation_of_only_this_is_a_used_one_the_exit_names(self, make_crew):
+        """Stored (the exit's ``--resume`` hint names a stored conversation) and
+        no longer fresh: ``/new`` and a switch of backend treat it as used."""
+        crew, app = await new_view(make_crew, store="sqlite", helper=[says("Helped.")])
+        app._conversation.opened_empty = True  # as a new conversation is opened
+
+        await typed(app, "/agent new helper Help with X.")
+
+        assert await app._is_stored(app.workflow, app.session_id)
+        assert app._conversation.written and not app._conversation.fresh
+        assert not app._conversation.turned
+        assert app.session_id in app._resume_hint()
+
     async def test_it_blocks_no_event_loop(self, make_crew):
         crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
                          coordinator=[says("Noted.")], helper=[says("Helped.")])

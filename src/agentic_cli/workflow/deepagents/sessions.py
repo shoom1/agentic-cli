@@ -254,11 +254,33 @@ class CheckpointSessions:
         self._backfill = backfill
 
     async def exists(self, ref: SessionRef) -> bool:
-        """Whether ``ref``'s root thread holds at least one message."""
-        return bool(_messages(await self._root(ref)))
+        """Whether ``ref``'s root thread holds at least one message, or the index holds its row.
+
+        A row without a message is a conversation whose only work is a run the
+        user started (``keep``).
+        """
+        if _messages(await self._root(ref)):
+            return True
+        item = await self._store.aget(_rows_of(ref.app_name, ref.user_id), ref.session_id)
+        return item is not None and _from_value(ref.session_id, item.value) is not None
+
+    async def keep(self, ref: SessionRef, objective: str) -> None:
+        """Write ``ref``'s row, titled from ``objective`` with no turns, when it has none.
+
+        What a conversation whose only work is a run the user started
+        (``start_instance``) needs to be listed and found. A conversation that
+        holds a message or a row keeps its title and turns. A failed write is
+        raised: the start's conversation could not be stored.
+        """
+        if await self.exists(ref):
+            return
+        row = SessionInfo(ref.session_id, session_title(objective), 0, datetime.now(timezone.utc))
+        await self._store.aput(
+            _rows_of(ref.app_name, ref.user_id), ref.session_id, _value(row), index=False
+        )
 
     async def info(self, ref: SessionRef) -> SessionInfo | None:
-        """``ref``'s row, or None when its root thread holds no message.
+        """``ref``'s row, or None when its root thread holds no message and the index no row.
 
         The index's row; a conversation it does not hold (written before it,
         or whose row could not be written) is read from its checkpoint.

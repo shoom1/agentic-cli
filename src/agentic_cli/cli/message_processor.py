@@ -469,6 +469,39 @@ class MessageProcessor:
                 request: thinking-prompt cancels the input handler running it.
                 ``CANCELLED_LINE`` has been said, once.
         """
+        def _source(workflow):
+            return workflow.process(
+                message=message,
+                user_id=settings.default_user,
+                session_id=session_id,
+            )
+
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker,
+            log="handling_message", fields={"message_length": len(message)},
+        )
+
+    async def _user_turn(
+        self,
+        source_factory,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None",
+        *,
+        log: str,
+        fields: dict[str, Any],
+        viewed: str | None = None,
+        opens: "Callable[[str], Awaitable[None]] | None" = None,
+    ) -> TurnResult:
+        """What a turn of the user's own does around ``_run_turn``: ``process``,
+        ``process_instance`` and ``process_start``.
+
+        Ctrl+C says ``CANCELLED_LINE`` once (``_says_so_when_stopped``). A
+        workflow that did not initialize is said and is an ``UNAVAILABLE``
+        result; otherwise the user is bound to the log, ``log`` is logged with
+        ``fields``, and the turn runs.
+        """
         async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
             # Wait for initialization if needed
             if not await workflow_controller.ensure_initialized(ui):
@@ -481,17 +514,10 @@ class MessageProcessor:
                 )
 
             bind_context(user_id=settings.default_user)
-            logger.info("handling_message", message_length=len(message))
-
-            def _source(workflow):
-                return workflow.process(
-                    message=message,
-                    user_id=settings.default_user,
-                    session_id=session_id,
-                )
-
+            logger.info(log, **fields)
             return await self._run_turn(
-                _source, workflow_controller, ui, settings, usage_tracker
+                source_factory, workflow_controller, ui, settings, usage_tracker,
+                viewed=viewed, opens=opens,
             )
 
     async def process_resume(
@@ -627,32 +653,19 @@ class MessageProcessor:
             asyncio.CancelledError: Ctrl+C stopped it (the user's stop of the
                 run): ``CANCELLED_LINE`` has been said, once.
         """
-        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
-            if not await workflow_controller.ensure_initialized(ui):
-                ui.add_error(
-                    "Cannot process message - workflow not initialized. "
-                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
-                )
-                return TurnResult(
-                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
-                )
-
-            bind_context(user_id=settings.default_user)
-            logger.info(
-                "handling_instance_message", instance=instance, message_length=len(message)
+        def _source(workflow):
+            return workflow.run_instance(
+                instance,
+                message,
+                session_id=session_id,
+                user_id=settings.default_user,
             )
 
-            def _source(workflow):
-                return workflow.run_instance(
-                    instance,
-                    message,
-                    session_id=session_id,
-                    user_id=settings.default_user,
-                )
-
-            return await self._run_turn(
-                _source, workflow_controller, ui, settings, usage_tracker, viewed=instance
-            )
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker, viewed=instance,
+            log="handling_instance_message",
+            fields={"instance": instance, "message_length": len(message)},
+        )
 
     async def process_start(
         self,
@@ -694,32 +707,19 @@ class MessageProcessor:
             asyncio.CancelledError: Ctrl+C stopped it (the user's stop of the
                 run): ``CANCELLED_LINE`` has been said, once.
         """
-        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
-            if not await workflow_controller.ensure_initialized(ui):
-                ui.add_error(
-                    "Cannot process message - workflow not initialized. "
-                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
-                )
-                return TurnResult(
-                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
-                )
-
-            bind_context(user_id=settings.default_user)
-            logger.info(
-                "handling_instance_start", agent_type=agent_type, objective_length=len(objective)
+        def _source(workflow):
+            return workflow.start_instance(
+                agent_type,
+                objective,
+                session_id=session_id,
+                user_id=settings.default_user,
             )
 
-            def _source(workflow):
-                return workflow.start_instance(
-                    agent_type,
-                    objective,
-                    session_id=session_id,
-                    user_id=settings.default_user,
-                )
-
-            return await self._run_turn(
-                _source, workflow_controller, ui, settings, usage_tracker, opens=opens
-            )
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker, opens=opens,
+            log="handling_instance_start",
+            fields={"agent_type": agent_type, "objective_length": len(objective)},
+        )
 
     async def process_notice(
         self,

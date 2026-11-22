@@ -409,6 +409,34 @@ def turn_state(session: "Session", message: str) -> dict[str, Any]:
     return delta
 
 
+async def keep_conversation(service: "BaseSessionService", ref: SessionRef, objective: str) -> None:
+    """Store ``ref``'s conversation when it holds no event yet, titled from ``objective``.
+
+    ADK lists a session only once it holds an event, and keeps its state only
+    through events: the session is made when there is none, and one state-only
+    event (``RECORDS_AUTHOR``, no content: no request carries it) sets its
+    title and no turns of the user's, the row ``turn_state`` would leave. A
+    session with events, or with a row of its own, is left as it is.
+    """
+    from google.adk.events import Event, EventActions
+    from google.adk.sessions.base_session_service import GetSessionConfig
+
+    session = await service.get_session(
+        app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        config=GetSessionConfig(num_recent_events=1),
+    )
+    if session is not None and session.events:
+        return
+    if session is None:
+        session = await service.create_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+    delta: dict[str, Any] = {TURNS_KEY: 0, TITLE_KEY: session_title(objective)}
+    await service.append_event(session, Event(
+        author=RECORDS_AUTHOR, actions=EventActions(state_delta=delta),
+    ))
+
+
 def row_from_state(session: "Session") -> SessionInfo | None:
     """The row the session's state holds, or None when it holds none."""
     state = session.state or {}

@@ -567,6 +567,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         mark = self._outside_marks.get(ref)
         return {"outside_content": mark} if mark else {}
 
+    async def _keep_conversation(self, ref: "SessionRef", objective: str) -> None:
+        """Write the conversation's row when it has none (``CheckpointSessions.keep``)."""
+        if self._sessions is not None:
+            await self._sessions.keep(ref, objective)
+
     async def _inherited_history(self, ref: "SessionRef") -> list[Any]:
         """``ref``'s conversation as an inheriting run the user starts reads it.
 

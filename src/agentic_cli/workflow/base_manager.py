@@ -176,7 +176,7 @@ class _UsersRunEvents(live_events.LiveEvents):
         super().__init__()
         #: The run the user started, once its start is reported.
         self.started: RunRef | None = None
-        self._started = asyncio.Event()
+        self._waiting: asyncio.Future[None] | None = None
 
     def emit(self, event: WorkflowEvent) -> None:
         if (
@@ -186,16 +186,27 @@ class _UsersRunEvents(live_events.LiveEvents):
             and event.run is not None
         ):
             self.started = event.run
-            self._started.set()
+            self._wake()
         super().emit(event)
 
+    def _wake(self) -> None:
+        waiting = self._waiting
+        if waiting is not None and not waiting.done():
+            waiting.set_result(None)
+
     async def until_started(self, work: "asyncio.Task[Any]") -> None:
-        """Wait until the run has started, or ``work`` (what starts it) has ended."""
-        waiter = asyncio.ensure_future(self._started.wait())
-        try:
-            await asyncio.wait({work, waiter}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            waiter.cancel()
+        """Wait until the run has started, or ``work`` (what starts it) has ended.
+
+        One future, resolved by the report of the start or by the end of
+        ``work`` and awaited directly: the caller then runs in the step after
+        the report, ahead of the run's own first step, so a stop it makes
+        cancels the run before its hook is entered.
+        """
+        if self.started is not None or work.done():
+            return
+        self._waiting = asyncio.get_running_loop().create_future()
+        work.add_done_callback(lambda _: self._wake())
+        await self._waiting
 
 
 def _module_of(klass: type) -> str:
@@ -1019,16 +1030,22 @@ class BaseWorkflowManager(ABC):
         Yields:
             The run's ``WorkflowEvent``s, its start first.
 
+        A conversation that is not stored yet is stored first, titled from
+        the objective with no turns of the user's with the main agent
+        (``_keep_conversation``), so what the user did here is found by
+        ``/resume``, ``--continue`` and ``--resume``.
+
         Raises:
             Exception: The store's, when the conversation's sub-agent records,
-                or an inheriting type's conversation, cannot be read: nothing
-                runs.
+                or an inheriting type's conversation, cannot be read or the
+                conversation cannot be stored: nothing runs.
         """
         async with self._turn(session_id, user_id) as ref:
             refused = self._delegations.user_start_refused(agent_type, objective)
             if refused is not None:
                 yield WorkflowEvent.error(refused)
                 return
+            await self._keep_conversation(ref, objective)
             config = next((c for c in self._agent_configs if c.name == agent_type), None)
             history = None
             if config is not None and config.inherit_context:
@@ -1283,6 +1300,17 @@ class BaseWorkflowManager(ABC):
         from the conversation's own state first. The base has none.
         """
         return {}
+
+    async def _keep_conversation(self, ref: SessionRef, objective: str) -> None:
+        """Store ``ref``'s conversation when it is not yet, as a turn's start does (a backend hook).
+
+        What a conversation whose only work is a run the user started
+        (``start_instance``) needs to be one the session hooks find
+        (``session_exists``, ``list_sessions``): its title is the objective's
+        (``session_title``) and its turns none, since the user typed none to
+        the main agent. A stored conversation keeps its title and turns. The
+        base stores nothing.
+        """
 
     async def _inherited_history(self, ref: SessionRef) -> list[Any]:
         """``ref``'s conversation as an inheriting run the user starts reads it (a backend hook).
@@ -3024,7 +3052,8 @@ class BaseWorkflowManager(ABC):
         """Run the block as one turn of a conversation, and yield the conversation.
 
         How every turn-shaped entry point starts (``process``,
-        ``resume_with_job_result``, ``compact``, ``run_instance``, ``tell_root``): the conversation is
+        ``resume_with_job_result``, ``compact``, ``run_instance``,
+        ``start_instance``, ``tell_root``): the conversation is
         resolved as ``session_ref`` resolves it (the manager's current
         session and the default user for what is omitted) and named in the
         log context; then turn admission (:meth:`_turn_admission`: the

@@ -6043,6 +6043,20 @@ class TestANoticeToTheRoot:
         assert [e.content for e in events if e.type is EventType.TEXT] == ["Noted."]
 
 
+def watch_hook(crew: Crew) -> list[str]:
+    """The runs whose hook is entered (a backend's model call comes after it)."""
+    entered: list[str] = []
+    delegations = crew.manager._delegations
+    hook = delegations._hook
+
+    async def recording(run: Any) -> Any:
+        entered.append(run.ref.run)
+        return await hook(run)
+
+    delegations._hook = recording
+    return entered
+
+
 class TestTheUsersStopInTheWindowBeforeTheRunStarts:
     """A Ctrl+C that lands as ``run_instance`` starts merging: its pump is
     made but has not run, so the instance is not ``running`` yet. The run
@@ -6057,6 +6071,7 @@ class TestTheUsersStopInTheWindowBeforeTheRunStarts:
             researcher=[says("X is 42."), says("Went on.")],
         )
         await crew.turn()
+        entered = watch_hook(crew)
 
         async def view() -> None:
             async for _ in crew.manager.run_instance("researcher-1", "Go on."):
@@ -6082,6 +6097,7 @@ class TestTheUsersStopInTheWindowBeforeTheRunStarts:
             "researcher-1#2", RUN_CANCELLED, "user",
         )
         assert crew.instances() == [("researcher-1", INSTANCE_STOPPED)]
+        assert entered == []  # stopped before its first step: no hook, no model call
 
 
 class TestTheUsersControlAfterARestart:
@@ -7525,6 +7541,55 @@ class TestTheUsersStart:
         assert second.instances() == [("helper-1", INSTANCE_IDLE), ("helper-2", INSTANCE_IDLE)]
 
 
+class TestTheUsersStartStoresItsConversation:
+    """A conversation whose only work is a start is stored as a turn's start
+    stores one: titled from the objective, no turns of the user's with the
+    main agent; ``/resume``, ``--continue`` and ``--resume`` reach it."""
+
+    async def test_a_start_alone_stores_the_conversation(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         helper=[says("Helped.")])
+        assert not await crew.manager.session_exists(SESSION, user_id=USER)
+
+        await user_start(crew, "helper", "Help with X.\nIn the docs.")
+
+        assert await crew.manager.session_exists(SESSION, user_id=USER)
+        (row,) = await crew.manager.list_sessions(user_id=USER)
+        assert (row.session_id, row.title, row.turns) == (SESSION, "Help with X. In the docs.", 0)
+        info = await crew.manager.session_info(SESSION, user_id=USER)
+        assert (info.title, info.turns) == ("Help with X. In the docs.", 0)
+
+    async def test_a_conversation_with_turns_keeps_its_title_and_turns(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+        await crew.turn("My first prompt.")
+
+        await user_start(crew, "helper", "Help with X.")
+
+        (row,) = await crew.manager.list_sessions(user_id=USER)
+        assert (row.title, row.turns) == ("My first prompt.", 1)
+
+    async def test_the_main_agents_first_turn_after_it_counts_one(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped."), says("Again.")])
+        await user_start(crew, "helper", "Help with X.")
+
+        await crew.turn("Now you.")
+
+        (row,) = await crew.manager.list_sessions(user_id=USER)
+        assert row.turns == 1
+        events = await user_start(crew, "helper", "Again.")
+        assert runs_of(events)[-1].metadata["status"] == RUN_COMPLETED
+
+    async def test_a_refusal_stores_nothing(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite")
+
+        await user_start(crew, "researcher", "Find X.")
+
+        assert not await crew.manager.session_exists(SESSION, user_id=USER)
+        assert await crew.manager.list_sessions(user_id=USER) == []
+
+
 class TestTheUsersStopOfANewInstance:
     """Stopping ``start_instance``'s stream (Ctrl+C in its view) is the user's
     stop of its first run: ``cancelled`` by the user, the instance
@@ -7563,6 +7628,7 @@ class TestTheUsersStopOfANewInstance:
         import inspect
 
         crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+        entered = watch_hook(crew)
 
         async def view() -> None:
             async for _ in crew.manager.start_instance("helper", "Go."):
@@ -7589,6 +7655,7 @@ class TestTheUsersStopOfANewInstance:
         )
         assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
         assert crew.requests("helper") == 0
+        assert entered == []
 
     async def test_a_stop_while_its_instance_is_numbered_stops_the_run_as_it_starts(
         self, make_crew
@@ -7596,6 +7663,7 @@ class TestTheUsersStopOfANewInstance:
         """The stop lands while the start reads the store's instances
         (before its run starts): the run that starts then is stopped."""
         crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+        entered = watch_hook(crew)
         delegations = crew.manager._delegations
         read, gate = asyncio.Event(), asyncio.Event()
         stored = delegations._stored
@@ -7626,6 +7694,7 @@ class TestTheUsersStopOfANewInstance:
         )
         assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
         assert crew.requests("helper") == 0
+        assert entered == []
 
     async def test_an_interrupt_ends_its_run_as_a_turns_cancel_and_the_instance_idle(
         self, make_crew
