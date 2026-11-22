@@ -81,7 +81,12 @@ from agentic_cli.workflow.adk.sessions import (
     stored_instances,
     turn_state,
 )
-from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool, follow_up_tools
+from agentic_cli.workflow.adk.task_tool import (
+    SHARED_KEYS,
+    TaskTool,
+    follow_up_tools,
+    inherited_events,
+)
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
 from agentic_cli.workflow.agents.control import KEPT_TOOLS
 from agentic_cli.workflow.agents.delegate import (
@@ -2003,6 +2008,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             self._seed_outside_content(ref, session)
         mark = self._outside_marks.get(ref)
         return {OUTSIDE_CONTENT_KEY: mark} if mark else {}
+
+    async def _inherited_history(self, ref: SessionRef) -> list[Any]:
+        """``ref``'s conversation as an inheriting run the user starts reads it.
+
+        The conversation's session, read whole: copies of its root-visible
+        events (``inherited_events``), as the root's ``task`` hands them
+        from its session; none for a conversation with no session yet.
+        """
+        session = await self._session_service.get_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+        return inherited_events(session.events) if session is not None else []
 
     async def _deliver_job_notice(
         self, notice: str, record: Any, result: Any, ref: SessionRef

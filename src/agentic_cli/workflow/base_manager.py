@@ -33,6 +33,7 @@ from types import MappingProxyType
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterator, Mapping, TYPE_CHECKING
 
 from agentic_cli.workflow.events import (
+    EventType,
     UserInputRequest,
     UserInputUnavailable,
     WorkflowEvent,
@@ -69,6 +70,7 @@ from agentic_cli.workflow.agents.runs import (
     INSTANCE_CLOSED,
     INSTANCE_RUNNING,
     RUN_END_STATUSES,
+    RUN_STARTED,
     AgentRuns,
 )
 from agentic_cli.workflow.agents.spawn import can_have_children
@@ -91,6 +93,7 @@ from agentic_cli.workflow.memory_index import (  # noqa: F401
 from agentic_cli.workflow.model_settings import ModelSettings, ThinkingSettings
 from agentic_cli.workflow.outside_content import OutsideContentMarks, outside_content_note
 from agentic_cli.workflow.sessions import (
+    RunRef,
     SessionInfo,
     SessionRef,
     close_turn_scope,
@@ -150,13 +153,49 @@ RECORDS_RELEASE_WAIT = 10.0
 
 
 class _UserRun:
-    """A run the user started (``run_instance``), while its turn lasts: its
-    task once it starts, and whether it is interrupted (``interrupt_instance``),
-    which makes a stop of its stream a turn's cancel, not the user's stop."""
+    """A run the user started (``run_instance``, ``start_instance``), while its
+    turn lasts: its task once it starts, and whether it is interrupted
+    (``interrupt_instance``), which makes a stop of its stream a turn's
+    cancel, not the user's stop."""
 
     def __init__(self) -> None:
         self.work: asyncio.Task[Delegated] | None = None
         self.interrupted = False
+
+
+class _UsersRunEvents(live_events.LiveEvents):
+    """The live events of a run the user starts (``_users_run``).
+
+    The first run whose start they report is that run (the runs it starts
+    are reported later), noted as its start is reported, before anything
+    else of it, so a stop of the stream finds it even before the stream's
+    consumer read that start. ``Delegations`` reports a start on the loop.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: The run the user started, once its start is reported.
+        self.started: RunRef | None = None
+        self._started = asyncio.Event()
+
+    def emit(self, event: WorkflowEvent) -> None:
+        if (
+            self.started is None
+            and event.type is EventType.AGENT_RUN
+            and event.metadata.get("status") == RUN_STARTED
+            and event.run is not None
+        ):
+            self.started = event.run
+            self._started.set()
+        super().emit(event)
+
+    async def until_started(self, work: "asyncio.Task[Any]") -> None:
+        """Wait until the run has started, or ``work`` (what starts it) has ended."""
+        waiter = asyncio.ensure_future(self._started.wait())
+        try:
+            await asyncio.wait({work, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
 
 
 def _module_of(klass: type) -> str:
@@ -940,57 +979,151 @@ class BaseWorkflowManager(ABC):
                 instance=instance, message=message, started_by=USER, conversation=ref,
                 state=await self._conversation_state(ref),
             )
-            live = live_events.LiveEvents()
-            key = (ref, instance)
-            held = self._user_runs[key] = _UserRun()
+            async with contextlib.aclosing(self._users_run(
+                ref, lambda: self._delegations.follow_up(request),
+                instance=instance, name=f"user run of {instance}",
+            )) as events:
+                async for event in events:
+                    yield event
 
-            def stop_it() -> None:
-                # Its consumer stopped (Ctrl+C): the user's stop of the run
-                # alone, unless the run is interrupted (a turn's cancel).
-                if held.interrupted:
-                    return
-                record = self.agent_runs.instance(ref, instance)
-                if record is not None and record.status == INSTANCE_RUNNING and record.runs:
-                    self._delegations.cancel(
-                        record.runs[-1], by=USER, error=STOPPED_BY_USER_ERROR, conversation=ref
-                    )
+    async def start_instance(
+        self,
+        agent_type: str,
+        objective: str,
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """Start a sub-agent of ``agent_type`` for the user, as a turn of its own (provisional).
 
-            async def source() -> AsyncGenerator[WorkflowEvent, None]:
-                if held.interrupted:  # before its run started: none starts
-                    raise asyncio.CancelledError
-                # The run's own task: a stop cancels the run, not its caller,
-                # so it ends cancelled by the user, not interrupted.
-                work = held.work = asyncio.create_task(
-                    self._delegations.follow_up(request), name=f"user run of {instance}"
-                )
-                try:
-                    delegated = await asyncio.shield(work)
-                except asyncio.CancelledError:
-                    if held.interrupted:
-                        work.cancel()  # the run's caller is cancelled: it ends interrupted
-                    else:
-                        stop_it()  # a run that started after the consumer's stop looked
-                    await asyncio.wait([work])
-                    if not work.cancelled() and work.exception() is None:
-                        self._user_ran(ref, instance, work.result())
-                    raise
-                if delegated.run is None:
-                    yield WorkflowEvent.error(str(delegated.result.get("error", "")))
-                    return
-                self._user_ran(ref, instance, delegated)
+        What ``/agent new <type> <objective>`` runs: the instance's first
+        run, ``started_by`` the user, its parent the root (depth 1, so
+        ``max_spawn_depth`` never refuses it), its brief the objective,
+        titled with its first line. A turn of the conversation
+        (``_turn``: the root does not run), whose first event is the run's
+        ``AGENT_RUN`` start, which names the instance; then the run's events,
+        as ``run_instance``'s. It is counted toward no turn's runs
+        (``max_runs_per_turn``), takes a working slot while it works, and
+        starts from the conversation's outside-content mark; an inheriting
+        type reads the conversation as the root's ``task`` would hand it
+        (``_inherited_history``). A type the user may not start (the
+        policy's ``spawn_sources`` and the type's ``spawnable_by`` must both
+        name ``"user"``) or a blank objective is one ``ERROR`` event, and
+        nothing runs. The run's envelope is kept for ``instance_result``.
 
+        Stopping the stream (Ctrl+C) is the user's stop of the run, as in
+        ``run_instance``: it ends ``cancelled`` by the user and the instance
+        is ``stopped``; a stop before the run started stops the run as it
+        starts. ``interrupt_instance`` ends it as a turn's cancel does.
+
+        Yields:
+            The run's ``WorkflowEvent``s, its start first.
+
+        Raises:
+            Exception: The store's, when the conversation's sub-agent records,
+                or an inheriting type's conversation, cannot be read: nothing
+                runs.
+        """
+        async with self._turn(session_id, user_id) as ref:
+            refused = self._delegations.user_start_refused(agent_type, objective)
+            if refused is not None:
+                yield WorkflowEvent.error(refused)
+                return
+            config = next((c for c in self._agent_configs if c.name == agent_type), None)
+            history = None
+            if config is not None and config.inherit_context:
+                copy = await self._inherited_history(ref)
+                history = lambda: copy  # noqa: E731 - read once, before the run
+            state = await self._conversation_state(ref)
+            async with contextlib.aclosing(self._users_run(
+                ref,
+                lambda: self._delegations.start_by_user(
+                    ref, agent_type, objective, state=state, history=history,
+                ),
+                name=f"user start of {agent_type}",
+            )) as events:
+                async for event in events:
+                    yield event
+
+    async def _users_run(
+        self,
+        ref: SessionRef,
+        work: Callable[[], Awaitable[Delegated]],
+        *,
+        instance: str | None = None,
+        name: str,
+    ) -> AsyncGenerator[WorkflowEvent, None]:
+        """A run the user starts in ``ref``'s turn, streamed (``run_instance``, ``start_instance``).
+
+        ``work()`` starts it through ``Delegations`` and returns its
+        envelope; it runs in a task of its own, so a stop of the stream
+        cancels the run, not its caller: the run ends ``cancelled`` by the
+        user. A run that has not started when the stream stops is stopped
+        as it starts. An interrupted one (``interrupt_instance``, held under
+        ``instance``, or the new instance's id once its start is reported)
+        ends as a turn's cancel ends its runs. A refusal (no run) is one
+        ``ERROR``. The envelope of a run that ended is kept (``_user_ran``).
+        """
+        live = _UsersRunEvents()
+        held = _UserRun()
+        key = (ref, instance) if instance is not None else None
+        if key is not None:
+            self._user_runs[key] = held
+
+        def stop_it() -> None:
+            # Its consumer stopped (Ctrl+C): the user's stop of the run
+            # alone, unless the run is interrupted (a turn's cancel).
+            if held.interrupted or live.started is None or live.started.run is None:
+                return
+            self._delegations.cancel(
+                live.started.run, by=USER, error=STOPPED_BY_USER_ERROR, conversation=ref
+            )
+
+        async def source() -> AsyncGenerator[WorkflowEvent, None]:
+            if held.interrupted:  # before its run started: none starts
+                raise asyncio.CancelledError
+            # The run's own task: a stop cancels the run, not its caller,
+            # so it ends cancelled by the user, not interrupted.
+            task = held.work = asyncio.create_task(work(), name=name)
             try:
-                with live_events.reporting(live):
-                    async with contextlib.aclosing(
-                        live_events.merged(source(), live, on_stop=stop_it)
-                    ) as items:
-                        async for item in items:
-                            event = self._apply_event_hook(item)
-                            if event is not None:
-                                yield event
-            finally:
-                if self._user_runs.get(key) is held:
-                    del self._user_runs[key]
+                delegated = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if held.interrupted:
+                    task.cancel()  # the run's caller is cancelled: it ends interrupted
+                else:
+                    stop_it()
+                    if live.started is None:
+                        # Stopped before its run started (its instance being
+                        # numbered): the run that starts is stopped as it starts.
+                        await live.until_started(task)
+                        stop_it()
+                await asyncio.wait([task])
+                if not task.cancelled() and task.exception() is None:
+                    ended = task.result()
+                    if ended.run is not None:
+                        self._user_ran(ref, ended.run.instance, ended)
+                raise
+            if delegated.run is None:
+                yield WorkflowEvent.error(str(delegated.result.get("error", "")))
+                return
+            self._user_ran(ref, delegated.run.instance, delegated)
+
+        try:
+            with live_events.reporting(live):
+                async with contextlib.aclosing(
+                    live_events.merged(source(), live, on_stop=stop_it)
+                ) as items:
+                    async for item in items:
+                        if key is None and live.started is not None:
+                            # The new instance is named: interrupt_instance finds it.
+                            key = (ref, live.started.instance)
+                            self._user_runs[key] = held
+                        event = self._apply_event_hook(item)
+                        if event is not None:
+                            yield event
+        finally:
+            if key is not None and self._user_runs.get(key) is held:
+                del self._user_runs[key]
 
     def interrupt_instance(
         self, instance: str, *, session_id: str | None = None, user_id: str | None = None
@@ -998,12 +1131,13 @@ class BaseWorkflowManager(ABC):
         """Interrupt the run of ``instance`` the user started, as a turn's cancel (provisional).
 
         What a process exit does to a run: not the user's stop. The run of
-        that ``run_instance`` ends ``interrupted`` and its instance stays
+        that ``run_instance`` (or ``start_instance``, once its start named
+        the instance) ends ``interrupted`` and its instance stays
         ``idle``, so its parent may continue it; its stream then raises
         ``asyncio.CancelledError``, and its turn records the run and writes
         the records as it ends (a stop of that stream from now on is no
-        stop of the user's either). Only ``run_instance``'s run: a run of
-        the root's turn ends with that turn.
+        stop of the user's either). Only ``run_instance``'s and
+        ``start_instance``'s run: a run of the root's turn ends with that turn.
 
         Returns:
             Whether such a run was working (or about to start); False,
@@ -1149,6 +1283,18 @@ class BaseWorkflowManager(ABC):
         from the conversation's own state first. The base has none.
         """
         return {}
+
+    async def _inherited_history(self, ref: SessionRef) -> list[Any]:
+        """``ref``'s conversation as an inheriting run the user starts reads it (a backend hook).
+
+        What the root's ``task`` would hand such a run (its ``history``),
+        read from the store between turns: ADK the conversation's
+        root-visible events (``adk/task_tool.py::inherited_events``), Deep
+        Agents the root's messages with its summary applied
+        (``deepagents/task_tool.py::inherited_messages``). Empty for a
+        conversation with none yet. The base has none.
+        """
+        return []
 
     async def tell_root(
         self, text: str, *, session_id: str | None = None, user_id: str | None = None

@@ -7321,3 +7321,349 @@ class TestASkillThatStartsAnAgent:
         assert [(call, len(held)) for call, held in second.call_results("coordinator", 0)
                 if call == "c1"] == [("c1", 1)]
         assert INTERRUPTED in second.results_read("coordinator", 0)["c1"]
+
+
+# -- the user's start: /agent new -----------------------------------------------------
+
+#: The user may start a type at run time (``/agent new``); agents none.
+STARTING = SubAgentPolicy(spawn_sources={"user"})
+HELPER_1 = RunRef(agent="helper", instance="helper-1", run="helper-1#1", parent_run=None, depth=1)
+
+
+def user_team(**fields: Any) -> list[AgentConfig]:
+    """``team()`` and a helper only the user may start (by default), which looks
+    up, blocks or holds."""
+    fields.setdefault("spawnable_by", frozenset({"user"}))
+    return [*team(), helper(tools=(contract_lookup, contract_block, contract_hold), **fields)]
+
+
+async def user_start(crew: Crew, agent_type: str, objective: str) -> list[WorkflowEvent]:
+    """The user's new ``agent_type`` instance (``start_instance``), run to its end; its events."""
+    return [event async for event in crew.manager.start_instance(agent_type, objective)]
+
+
+class TestTheUsersStart:
+    """``start_instance``: a new instance the user starts, a turn of its own on
+    the open conversation: its parent the root, at depth 1, ``started_by:
+    user``, counted toward no turn's runs, a working slot taken; its first
+    event is its run's start; the root does not run."""
+
+    async def test_it_starts_a_new_instance_under_the_root_and_streams_as_a_turn(
+        self, make_crew
+    ):
+        from agentic_cli.workflow.agents.brief import Brief, task_message
+
+        crew = make_crew(
+            user_team(), subagents=STARTING,
+            helper=[calls(use("contract_lookup", "h1", q="X")), says("Helped with X.")],
+        )
+
+        events = await user_start(crew, "helper", "Help with X.\nIn the docs.")
+
+        started, ended = runs_of(events)
+        assert events[0] is started
+        assert started.run == HELPER_1
+        assert (started.metadata["started_by"], started.metadata["title"],
+                started.metadata["brief"]) == (
+            "user", "Help with X.",
+            {"title": "Help with X.", "objective": "Help with X.\nIn the docs."},
+        )
+        assert "call_id" not in started.metadata
+        assert (ended.metadata["status"], ended.metadata["result"],
+                ended.metadata["instance_status"]) == (
+            RUN_COMPLETED, "Helped with X.", INSTANCE_IDLE
+        )
+        assert [(e.content, e.run) for e in events if e.type is EventType.TEXT] == [
+            ("Helped with X.", HELPER_1),
+        ]
+        assert crew.last_message("helper", 0) == task_message(
+            Brief(title="Help with X.", objective="Help with X.\nIn the docs.")
+        )
+        assert crew.requests("coordinator") == 0
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.instance, instance.agent, instance.parent, instance.depth,
+                instance.status, instance.title) == (
+            "helper-1", "helper", "root", 1, INSTANCE_IDLE, "Help with X."
+        )
+        (record,) = crew.records()
+        assert (record.started_by, record.call_id, record.status) == ("user", None, RUN_COMPLETED)
+        assert crew.manager.instance_result("helper-1") == {
+            "success": True, "agent": "helper-1", "run": "helper-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Helped with X.", "error": None,
+        }
+
+    async def test_each_start_is_a_new_instance(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING,
+                         helper=[says("One."), says("Two.")])
+
+        await user_start(crew, "helper", "One.")
+        await user_start(crew, "helper", "Two.")
+
+        assert crew.instances() == [("helper-1", INSTANCE_IDLE), ("helper-2", INSTANCE_IDLE)]
+
+    async def test_it_is_not_counted_toward_its_turns_runs(self, make_crew):
+        """With one run a turn, the new instance's own delegation runs: the
+        user's start took none of the turn's runs."""
+        crew = make_crew(
+            [*team(), agent("planner", sub_agents=("checker",), description="Plans.",
+                            spawnable_by=frozenset({"user"})),
+             agent("checker", tools=(contract_lookup,))],
+            subagents=SubAgentPolicy(spawn_sources={"user"}, max_runs_per_turn=1),
+            planner=[calls(delegate("checker", "Check X.", "p1")), says("Planned.")],
+            checker=[says("Checked.")],
+        )
+
+        events = await user_start(crew, "planner", "Plan X.")
+
+        assert [(e.run.run, e.metadata["status"]) for e in runs_of(events)] == [
+            ("planner-1#1", RUN_STARTED), ("checker-1#1", RUN_STARTED),
+            ("checker-1#1", RUN_COMPLETED), ("planner-1#1", RUN_COMPLETED),
+        ]
+        assert envelope_read(crew.results_read("planner")["p1"])["result"] == "Checked."
+
+    async def test_it_takes_a_working_slot(self, make_crew):
+        crew = make_crew(
+            user_team(), subagents=SubAgentPolicy(spawn_sources={"user"}, max_active=1),
+            helper=[calls(use("contract_hold", "h1")), says("Held.")],
+        )
+
+        starting = asyncio.create_task(user_start(crew, "helper", "Hold."))
+        crew.started.append(starting)
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        held = crew.slots().free
+        HELD["go"].set()
+        events = await asyncio.wait_for(starting, 10)
+
+        assert (held, crew.slots().free) == (0, 1)
+        assert runs_of(events)[-1].metadata["status"] == RUN_COMPLETED
+
+    async def test_one_the_user_may_not_start_is_one_error_and_nothing_runs(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+
+        refused = [
+            [(e.type, e.content) for e in await user_start(crew, agent_type, objective)]
+            for agent_type, objective in (("researcher", "Find X."), ("nobody", "Go."),
+                                          ("helper", "  "))
+        ]
+
+        assert refused == [
+            [(EventType.ERROR, "You cannot start 'researcher' here. Types you can start: helper.")],
+            [(EventType.ERROR, "You cannot start 'nobody' here. Types you can start: helper.")],
+            [(EventType.ERROR, "A new agent needs an objective.")],
+        ]
+        assert (crew.records(), crew.requests("helper")) == ([], 0)
+
+    @pytest.mark.parametrize("policy", [None, SubAgentPolicy(spawn_sources={"agent"})])
+    async def test_an_app_that_lets_the_user_start_none_says_so(self, make_crew, policy):
+        crew = make_crew(user_team(spawnable_by=frozenset({"agent", "user"})), subagents=policy,
+                         helper=[says("[never asked]")])
+
+        events = await user_start(crew, "helper", "Help.")
+
+        assert [(e.type, e.content) for e in events] == [
+            (EventType.ERROR, "This app lets you start no agent types."),
+        ]
+        assert crew.records() == []
+
+    async def test_an_inheriting_type_reads_the_conversation(self, make_crew):
+        """Its parent is the root: it reads the root's conversation, as a
+        root's ``task`` would hand it."""
+        from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
+
+        crew = make_crew(
+            [*team(), agent("reader", inherit_context=True, description="Reads.",
+                            spawnable_by=frozenset({"user"}))],
+            subagents=STARTING,
+            coordinator=[says("Noted, Ada.")], reader=[says("The code is 7.")],
+        )
+        await crew.turn("My name is Ada and the code is 7.")
+
+        events = await user_start(crew, "reader", "Find the code.")
+
+        (first,) = crew.bodies("reader")
+        assert "My name is Ada and the code is 7." in first and "Noted, Ada." in first
+        last = crew.last_message("reader", 0)
+        assert last == task_message(
+            Brief(title="Find the code.", objective="Find the code."), inherit=True
+        )
+        assert last.endswith(INHERITED_CONTEXT_NOTE)
+        assert runs_of(events)[-1].metadata["result"] == "The code is 7."
+        assert crew.requests("coordinator") == 1
+
+    async def test_its_view_and_the_roots_message_agent_follow_it_up(self, make_crew):
+        crew = make_crew(
+            user_team(), subagents=SubAgentPolicy(spawn_sources={"user"}, follow_ups=True),
+            coordinator=[calls(message("helper-1", "And Z?", "c1")), says("Asked.")],
+            helper=[says("Helped with X."), says("Y is 7."), says("Z is 9.")],
+        )
+        await user_start(crew, "helper", "Help with X.")
+
+        await user_turn(crew, "helper-1", "And Y?")
+        await crew.turn()
+
+        assert [(r.ref.run, r.status, r.started_by) for r in crew.records()] == [
+            ("helper-1#1", RUN_COMPLETED, "user"),
+            ("helper-1#2", RUN_COMPLETED, "user"),
+            ("helper-1#3", RUN_COMPLETED, "agent:root"),
+        ]
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Z is 9."
+        # One transcript: the root's follow-up reads both of the user's runs.
+        assert "Helped with X." in crew.bodies("helper")[2]
+        assert "Y is 7." in crew.bodies("helper")[2]
+
+    async def test_after_a_restart_it_is_numbered_past_the_stored(self, make_crew):
+        first = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                          helper=[says("One.")])
+        await user_start(first, "helper", "One.")
+        await first.manager.cleanup()
+        second = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                           helper=[says("Two.")])
+
+        events = await user_start(second, "helper", "Two.")
+
+        assert runs_of(events)[0].run.instance == "helper-2"
+        assert second.instances() == [("helper-1", INSTANCE_IDLE), ("helper-2", INSTANCE_IDLE)]
+
+
+class TestTheUsersStopOfANewInstance:
+    """Stopping ``start_instance``'s stream (Ctrl+C in its view) is the user's
+    stop of its first run: ``cancelled`` by the user, the instance
+    ``stopped``; a run that starts after the stop is stopped as it starts.
+    ``interrupt_instance`` (a process exit) is no stop of the user's."""
+
+    async def test_ctrl_c_stops_its_first_run_by_the_user_and_the_instance_is_stopped(
+        self, make_crew
+    ):
+        crew = make_crew(user_team(), subagents=STARTING,
+                         helper=[calls(use("contract_block", "h1")), says("Went on.")])
+        seen: list[WorkflowEvent] = []
+
+        async def view() -> None:
+            async for event in crew.manager.start_instance("helper", "Wait here."):
+                seen.append(event)
+
+        viewing = asyncio.create_task(view())
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        await Crew.stop(viewing)
+
+        (record,) = crew.records()
+        assert (record.ref.run, record.status, record.cancelled_by, record.error) == (
+            "helper-1#1", RUN_CANCELLED, "user", "stopped by the user",
+        )
+        assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
+        assert seen[0].run == HELPER_1
+        assert crew.manager.instance_result("helper-1")["cancelled_by"] == "user"
+        # Only the user continues it; its stopped call answered once.
+        events = await user_turn(crew, "helper-1", "Go on.")
+        assert runs_of(events)[-1].metadata["status"] == RUN_COMPLETED
+        assert [call for call, _ in crew.call_results("helper", -1)] == ["h1"]
+        assert crew.instances() == [("helper-1", INSTANCE_IDLE)]
+
+    async def test_ctrl_c_as_the_stream_starts_stops_the_run_by_the_user(self, make_crew):
+        import inspect
+
+        crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+
+        async def view() -> None:
+            async for _ in crew.manager.start_instance("helper", "Go."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        landed = False
+        for _ in range(10_000):
+            await asyncio.sleep(0)
+            pumps = [t for t in asyncio.all_tasks() if t.get_name() == live_events.PUMP_TASK]
+            if pumps and inspect.getcoroutinestate(pumps[0].get_coro()) == inspect.CORO_CREATED:
+                viewing.cancel()
+                landed = True
+                break
+            if viewing.done():
+                break
+        assert landed, "the cancel could not be landed in the window"
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(viewing, 10)
+
+        (record,) = crew.records()
+        assert (record.ref.run, record.status, record.cancelled_by) == (
+            "helper-1#1", RUN_CANCELLED, "user",
+        )
+        assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
+        assert crew.requests("helper") == 0
+
+    async def test_a_stop_while_its_instance_is_numbered_stops_the_run_as_it_starts(
+        self, make_crew
+    ):
+        """The stop lands while the start reads the store's instances
+        (before its run starts): the run that starts then is stopped."""
+        crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+        delegations = crew.manager._delegations
+        read, gate = asyncio.Event(), asyncio.Event()
+        stored = delegations._stored
+
+        async def slow(conversation: SessionRef) -> Any:
+            read.set()
+            await gate.wait()
+            return await stored(conversation)
+
+        delegations._stored = slow
+
+        async def view() -> None:
+            async for _ in crew.manager.start_instance("helper", "Go."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        await asyncio.wait_for(read.wait(), 10)
+        viewing.cancel()
+        await asyncio.sleep(0.05)
+        assert crew.records() == []  # not started yet
+        gate.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(viewing, 10)
+
+        (record,) = crew.records()
+        assert (record.ref.run, record.status, record.cancelled_by) == (
+            "helper-1#1", RUN_CANCELLED, "user",
+        )
+        assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
+        assert crew.requests("helper") == 0
+
+    async def test_an_interrupt_ends_its_run_as_a_turns_cancel_and_the_instance_idle(
+        self, make_crew
+    ):
+        crew = make_crew(user_team(), subagents=STARTING,
+                         helper=[calls(use("contract_block", "h1")), says("Went on.")])
+
+        async def view() -> None:
+            async for _ in crew.manager.start_instance("helper", "Wait here."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert crew.manager.interrupt_instance("helper-1") is True
+        done, _ = await asyncio.wait({viewing}, timeout=10)
+        if not done:
+            await Crew.stop(viewing)
+        assert done, "the interrupted run did not end"
+        assert viewing.cancelled()
+
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_INTERRUPTED, None)
+        assert crew.instances() == [("helper-1", INSTANCE_IDLE)]
+        assert crew.manager.interrupt_instance("helper-1") is False
+
+
+class TestTheUsersStartOffTheLoop:
+    async def test_it_blocks_no_event_loop(self, make_crew):
+        """An inheriting type's: the conversation read from the sqlite store too."""
+        crew = make_crew(
+            [*team(), agent("reader", inherit_context=True, description="Reads.",
+                            spawnable_by=frozenset({"user"}))],
+            subagents=STARTING, store="sqlite",
+            coordinator=[says("Noted, Ada.")], reader=[says("The code is 7.")],
+        )
+        await crew.turn("My name is Ada and the code is 7.")
+
+        with no_blocking_calls():
+            events = await user_start(crew, "reader", "Find the code.")
+
+        assert runs_of(events)[-1].metadata["result"] == "The code is 7."
