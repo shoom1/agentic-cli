@@ -5,13 +5,20 @@ from dataclasses import dataclass, field
 from typing import Callable, Any, TYPE_CHECKING
 
 from agentic_cli.workflow.agents.brief import BRIEF_FIELDS
-from agentic_cli.workflow.agents.policy import AgentLimits
+from agentic_cli.logging import Loggers
+from agentic_cli.workflow.agents.policy import (
+    SPAWN_SOURCES,
+    AgentLimits,
+    SubAgentPolicy,
+    as_policy,
+)
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
     from agentic_cli.workflow.model_settings import ModelSettings
     from agentic_cli.workflow.mcp import MCPServerConfig
 
+logger = Loggers.workflow()
 
 #: The brief fields a delegation must fill unless an agent asks for more.
 _DEFAULT_BRIEF_REQUIRED = ("objective",)
@@ -73,6 +80,13 @@ class AgentConfig:
         continuable: Whether an instance of this agent takes follow-ups
             after its run. True (the default) keeps it ``idle`` for the
             next; False closes it when its run ends. Only on sub-agents.
+        spawnable_by: Who may start this type at run time (a subset of
+            ``SPAWN_SOURCES``: ``agent``, ``skill``, ``user``; a list or
+            tuple is read as one), which the app's ``SubAgentPolicy``
+            must allow too. None (the default): only its parent in
+            ``sub_agents`` starts it. A type that sets it and is in no
+            ``sub_agents`` list is a free type: no root, started at run time
+            only. Only on sub-agents.
     """
 
     name: str
@@ -89,6 +103,7 @@ class AgentConfig:
     brief_required: tuple[str, ...] = _DEFAULT_BRIEF_REQUIRED
     limits: AgentLimits | None = None
     continuable: bool = True
+    spawnable_by: frozenset[str] | None = None
 
     def get_prompt(self, settings: "BaseSettings | None" = None) -> str:
         """Get the prompt string, calling the factory if the prompt is callable.
@@ -190,15 +205,22 @@ class AgentGraph:
         config_map: Agent name → config.
         build_order: Names ordered so every agent follows its sub-agents.
         root_name: The agent the runner starts from.
+        free_types: The agent types that set ``spawnable_by`` and are in no
+            ``sub_agents`` list, in config order: built like any sub-agent,
+            started at run time only, never the root.
     """
 
     config_map: dict[str, AgentConfig]
     build_order: tuple[str, ...]
     root_name: str
+    free_types: tuple[str, ...] = ()
 
 
 def validate_agent_graph(
-    configs: list[AgentConfig], backend: str = "adk"
+    configs: list[AgentConfig],
+    backend: str = "adk",
+    *,
+    policy: SubAgentPolicy | None = None,
 ) -> AgentGraph:
     """Validate an agent graph and return it in dependency (topological) order.
 
@@ -211,7 +233,10 @@ def validate_agent_graph(
     5. no delegation cycle;
     6. no agent is a sub-agent of two parents — ADK agents hold a single
        ``parent_agent``, so a shared child is a tree the backend cannot build;
-    7. exactly one root;
+    7. exactly one root among the agents that are not free types: each
+       agent's ``spawnable_by`` is checked first (None, or a non-empty set,
+       list or tuple of ``SPAWN_SOURCES``), a free type is one that sets it
+       and is in no ``sub_agents`` list, and the root may not set it;
     8. each agent's ``inherit_context`` is True or False;
     9. the root does not set ``inherit_context``: it has no parent's
        conversation;
@@ -225,9 +250,14 @@ def validate_agent_graph(
         objective), ``limits`` and ``continuable`` (beyond True): it is never
         delegated to.
 
+    A free type that no source ``policy`` enables can start is warned of
+    (``subagent_type_unreachable``), once for each validation.
+
     Args:
         configs: The declared agents.
         backend: Backend name, used only in error messages.
+        policy: The app's sub-agent policy (None: ``SubAgentPolicy()``);
+            only the free types' warning reads it.
 
     Returns:
         The validated graph plus a build order in which every agent comes after
@@ -236,6 +266,7 @@ def validate_agent_graph(
     Raises:
         AgentGraphError: With the offending agent name(s) in the message.
     """
+    policy = as_policy(policy)
     if not configs:
         raise AgentGraphError("No agents configured: at least one AgentConfig is required.")
 
@@ -289,7 +320,22 @@ def validate_agent_graph(
     # sub-coordinator before its parent promoted the child to root) and
     # silently accepted a forest: only one root is ever run, so every other
     # tree — and every agent under it — was unreachable.
-    roots = [c.name for c in configs if c.name not in parents]
+    _check_spawnable_by(configs)
+    free = tuple(
+        c.name for c in configs if c.spawnable_by is not None and c.name not in parents
+    )
+    roots = [c.name for c in configs if c.name not in parents and c.name not in free]
+    if not roots:
+        if len(free) == 1:
+            raise AgentGraphError(
+                f"Agent {free[0]!r} is the root agent and cannot set spawnable_by: "
+                "only a sub-agent type is started at run time."
+            )
+        raise AgentGraphError(
+            f"Agent graph has no root: every agent nobody delegates to ({', '.join(free)}) "
+            "sets spawnable_by, which makes it a type started at run time. Leave "
+            "spawnable_by off the agent the runner starts from."
+        )
     if len(roots) > 1:
         raise AgentGraphError(
             f"Agent graph has {len(roots)} roots: {', '.join(sorted(roots))}. "
@@ -299,7 +345,50 @@ def validate_agent_graph(
         )
     _check_inherit_context(config_map, roots[0])
     _check_delegation_fields(config_map, roots[0])
-    return AgentGraph(config_map=config_map, build_order=order, root_name=roots[0])
+    _warn_unreachable([config_map[name] for name in free], policy)
+    return AgentGraph(
+        config_map=config_map, build_order=order, root_name=roots[0], free_types=free
+    )
+
+
+def _check_spawnable_by(configs: list[AgentConfig]) -> None:
+    """Each agent's ``spawnable_by`` is None, or a non-empty set, list or tuple of sources.
+
+    Raises:
+        AgentGraphError: Naming the agent, the value and what to change.
+    """
+    allowed = ", ".join(repr(source) for source in SPAWN_SOURCES)
+    for config in configs:
+        value = config.spawnable_by
+        if value is None:
+            continue
+        if isinstance(value, (set, frozenset, list, tuple)) and not value:
+            raise AgentGraphError(
+                f"Agent {config.name!r} has an empty spawnable_by: name at least one "
+                "source, or leave it out for a type only its parent starts."
+            )
+        if not isinstance(value, (set, frozenset, list, tuple)) or not all(
+            isinstance(item, str) and item in SPAWN_SOURCES for item in value
+        ):
+            raise AgentGraphError(
+                f"Agent {config.name!r} has spawnable_by {value!r}: each source must be "
+                f"one of {allowed}."
+            )
+
+
+def _warn_unreachable(free: list[AgentConfig], policy: SubAgentPolicy) -> None:
+    """Log each free type that no source the policy enables can start.
+
+    An app may define types it enables per install, so this is a warning.
+    """
+    for config in free:
+        if not set(config.spawnable_by or ()) & policy.spawn_sources:
+            logger.warning(
+                "subagent_type_unreachable",
+                agent=config.name,
+                spawnable_by=sorted(config.spawnable_by or ()),
+                spawn_sources=sorted(policy.spawn_sources),
+            )
 
 
 def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> None:

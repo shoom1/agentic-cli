@@ -12,8 +12,9 @@ from agentic_cli.workflow.agent_loader import (
     create_workflow_manager_from_yaml,
     load_agents_from_yaml,
 )
-from agentic_cli.workflow.agents.policy import AgentLimits
+from agentic_cli.workflow.agents.policy import AgentLimits, SubAgentPolicy
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
+from agentic_cli.workflow.config import AgentGraphError, validate_agent_graph
 
 
 def _write(tmp_path: Path, text: str, name: str = "agents.yaml") -> Path:
@@ -133,6 +134,7 @@ class TestLoadAgentsFromYaml:
         assert cfg.brief_required == ("objective",)
         assert cfg.limits is None
         assert cfg.continuable is True
+        assert cfg.spawnable_by is None
 
     def test_a_sub_agents_inherit_context(self, tmp_path):
         path = _write(
@@ -233,6 +235,60 @@ class TestLoadAgentsFromYaml:
         message = str(exc.value)
         assert "agents.0.limits.steps" in message
         assert "Extra inputs are not permitted" in message
+
+    def test_a_type_started_at_run_time(self, tmp_path):
+        # Listed before the root: a free type is never the root.
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: helper
+                instruction: Help.
+                spawnable_by: [agent, user]
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [researcher]
+              - name: researcher
+                instruction: Find facts.
+                spawnable_by: [skill]
+            """,
+        )
+        configs = load_agents_from_yaml(path)
+        found = {c.name: c.spawnable_by for c in configs}
+        assert found == {
+            "helper": frozenset({"agent", "user"}), "coordinator": None,
+            "researcher": frozenset({"skill"}),
+        }
+        graph = validate_agent_graph(
+            configs, policy=SubAgentPolicy(spawn_sources={"agent", "user", "skill"})
+        )
+        assert (graph.root_name, graph.free_types) == ("coordinator", ("helper",))
+
+    def test_spawnable_by_is_a_list(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    spawnable_by: agent\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.spawnable_by" in message and "valid list" in message
+
+    def test_a_source_spawnable_by_does_not_name_is_the_graphs_to_refuse(self, tmp_path):
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [researcher]
+              - name: researcher
+                instruction: Find facts.
+                spawnable_by: [agents]
+            """,
+        )
+        configs = load_agents_from_yaml(path)
+        with pytest.raises(AgentGraphError, match="'researcher' has spawnable_by frozenset"):
+            validate_agent_graph(configs)
 
     def test_brief_required_is_a_list(self, tmp_path):
         path = _write(
