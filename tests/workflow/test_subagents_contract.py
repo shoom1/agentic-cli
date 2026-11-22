@@ -6903,6 +6903,22 @@ def refused_by_skill(agent_type: str, reason: str, skill: str = "research") -> d
     }
 
 
+def recorded_warnings(monkeypatch) -> list[dict[str, Any]]:
+    """Every log call of ``tools/skills/agents.py``, with its level."""
+    from agentic_cli.tools.skills import agents as skill_agents
+
+    events: list[dict[str, Any]] = []
+
+    class Recorder:
+        def __getattr__(self, level: str):
+            return lambda event, **fields: events.append(
+                {"event": event, "log_level": level, **fields}
+            )
+
+    monkeypatch.setattr(skill_agents, "logger", Recorder())
+    return events
+
+
 class TestASkillThatStartsAnAgent:
     async def test_the_root_loads_one_and_its_run_is_the_skills(self, make_crew, project):
         crew = make_crew(
@@ -6936,6 +6952,10 @@ class TestASkillThatStartsAnAgent:
             "helper", "root", 1, INSTANCE_IDLE
         )
         assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+        # A skill gives no tools and no model: the instance runs on its type's own.
+        assert (instance.tools, instance.model) == (None, None)
+        started = runs_of(events, RUN_STARTED)[0].metadata
+        assert "tools" not in started and "model" not in started
         # Its result is shown as a delegation's, alike on both.
         (shown,) = [e for e in events if e.type is EventType.TOOL_RESULT
                     and e.metadata.get("tool_call_id") == "c1"]
@@ -7011,9 +7031,8 @@ class TestASkillThatStartsAnAgent:
     @pytest.mark.parametrize("skill_agent, spawnable_by, sources, reason", [
         ("nobody", {"skill"}, {"skill"}, "is not one of this app's agent types"),
         ("helper", {"agent"}, {"agent", "skill"}, "this app does not let a skill start"),
-        ("helper", {"skill"}, {"agent"}, "this app does not let a skill start"),
         ("researcher", {"skill"}, {"skill"}, "this app does not let a skill start"),
-    ], ids=["unknown-type", "type-not-for-skills", "policy-not-for-skills", "a-static-sub-agent"])
+    ], ids=["unknown-type", "type-not-for-skills", "a-static-sub-agent"])
     async def test_a_load_that_may_not_start_its_agent_is_refused_and_starts_none(
         self, make_crew, project, skill_agent, spawnable_by, sources, reason
     ):
@@ -7037,48 +7056,70 @@ class TestASkillThatStartsAnAgent:
             False, refused_by_skill(skill_agent, reason)["error"]
         )
 
-    async def test_with_the_default_policy_a_plain_skill_loads_and_one_naming_an_agent_does_not(
-        self, make_crew, project, monkeypatch
+    @pytest.mark.parametrize("sources", [set(), {"agent"}], ids=["default", "agents-only"])
+    async def test_while_no_skill_may_start_one_the_key_is_ignored_and_warned_of(
+        self, make_crew, project, monkeypatch, sources
     ):
-        from agentic_cli.tools.skills import agents as skill_agents
-
-        warned: list[dict[str, Any]] = []
-
-        class Recorder:
-            def __getattr__(self, level: str):
-                return lambda event, **fields: warned.append(
-                    {"event": event, "log_level": level, **fields}
-                )
-
-        monkeypatch.setattr(skill_agents, "logger", Recorder())
+        warned = recorded_warnings(monkeypatch)
         skills = project.parent / "skills"
         crew = make_crew(
             skill_team(make_skill(skills, "notes", agent_type=None, body="Write notes."),
+                       make_skill(skills, "explore", agent_type="Explore"),
                        make_skill(skills)),
-            coordinator=[calls(load("notes", "c1"), load("research", "c2")), says("Done.")],
+            subagents=SubAgentPolicy(spawn_sources=sources),
+            coordinator=[calls(load("notes", "c1"), load("research", "c2"),
+                               load("explore", "c3")), says("Done.")],
             helper=[says("[never asked]")],
         )
 
         events = await crew.turn()
 
-        read = crew.results_read("coordinator")
-        loaded = json.loads(read["c1"])
-        assert (loaded["skill_name"], loaded["instructions"]) == ("notes", "Write notes.")
-        assert json.loads(read["c2"]) == refused_by_skill(
-            "helper", "this app does not let a skill start"
-        )
+        # Each loads as instructions, the plain result's keys, whatever it names.
+        read = {call: json.loads(text) for call, text in crew.results_read("coordinator").items()}
+        assert {call: (found["skill_name"], found["instructions"])
+                for call, found in read.items()} == {
+            "c1": ("notes", "Write notes."), "c2": ("research", RESEARCH),
+            "c3": ("explore", RESEARCH),
+        }
+        assert read["c2"]["frontmatter"]["agent"] == "helper"
         assert (runs_of(events), crew.records(), crew.requests("helper")) == ([], [], 0)
         shown = {e.metadata["tool_call_id"]: e for e in events if e.type is EventType.TOOL_RESULT}
-        assert (shown["c1"].metadata["success"], shown["c1"].metadata["result"]["skill_name"]) == (
-            True, "notes"
+        assert {call: (e.metadata["success"], e.metadata["result"]["skill_name"])
+                for call, e in shown.items()} == {
+            "c1": (True, "notes"), "c2": (True, "research"), "c3": (True, "explore"),
+        }
+        # Warned of once each, as the coordinator was built.
+        assert sorted((w["skill"], w["agent_type"]) for w in warned) == [
+            ("explore", "Explore"), ("research", "helper"),
+        ]
+        assert {(w["event"], w["log_level"], w["agent"]) for w in warned} == {
+            ("skill_agent_ignored", "warning", "coordinator"),
+        }
+        assert all(w["message"] == (
+            f"The skill '{w['skill']}' names the agent '{w['agent_type']}', but this app lets "
+            "no skill start an agent: it loads as instructions."
+        ) for w in warned)
+
+    async def test_a_skill_with_no_instructions_has_no_task_and_is_refused(
+        self, make_crew, project, monkeypatch
+    ):
+        warned = recorded_warnings(monkeypatch)
+        reason = "needs the skill's instructions as its task, and this skill has none"
+        crew = make_crew(
+            skill_team(make_skill(project.parent / "skills", body="  ")), subagents=SKILLS,
+            coordinator=[calls(load("research", "c1")), says("Could not.")],
+            helper=[says("[never asked]")],
         )
-        assert shown["c2"].metadata["success"] is False
-        # Warned of once, as the coordinator was built.
-        assert warned == [{
-            "event": "skill_agent_not_startable", "log_level": "warning",
-            "agent": "coordinator", "skill": "research", "agent_type": "helper",
-            "reason": "this app does not let a skill start",
-        }]
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator")["c1"]) == refused_by_skill(
+            "helper", reason
+        )
+        assert (runs_of(events), crew.records(), crew.requests("helper")) == ([], [], 0)
+        assert [(w["event"], w["reason"]) for w in warned] == [
+            ("skill_agent_not_startable", reason)
+        ]
 
     @pytest.mark.parametrize("first", ["skill", "task"])
     async def test_its_run_counts_toward_the_turns_runs(self, make_crew, project, first):
@@ -7199,17 +7240,7 @@ class TestASkillThatStartsAnAgent:
     async def test_a_type_with_model_choices_warns_of_its_skill_once(
         self, make_crew, project, monkeypatch
     ):
-        from agentic_cli.tools.skills import agents as skill_agents
-
-        warned: list[dict[str, Any]] = []
-
-        class Recorder:
-            def __getattr__(self, level: str):
-                return lambda event, **fields: warned.append(
-                    {"event": event, "log_level": level, **fields}
-                )
-
-        monkeypatch.setattr(skill_agents, "logger", Recorder())
+        warned = recorded_warnings(monkeypatch)
         path = make_skill(project.parent / "skills", agent_type="nobody")
         crew = make_crew(
             [agent("coordinator", sub_agents=("researcher",)),
@@ -7226,3 +7257,67 @@ class TestASkillThatStartsAnAgent:
             "agent": "researcher", "skill": "research", "agent_type": "nobody",
             "reason": "is not one of this app's agent types",
         }]
+
+    async def test_the_build_warns_again_after_a_model_switch(
+        self, make_crew, project, monkeypatch
+    ):
+        warned = recorded_warnings(monkeypatch)
+        crew = make_crew(
+            skill_team(make_skill(project.parent / "skills", agent_type="nobody")),
+            subagents=SKILLS, coordinator=[says("One."), says("Two.")],
+        )
+
+        await crew.turn()
+        assert len(warned) == 1
+        await crew.manager.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
+        await crew.turn("Again.")
+
+        # Once for each build.
+        assert [w["event"] for w in warned] == ["skill_agent_not_startable"] * 2
+
+    async def test_a_skill_does_not_fill_the_types_brief(self, make_crew, project):
+        # ``brief_required`` is asked of ``task`` calls: a skill gives a title and
+        # an objective alone.
+        crew = make_crew(
+            skill_team(make_skill(project.parent / "skills"),
+                       brief_required=("objective", "deliverable", "done_when")),
+            subagents=SKILLS,
+            coordinator=[calls(load("research", "c1")), says("Done.")],
+            helper=[says("Found it.")],
+        )
+
+        await crew.turn()
+
+        read = envelope_read(crew.results_read("coordinator")["c1"])
+        assert (read["success"], read["status"], read["result"]) == (
+            True, RUN_COMPLETED, "Found it."
+        )
+
+    async def test_after_a_crash_its_open_call_is_answered_at_the_next_turn(
+        self, make_crew, project, monkeypatch
+    ):
+        path = make_skill(project.parent / "skills")
+        first = make_crew(
+            skill_team(path, tools=(contract_block,)), subagents=SKILLS, store="sqlite",
+            coordinator=[calls(load("research", "c1"))],
+            helper=[calls(use("contract_block", "h1"))],
+        )
+        with no_seals(monkeypatch):
+            turn = first.start()
+            try:
+                await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+            finally:
+                await first.stop(turn)
+        await killed_mid_call(first, "helper-1")
+        await first.manager.cleanup()
+
+        second = make_crew(
+            skill_team(path, tools=(contract_block,)), subagents=SKILLS, store="sqlite",
+            coordinator=[says("Starting over.")],
+        )
+        await second.turn("Go on.")
+
+        # Answered once, as a ``task`` call the crash left open is.
+        assert [(call, len(held)) for call, held in second.call_results("coordinator", 0)
+                if call == "c1"] == [("c1", 1)]
+        assert INTERRUPTED in second.results_read("coordinator", 0)["c1"]

@@ -10,16 +10,15 @@ No supported manager path wires an executor today, so in practice scripts stay
 off; the parameter exists for a caller that owns one.
 
 A skill whose frontmatter names an agent type starts a run of it when loaded
-(``agents.py``). For an agent with such a skill, given its ``SkillAgents``,
-the toolset's ``load_skill`` is the framework's (``adk/skill_tool.py``); any
-other toolset is ADK's own.
+(``agents.py``), where the app lets a skill start an agent. For an agent with
+such a skill, given its ``SkillAgents``, the toolset's ``load_skill`` is the
+framework's (``adk/skill_tool.py``); any other toolset is ADK's own, and a
+skill whose key is ignored there is warned of.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-
-from agentic_cli.tools.skills.agents import skill_agent
 
 if TYPE_CHECKING:
     from agentic_cli.tools.skills.agents import SkillAgents
@@ -41,10 +40,11 @@ def make_skill_toolset(
             rather than offered and then failing.
         additional_tools: Tools surfaced when a skill with ``adk_additional_tools``
             frontmatter is activated.
-        agents: The loading agent's ``SkillAgents``. Given, and one of the
-            skills naming an agent type, ``load_skill`` starts that agent
-            (and the skills that name one the agent could not start are
-            warned of). None: every skill loads as ADK loads it.
+        agents: The loading agent's ``SkillAgents``. Given, and the app lets
+            a skill start an agent, a skill naming an agent type starts that
+            agent when loaded; the skills that name one the agent could not
+            start, or the app lets no skill start, are warned of. None: every
+            skill loads as ADK loads it.
 
     Returns:
         A configured ``SkillToolset``.
@@ -60,11 +60,12 @@ def make_skill_toolset(
         toolset._tools = [
             t for t in toolset._tools if not isinstance(t, RunSkillScriptTool)
         ]
-    starting = {s.name: s for s in skills if skill_agent(s) is not None}
+    if agents is not None:
+        agents.check(skills)
+    starting = {s.name: s for s in skills if agents is not None and agents.starts(s)}
     if agents is not None and starting:
         from agentic_cli.workflow.adk.skill_tool import SkillLoadTool
 
-        agents.check(skills)
         toolset._tools = [
             SkillLoadTool(toolset, starting, agents) if type(t) is LoadSkillTool else t
             for t in toolset._tools

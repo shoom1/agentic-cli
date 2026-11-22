@@ -255,8 +255,9 @@ def _starting_skill(parent: Path, name: str = "research", agent: str = "helper")
     return skill_dir
 
 
-def _agents():
-    """The root ``lead``'s ``SkillAgents``, over delegations that may start ``helper``."""
+def _agents(sources: frozenset[str] | set[str] = frozenset({"skill"})):
+    """The root ``lead``'s ``SkillAgents``, over delegations that may start ``helper``
+    (from ``sources``)."""
     from agentic_cli.tools.skills import SkillAgents
     from agentic_cli.workflow.agents import AgentRuns, SubAgentPolicy
     from agentic_cli.workflow.agents.delegate import Delegations
@@ -265,7 +266,7 @@ def _agents():
         raise AssertionError(run)
 
     delegations = Delegations(
-        runs=AgentRuns(), policy=SubAgentPolicy(spawn_sources={"skill"}), hook=never,
+        runs=AgentRuns(), policy=SubAgentPolicy(spawn_sources=sources), hook=never,
         types={
             "lead": AgentConfig(name="lead", prompt="p"),
             "helper": AgentConfig(name="helper", prompt="p", spawnable_by=frozenset({"skill"})),
@@ -307,6 +308,17 @@ class TestTheFrameworksLoadSkill:
 
         for toolset in (make_skill_toolset(plain, agents=_agents()), make_skill_toolset(starting)):
             assert type(_load_skill(toolset)) is LoadSkillTool
+
+    @pytest.mark.parametrize("sources", [set(), {"agent"}], ids=["default", "agents-only"])
+    def test_while_no_skill_may_start_one_the_toolset_is_adks_own(self, tmp_path, sources):
+        """The key is ignored: ``load_skill`` is ADK's own, object for object."""
+        from google.adk.tools.skill_toolset import LoadSkillTool
+
+        skills = SkillStore().resolve([str(_starting_skill(tmp_path))])
+
+        toolset = make_skill_toolset(skills, agents=_agents(sources))
+
+        assert type(_load_skill(toolset)) is LoadSkillTool
 
     async def test_the_gate_lets_the_one_the_framework_built_through_and_no_other(
         self, tmp_path

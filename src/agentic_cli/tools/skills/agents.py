@@ -7,6 +7,12 @@ task message is the skill's body under its name, its parent the loading
 agent's run, ``started_by`` ``skill:<name>``, and the load's result the run's
 envelope with the skill's name added.
 
+The key takes effect only where the app lets a skill start an agent
+(``"skill"`` in ``SubAgentPolicy.spawn_sources``); otherwise it is ignored, the
+skill loads as instructions, as any skill does, and the build warns of it
+(``skill_agent_ignored``: other tools, Claude Code's among them, give skills
+an ``agent`` key of their own).
+
 A load starts a run only where any run-time start is allowed: the type is one
 of the app's, the type's ``spawnable_by`` and the policy's ``spawn_sources``
 both hold ``"skill"``, and the loading run may start a type at its depth
@@ -43,6 +49,12 @@ SKILL_AGENT_ERROR = "The skill '{skill}' starts the agent '{agent}', which {reas
 UNKNOWN_TYPE = "is not one of this app's agent types"
 NOT_FOR_SKILLS = "this app does not let a skill start"
 NOT_HERE = "cannot be started here: sub-agents cannot start sub-agents"
+NO_TASK = "needs the skill's instructions as its task, and this skill has none"
+#: The build's warning for a key that is ignored, its text.
+IGNORED = (
+    "The skill '{skill}' names the agent '{agent}', but this app lets no skill "
+    "start an agent: it loads as instructions."
+)
 
 
 def skill_started_by(name: str) -> str:
@@ -89,8 +101,16 @@ class SkillAgents:
         self._root = root
         self._warned = warned if warned is not None else set()
 
-    def _reason(self, name: str, depth: int) -> str | None:
-        """Why this agent's run at ``depth`` may not start the type ``name``, or None."""
+    def starts(self, skill: Any) -> bool:
+        """Whether loading ``skill`` is a start: it names an agent type and the app
+        lets a skill start one (``"skill"`` in ``spawn_sources``)."""
+        return (
+            skill_agent(skill) is not None
+            and SKILL_SOURCE in self._delegations().policy.spawn_sources
+        )
+
+    def _reason(self, skill: Any, name: str, depth: int) -> str | None:
+        """Why this agent's run at ``depth`` may not start the type ``name`` for ``skill``."""
         delegations = self._delegations()
         types = delegations.types
         config = types.get(name)
@@ -106,25 +126,36 @@ class SkillAgents:
             or (depth > 0 and config.inherit_context)
         ):
             return NOT_HERE
+        if not skill.instructions.strip():
+            return NO_TASK
         return None
 
     def refusal(self, skill: Any, depth: int) -> str | None:
         """The error a load of ``skill`` from a run at ``depth`` gets, or None to start it."""
         name = skill_agent(skill)
-        if name is None:
+        if name is None or not self.starts(skill):
             return None
-        reason = self._reason(name, depth)
+        reason = self._reason(skill, name, depth)
         if reason is None:
             return None
         return SKILL_AGENT_ERROR.format(skill=skill.name, agent=name, reason=reason)
 
     def check(self, skills: Sequence[Any]) -> None:
-        """Warn, once per skill, of each that this agent's first run could not start."""
+        """Warn, once per skill, of each that names an agent this agent's first run
+        could not start, or that the app lets no skill start (the key is ignored)."""
         for skill in skills:
             name = skill_agent(skill)
             if name is None or (self._agent, skill.name) in self._warned:
                 continue
-            reason = self._reason(name, 0 if self._root else 1)
+            if not self.starts(skill):
+                self._warned.add((self._agent, skill.name))
+                logger.warning(
+                    "skill_agent_ignored",
+                    agent=self._agent, skill=skill.name, agent_type=name,
+                    message=IGNORED.format(skill=skill.name, agent=name),
+                )
+                continue
+            reason = self._reason(skill, name, 0 if self._root else 1)
             if reason is None:
                 continue
             self._warned.add((self._agent, skill.name))
@@ -141,7 +172,7 @@ class SkillAgents:
         state: Mapping[str, Any],
         history: Callable[[], Any] | None,
     ) -> Delegated:
-        """Load ``skill``: start its agent's run, or refuse and start none."""
+        """Load ``skill``, which ``starts``: start its agent's run, or refuse and start none."""
         caller = get_active_run()
         refused = self.refusal(skill, caller.depth if caller is not None else 0)
         if refused is not None:

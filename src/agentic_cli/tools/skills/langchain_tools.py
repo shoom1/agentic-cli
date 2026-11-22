@@ -36,7 +36,8 @@ tool by the same contract (EXEMPT), and an object the framework did not build
 is denied, whatever its name.
 
 A skill whose frontmatter names an agent type starts a run of it when loaded
-(``agents.py``), given the agent's ``SkillAgents`` (``make_skill_tools(agents=)``):
+(``agents.py``), where the app lets a skill start an agent, given the agent's
+``SkillAgents`` (``make_skill_tools(agents=)``):
 ``load_skill`` takes the call's runtime, which LangGraph's tool node injects,
 and hands the skill to ``workflow/deepagents/task_tool.py::start_skill_run``.
 The tools' declarations are unchanged, and any other skill loads as above.
@@ -58,7 +59,6 @@ from langgraph.prebuilt import ToolRuntime
 
 from agentic_cli.models import ProviderKind
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
-from agentic_cli.tools.skills.agents import skill_agent
 from agentic_cli.workflow.sessions import get_active_turn
 
 if TYPE_CHECKING:
@@ -185,9 +185,10 @@ def make_skill_tools(
         provider: The agent's model's provider kind. A binary resource is sent
             as an image only to a provider that reads one in a tool result;
             without it, every binary resource is a status.
-        agents: The agent's ``SkillAgents``. Given, a skill that names an
-            agent type starts it when loaded (and one its agent could not
-            start is warned of now). None: every skill loads as ADK loads it.
+        agents: The agent's ``SkillAgents``. Given, and the app lets a skill
+            start an agent, a skill that names an agent type starts it when
+            loaded (one its agent could not start, or the app lets no skill
+            start, is warned of now). None: every skill loads as ADK loads it.
 
     Returns:
         The tools, bound to the framework's skill tool definitions, and the
@@ -257,6 +258,7 @@ class _SkillAnswers:
         self._misses_turn: object = _NO_TURN
         self._misses = 0
         self._resource_paths = _adk_resource_listing()
+        self._agents = agents
         self._start = _starter(agents, list(self._skills.values()))
 
     # Unknown arguments are ignored, as ADK ignores them.
@@ -275,7 +277,7 @@ class _SkillAnswers:
         if not skill_name:
             raise _Failed("Argument 'skill_name' is required.", "INVALID_ARGUMENTS")
         skill = self._skill(skill_name)
-        if self._start is not None and runtime is not None and skill_agent(skill) is not None:
+        if self._start is not None and runtime is not None and self._agents.starts(skill):
             return await self._start(skill, runtime)
         answer: dict[str, Any] = {
             "skill_name": skill_name,
@@ -343,17 +345,19 @@ class _SkillAnswers:
 def _starter(
     agents: SkillAgents | None, skills: Sequence[Any]
 ) -> Callable[[Any, ToolRuntime], Awaitable[Any]] | None:
-    """What starts the agent a skill names, or None when no skill names one.
+    """What starts the agent a skill names, or None when no skill does.
 
     Imported when the tools are built: a first import during a call would
-    hold the event loop. The skills whose agent could not be started are
-    warned of here.
+    hold the event loop. The skills whose agent could not be started, or
+    whose key is ignored, are warned of here.
     """
-    if agents is None or not any(skill_agent(skill) is not None for skill in skills):
+    if agents is None:
+        return None
+    agents.check(skills)
+    if not any(agents.starts(skill) for skill in skills):
         return None
     from agentic_cli.workflow.deepagents.task_tool import start_skill_run
 
-    agents.check(skills)
     return functools.partial(start_skill_run, agents)
 
 

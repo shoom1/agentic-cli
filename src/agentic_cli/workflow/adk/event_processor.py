@@ -502,8 +502,13 @@ def _with_call_id(event: WorkflowEvent, call_id: Any) -> WorkflowEvent:
 
 
 def _delegated(response: Any) -> Any:
-    """A ``task`` call's result (or a parent's tool's, or a skill's start) as it returned it: the dict whose
-    JSON text ADK stores under ``result`` (``adk/task_tool.py``); anything else as it is."""
+    """The result of a call that delegates, as it returned it.
+
+    That is a ``task`` call's (or a parent's tool's), or a ``load_skill`` that
+    started a run or was refused one: the dict whose JSON text ADK stores under
+    ``result`` (``adk/task_tool.py``, ``adk/skill_tool.py``). Anything else is
+    returned as it is.
+    """
     if isinstance(response, dict) and set(response) == {"result"}:
         try:
             parsed = json.loads(response["result"])

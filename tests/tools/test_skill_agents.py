@@ -115,15 +115,13 @@ class TestWhatALoadMayStart:
         ("lead", True, SKILLS, "nobody", "is not one of this app's agent types"),
         ("lead", True, SKILLS, "asked", "this app does not let a skill start"),
         ("lead", True, SKILLS, "middle", "this app does not let a skill start"),
-        ("lead", True, SubAgentPolicy(spawn_sources={"agent"}), "helper",
-         "this app does not let a skill start"),
         ("middle", False, SKILLS, "helper",
          "cannot be started here: sub-agents cannot start sub-agents"),
         ("reader", False, SubAgentPolicy(spawn_sources={"skill"}, max_spawn_depth=2), "helper",
          "cannot be started here: sub-agents cannot start sub-agents"),
         ("middle", False, SubAgentPolicy(spawn_sources={"skill"}, max_spawn_depth=2), "noter",
          "cannot be started here: sub-agents cannot start sub-agents"),
-    ], ids=["unknown", "type-not-for-skills", "a-static-sub-agent", "policy-not-for-skills",
+    ], ids=["unknown", "type-not-for-skills", "a-static-sub-agent",
             "past-the-depth", "an-inheriting-caller", "an-inheriting-type-below-the-root"])
     def test_a_skill_it_may_not_start_is_warned_of_as_the_agent_is_built(
         self, tmp_path, logged, agent, root, policy, named, reason
@@ -141,6 +139,21 @@ class TestWhatALoadMayStart:
             f"The skill 'research' starts the agent '{named}', which {reason}."
         )
 
+    def test_one_with_no_instructions_has_no_task_and_is_refused(self, tmp_path, logged):
+        skill = make_skill(tmp_path, "research", "agent: helper\n", body="  ")
+        agents = SkillAgents("lead", lambda: made(), root=True)
+        reason = "needs the skill's instructions as its task, and this skill has none"
+
+        agents.check([skill])
+
+        assert logged == [{
+            "event": "skill_agent_not_startable", "log_level": "warning", "agent": "lead",
+            "skill": "research", "agent_type": "helper", "reason": reason,
+        }]
+        assert agents.refusal(skill, 0) == (
+            f"The skill 'research' starts the agent 'helper', which {reason}."
+        )
+
     @pytest.mark.parametrize("agent, root, policy, named", [
         ("lead", True, SKILLS, "helper"),
         ("lead", True, SKILLS, "noter"),
@@ -154,6 +167,46 @@ class TestWhatALoadMayStart:
 
         assert logged == []
         assert agents.refusal(skill, 0 if root else 1) is None
+
+
+class TestTheKeyWhileNoSkillMayStart:
+    """With ``"skill"`` not in ``spawn_sources`` (the default) the key is ignored:
+    the skill loads as instructions, and the build says so."""
+
+    @pytest.mark.parametrize("policy", [SubAgentPolicy(), SubAgentPolicy(spawn_sources={"agent"})],
+                             ids=["default", "agents-only"])
+    @pytest.mark.parametrize("named", ["Explore", "helper"], ids=["no-such-type", "a-real-type"])
+    def test_it_is_ignored_and_warned_of_once(self, tmp_path, logged, policy, named):
+        skill = make_skill(tmp_path, "research", f"agent: {named}\n")
+        agents = SkillAgents("lead", lambda: made(policy=policy), root=True)
+
+        agents.check([skill, make_skill(tmp_path, "plain")])
+        agents.check([skill])
+
+        assert not agents.starts(skill)
+        assert agents.refusal(skill, 0) is None
+        assert logged == [{
+            "event": "skill_agent_ignored", "log_level": "warning", "agent": "lead",
+            "skill": "research", "agent_type": named,
+            "message": f"The skill 'research' names the agent '{named}', but this app lets "
+                       "no skill start an agent: it loads as instructions.",
+        }]
+
+    def test_where_a_skill_may_start_it_starts(self, tmp_path, logged):
+        skill = make_skill(tmp_path, "research", "agent: helper\n")
+        agents = SkillAgents("lead", lambda: made(), root=True)
+
+        assert agents.starts(skill) and not agents.starts(make_skill(tmp_path, "plain"))
+
+    def test_builds_of_one_agent_share_what_they_warned_of(self, tmp_path, logged):
+        skill = make_skill(tmp_path, "research", "agent: Explore\n")
+        warned: set = set()
+
+        for _ in range(2):
+            SkillAgents("lead", lambda: made(policy=SubAgentPolicy()), root=True,
+                        warned=warned).check([skill])
+
+        assert [entry["event"] for entry in logged] == ["skill_agent_ignored"]
 
 
 async def loaded(agents: SkillAgents, skill: Any, *, caller=None, **fields: Any):
