@@ -1,4 +1,5 @@
-"""ADK: a sub-agent run's limits, and the tools a narrowed run is offered, at its model calls (``workflow/adk/run_control_plugin.py``).
+"""ADK: a sub-agent run's limits, and the tools a narrowed run is offered, at its model
+calls (``workflow/adk/run_control_plugin.py``).
 
 What the plugin does to a request and an answer, alone. Whole turns, on both
 backends, are in the contract suite (``TestTheStepLimit``,
@@ -250,7 +251,10 @@ def offering(*names: str) -> LlmRequest:
 
 
 def declared(request: LlmRequest) -> list[str]:
-    return [d.name for tool in request.config.tools or () for d in tool.function_declarations or ()]
+    return [
+        d.name for tool in request.config.tools or ()
+        for d in tool.function_declarations or ()
+    ]
 
 
 class TestANarrowedRunsTools:
@@ -265,7 +269,8 @@ class TestANarrowedRunsTools:
 
         await plugin.before_model_callback(callback_context=None, llm_request=request)
 
-        assert list(request.tools_dict) == ["lookup", "save_plan", "task", "check_agents"]
+        assert list(request.tools_dict) == ["lookup", "save_plan", "task",
+                                            "check_agents"]
         assert declared(request) == ["lookup", "save_plan", "task", "check_agents"]
         # What is no function declaration stays.
         assert request.config.tools[1].google_search is not None
@@ -275,7 +280,8 @@ class TestANarrowedRunsTools:
         request.config.tools = [types.Tool(function_declarations=[
             types.FunctionDeclaration(name="fetch_page", description="Fetch."),
         ])]
-        request.tools_dict = {"fetch_page": BaseTool(name="fetch_page", description="Fetch.")}
+        request.tools_dict = {"fetch_page": BaseTool(name="fetch_page",
+                                                     description="Fetch.")}
 
         narrow(request, lambda name: False)
 

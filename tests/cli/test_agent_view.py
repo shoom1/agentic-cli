@@ -540,15 +540,18 @@ class TestAnInstanceOnAModelChoice:
 
     async def test_after_a_restart_its_view_and_panel_say_so(self, make_crew):
         first = make_crew(
-            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite", models=SMALL_ENTRY,
-            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=SMALL_MODEL,
+            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite",
+            models=SMALL_ENTRY,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1",
+                                        model=SMALL_MODEL,
                                         tools=["contract_lookup"])), says("Done.")],
             researcher=[says("X is 42.", usage=(1_200, 40))],
         )
         await first.turn()
         await first.manager.cleanup()
         second = make_crew(
-            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite", models=SMALL_ENTRY,
+            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite",
+            models=SMALL_ENTRY,
             researcher=[says("Y is 7.", usage=(900, 30))],
         )
         app = await app_on(second)

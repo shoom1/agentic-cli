@@ -289,7 +289,8 @@ def _named(name: str) -> StructuredTool:
 
 
 def _narrowing(tools: frozenset[str] | None, *, task_offered: bool = False):
-    """The middleware, over delegations whose run has ``tools`` (and offers ``task`` or not)."""
+    """The middleware, over delegations whose run has ``tools`` (and offers ``task`` or
+    not)."""
     control = RunControl(REF, AgentLimits(), tools=tools)
     delegations = SimpleNamespace(
         control=lambda run: control,
@@ -298,7 +299,8 @@ def _narrowing(tools: frozenset[str] | None, *, task_offered: bool = False):
     return RunControlMiddleware(lambda: delegations)
 
 
-TOOLS = [_named(name) for name in ("lookup", "fetch_page", "save_plan", "task", "check_agents")]
+TOOLS = [_named(name) for name in ("lookup", "fetch_page", "save_plan", "task",
+                                   "check_agents")]
 
 
 async def test_a_narrowed_runs_request_offers_its_tools_and_those_every_run_keeps():
@@ -308,7 +310,9 @@ async def test_a_narrowed_runs_request_offers_its_tools_and_those_every_run_keep
         sent.append([tool.name for tool in request.tools])
         return AIMessage("Done.")
 
-    await _narrowing(frozenset({"lookup"})).awrap_model_call(_request(list(TOOLS)), handler)
+    await _narrowing(frozenset({"lookup"})).awrap_model_call(
+        _request(list(TOOLS)), handler
+    )
 
     assert sent == [["lookup", "save_plan", "task", "check_agents"]]
 
@@ -349,7 +353,8 @@ async def test_a_call_of_a_tool_it_was_not_given_is_one_it_does_not_have(
 
 
 @pytest.mark.parametrize("tools, name", [
-    (frozenset({"lookup"}), "lookup"), (frozenset({"lookup"}), "save_plan"), (None, "fetch_page"),
+    (frozenset({"lookup"}), "lookup"), (frozenset({"lookup"}), "save_plan"),
+    (None, "fetch_page"),
 ])
 async def test_a_call_of_a_tool_it_has_runs(tools, name):
     answer, ran = await _called(_narrowing(tools), name)

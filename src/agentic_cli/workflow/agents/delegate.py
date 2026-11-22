@@ -142,7 +142,11 @@ from agentic_cli.workflow.agents.brief import (
     task_message,
     task_offer,
 )
-from agentic_cli.workflow.agents.control import PARENT_CAUSE, RunControl, configured_tool_names
+from agentic_cli.workflow.agents.control import (
+    PARENT_CAUSE,
+    RunControl,
+    configured_tool_names,
+)
 from agentic_cli.workflow.agents.envelope import (
     CANCELLED_BY,
     INTERRUPTED_ERROR,
@@ -264,7 +268,8 @@ _OPEN = frozenset({INSTANCE_IDLE, INSTANCE_STOPPED})
 
 
 class ToolsUnlistedError(Exception):
-    """A backend's ``tool_names`` hook could not list a type's tools (an MCP server's, say).
+    """A backend's ``tool_names`` hook could not list a type's tools (an MCP server's,
+    say).
 
     Raised instead of answering with the names without them, which would read
     as tools the type lacks; asking again lists again.
@@ -288,7 +293,8 @@ def started_by(caller: RunRef | None) -> str:
     return f"agent:{caller.instance if caller is not None else 'root'}"
 
 
-#: ``follow_up``'s ``_own`` when ``message`` has not asked for the tool names (None is an answer).
+#: ``follow_up``'s ``_own`` when ``message`` has not asked for the tool names (None is
+#: an answer).
 _UNFETCHED = object()
 
 
@@ -1357,11 +1363,14 @@ class Delegations:
             if gone:
                 what = f"the tools {', '.join(gone)}"
         if what is not None:
-            return CHOICE_GONE_ERROR.format(instance=found.instance, what=what, agent=found.agent)
+            return CHOICE_GONE_ERROR.format(
+                instance=found.instance, what=what, agent=found.agent
+            )
         return None
 
     async def _own_tools(self, config: AgentConfig) -> Collection[str]:
-        """The names of ``config``'s own tools: its backend's, else its configured tools'.
+        """The names of ``config``'s own tools: its backend's, else its configured
+        tools'.
 
         The one place the backend's hook is asked.
 
@@ -1381,7 +1390,8 @@ class Delegations:
     async def _instance_tools(
         self, conversation: SessionRef | None, instance: str
     ) -> frozenset[str] | None:
-        """The names of the own tools of ``instance``'s type, when it is a narrowed one; else None.
+        """The names of the own tools of ``instance``'s type, when it is a narrowed one;
+        else None.
 
         What a follow-up checks the instance's tools against. Awaited before
         the follow-up's synchronous step, and only for an instance that has

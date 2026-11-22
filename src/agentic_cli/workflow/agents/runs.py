@@ -498,8 +498,8 @@ class AgentRuns:
 
         ``{"v": RECORDS_VERSION, "saved": <now, ISO>, "numbered": {type: n},
         "instances": [...], "runs": [...]}``: each instance's fields
-        (``InstanceRecord``, its ``tools`` a list) and each run's (``RunRecord``, its ``ref``'s
-        fields first, its times as ISO text, and ``end``: where its end was
+        (``InstanceRecord``, its ``tools`` a list) and each run's (``RunRecord``, its
+        ``ref``'s fields first, its times as ISO text, and ``end``: where its end was
         recorded, 0 for none yet), in the order they started, and the
         highest instance number of each type. ``saved`` is when this was
         taken: a run still working then is restored as ended at that time.

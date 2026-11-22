@@ -653,14 +653,20 @@ class TestSettingsValidation:
 
     def test_a_malformed_model_choice_is_an_error(self, temp_workspace: Path):
         settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
-        agents = [AgentConfig(name="writer", prompt="p", model_choices=("fast", "gemini"))]
+        agents = [AgentConfig(
+            name="writer", prompt="p", model_choices=("fast", "gemini")
+        )]
 
         (problem,) = self._problems(settings, agents)
         assert problem.startswith("Agent 'writer' (model choice 'gemini'): ")
 
-    def test_a_model_choice_on_an_undefined_provider_is_an_error(self, temp_workspace: Path):
+    def test_a_model_choice_on_an_undefined_provider_is_an_error(
+        self, temp_workspace: Path
+    ):
         settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
-        agents = [AgentConfig(name="writer", prompt="p", model_choices=("third-box:mistral",))]
+        agents = [AgentConfig(
+            name="writer", prompt="p", model_choices=("third-box:mistral",)
+        )]
 
         (problem,) = self._problems(settings, agents)
         assert problem.startswith(
@@ -668,7 +674,9 @@ class TestSettingsValidation:
             "names provider 'third-box'"
         )
 
-    def test_a_computed_role_choice_needs_a_tier(self, temp_workspace: Path, monkeypatch):
+    def test_a_computed_role_choice_needs_a_tier(
+        self, temp_workspace: Path, monkeypatch
+    ):
         monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
         settings = self._settings(
             temp_workspace,

@@ -158,7 +158,8 @@ class TestEachBackendFailsBeforeBuildingAnything:
 
 
 def _choosing(choice: str) -> list[AgentConfig]:
-    """A lead, and an agent whose tool needs a service (the jobs) with ``choice`` as its model choice."""
+    """A lead, and an agent whose tool needs a service (the jobs) with ``choice`` as its
+    model choice."""
     from agentic_cli.tools.jobs.tools import job_status
 
     return [

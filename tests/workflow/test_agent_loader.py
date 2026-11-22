@@ -313,7 +313,8 @@ class TestLoadAgentsFromYaml:
 
     def test_model_choices_is_a_list(self, tmp_path):
         path = _write(
-            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    model_choices: fast\n"
+            tmp_path,
+            "agents:\n  - name: a\n    instruction: hi\n    model_choices: fast\n"
         )
         with pytest.raises(ValidationError) as exc:
             load_agents_from_yaml(path)

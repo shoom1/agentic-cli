@@ -612,9 +612,9 @@ the start of the entry's title.
   "The model for 'researcher' must be one of its model choices: fast.",
   "'researcher' has no model choices; leave model out."; a backend that
   cannot list the type's MCP tools just now says so, "The tools of
-  'researcher' could not be listed just now (OSError: …); try again."). `task`'s schema
-  always has `tools` (with the default policy it is otherwise as it was),
-  and `model` when a type it offers has choices, which its line names
+  'researcher' could not be listed just now (OSError: …); try again.").
+  `task`'s schema always has `tools` (with the default policy it is otherwise as
+  it was), and `model` when a type it offers has choices, which its line names
   (`- researcher (model choices: fast): …`). The instance keeps them
   (`InstanceRecord.tools`, `.model`, in the records beside the
   conversation; records written before them read as all the tools and the

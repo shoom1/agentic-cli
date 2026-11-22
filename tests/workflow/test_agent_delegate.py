@@ -4106,13 +4106,15 @@ async def test_a_start_blocks_no_event_loop():
 CHOOSY = AgentConfig(name="choosy", prompt="p", description="Chooses.",
                      model_choices=("fast", "anthropic:claude-haiku-4-5"))
 CHOOSING = {**TYPES, "coordinator": AgentConfig(
-    name="coordinator", prompt="p", sub_agents=["researcher", "choosy"]), "choosy": CHOOSY}
+    name="coordinator", prompt="p", sub_agents=["researcher", "choosy"]),
+    "choosy": CHOOSY}
 NARROW = {"agent_type": "choosy", "title": "Look", "objective": "Look X up.",
           "tools": ["lookup"], "model": "fast"}
 
 
 def own_tools(names: dict[str, set[str]], asked: list[str] | None = None):
-    """A backend's hook for each type's own tools (``_agent_tool_names``), recording who asked."""
+    """A backend's hook for each type's own tools (``_agent_tool_names``), recording who
+    asked."""
 
     async def tool_names(agent: str) -> frozenset[str]:
         if asked is not None:
@@ -4141,7 +4143,9 @@ class TestADelegationsToolsAndModel:
         assert (run.tools, run.model) == (frozenset({"lookup"}), "fast")
         assert run.control.tools == frozenset({"lookup"})
         start = runs_of_status(events, RUN_STARTED)[0]
-        assert (start.metadata["tools"], start.metadata["model"]) == (["lookup"], "fast")
+        assert (start.metadata["tools"], start.metadata["model"]) == (
+            ["lookup"], "fast"
+        )
         instance = runs.instance(CONVERSATION, "choosy-1")
         assert (instance.tools, instance.model) == (("lookup",), "fast")
 
@@ -4174,7 +4178,8 @@ class TestADelegationsToolsAndModel:
         ({**NARROW, "model": "strong"},
          "The model for 'choosy' must be one of its model choices: fast, "
          "anthropic:claude-haiku-4-5."),
-        ({**BRIEF, "model": "fast"}, "'researcher' has no model choices; leave model out."),
+        ({**BRIEF, "model": "fast"},
+         "'researcher' has no model choices; leave model out."),
         ({**NARROW, "objective": " "}, "The brief for 'choosy' is missing: objective."),
     ])
     async def test_what_the_type_cannot_take_starts_no_run_and_counts_none(
@@ -4195,7 +4200,8 @@ class TestADelegationsToolsAndModel:
 
     async def test_without_a_backends_names_its_configured_tools_are_its_own(self):
         hook, asked = answering()
-        typed = AgentConfig(name="choosy", prompt="p", tools=[contract_tool, "web_fetch"])
+        typed = AgentConfig(name="choosy", prompt="p", tools=[contract_tool,
+                                                              "web_fetch"])
         made = delegations(hook, types={**CHOOSING, "choosy": typed})
 
         result, _ = await delegated(made, request({**NARROW, "model": None,
@@ -4208,7 +4214,8 @@ class TestADelegationsToolsAndModel:
         hook, asked = answering()
         made = delegations(hook, types=CHOOSING)
 
-        await started(made, start_request("choosy", tools=frozenset({"lookup"}), model="fast"))
+        await started(made, start_request("choosy", tools=frozenset({"lookup"}),
+                                          model="fast"))
 
         (run,) = asked
         assert (run.tools, run.model, run.control.tools) == (
@@ -4216,7 +4223,8 @@ class TestADelegationsToolsAndModel:
         )
 
     def test_the_fields_default_to_none(self):
-        made = StartRequest(agent_type="researcher", brief=Brief(title="T", objective="O"),
+        made = StartRequest(agent_type="researcher", brief=Brief(title="T",
+                                                                 objective="O"),
                             started_by="user")
         assert (made.tools, made.model) == (None, None)
         run = AgentRun(ref=RESEARCHER, config=TYPES["researcher"], message="m",
@@ -4259,7 +4267,8 @@ class TestAFollowUpKeepsThem:
         await self.narrowed(made)
         again = AgentRuns()
         again.restore(CONVERSATION, runs.export(CONVERSATION))
-        restarted = delegations(hook, runs=again, types=CHOOSING, tool_names=own_tools(OWN))
+        restarted = delegations(hook, runs=again, types=CHOOSING,
+                                tool_names=own_tools(OWN))
 
         result, _ = await turned(lambda: restarted.follow_up(users("choosy-1")))
 
@@ -4271,8 +4280,9 @@ class TestAFollowUpKeepsThem:
         runs = AgentRuns()
         made = delegations(hook, runs=runs, types=CHOOSING, tool_names=own_tools(OWN))
         await self.narrowed(made)
-        made._types["choosy"] = AgentConfig(name="choosy", prompt="p",
-                                            model_choices=("anthropic:claude-haiku-4-5",))
+        made._types["choosy"] = AgentConfig(
+            name="choosy", prompt="p", model_choices=("anthropic:claude-haiku-4-5",)
+        )
 
         result, events = await turned(lambda: made.follow_up(follow("choosy-1")))
 
@@ -4288,7 +4298,8 @@ class TestAFollowUpKeepsThem:
         names = {"choosy": {"lookup", "fetch_page"}}
         made = delegations(hook, types=CHOOSING, tool_names=own_tools(names))
         await turned(lambda: made.delegate(request({**NARROW, "model": None,
-                                                    "tools": ["lookup", "fetch_page"]})))
+                                                    "tools": ["lookup",
+                                                              "fetch_page"]})))
         names["choosy"] = {"fetch_page"}
 
         result, events = await turned(lambda: made.message(users("choosy-1")))
@@ -4312,13 +4323,15 @@ class TestAFollowUpKeepsThem:
         assert [run.model for run in asked] == ["fast", "fast"]
 
     async def test_the_model_is_checked_before_the_tools(self):
-        """An instance whose type lost its model choice and a tool is told of the model."""
+        """An instance whose type lost its model choice and a tool is told of the
+        model."""
         hook, asked = answering()
         names = {"choosy": {"lookup", "fetch_page"}}
         made = delegations(hook, types=CHOOSING, tool_names=own_tools(names))
         await turned(lambda: made.delegate(request({**NARROW, "tools": ["lookup"]})))
-        made._types["choosy"] = AgentConfig(name="choosy", prompt="p",
-                                            model_choices=("anthropic:claude-haiku-4-5",))
+        made._types["choosy"] = AgentConfig(
+            name="choosy", prompt="p", model_choices=("anthropic:claude-haiku-4-5",)
+        )
         names["choosy"] = {"fetch_page"}
 
         result, _ = await turned(lambda: made.follow_up(follow("choosy-1")))
@@ -4329,7 +4342,9 @@ class TestAFollowUpKeepsThem:
         )
         assert len(asked) == 1
 
-    async def test_two_messages_at_once_to_a_narrowed_one_start_one_run_and_steer_the_other(self):
+    async def test_two_messages_at_once_to_a_narrowed_one_start_one_run_and_steer_the_other(
+        self,
+    ):
         """As for an instance not narrowed, though a narrowed one's tool names are
         asked for first, and by a hook that suspends every time."""
         taken: list[list[str]] = []
@@ -4358,9 +4373,16 @@ class TestAFollowUpKeepsThem:
 
         (first, second), _ = await turned(work)
 
-        assert (first.result["run"], first.result["status"]) == ("choosy-1#2", RUN_COMPLETED)
-        assert second.result["status"] == "running" and second.result["run"] == "choosy-1#2"
-        assert [r.ref.run for r in runs.records(CONVERSATION)] == ["choosy-1#1", "choosy-1#2"]
+        assert (first.result["run"], first.result["status"]) == (
+            "choosy-1#2", RUN_COMPLETED
+        )
+        assert (
+            second.result["status"] == "running"
+            and second.result["run"] == "choosy-1#2"
+        )
+        assert [r.ref.run for r in runs.records(CONVERSATION)] == [
+            "choosy-1#1", "choosy-1#2"
+        ]
 
 
 UNLISTED = ("The tools of 'choosy' could not be listed just now "
@@ -4385,7 +4407,9 @@ class TestAListingThatFails:
     async def test_a_task_call_naming_tools_is_told_to_try_again(self):
         hook, asked = answering()
         fail = [True]
-        made = delegations(hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail))
+        made = delegations(
+            hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail)
+        )
 
         async def work():
             refused = await made.delegate(request(NARROW))
@@ -4403,7 +4427,9 @@ class TestAListingThatFails:
     async def test_a_narrowed_ones_follow_up_is_told_so(self, how):
         hook, asked = answering()
         fail = [False]
-        made = delegations(hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail))
+        made = delegations(
+            hook, types=CHOOSING, tool_names=unlisting("choosy", fail=fail)
+        )
         await turned(lambda: made.delegate(request(NARROW)))
         fail[0] = True
 

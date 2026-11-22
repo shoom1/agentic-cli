@@ -225,9 +225,9 @@ class WorkflowEvent:
         ``started_by`` and its ``mode``; a first run of an instance also
         says whether the instance ``inherit_context`` and is ``continuable``,
         and the ``tools`` and ``model`` its delegation gave it; a follow-up's
-        start carries its ``input``, the message as written), then one end status (``completed``,
-        ``failed``, ``refused``, ``cancelled``, ``interrupted``: the constants
-        of ``workflow/agents/runs.py``) with the first of its ``result``, its
+        start carries its ``input``, the message as written), then one end status
+        (``completed``, ``failed``, ``refused``, ``cancelled``, ``interrupted``: the
+        constants of ``workflow/agents/runs.py``) with the first of its ``result``, its
         ``error``, whether the result is ``partial``, the tokens the run
         used (``usage``) and, for a cancelled run, who cancelled it.
         ``metadata["agent"]`` is the sub-agent, as on every event an agent

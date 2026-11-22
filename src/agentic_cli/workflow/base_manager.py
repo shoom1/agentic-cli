@@ -1238,7 +1238,8 @@ class BaseWorkflowManager(ABC):
     def _run_models(
         self, run: AgentRun
     ) -> "tuple[Mapping[str, ResolvedModel], Mapping[str, ContextBudget]]":
-        """The agents' models and context numbers a sub-agent ``run`` reads, by agent name.
+        """The agents' models and context numbers a sub-agent ``run`` reads, by agent
+        name.
 
         Those of the manager's, except that a run on a model choice
         (``run.model``) has its type's entries the choice's: its backend's
@@ -1258,7 +1259,8 @@ class BaseWorkflowManager(ABC):
         return models, budgets
 
     async def _agent_tool_names(self, agent: str) -> frozenset[str]:
-        """The names a ``task`` call's ``tools`` may give for ``agent`` (a backend hook).
+        """The names a ``task`` call's ``tools`` may give for ``agent`` (a backend
+        hook).
 
         Asked for a call that names tools and for a narrowed instance's
         follow-up: the agent's own tools by the names its model sees (a
@@ -2701,7 +2703,8 @@ class BaseWorkflowManager(ABC):
             for choice in config.model_choices:
                 try:
                     choices[(config.name, choice)] = self._resolve_for(
-                        dataclasses.replace(config, model=choice), roles, self._catalog, providers
+                        dataclasses.replace(config, model=choice),
+                        roles, self._catalog, providers
                     )
                 except ModelResolutionError as exc:
                     errors.append(str(exc))

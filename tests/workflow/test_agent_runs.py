@@ -908,7 +908,9 @@ class TestExportAndRestore:
         ("tools", "lookup"), ("tools", [1]), ("tools", {"lookup": True}), ("model", 3),
         ("model", ["fast"]),
     ])
-    def test_tools_or_a_model_that_do_not_read_are_records_it_cannot_read(self, field, value):
+    def test_tools_or_a_model_that_do_not_read_are_records_it_cannot_read(
+        self, field, value
+    ):
         runs = AgentRuns()
         a_conversation(runs)
         data = json.loads(json.dumps(runs.export(ONE)))

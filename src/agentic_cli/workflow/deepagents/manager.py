@@ -479,7 +479,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return [("checkpointer", functools.partial(self._close_connection, connection))]
 
     async def _agent_tool_names(self, agent: str) -> frozenset[str]:
-        """The names a ``task`` call's ``tools`` may give for ``agent``: its built tools'."""
+        """The names a ``task`` call's ``tools`` may give for ``agent``: its built
+        tools'."""
         names = self._own_tool_names.get(agent)
         return names if names is not None else await super()._agent_tool_names(agent)
 

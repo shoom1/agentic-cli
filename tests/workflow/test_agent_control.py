@@ -432,7 +432,8 @@ class TestTheToolsItKeeps:
     def test_a_narrowed_run_keeps_its_tools_its_plan_and_its_delegation_tools(self):
         control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
 
-        names = ["lookup", "fetch_page", "save_plan", "get_tasks", "task", "check_agents"]
+        names = ["lookup", "fetch_page", "save_plan", "get_tasks", "task",
+                 "check_agents"]
         assert [name for name in names if control.keeps(name)] == [
             "lookup", "save_plan", "get_tasks", "task", "check_agents",
         ]
@@ -443,7 +444,8 @@ class TestTheToolsItKeeps:
         from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
 
         assert KEPT_TOOLS == {
-            *(name for name, _ in state_tools._STATE_TOOLS), TASK_TOOL, *FOLLOW_UP_TOOLS,
+            *(name for name, _ in state_tools._STATE_TOOLS), TASK_TOOL,
+            *FOLLOW_UP_TOOLS,
         }
 
 

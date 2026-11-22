@@ -367,7 +367,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         return text
 
     async def _agent_tool_names(self, agent: str) -> frozenset[str]:
-        """The names a ``task`` call's ``tools`` may give for ``agent``: its built agent's.
+        """The names a ``task`` call's ``tools`` may give for ``agent``: its built
+        agent's.
 
         Its tools as its model sees them (callables, ADK tools, a skill
         toolset's tools) and each MCP toolset's, which ADK lists by connecting:
@@ -399,7 +400,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 except Exception as exc:  # noqa: BLE001 - a server that will not list
                     logger.warning("mcp_tools_unlisted", agent=agent, error=str(exc))
                     raise ToolsUnlistedError(agent, exc) from exc
-                # The toolset is kept with its names: its id is only its own while it lives.
+                # The toolset is kept with its names: its id is only its own while it
+                # lives.
                 kept = listed[id(tool)] = (tool, found)
             names |= kept[1]
         return frozenset(names - KEPT_TOOLS)
@@ -417,7 +419,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         self.__dict__.pop("_mcp_tool_names", None)
         runner, self._runner = self._runner, None
         runners, self._agent_runners = self._agent_runners, MappingProxyType({})
-        chosen_runners, self._variant_runners = self._variant_runners, MappingProxyType({})
+        chosen_runners, self._variant_runners = (
+            self._variant_runners, MappingProxyType({})
+        )
         self._variant_agents = MappingProxyType({})
         self._agents = MappingProxyType({})
         self._root_agent = None
@@ -438,7 +442,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             *(
                 (
                     f"runner {name} on {choice}",
-                    functools.partial(self._aclose_owned, owned, f"runner {name} on {choice}"),
+                    functools.partial(
+                        self._aclose_owned, owned, f"runner {name} on {choice}"
+                    ),
                 )
                 for (name, choice), owned in chosen_runners.items()
             ),
@@ -1729,7 +1735,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         # usage and context the choice's under the type's name.
         _, budgets = self._run_models(run)
         models, kinds = dict(build.models), self._agent_kinds()
-        chosen = self._choice_models[(run.ref.agent, run.model)] if run.model is not None else None
+        chosen = (
+            self._choice_models[(run.ref.agent, run.model)]
+            if run.model is not None else None
+        )
         if chosen is not None:
             models[run.ref.agent] = str(chosen.ref)
             kinds[run.ref.agent] = chosen.record.kind.value
@@ -1817,7 +1826,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
 
     def _chosen_model(self, agent: str | None) -> "ResolvedModel | None":
-        """The model choice the run in progress is on, when it is ``agent``'s run; else None.
+        """The model choice the run in progress is on, when it is ``agent``'s run; else
+        None.
 
         What the raw LLM log names a call's model by (``LLMLoggingPlugin``):
         the one plugin serves every runner, and names a model by agent name.

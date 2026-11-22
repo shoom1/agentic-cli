@@ -186,7 +186,9 @@ async def test_a_delegating_app(project):
     assert logs == [shared]
 
 
-async def test_a_model_choices_runner_has_its_types_chain_on_the_choices_numbers(project):
+async def test_a_model_choices_runner_has_its_types_chain_on_the_choices_numbers(
+    project,
+):
     """A sub-agent type with model choices has a runner of its own for each:
     its agent built on the choice's model, and the type's chain, in which
     every plugin that reads an agent's numbers, kind or model by name reads

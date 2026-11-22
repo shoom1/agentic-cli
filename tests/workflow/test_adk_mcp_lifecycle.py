@@ -127,7 +127,8 @@ async def test_a_sub_agents_mcp_tools_are_listed_when_first_asked_and_stop_with_
             AgentConfig(name="lead", prompt="Lead.", sub_agents=["researcher"]),
             AgentConfig(name="researcher", prompt="Find.", mcp_servers=[server]),
         ],
-        settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+        settings=BaseSettings(session_store="memory",
+                              default_model="claude-sonnet-4-6"),
     )
     try:
         await manager.initialize_services()
@@ -157,7 +158,11 @@ async def test_a_listing_that_fails_is_said_so_and_asked_again(
         DelegationRequest,
         ToolsUnlistedError,
     )
-    from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn
+    from agentic_cli.workflow.sessions import (
+        SessionRef,
+        reset_active_turn,
+        set_active_turn,
+    )
 
     route(monkeypatch, anthropic, "AsyncAnthropic",
           FakeAPI(anthropic_message({"type": "text", "text": "ok"})))
@@ -171,7 +176,8 @@ async def test_a_listing_that_fails_is_said_so_and_asked_again(
             AgentConfig(name="researcher", prompt="Find.", description="Finds.",
                         mcp_servers=[server]),
         ],
-        settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+        settings=BaseSettings(session_store="memory",
+                              default_model="claude-sonnet-4-6"),
     )
     real = McpToolset.get_tools_with_prefix
     failing = [True]
@@ -206,7 +212,8 @@ async def test_a_listing_that_fails_is_said_so_and_asked_again(
         assert refused.run is None
 
         failing[0] = False
-        assert await manager._agent_tool_names("researcher") == {"atlas_add", "atlas_lookup"}
+        assert await manager._agent_tool_names("researcher") == {"atlas_add",
+                                                                 "atlas_lookup"}
     finally:
         await manager.cleanup()
 
@@ -283,7 +290,8 @@ async def test_a_model_choices_runner_is_released_with_the_backend(
         subagents=FOLLOWING,
         coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
                      says("Asked."),
-                     calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+                     calls(message("researcher-1", "Now find Y.", "c2")),
+                     says("Done.")],
         researcher=[says("X is 42."), says("Y is 7.")],
     )
     manager = crew.manager
@@ -298,7 +306,9 @@ async def test_a_model_choices_runner_is_released_with_the_backend(
             assert alive(pid_dir) == []  # no runner of the old build is left open
         await crew.turn("Find Y too.")
         assert alive(pid_dir)
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
     finally:
         await manager.cleanup()
 

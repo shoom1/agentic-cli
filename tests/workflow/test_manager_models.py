@@ -421,7 +421,8 @@ class TestModelChoices:
         provider whose newest fast-tier model it takes, as it does for an agent
         on that role."""
         keys(monkeypatch, "anthropic")
-        manager = adk(team(model_choices=("fast",)), settings(default_model="claude-opus-4-7"))
+        manager = adk(team(model_choices=("fast",)),
+                      settings(default_model="claude-opus-4-7"))
 
         await manager.initialize_services()
         try:
@@ -439,7 +440,8 @@ class TestModelChoices:
         configs = [
             AgentConfig(name="coordinator", prompt="p", sub_agents=["a", "b"]),
             AgentConfig(name="a", prompt="p", model="anthropic:claude-sonnet-4-5"),
-            AgentConfig(name="b", prompt="p", model_choices=("anthropic:claude-haiku-4-5",)),
+            AgentConfig(name="b", prompt="p",
+                        model_choices=("anthropic:claude-haiku-4-5",)),
         ]
         manager = adk(configs, settings())
 
@@ -455,7 +457,8 @@ class TestModelChoices:
     async def test_a_choice_takes_the_agent_s_generation_settings(
         self, providers, monkeypatch
     ):
-        """A thinking level the choice's model lacks fails the start, as on the agent's own."""
+        """A thinking level the choice's model lacks fails the start, as on the agent's
+        own."""
         keys(monkeypatch, "anthropic")
         writer = ModelSettings(thinking=ThinkingSettings(mode="xhigh"))
         manager = adk(
@@ -474,7 +477,8 @@ class TestModelChoices:
 
     async def test_a_model_switch_resolves_them_again(self, providers, monkeypatch):
         keys(monkeypatch, "google")
-        manager = adk(team(model_choices=("default",)), settings(default_model="gemini-2.5-pro"))
+        manager = adk(team(model_choices=("default",)),
+                      settings(default_model="gemini-2.5-pro"))
 
         await manager.initialize_services()
         try:
@@ -1310,7 +1314,8 @@ async def test_the_base_names_a_configured_types_tools_as_its_delegations_do(pro
         SimpleNamespace(_tool_names=None), configs[1]
     ) == names
     assert await manager._agent_tool_names("nobody") == frozenset()
-    # The manager has resolved its configs' strings; a Delegations over raw ones names alike.
+    # The manager has resolved its configs' strings; a Delegations over raw ones names
+    # alike.
     raw = AgentConfig(name="writer", prompt="p", tools=[
         "web_fetch", "agentic_cli.tools.glob_tool.glob", read_file,
     ])

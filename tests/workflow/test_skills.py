@@ -192,7 +192,9 @@ class TestSkillsIntegration:
         # Scripts disabled by default -> run_skill_script not exposed.
         assert "run_skill_script" not in {t.name for t in skill_toolsets[0]._tools}
 
-    async def test_a_task_may_narrow_a_sub_agent_to_its_skill_tools_and_its_own(self, tmp_path):
+    async def test_a_task_may_narrow_a_sub_agent_to_its_skill_tools_and_its_own(
+        self, tmp_path
+    ):
         """What ``task``'s ``tools`` may name: the agent's own tools by their names,
         its skill toolset's tools, never the state or delegation tools."""
         from agentic_cli.tools import read_file
@@ -206,7 +208,8 @@ class TestSkillsIntegration:
         ]
         with MockContext(google_api_key="test-key", session_store="memory") as context:
             mgr = GoogleADKWorkflowManager(
-                agent_configs=configs, settings=context.settings, model="gemini-2.5-flash"
+                agent_configs=configs, settings=context.settings,
+                model="gemini-2.5-flash"
             )
             await mgr.initialize_services()
         try:

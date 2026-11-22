@@ -230,8 +230,9 @@ def build_agent_tree(
     def build(name: str) -> "CompiledStateGraph":
         is_root = name == root
         return build_agent(
-            config_map[name], root=is_root, configs=configs, chat_model=chat_models[name],
-            resolved=resolved.get(name), tools=tools.get(name, []), prompt=prompts[name],
+            config_map[name], root=is_root, configs=configs,
+            chat_model=chat_models[name], resolved=resolved.get(name),
+            tools=tools.get(name, []), prompt=prompts[name],
             settings=settings, checkpointer=checkpointer, bound=bound,
             budget=budgets.get(name) if budgets is not None else None,
             summarizers=summarizers, open_calls=open_calls, marks=marks,
@@ -249,7 +250,8 @@ def build_agent_tree(
         graph = build_agent(
             variant.config, root=False, configs=configs, chat_model=variant.chat_model,
             resolved=variant.resolved, tools=tools.get(name, []), prompt=prompts[name],
-            settings=settings, checkpointer=checkpointer, bound=bound, budget=variant.budget,
+            settings=settings, checkpointer=checkpointer, bound=bound,
+            budget=variant.budget,
             open_calls=open_calls, marks=marks, delegations=delegations,
         )
         if variant_graphs is not None:
@@ -329,7 +331,9 @@ def build_agent(
             PatchToolCallsMiddleware() if open_calls is None
             else InterruptedCallsMiddleware(open_calls, root=root),
             *model_side,
-            *_tool_side(config, settings, bound=bound, open_calls=open_calls, marks=marks),
+            *_tool_side(
+                config, settings, bound=bound, open_calls=open_calls, marks=marks
+            ),
         ],
         state_schema=AgentCliState,
         name=name,

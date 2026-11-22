@@ -289,7 +289,8 @@ def read_choices(
     config: AgentConfig,
     own_tools: Collection[str] = (),
 ) -> tuple[frozenset[str] | None, str | None]:
-    """The tools and the model a ``task`` call gives its run: None each when left out (or null).
+    """The tools and the model a ``task`` call gives its run: None each when left out
+    (or null).
 
     ``tools`` are some of the type's own: ``own_tools`` are the names its
     backend gives it (the state and delegation tools left out), and none at
@@ -312,7 +313,9 @@ def read_choices(
             isinstance(name, str) and name in own_tools for name in given
         ):
             raise BriefError(
-                TOOLS_ERROR.format(agent_type=agent_type, names=", ".join(sorted(own_tools)))
+                TOOLS_ERROR.format(
+                    agent_type=agent_type, names=", ".join(sorted(own_tools))
+                )
             )
         tools = frozenset(given)
 
@@ -323,7 +326,9 @@ def read_choices(
             raise BriefError(NO_MODEL_CHOICES_ERROR.format(agent_type=agent_type))
         if not isinstance(chosen, str) or chosen.strip() not in config.model_choices:
             raise BriefError(
-                MODEL_ERROR.format(agent_type=agent_type, names=", ".join(config.model_choices))
+                MODEL_ERROR.format(
+                    agent_type=agent_type, names=", ".join(config.model_choices)
+                )
             )
         model = chosen.strip()
     return tools, model

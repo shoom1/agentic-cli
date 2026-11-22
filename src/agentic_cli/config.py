@@ -467,7 +467,10 @@ def _model_settings_problems(
         choices = getattr(config, "model_choices", None) or ()
         for who, spec, own in (
             (f"Agent {name!r}", getattr(config, "model", None), True),
-            *((f"Agent {name!r} (model choice {choice!r})", choice, False) for choice in choices),
+            *(
+                (f"Agent {name!r} (model choice {choice!r})", choice, False)
+                for choice in choices
+            ),
         ):
             if not spec:
                 continue
@@ -481,7 +484,9 @@ def _model_settings_problems(
                 # from the catalog at startup.
                 mapped = roles.spec_for(parsed.role) if roles is not None else None
                 if mapped is not None and parsed.role != "default":
-                    runs.append((f"{who} (role {parsed.role!r})" if own else who, mapped))
+                    runs.append(
+                        (f"{who} (role {parsed.role!r})" if own else who, mapped)
+                    )
                 continue
             named.append((who, parsed))
             runs.append((who, parsed))

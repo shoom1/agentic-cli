@@ -82,7 +82,8 @@ def configured_tool_names(tools: Iterable[Any]) -> frozenset[str]:
     one rule for ``Delegations`` and for a manager's ``_agent_tool_names``.
     """
     names = (
-        tool.strip().rsplit(".", 1)[-1] if isinstance(tool, str) else getattr(tool, "__name__", "")
+        tool.strip().rsplit(".", 1)[-1] if isinstance(tool, str)
+        else getattr(tool, "__name__", "")
         for tool in tools
     )
     return frozenset(name for name in names if name and name not in KEPT_TOOLS)

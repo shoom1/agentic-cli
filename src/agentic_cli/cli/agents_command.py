@@ -7,9 +7,9 @@ deeper. Enter opens the view of the one picked (``/agent <id>``), Esc
 nothing; ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent, its
 title, the model choice it runs on and the tools its delegation narrowed it
-to (when it was given any), then each run's status (while it works ``running``, ``queued`` waiting
-for a free working slot, or ``needs you`` waiting on the user; a completion
-cut at its output limit ``completed (partial)``) and how long it ran (or has
+to (when it was given any), then each run's status (while it works ``running``,
+``queued`` waiting for a free working slot, or ``needs you`` waiting on the user; a
+completion cut at its output limit ``completed (partial)``) and how long it ran (or has
 been running), the fields of its brief its parent filled (its objective,
 deliverable, constraints, what was known, when it is done; a follow-up's
 message in their place), the first lines of its result, the plan and the
@@ -255,7 +255,10 @@ def _workflow(app: Any) -> Any:
 
 
 def _one(
-    records: list["RunRecord"], ledger: "UsageLedger", *, instance: "InstanceRecord | None" = None
+    records: list["RunRecord"],
+    ledger: "UsageLedger",
+    *,
+    instance: "InstanceRecord | None" = None,
 ) -> Panel:
     """``/agents <id>``'s panel: one instance's runs (one run's, for a run id).
 

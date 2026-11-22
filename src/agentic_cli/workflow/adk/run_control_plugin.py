@@ -198,7 +198,9 @@ def narrow(llm_request: LlmRequest, keeps: Callable[[str], bool]) -> None:
         left = [d for d in declarations if d.name is None or keeps(d.name)]
         if len(left) == len(declarations):
             kept.append(tool)
-        elif left or tool.model_dump(exclude={"function_declarations"}, exclude_none=True):
+        elif left or tool.model_dump(
+            exclude={"function_declarations"}, exclude_none=True
+        ):
             kept.append(tool.model_copy(update={"function_declarations": left or None}))
     llm_request.config.tools = kept or None
 

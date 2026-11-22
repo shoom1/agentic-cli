@@ -1,4 +1,5 @@
-"""A sub-agent type's delegation fields: ``brief_required``, ``limits``, ``continuable``, ``spawnable_by`` and ``model_choices``.
+"""A sub-agent type's delegation fields: ``brief_required``, ``limits``,
+``continuable``, ``spawnable_by`` and ``model_choices``.
 
 ``brief_required`` names the brief fields a delegation to the type must fill
 (the title and the objective are always needed); ``limits`` are the type's
@@ -58,8 +59,10 @@ class TestTheFields:
     def test_they_follow_inherit_context(self):
         # Appended: a positional AgentConfig(...) written before them still binds.
         names = [f.name for f in dataclasses.fields(AgentConfig)]
-        assert names[-6:] == ["inherit_context", "brief_required", "limits", "continuable",
-                              "spawnable_by", "model_choices"]
+        assert names[-6:] == [
+            "inherit_context", "brief_required", "limits", "continuable",
+            "spawnable_by", "model_choices",
+        ]
 
     def test_no_model_choices_by_default(self):
         assert AgentConfig(name="a", prompt="p").model_choices == ()
@@ -394,10 +397,13 @@ class TestAFreeTypeNoSourceCanStart:
 class TestModelChoices:
     """``model_choices``: the models a delegation may pick instead of the type's own."""
 
-    @pytest.mark.parametrize("value", [("fast",), ["fast", "anthropic:claude-haiku-4-5"],
-                                       ("claude-opus-4-7",)])
+    @pytest.mark.parametrize("value", [
+        ("fast",), ["fast", "anthropic:claude-haiku-4-5"], ("claude-opus-4-7",),
+    ])
     def test_a_tuple_or_list_of_models_or_roles(self, value):
-        assert validate_agent_graph(team(writer={"model_choices": value})).root_name == "lead"
+        assert validate_agent_graph(
+            team(writer={"model_choices": value})
+        ).root_name == "lead"
 
     @pytest.mark.parametrize("value", ["fast", ("fast", ""), ("fast", "  "), (1,), None,
                                        {"fast"}])

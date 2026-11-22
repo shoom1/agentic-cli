@@ -734,7 +734,8 @@ class TestInTheManager:
             return [{"type": "text", "text": "found"}], None
 
         _fake_mcp(monkeypatch, StructuredTool(
-            name="search", description="A server's tool.", args_schema={"type": "object"},
+            name="search", description="A server's tool.",
+            args_schema={"type": "object"},
             coroutine=call_tool, response_format="content_and_artifact",
         ))
         scripted(monkeypatch, lead=[], writer=[])

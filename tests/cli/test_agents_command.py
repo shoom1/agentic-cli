@@ -87,7 +87,8 @@ class Runs:
         ref = self.manager.agent_runs.run_for(self.conversation, parent, call_id, agent)
         title = request.splitlines()[0]
         self._observe(WorkflowEvent.agent_run(
-            ref, "started", title=title, call_id=call_id, brief=brief, tools=tools, model=model,
+            ref, "started", title=title, call_id=call_id, brief=brief, tools=tools,
+            model=model,
         ), at)
         return ref
 
@@ -252,7 +253,8 @@ class TestOne:
         ]
 
     @pytest.mark.parametrize("tools, model, shown", [
-        (["lookup", "fetch_page"], "fast", [("Model", "fast"), ("Tools", "lookup, fetch_page")]),
+        (["lookup", "fetch_page"], "fast",
+         [("Model", "fast"), ("Tools", "lookup, fetch_page")]),
         ([], None, [("Tools", "none of its own")]),
         (None, HAIKU, [("Model", HAIKU)]),
     ])

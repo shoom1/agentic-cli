@@ -288,8 +288,10 @@ class TestTaskParameters:
     def test_a_model_argument_once_a_type_has_model_choices(self):
         schema = task_parameters({"researcher": RESEARCHER, "checker": CHOOSING})
         properties = schema["properties"]
-        assert list(properties) == ["agent_type", "title", *BRIEF_FIELDS, "tools", "model"]
-        assert properties["model"] == {"type": "string", "description": MODEL_DESCRIPTION}
+        assert list(properties) == ["agent_type", "title", *BRIEF_FIELDS, "tools",
+                                    "model"]
+        assert properties["model"] == {"type": "string",
+                                       "description": MODEL_DESCRIPTION}
         assert properties["agent_type"]["description"].endswith(
             "- checker (model choices: fast, anthropic:claude-haiku-4-5): Checks a claim."
         )
@@ -431,16 +433,20 @@ class TestReadChoices:
         assert read_choices({"agent_type": "checker"}, CHOOSING) == (None, None)
 
     def test_null_is_left_out(self):
-        assert read_choices({"tools": None, "model": None}, CHOOSING, OWN) == (None, None)
+        assert read_choices(
+            {"tools": None, "model": None}, CHOOSING, OWN
+        ) == (None, None)
 
     def test_some_of_its_own_tools(self):
-        tools, model = read_choices({"tools": ["lookup", "mcp_search", "lookup"]}, CHOOSING, OWN)
+        tools, model = read_choices({"tools": ["lookup", "mcp_search", "lookup"]},
+                                    CHOOSING, OWN)
         assert (tools, model) == (frozenset({"lookup", "mcp_search"}), None)
 
     def test_none_of_them_is_a_narrowing_too(self):
         assert read_choices({"tools": []}, CHOOSING, OWN) == (frozenset(), None)
 
-    @pytest.mark.parametrize("tools", [["lookup", "write_file"], "lookup", [3], {"lookup": 1}])
+    @pytest.mark.parametrize("tools", [["lookup", "write_file"], "lookup", [3],
+                                       {"lookup": 1}])
     def test_anything_else_names_its_own(self, tools):
         with pytest.raises(BriefError) as exc:
             read_choices({"tools": tools}, CHOOSING, OWN)
@@ -455,7 +461,8 @@ class TestReadChoices:
         assert read_choices({"tools": []}, CHOOSING, frozenset()) == (frozenset(), None)
 
     @pytest.mark.parametrize("given, chosen", [
-        ("fast", "fast"), (" anthropic:claude-haiku-4-5 ", "anthropic:claude-haiku-4-5"),
+        ("fast", "fast"),
+        (" anthropic:claude-haiku-4-5 ", "anthropic:claude-haiku-4-5"),
     ])
     def test_one_of_its_model_choices_as_written(self, given, chosen):
         assert read_choices({"model": given}, CHOOSING) == (None, chosen)

@@ -498,7 +498,8 @@ def _runs_of(workflow: Any, conversation: "SessionRef", instance: str) -> list["
 
 
 def _model(workflow: Any, record: "InstanceRecord") -> Any:
-    """The model the instance runs on: its model choice's when it has one, else its type's."""
+    """The model the instance runs on: its model choice's when it has one, else its
+    type's."""
     if record.model is not None:
         return getattr(workflow, "choice_models", {}).get((record.agent, record.model))
     return getattr(workflow, "agent_models", {}).get(record.agent)

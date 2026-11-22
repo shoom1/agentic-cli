@@ -51,7 +51,10 @@ from agentic_cli.workflow.agents.brief import (  # noqa: E402
 )
 from agentic_cli.workflow.config import AgentConfig, AgentGraphError  # noqa: E402
 from agentic_cli.workflow.deepagents import agent_builder  # noqa: E402
-from agentic_cli.workflow.deepagents.agent_builder import Variant, build_agent_tree  # noqa: E402
+from agentic_cli.workflow.deepagents.agent_builder import (  # noqa: E402
+    Variant,
+    build_agent_tree,
+)
 from agentic_cli.workflow.deepagents.middleware import (  # noqa: E402
     ActiveToolCallMiddleware,
     PermissionMiddleware,
@@ -699,7 +702,8 @@ class TestAVariant:
             [COORDINATOR, RESEARCHER],
             {"coordinator": ScriptedChat(), "researcher": own},
             tools=tools, checkpointer=InMemorySaver(),
-            variants={("researcher", "fast"): Variant(config=RESEARCHER, chat_model=cheaper,
+            variants={("researcher", "fast"): Variant(config=RESEARCHER,
+                                                      chat_model=cheaper,
                                                       resolved=None)},
             variant_graphs=variant_graphs,
         )
@@ -711,6 +715,8 @@ class TestAVariant:
         assert (len(own.requests), len(cheaper.requests)) == (0, 1)
         *_, variant = made
         assert [m["name"] for m in made] == ["coordinator", "researcher", "researcher"]
-        assert (variant["model"], variant["system_prompt"]) == (cheaper, "You are researcher.")
+        assert (variant["model"], variant["system_prompt"]) == (
+            cheaper, "You are researcher."
+        )
         assert [tool.name for tool in variant["tools"]] == ["save_plan"]
         assert RunControlMiddleware in [type(m) for m in variant["middleware"]]

@@ -192,7 +192,9 @@ def _named_references(
             named.setdefault(parsed, []).append(f"agent {config.name!r}")
         where = f"agent {config.name!r} model_choices"
         for choice in _agent_choices(config):
-            if isinstance(choice, ModelRef) and where not in named.setdefault(choice, []):
+            if isinstance(choice, ModelRef) and where not in named.setdefault(
+                choice, []
+            ):
                 named[choice].append(where)
     return named
 

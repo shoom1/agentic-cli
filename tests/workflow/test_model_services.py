@@ -475,17 +475,21 @@ def test_model_choices_are_named_references_too():
         ModelRef("anthropic", "claude-haiku-4-5"),
     )
     assert model_services.reference_settings(settings, agents) == {
-        ModelRef("google", "gemini-2.5-flash"): "default_model and agent 'writer' model_choices",
+        ModelRef("google", "gemini-2.5-flash"): (
+            "default_model and agent 'writer' model_choices"
+        ),
         ModelRef("google", "gemini-2.5-pro"): "agent 'writer'",
         ModelRef("anthropic", "claude-haiku-4-5"): "agent 'writer' model_choices",
     }
 
 
 def test_a_role_choice_is_computed():
-    settings = BaseSettings(default_model="gemini-2.5-flash", model_roles={"strong": "o3"})
+    settings = BaseSettings(default_model="gemini-2.5-flash",
+                            model_roles={"strong": "o3"})
     agents = [
         AgentConfig(name="writer", prompt="p", model_choices=("fast", "strong")),
-        AgentConfig(name="critic", prompt="p", model_choices=("vision",)),  # an app's role
+        # an app's role
+        AgentConfig(name="critic", prompt="p", model_choices=("vision",)),
     ]
 
     assert model_services.computed_roles(settings, agents) == ("fast",)
