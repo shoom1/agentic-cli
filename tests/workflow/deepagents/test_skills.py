@@ -723,6 +723,34 @@ class TestInTheManager:
         (result,) = of(events, EventType.TOOL_RESULT)
         assert result.metadata["result"]["skill_name"] == "pdf-tools"
 
+    async def test_a_task_may_narrow_a_sub_agent_to_its_skill_mcp_and_own_tools(
+        self, ctx, monkeypatch
+    ):
+        """What ``task``'s ``tools`` may name, as on ADK: the agent's own tools,
+        its skill tools and its MCP tools, never the state or delegation tools."""
+        from agentic_cli.tools import read_file
+
+        async def call_tool(**arguments):
+            return [{"type": "text", "text": "found"}], None
+
+        _fake_mcp(monkeypatch, StructuredTool(
+            name="search", description="A server's tool.", args_schema={"type": "object"},
+            coroutine=call_tool, response_format="content_and_artifact",
+        ))
+        scripted(monkeypatch, lead=[], writer=[])
+        manager = _manager(ctx.settings, [
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["writer"]),
+            _writer(tools=[read_file], include_state_tools=True,
+                    mcp_servers=[MCPServerConfig(name="atlas", command="srv")]),
+        ])
+        try:
+            await manager.initialize_services()
+            assert await manager._agent_tool_names("writer") == {
+                "read_file", *SKILL_TOOL_NAMES, "search",
+            }
+        finally:
+            await manager.cleanup()
+        assert manager._own_tool_names == {}
     async def test_a_model_switch_rebuilds_them(self, ctx, monkeypatch):
         models = scripted(monkeypatch, writer=_steps(("load_skill", {"skill_name": "pdf-tools"})))
         manager = _manager(ctx.settings, [_writer()])

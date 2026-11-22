@@ -25,6 +25,7 @@ from agentic_cli.config import BaseSettings  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.mcp import MCPServerConfig  # noqa: E402
+from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 
@@ -96,6 +97,40 @@ async def test_cleanup_stops_the_servers_and_a_model_switch_leaves_one(
 
     assert alive(pid_dir) == [], "a server outlived cleanup()"
 
+
+async def test_a_sub_agents_mcp_tools_are_listed_when_first_asked_and_stop_with_it(
+    project, pid_dir, monkeypatch
+):
+    """What ``task``'s ``tools`` may name includes a sub-agent's MCP tools, by
+    their prefixed names: ADK connects its toolset to list them, once a
+    build, and the toolset's runner stops the server."""
+    route(monkeypatch, anthropic, "AsyncAnthropic",
+          FakeAPI(anthropic_message({"type": "text", "text": "ok"})))
+    server = MCPServerConfig(
+        name="atlas", command=sys.executable, args=[str(SERVER)], timeout=30,
+        env={"MCP_TEST_PID_DIR": str(pid_dir)}, tool_name_prefix="atlas",
+    )
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["researcher"]),
+            AgentConfig(name="researcher", prompt="Find.", mcp_servers=[server]),
+        ],
+        settings=BaseSettings(session_store="memory", default_model="claude-sonnet-4-6"),
+    )
+    try:
+        await manager.initialize_services()
+        assert list(pid_dir.iterdir()) == []  # ADK connects when it is asked
+
+        with no_blocking_calls():
+            names = await manager._agent_tool_names("researcher")
+            again = await manager._agent_tool_names("researcher")
+
+        assert names == again == {"atlas_add", "atlas_lookup"}
+        assert len(list(pid_dir.iterdir())) == 1  # listed once
+    finally:
+        await manager.cleanup()
+
+    assert alive(pid_dir) == [], "a server outlived cleanup()"
 
 async def test_a_native_apps_toolset_outlives_its_runner_and_serves_the_next(
     project, pid_dir, monkeypatch

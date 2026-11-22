@@ -83,6 +83,7 @@ from agentic_cli.workflow.adk.sessions import (
 )
 from agentic_cli.workflow.adk.task_tool import SHARED_KEYS, TaskTool, follow_up_tools
 from agentic_cli.workflow.adk.tool_result_cap_plugin import ToolResultCapPlugin
+from agentic_cli.workflow.agents.control import KEPT_TOOLS
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.agents.spawn import can_have_children
@@ -348,6 +349,38 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             ))
         return text
 
+    async def _agent_tool_names(self, agent: str) -> frozenset[str]:
+        """The names a ``task`` call's ``tools`` may give for ``agent``: its built agent's.
+
+        Its tools as its model sees them (callables, ADK tools, a skill
+        toolset's tools) and each MCP toolset's, which ADK lists by connecting:
+        done when first asked, once a build (the toolset stays connected for the
+        agent's runs, and its runner stops it). A listing that fails is logged
+        and asked again next time. The state and delegation tools are left out.
+        """
+        built = self._agents.get(agent)
+        if built is None:
+            return await super()._agent_tool_names(agent)
+        from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+
+        tools = list(built.tools)
+        names = _tool_names(tools)
+        listed = self.__dict__.setdefault("_mcp_tool_names", {})
+        for tool in tools:
+            if not isinstance(tool, McpToolset):
+                continue
+            kept = listed.get(id(tool))
+            if kept is None:
+                try:
+                    found = {t.name for t in await tool.get_tools_with_prefix()}
+                except Exception as exc:  # noqa: BLE001 - a server that will not list
+                    logger.warning("mcp_tools_unlisted", agent=agent, error=str(exc))
+                    continue
+                # The toolset is kept with its names: its id is only its own while it lives.
+                kept = listed[id(tool)] = (tool, found)
+            names |= kept[1]
+        return frozenset(names - KEPT_TOOLS)
+
     def _detach_backend(self) -> list[Closer]:
         """The runners and the agents, and the LLM logging plugin.
 
@@ -357,6 +390,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         keeps stays open. They close before the session service (the base
         runs the backend's closers before the store's).
         """
+        self.__dict__.pop("_mcp_tool_names", None)
         runner, self._runner = self._runner, None
         runners, self._agent_runners = self._agent_runners, MappingProxyType({})
         self._agents = MappingProxyType({})

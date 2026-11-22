@@ -51,6 +51,7 @@ from agentic_cli.models import (
 )
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.config import AgentConfig
+from agentic_cli.workflow.agents.control import KEPT_TOOLS
 from agentic_cli.workflow.agents.delegate import (
     STOPPED_BY_USER_ERROR,
     USER,
@@ -668,6 +669,7 @@ class BaseWorkflowManager(ABC):
                 ledgers=self._usage_ledgers,
                 stored=self._stored_instances,
                 open_calls=getattr(self, "_open_calls", None),
+                tool_names=self._agent_tool_names,
             )
         return delegations
 
@@ -1222,12 +1224,32 @@ class BaseWorkflowManager(ABC):
         has ended, before anything it awaits to read what the run did, it
         calls ``run.control.finish()``, so a cancel of the run alone then
         loses nothing. ``run.control`` keeps its limits at its model calls
-        (each backend's in its sub-agents' stacks).
+        (each backend's in its sub-agents' stacks). A run narrowed to some of
+        its type's tools (``run.control.tools``) is offered only those and the
+        tools every run keeps (``KEPT_TOOLS``), and a call of another is
+        answered as one of a tool the agent does not have
+        (``unknown_tool_result``).
 
         Raises:
             NotImplementedError: This backend runs no sub-agent.
         """
         raise NotImplementedError(f"{type(self).__name__} runs no sub-agent")
+
+    async def _agent_tool_names(self, agent: str) -> frozenset[str]:
+        """The names a ``task`` call's ``tools`` may give for ``agent`` (a backend hook).
+
+        Asked for a call that names tools and for a narrowed instance's
+        follow-up: the agent's own tools by the names its model sees (a
+        backend adds its skill and MCP tools), the state and delegation tools
+        (``KEPT_TOOLS``) left out. The base's are the agent's configured tools
+        as ``_build_tools`` assembles them, each by its callable's name; an
+        agent that is not configured has none.
+        """
+        config = next((c for c in self._agent_configs if c.name == agent), None)
+        if config is None:
+            return frozenset()
+        names = (getattr(tool, "__name__", "") for tool in self._build_tools(config, {}))
+        return frozenset(name for name in names if name and name not in KEPT_TOOLS)
 
     @property
     def settings(self) -> "BaseSettings":

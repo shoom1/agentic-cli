@@ -1143,7 +1143,12 @@ class RunControlMiddleware(AgentMiddleware):
       app's own tool of that name) is the run's: its description and schema
       are what the run may start (``Delegations.task_offer``, by the run's
       depth), or the tool is left out when it may start nothing, as ADK
-      declares one per request.
+      declares one per request;
+    - a run narrowed to some of its type's tools (``RunControl.tools``) is
+      offered only those and the tools every run keeps (``KEPT_TOOLS``), and a
+      call of any other (``awrap_tool_call``) is answered as one of a tool the
+      agent does not have, as the permission gate answers one, and run
+      nowhere.
 
     The summarization inside it counts the note and the rewritten tools; the
     outcome middleware outside it reads an answer whose calls were dropped as
@@ -1180,6 +1185,11 @@ class RunControlMiddleware(AgentMiddleware):
         control = self._control()
         if control is None:
             return await handler(request)
+        if control.tools is not None:
+            request = request.override(tools=[
+                tool for tool in request.tools or ()
+                if not isinstance(tool, BaseTool) or control.keeps(tool.name)
+            ])
         # What abefore_model added is in this request, and its step is checkpointed.
         control.stored()
         if control.model_call():
@@ -1194,6 +1204,26 @@ class RunControlMiddleware(AgentMiddleware):
         if control.final_call:
             response = _mapped(response, without_calls)
         return response
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[_ToolResult]],
+    ) -> _ToolResult:
+        control = self._control()
+        call = request.tool_call
+        if control is None or control.keeps(call["name"]):
+            return await handler(request)
+        run = control.ref
+        # What the agent was not offered this run: the unknown-tool answer, listing
+        # what it was (``task`` only when this run may start something).
+        task_offered = self._delegations().task_offer(run.agent, run.depth) is not None
+        available = [
+            tool.name for tool in getattr(request.runtime, "tools", None) or ()
+            if control.keeps(tool.name) and (tool.name != TASK_TOOL or task_offered)
+        ]
+        logger.info("tool_not_found", tool=call["name"], agent=run.agent)
+        return error_tool_message(unknown_tool_result(call["name"], available), call)
 
     def _with_task_offered(self, request: ModelRequest, run: RunRef) -> ModelRequest:
         """``request`` with the framework's ``task`` as ``run`` is offered it.

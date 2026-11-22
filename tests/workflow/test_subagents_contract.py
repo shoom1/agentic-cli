@@ -6483,6 +6483,87 @@ def narrow_team(**researcher: Any) -> list[AgentConfig]:
     ]
 
 
+#: The researcher's own tool it was not given, called anyway: what its call reads.
+WHOAMI_NOT_FOUND = {
+    "success": False,
+    "error": "contract_whoami failed: ValueError: Tool 'contract_whoami' not found.\n"
+             "Available tools: contract_lookup, get_plan, get_tasks, save_plan, save_tasks",
+}
+#: The researcher's requests, narrowed to ``contract_lookup``: it and its plan's tools.
+NARROWED = ["contract_lookup", "save_plan", "get_plan", "save_tasks", "get_tasks"]
+
+
+class TestANarrowedRun:
+    """``task``'s ``tools``: the run is offered only those of its type's tools and
+    the tools every run keeps (its plan's, the delegation tools); a call of
+    any other is answered as one of a tool it does not have, and the run goes
+    on. A static sub-agent as a type started at run time."""
+
+    async def test_its_requests_offer_only_its_tools_and_a_call_of_another_is_unknown(
+        self, make_crew
+    ):
+        crew = make_crew(
+            narrow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1",
+                                        tools=["contract_lookup"])), says("Done.")],
+            researcher=[calls(use("contract_whoami", "r1")),
+                        calls(use("contract_lookup", "r2", q="x")), says("X is 42.")],
+        )
+
+        with no_blocking_calls():
+            await crew.turn()
+
+        assert [crew.tool_names("researcher", n) for n in range(3)] == [NARROWED] * 3
+        assert json.loads(crew.results_read("researcher", 1)["r1"]) == WHOAMI_NOT_FOUND
+        assert json.loads(crew.results_read("researcher", 2)["r2"]) == {
+            "success": True, "value": 42,
+        }
+        assert SEEN == []  # contract_whoami never ran
+        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.tools, instance.model) == (("contract_lookup",), None)
+
+    async def test_left_out_it_has_them_all(self, make_crew):
+        crew = make_crew(
+            narrow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("researcher") == [
+            "contract_lookup", "contract_whoami", "save_plan", "get_plan", "save_tasks",
+            "get_tasks",
+        ]
+
+    async def test_a_type_started_at_run_time_is_narrowed_alike(self, make_crew):
+        crew = make_crew(
+            [*team(), helper(tools=(contract_lookup, contract_whoami))], subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help.", "c1", tools=["contract_whoami"])),
+                         says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("helper") == ["contract_whoami"]
+
+    async def test_a_follow_up_keeps_them(self, make_crew):
+        crew = make_crew(
+            narrow_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1",
+                                        tools=["contract_lookup"])), says("Asked."),
+                         calls(message("researcher-1", "Now find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn()
+        await crew.turn("Find Y too.")
+
+        assert crew.tool_names("researcher", 1) == NARROWED
+        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+
 class TestWhatATypeCannotTake:
     """A ``task`` call whose ``tools`` are not some of the type's own, or whose
     ``model`` is none of its choices, is its error result naming what it may

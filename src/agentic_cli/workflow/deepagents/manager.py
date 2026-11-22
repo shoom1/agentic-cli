@@ -67,6 +67,7 @@ from agentic_cli.workflow.config import (
     validate_agent_graph,
 )
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.agents.control import KEPT_TOOLS
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.context import (
@@ -193,6 +194,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root: CompiledStateGraph | None = None
         # Every agent's graph, by name: what a sub-agent run runs on.
         self._agent_graphs: dict[str, CompiledStateGraph] = {}
+        # Each agent's own tools' names as its model sees them (its tools, skill
+        # tools and MCP tools), the framework's state and delegation tools left
+        # out: what a task call's `tools` may name.
+        self._own_tool_names: dict[str, frozenset[str]] = {}
         # The root agent's summarization middleware, which compact() uses.
         self._root_summarization: ReportingSummarizationMiddleware | None = None
 
@@ -281,6 +286,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             if config.mcp_servers:
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
+        self._own_tool_names = {
+            name: frozenset(t.name for t in own if t.name not in KEPT_TOOLS)
+            for name, own in tools.items()
+        }
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
         root = self._root_agent_name  # from the graph the base validated
         index_wanted = self._memory_index_wanted(root)
@@ -428,6 +437,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root = None
         self._agent_graphs = {}
         self._root_summarization = None
+        self._own_tool_names = {}
         self._pending_notices = []
         sessions, self._mcp = self._mcp, MCPSessions()
         return [("mcp_sessions", sessions.aclose)]
@@ -444,6 +454,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._checkpointer = None
         self._sessions = None
         return [("checkpointer", functools.partial(self._close_connection, connection))]
+
+    async def _agent_tool_names(self, agent: str) -> frozenset[str]:
+        """The names a ``task`` call's ``tools`` may give for ``agent``: its built tools'."""
+        names = self._own_tool_names.get(agent)
+        return names if names is not None else await super()._agent_tool_names(agent)
 
     async def _close_connection(self, connection: "AbstractAsyncContextManager | None") -> None:
         """Exit what owns the checkpointer's and the index's connections.
