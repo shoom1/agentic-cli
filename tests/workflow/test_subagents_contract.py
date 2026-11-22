@@ -6317,7 +6317,8 @@ class TestAFreeTypeListedFirst:
 
 
 #: ``task``'s declaration for ``team()``'s coordinator, as both backends send it
-#: with the default policy: what an app that starts no type at run time keeps.
+#: with the default policy: what an app that starts no type at run time keeps,
+#: and the ``tools`` every call may narrow its run to.
 TEAM_TASK = {
     "description": (
         "Hand a task to a sub-agent. The sub-agent works on it on its own, with its own "
@@ -6352,6 +6353,13 @@ TEAM_TASK = {
                 ),
             },
             "done_when": {"type": "string", "description": "The criteria for the task to be done."},
+            "tools": {
+                "type": "array", "items": {"type": "string"},
+                "description": (
+                    "Optional: names of the agent's own tools to give this task, to narrow "
+                    "it; leave it out for all of them."
+                ),
+            },
         },
         "required": ["agent_type", "title", "objective"],
     },
@@ -6370,7 +6378,8 @@ def agent_types(declared: dict[str, Any] | None) -> list[str]:
 
 
 class TestTheDefaultPolicyKeepsTask:
-    """With nothing started at run time, ``task`` is what it was, byte for byte."""
+    """With nothing started at run time, ``task`` is what it was, byte for byte,
+    but for the ``tools`` argument every call has."""
 
     async def test_its_schema_and_description(self, make_crew):
         crew = make_crew(team(), coordinator=[says("Hi.")])

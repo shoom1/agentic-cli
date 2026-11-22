@@ -12,13 +12,15 @@ start a run is a ``BriefError``, whose text is the call's error result.
 ``task``'s schema and description, the same for both backends, made for the
 types one run may start (``task_offer``, ``Delegations.offered``);
 ``follow_up_parameters`` and ``follow_up_description`` are the parent's other
-tools' (``message_agent``, ``stop_agent``, ``check_agents``).
+tools' (``message_agent``, ``stop_agent``, ``check_agents``). Every call may
+narrow its run's tools (``tools``), and one to a type with model choices may
+pick one (``model``), which ``read_choices`` checks.
 """
 
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -33,8 +35,33 @@ logger = Loggers.workflow()
 #: A brief's fields besides its title, in the order a task message lays them out.
 BRIEF_FIELDS = ("objective", "deliverable", "constraints", "known", "done_when")
 
-#: ``task``'s arguments, in the order its schema lists them.
-_ARGUMENTS = ("agent_type", "title", *BRIEF_FIELDS)
+#: ``task``'s arguments, in the order its schema lists them (``model`` only for
+#: types with model choices).
+_ARGUMENTS = ("agent_type", "title", *BRIEF_FIELDS, "tools", "model")
+
+#: What ``task``'s schema tells the model of ``tools``.
+TOOLS_DESCRIPTION = (
+    "Optional: names of the agent's own tools to give this task, to narrow it; "
+    "leave it out for all of them."
+)
+
+#: What ``task``'s schema tells the model of ``model``, when a type has choices.
+MODEL_DESCRIPTION = (
+    "Optional: one of the agent's model choices (named with it below) to run this "
+    "task on; leave it out for its own model."
+)
+
+#: What a call is told whose ``tools`` are not some of the type's own.
+TOOLS_ERROR = "The tools for '{agent_type}' must be some of its own: {names}."
+
+#: What a call is told that narrows the tools of a type that has none of its own.
+NO_TOOLS_ERROR = "'{agent_type}' has no tools of its own; leave tools out."
+
+#: What a call is told whose ``model`` is none of the type's choices.
+MODEL_ERROR = "The model for '{agent_type}' must be one of its model choices: {names}."
+
+#: What a call is told that names a model for a type with no choices.
+NO_MODEL_CHOICES_ERROR = "'{agent_type}' has no model choices; leave model out."
 
 #: What ``task``'s schema tells the model of each field of the brief.
 _FIELD_DESCRIPTIONS = {
@@ -257,6 +284,51 @@ def read_brief(
     return config, Brief(**texts)
 
 
+def read_choices(
+    arguments: Mapping[str, Any],
+    config: AgentConfig,
+    own_tools: Collection[str] = (),
+) -> tuple[frozenset[str] | None, str | None]:
+    """The tools and the model a ``task`` call gives its run: None each when left out (or null).
+
+    ``tools`` are some of the type's own: ``own_tools`` are the names its
+    backend gives it (the state and delegation tools left out), and none at
+    all is a narrowing too. ``model`` is one of the type's ``model_choices``,
+    as written (stripped). Read after ``read_brief``, before the run counts;
+    the tools are read first.
+
+    Raises:
+        BriefError: ``tools`` are not a list of the names of the type's own
+            tools (the message lists them), or the type has none; ``model`` is not
+            one of its choices (the message lists them), or it has none.
+    """
+    agent_type = config.name
+    tools: frozenset[str] | None = None
+    given = arguments.get("tools")
+    if given is not None:
+        if not own_tools and given != []:
+            raise BriefError(NO_TOOLS_ERROR.format(agent_type=agent_type))
+        if not isinstance(given, list) or not all(
+            isinstance(name, str) and name in own_tools for name in given
+        ):
+            raise BriefError(
+                TOOLS_ERROR.format(agent_type=agent_type, names=", ".join(sorted(own_tools)))
+            )
+        tools = frozenset(given)
+
+    model: str | None = None
+    chosen = arguments.get("model")
+    if chosen is not None:
+        if not config.model_choices:
+            raise BriefError(NO_MODEL_CHOICES_ERROR.format(agent_type=agent_type))
+        if not isinstance(chosen, str) or chosen.strip() not in config.model_choices:
+            raise BriefError(
+                MODEL_ERROR.format(agent_type=agent_type, names=", ".join(config.model_choices))
+            )
+        model = chosen.strip()
+    return tools, model
+
+
 def task_parameters(types: Mapping[str, AgentConfig]) -> dict[str, Any]:
     """``task``'s arguments, as a JSON schema object: both backends build its schema from this.
 
@@ -264,6 +336,8 @@ def task_parameters(types: Mapping[str, AgentConfig]) -> dict[str, Any]:
     named in its description with what it does; then the brief's title and
     fields. The type, the title and the objective are required: what else a
     type needs of the brief is said in its line, and ``read_brief`` checks it.
+    Then ``tools``, which every call may give, and ``model``, only when a type
+    in ``types`` has model choices (``read_choices`` checks both).
     """
     lines = "\n".join(_type_line(name, config) for name, config in types.items())
     properties: dict[str, Any] = {
@@ -275,6 +349,13 @@ def task_parameters(types: Mapping[str, AgentConfig]) -> dict[str, Any]:
     }
     for name in ("title", *BRIEF_FIELDS):
         properties[name] = {"type": "string", "description": _FIELD_DESCRIPTIONS[name]}
+    properties["tools"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": TOOLS_DESCRIPTION,
+    }
+    if any(config.model_choices for config in types.values()):
+        properties["model"] = {"type": "string", "description": MODEL_DESCRIPTION}
     return {
         "type": "object",
         "properties": properties,
@@ -378,8 +459,8 @@ def _type_line(name: str, config: AgentConfig, *, warn: bool = False) -> str:
     """How ``task`` offers ``config``: ``- <name> (<notes>): <description>``.
 
     The notes say that an inheriting type sees the caller's conversation and
-    which brief fields the type needs beyond the title and the objective. A
-    type without a description is "The <name> agent.", logged when ``warn``.
+    which brief fields the type needs beyond the title and the objective, and
+    names its model choices, last. A type without a description is "The <name> agent.", logged when ``warn``.
     """
     description = config.description.strip()
     if not description:
@@ -392,5 +473,7 @@ def _type_line(name: str, config: AgentConfig, *, warn: bool = False) -> str:
     more = [field for field in BRIEF_FIELDS[1:] if field in config.brief_required]
     if more:
         notes.append(f"its brief also needs: {', '.join(more)}")
+    if config.model_choices:
+        notes.append(f"model choices: {', '.join(config.model_choices)}")
     head = f"- {name} ({'; '.join(notes)})" if notes else f"- {name}"
     return f"{head}: {description}"

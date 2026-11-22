@@ -320,7 +320,7 @@ class TestDelegation:
         schema = coordinator.tool_schema("task")
         assert set(schema["parameters"]["properties"]) == {
             "agent_type", "title", "objective", "deliverable", "constraints", "known",
-            "done_when",
+            "done_when", "tools",
         }
         assert schema["parameters"]["required"] == ["agent_type", "title", "objective"]
 
