@@ -6088,3 +6088,100 @@ class TestTheMarkAUsersRunBrought:
         assert before is False
         assert any(e.type is EventType.ERROR for e in events)
         assert await crew.marked() is True
+
+
+# -- types started at run time -------------------------------------------------------
+
+#: Agents may start a type at run time: from the root alone (``max_spawn_depth`` 1).
+SPAWNING = SubAgentPolicy(spawn_sources={"agent"})
+
+
+def helper(**fields: Any) -> AgentConfig:
+    """A free type agents may start: ``spawnable_by`` set, in no ``sub_agents`` list."""
+    return agent("helper", spawnable_by=fields.pop("spawnable_by", frozenset({"agent"})),
+                 description="Helps with one thing.", **fields)
+
+
+def spawn_team(**fields: Any) -> list[AgentConfig]:
+    """``team()`` and the helper agents may start, which looks things up."""
+    return [*team(), helper(tools=(contract_lookup,), **fields)]
+
+
+class TestATypeStartedAtRunTime:
+    async def test_the_root_starts_one(self, make_crew):
+        crew = make_crew(
+            spawn_team(), subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "helper-1", "run": "helper-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Helped.", "error": None,
+        }
+        (record,) = crew.records()
+        assert (record.ref.instance, record.ref.depth, record.ref.parent_run,
+                record.started_by) == ("helper-1", 1, None, "agent:root")
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.agent, instance.parent, instance.depth, instance.status) == (
+            "helper", "root", 1, INSTANCE_IDLE
+        )
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]
+
+
+class TestATypeNotOffered:
+    """What a run is not offered it cannot start: a call naming it is an
+    unknown type, and no run starts."""
+
+    @pytest.mark.parametrize("sources, starts", [({"agent", "user"}, True), ({"user"}, False)])
+    async def test_only_while_the_policy_lets_agents_start_it(self, make_crew, sources, starts):
+        crew = make_crew(
+            spawn_team(spawnable_by=frozenset({"agent", "user"})),
+            subagents=SubAgentPolicy(spawn_sources=sources),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        events = await crew.turn()
+
+        read = json.loads(crew.results_read("coordinator")["c1"])
+        if starts:
+            assert (read["status"], read["agent"]) == (RUN_COMPLETED, "helper-1")
+        else:
+            assert read == {
+                "success": False,
+                "error": "Unknown agent_type 'helper': the agents you can delegate to are "
+                         "researcher.",
+            }
+            assert (runs_of(events), crew.records(), crew.requests("helper")) == ([], [], 0)
+
+    async def test_past_the_depth_while_a_static_tree_delegates_at_every_level(self, make_crew):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("researcher",)),
+             agent("researcher", sub_agents=("checker",)),
+             agent("checker", tools=(contract_lookup,)),
+             helper()],
+            subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help.", "c1")),
+                         calls(delegate("researcher", "Find X.", "c2")), says("Done.")],
+            researcher=[calls(delegate("helper", "Help.", "r1")),
+                        calls(delegate("checker", "Check X.", "r2")), says("X is 42.")],
+            checker=[says("Checked.")],
+            helper=[says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator", 1)["c1"])["agent"] == "helper-1"
+        assert json.loads(crew.results_read("researcher", 1)["r1"]) == {
+            "success": False,
+            "error": "Unknown agent_type 'helper': the agents you can delegate to are checker.",
+        }
+        assert [(r.ref.instance, r.ref.depth, r.status) for r in crew.records()] == [
+            ("helper-1", 1, RUN_COMPLETED), ("researcher-1", 1, RUN_COMPLETED),
+            ("checker-1", 2, RUN_COMPLETED),
+        ]
+        assert crew.requests("helper") == 1

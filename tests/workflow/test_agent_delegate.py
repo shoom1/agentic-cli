@@ -41,7 +41,14 @@ from agentic_cli.workflow.agents import (
     SubAgentPolicy,
 )
 from agentic_cli.workflow.agents import delegate as delegate_module
-from agentic_cli.workflow.agents.brief import INHERITED_CONTEXT_NOTE, Brief, task_message
+from agentic_cli.workflow.agents.brief import (
+    DEPTH_SENTENCE,
+    INHERITED_CONTEXT_NOTE,
+    Brief,
+    task_description,
+    task_message,
+    task_parameters,
+)
 from agentic_cli.workflow.agents.delegate import (
     RUNS_PER_TURN_ERROR,
     AgentRun,
@@ -3708,3 +3715,179 @@ class TestTheUsersClose:
             assert await made.close_by_user(CONVERSATION, "researcher-1") == ["researcher-1"]
 
         await asyncio.wait_for(turn.task, 5)
+
+
+# -- what a run may start: its own sub-agents, and the types started at run time -------
+
+HELPER = AgentConfig(name="helper", prompt="p", description="Helps.",
+                     spawnable_by=frozenset({"agent"}))
+NOTER = AgentConfig(name="noter", prompt="p", description="Notes.", inherit_context=True,
+                    spawnable_by=frozenset({"agent"}))
+ASKED = AgentConfig(name="asked", prompt="p", description="Answers.",
+                    spawnable_by=frozenset({"user"}))
+PLANNER = AgentConfig(name="planner", prompt="p", description="Plans.", sub_agents=["leaf"],
+                      spawnable_by=frozenset({"agent"}))
+SPAWNING = {**TYPES, "helper": HELPER, "noter": NOTER, "asked": ASKED}
+AGENTS = SubAgentPolicy(spawn_sources={"agent", "user"})
+HELP = {"agent_type": "helper", "title": "Help", "objective": "Help with X."}
+
+
+def at(depth: int, agent: str = "middle") -> RunRef:
+    """A run of ``agent`` at ``depth``."""
+    return RunRef(agent=agent, instance=f"{agent}-1", run=f"{agent}-1#1", parent_run=None,
+                  depth=depth)
+
+
+class TestWhatARunMayStart:
+    """``offered``: a run's own sub-agents in their order, then, while the
+    run is above ``max_spawn_depth`` and does not inherit, the types agents
+    may start at run time; an inheriting one only for the root."""
+
+    def test_with_the_default_policy_its_own_sub_agents(self):
+        made = delegations(answering()[0], types=SPAWNING)
+        assert list(made.offered("coordinator", 0)) == ["researcher", "middle", "reader"]
+        assert list(made.offered("middle", 1)) == ["leaf"]
+        assert made.offered("researcher", 1) == {}
+        assert made.offered("coordinator", 0) == made.sub_agents("coordinator")
+
+    def test_the_root_its_own_then_the_run_time_types_in_config_order(self):
+        made = delegations(answering()[0], types=SPAWNING, policy=AGENTS)
+        offered = made.offered("coordinator", 0)
+        assert list(offered) == ["researcher", "middle", "reader", "helper", "noter"]
+        assert offered["helper"] is HELPER
+
+    def test_past_the_depth_its_own_alone(self):
+        made = delegations(answering()[0], types=SPAWNING, policy=AGENTS)
+        assert list(made.offered("middle", 1)) == ["leaf"]
+        assert made.offered("researcher", 1) == {}
+
+    def test_below_the_root_no_inheriting_type(self):
+        deeper = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=3)
+        made = delegations(answering()[0], types=SPAWNING, policy=deeper)
+        assert list(made.offered("middle", 1)) == ["leaf", "helper"]
+        assert list(made.offered("researcher", 2)) == ["helper"]
+        assert made.offered("researcher", 3) == {}
+
+    def test_an_inheriting_run_starts_none(self):
+        deeper = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=3)
+        made = delegations(answering()[0], types=SPAWNING, policy=deeper)
+        assert made.offered("reader", 1) == {}
+        assert made.offered("noter", 1) == {}
+
+    def test_a_type_that_is_its_own_too_is_offered_once_in_its_place(self):
+        types = {**SPAWNING, "researcher": AgentConfig(
+            name="researcher", prompt="p", spawnable_by=frozenset({"agent"}))}
+        made = delegations(answering()[0], types=types, policy=AGENTS)
+        assert list(made.offered("coordinator", 0)) == [
+            "researcher", "middle", "reader", "helper", "noter",
+        ]
+
+    def test_an_unknown_agent_starts_none(self):
+        made = delegations(answering()[0], types=SPAWNING, policy=AGENTS)
+        assert made.offered("nobody", 0) == {}
+
+
+#: A lead whose own sub-agent has none, and the types agents may start.
+LEAD = AgentConfig(name="lead", prompt="p", sub_agents=["researcher"])
+LED = {"lead": LEAD, "researcher": TYPES["researcher"], "helper": HELPER, "noter": NOTER}
+
+
+class TestTheTaskOffer:
+    """``task_offer``: what ``task`` declares for a run, or None when it offers nothing."""
+
+    def test_the_schema_and_description_of_what_the_run_may_start(self):
+        made = delegations(answering()[0], types=LED, policy=AGENTS)
+
+        offer = made.task_offer("lead", 0)
+
+        assert list(offer.types) == ["researcher", "helper", "noter"]
+        assert offer.parameters == task_parameters(offer.types)
+        assert offer.description == task_description(offer.types, AGENTS, depth_sentence=True)
+
+    def test_none_when_it_offers_nothing(self):
+        made = delegations(answering()[0], types=SPAWNING, policy=AGENTS)
+        assert made.task_offer("researcher", 1) is None
+        assert made.task_offer("middle", 1) is not None
+
+    def test_the_default_policy_says_what_it_said(self):
+        made = delegations(answering()[0], types=LED)
+        offer = made.task_offer("lead", 0)
+        assert offer.description == task_description(made.sub_agents("lead"), SubAgentPolicy())
+        assert DEPTH_SENTENCE not in offer.description
+
+    @pytest.mark.parametrize("policy, types, caller, depth, says", [
+        # What the root starts may start nothing: it says so.
+        (AGENTS, LED, "lead", 0, True),
+        # One level more: what it starts may.
+        (SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2), LED, "lead", 0, False),
+        # A run one level above the limit.
+        (SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2), LED, "researcher", 1, True),
+        # Its own sub-agents alone: no run-time type, no sentence.
+        (AGENTS, SPAWNING, "middle", 1, False),
+        # A type it offers has sub-agents of its own: that one may start them.
+        (AGENTS, SPAWNING, "coordinator", 0, False),
+        (AGENTS, {**LED, "planner": PLANNER, "leaf": TYPES["leaf"]}, "lead", 0, False),
+    ])
+    def test_the_depth_sentence(self, policy, types, caller, depth, says):
+        made = delegations(answering()[0], types=types, policy=policy)
+        assert (DEPTH_SENTENCE in made.task_offer(caller, depth).description) is says
+
+
+class TestADelegationToATypeStartedAtRunTime:
+    async def test_the_root_starts_one(self):
+        hook, asked = answering("Helped.")
+        runs = AgentRuns()
+
+        result, events = await delegated(
+            delegations(hook, runs=runs, types=SPAWNING, policy=AGENTS), request(HELP)
+        )
+
+        assert result.result == {
+            "success": True, "agent": "helper-1", "run": "helper-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Helped.", "error": None,
+        }
+        (run,) = asked
+        assert (run.ref.depth, run.ref.parent_run, run.config) == (1, None, HELPER)
+        assert events[0].metadata["started_by"] == "agent:root"
+        (instance,) = runs.instances(CONVERSATION)
+        assert (instance.instance, instance.parent, instance.depth) == ("helper-1", "root", 1)
+
+    async def test_one_the_policy_does_not_let_agents_start_is_unknown(self):
+        hook, asked = answering()
+        made = delegations(hook, types=SPAWNING, policy=SubAgentPolicy(spawn_sources={"user"}))
+
+        result, events = await delegated(made, request(HELP))
+
+        assert result.result == {
+            "success": False,
+            "error": "Unknown agent_type 'helper': the agents you can delegate to are "
+                     "researcher, middle, reader.",
+        }
+        assert (asked, events) == ([], [])
+
+    async def test_past_the_depth_it_is_unknown(self):
+        hook, asked = answering()
+        made = delegations(hook, types=SPAWNING, policy=AGENTS)
+
+        result, events = await delegated(
+            made, request(HELP, caller=at(1), caller_agent="middle", call_id="m1")
+        )
+
+        assert result.result["error"] == (
+            "Unknown agent_type 'helper': the agents you can delegate to are leaf."
+        )
+        assert (asked, events) == ([], [])
+
+    async def test_a_run_above_the_depth_starts_one_a_level_down(self):
+        hook, asked = answering()
+        deeper = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2)
+        made = delegations(hook, types=SPAWNING, policy=deeper)
+
+        result, events = await delegated(
+            made, request(HELP, caller=at(1, "researcher"), caller_agent="researcher")
+        )
+
+        assert result.result["agent"] == "helper-1"
+        (run,) = asked
+        assert (run.ref.depth, run.ref.parent_run) == (2, "researcher-1#1")
+        assert events[0].metadata["started_by"] == "agent:researcher-1"

@@ -5,8 +5,9 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 ``deepagents/task_tool.py::build_task_tool``) as a ``DelegationRequest``.
 ``delegate``:
 
-- reads the brief against the caller's own sub-agents (``brief.read_brief``):
-  a brief that cannot start a run is the call's error result, and nothing
+- reads the brief against what the calling run may start (``brief.read_brief``;
+  ``offered``: its own sub-agents, then, above ``max_spawn_depth``, the types
+  agents start at run time, ``agents/spawn.py``): a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
 - counts the run against its turn's (``SubAgentPolicy.max_runs_per_turn``,
   runs at any depth: ``sessions.runs_this_turn``): a call past it is the
@@ -111,7 +112,13 @@ from typing import TYPE_CHECKING, Any
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
-from agentic_cli.workflow.agents.brief import BriefError, read_brief, task_message
+from agentic_cli.workflow.agents.brief import (
+    BriefError,
+    TaskOffer,
+    read_brief,
+    task_message,
+    task_offer,
+)
 from agentic_cli.workflow.agents.control import PARENT_CAUSE, RunControl
 from agentic_cli.workflow.agents.envelope import (
     CANCELLED_BY,
@@ -143,6 +150,12 @@ from agentic_cli.workflow.agents.runs import (
     run_title,
 )
 from agentic_cli.workflow.agents.slots import NEW, Slot, SlotPool
+from agentic_cli.workflow.agents.spawn import (
+    AGENT_SOURCE,
+    depth_sentence_applies,
+    may_spawn,
+    spawnable,
+)
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.sessions import (
     RunRef,
@@ -491,7 +504,8 @@ class Delegations:
         runs: The manager's runs, which name and record each run.
         policy: How the manager's sub-agents run.
         types: Every agent type, by name: a caller may start its own
-            sub-agents (``AgentConfig.sub_agents``).
+            sub-agents (``AgentConfig.sub_agents``) and, as the policy
+            allows, the types agents may start at run time (``offered``).
         hook: Runs one run (``BaseWorkflowManager._run_agent``).
         ledgers: The manager's usage ledgers: a run's end carries what it
             used, by model, and its token limit counts its side calls
@@ -558,6 +572,45 @@ class Delegations:
         names = caller.sub_agents if caller is not None else ()
         return {name: self._types[name] for name in names if name in self._types}
 
+    def offered(self, caller_agent: str, depth: int) -> dict[str, AgentConfig]:
+        """The types a run of ``caller_agent`` at ``depth`` may start with ``task``.
+
+        Its own sub-agents in their order, then, while ``depth`` is below
+        ``max_spawn_depth`` and the caller does not inherit its parent's
+        conversation, the types agents may start at run time
+        (``spawnable``), those not already its own, in config order. An
+        inheriting type is offered to the root (depth 0) alone: only the
+        root's own sub-agents inherit.
+        """
+        offered = self.sub_agents(caller_agent)
+        caller = self._types.get(caller_agent)
+        if caller is None or caller.inherit_context or not may_spawn(depth, self.policy):
+            return offered
+        for name in spawnable(list(self._types.values()), self.policy, AGENT_SOURCE):
+            config = self._types[name]
+            if name not in offered and (depth == 0 or not config.inherit_context):
+                offered[name] = config
+        return offered
+
+    def task_offer(
+        self, caller_agent: str, depth: int, *, warn: bool = False
+    ) -> TaskOffer | None:
+        """What ``task`` offers a run of ``caller_agent`` at ``depth``; None when it may start nothing.
+
+        Both backends declare ``task`` from this: the schema and description
+        of ``offered``'s types, with the sentence that sub-agents cannot
+        start sub-agents when what the run starts could not.
+        """
+        types = self.offered(caller_agent, depth)
+        if not types:
+            return None
+        own = self._types[caller_agent].sub_agents
+        return task_offer(
+            types, self.policy,
+            depth_sentence=depth_sentence_applies(types, own, depth, self.policy),
+            warn=warn,
+        )
+
     async def delegate(self, request: DelegationRequest) -> Delegated:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
@@ -567,8 +620,11 @@ class Delegations:
         of the caller's task (the turn's) ends the run ``interrupted`` once
         it has stopped, and goes on.
         """
+        depth = request.caller.depth if request.caller is not None else 0
         try:
-            config, brief = read_brief(request.arguments, self.sub_agents(request.caller_agent))
+            config, brief = read_brief(
+                request.arguments, self.offered(request.caller_agent, depth)
+            )
         except BriefError as error:
             return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
         refused = self._past_runs_per_turn(config.name)
