@@ -15,6 +15,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, fields, replace
 
+#: Who may start an agent type at run time: an agent's ``task`` call, a skill
+#: an agent loads, the user. A run records it as ``agent:<instance>``,
+#: ``skill:<name>`` or ``user``.
+SPAWN_SOURCES = ("agent", "skill", "user")
+
 
 def _check_count(owner: str, name: str, value: object, *, optional: bool) -> None:
     """Refuse ``value`` unless it is a positive int (or None, when ``optional``).
@@ -107,9 +112,16 @@ class SubAgentPolicy:
         max_open: How many sub-agent instances a conversation keeps open
             (``idle`` or ``stopped``) between their runs; past it, as a run
             ends, the oldest idle one (by its last run's end) is closed.
-        follow_ups: Whether every agent with sub-agents gets
+        follow_ups: Whether every agent that can have sub-agents gets
             ``message_agent``, ``stop_agent`` and ``check_agents`` beside
             ``task``; False, ``task`` alone.
+        spawn_sources: Who may start an agent type at run time: a type whose
+            ``spawnable_by`` names a source this set holds may be started by
+            it. Empty by default (nothing is started at run time); a set,
+            list or tuple is kept as a frozenset.
+        max_spawn_depth: A run at depth ``d`` (the root's is 0) may start an
+            agent type at run time while ``d`` is below this; the configured
+            tree keeps its depth.
     """
 
     max_active: int = 4
@@ -117,6 +129,8 @@ class SubAgentPolicy:
     limits: AgentLimits = DEFAULT_LIMITS
     max_open: int = 20
     follow_ups: bool = False
+    spawn_sources: frozenset[str] = frozenset()
+    max_spawn_depth: int = 1
 
     def __post_init__(self) -> None:
         _check_count("SubAgentPolicy", "max_active", self.max_active, optional=False)
@@ -130,6 +144,20 @@ class SubAgentPolicy:
                 f"SubAgentPolicy.limits must be an AgentLimits, not {self.limits!r}."
             )
         _check_count("SubAgentPolicy", "max_open", self.max_open, optional=False)
+        object.__setattr__(self, "spawn_sources", _sources(self.spawn_sources))
+        _check_count("SubAgentPolicy", "max_spawn_depth", self.max_spawn_depth, optional=False)
+
+
+def _sources(value: object) -> frozenset[str]:
+    """``value`` as a frozenset of sources, or a ``ValueError`` naming it."""
+    if isinstance(value, (set, frozenset, list, tuple)) and all(
+        isinstance(item, str) and item in SPAWN_SOURCES for item in value
+    ):
+        return frozenset(value)
+    allowed = ", ".join(repr(source) for source in SPAWN_SOURCES)
+    raise ValueError(
+        f"SubAgentPolicy.spawn_sources has {value!r}: each source must be one of {allowed}."
+    )
 
 
 def as_policy(subagents: object) -> SubAgentPolicy:
