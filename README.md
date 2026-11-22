@@ -1286,7 +1286,7 @@ configs = [coordinator, researcher, analyst]
 | `model` | str \| None | A model reference (`anthropic:claude-sonnet-5-5`), a bare model id, or a role (`fast`); without one, the `default` role (see [Models and providers](#models-and-providers)) |
 | `model_settings` | ModelSettings \| None | The agent's thinking, `max_tokens`, sampling settings and `extra` (see [Thinking](#thinking)) |
 | `mcp_servers` | list[MCPServerConfig] | MCP servers whose tools the agent gets (ADK and Deep Agents) |
-| `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory) |
+| `skills` | list[str] | Agent Skills: a skill folder's absolute path, or a name under `skills_dirs` (ADK and Deep Agents; never looked up in the working directory). A skill whose frontmatter names an agent type (`agent: researcher`) starts a run of it when loaded; see [Sub-agent context](#sub-agent-context) |
 | `inherit_context` | bool | What a sub-agent sees when its parent delegates to it: its task alone (`False`, the default) or its parent's conversation too (`True`); see [Sub-agent context](#sub-agent-context) (ADK and Deep Agents) |
 | `brief_required` | tuple[str, ...] | The brief fields a delegation to this agent must fill (default `("objective",)`; `title` and `objective` are always required): any of `deliverable`, `constraints`, `known`, `done_when`. A `task` call that leaves one empty starts no run, and its caller reads which. Not on the root |
 | `limits` | AgentLimits \| None | The agent's own per-run limits (`max_model_calls`, `timeout` in seconds, `max_tokens`), laid over the app's `SubAgentPolicy.limits` field by field: each of its runs works under them, and one past a limit ends (see [Sub-agent context](#sub-agent-context)). Not on the root |
@@ -1477,6 +1477,36 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   # The coordinator's call: {"agent_type": "researcher", "title": "Look it up",
   #   "objective": "...", "tools": ["web_search"], "model": "fast"}
   ```
+- **Skills that start an agent.** A skill may name an agent type at the top
+  of its `SKILL.md` frontmatter, `agent: researcher`; with the type's
+  `spawnable_by={"skill"}` and `SubAgentPolicy(spawn_sources={"skill"})`,
+  an agent that loads the skill starts a run of that type instead of
+  reading the skill's instructions. The run's task message is the skill's
+  body under its name (`# Task: research`, `## Objective`), its parent the
+  loading agent's run (`started_by: skill:research`), and it counts toward
+  `max_runs_per_turn`; the `load_skill` call's result is the run's envelope
+  with `"skill": "research"` added. The skill gives no tools and no system
+  prompt: the run has its type's. A load is refused, no run started, when
+  the type is not one of the app's, when the type or the policy does not
+  let a skill start it, or from a run that may start no type
+  (`max_spawn_depth`; an inheriting agent starts none, and an inheriting
+  type is started by the main agent alone): `{"success": false, "error":
+  "The skill 'research' starts the agent 'researcher', which this app does
+  not let a skill start."}`. Such a skill is also warned of as its agent is
+  built (`skill_agent_not_startable`), and the app still starts.
+
+  ```markdown
+  ---
+  name: todo-audit
+  description: List the project's open TODO comments.
+  agent: auditor
+  ---
+  Find every TODO comment under src/, group them by file, and report them
+  as a list with each one's line number.
+  ```
+
+  Its body is all a fresh type's run reads (an inheriting type reads the
+  conversation too), so write it as a task that stands on its own.
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
   every agent that can have sub-agents (its own, or types it may start at run
   time) gets three more tools beside `task` (with the

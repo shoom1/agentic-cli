@@ -575,6 +575,38 @@ the start of the entry's title.
 
 ### Added
 
+- **A skill that starts an agent: the frontmatter key `agent`, on both
+  backends.** A skill's `SKILL.md` may name one of the app's agent types at
+  the top of its frontmatter (`agent: researcher`). When an agent loads it
+  (`load_skill`), a run of that type starts instead of the skill's
+  instructions being handed back: its task message is the skill's body
+  under its name (`# Task: <skill>`, `## Objective`), its parent the
+  loading agent's run, `started_by: skill:<skill>`, counted toward
+  `max_runs_per_turn` as a `task` call's run is, and the call's result is
+  the run's envelope with `"skill": "<skill>"` added, shown as a
+  delegation. The skill gives no tools and no system prompt: the run has
+  its type's own. The app allows it as for any type started at run time:
+  the type's `spawnable_by` and `SubAgentPolicy.spawn_sources` both hold
+  `"skill"`, and the loading run is one that may start a type
+  (`max_spawn_depth`: by default the main agent alone; an inheriting agent
+  starts none, and an inheriting type is started by the main agent alone).
+  Otherwise the load starts no run and its result says why: `{"success":
+  false, "error": "The skill 'research' starts the agent 'helper', which
+  this app does not let a skill start."}` (or `is not one of this app's
+  agent types`, or `cannot be started here: sub-agents cannot start
+  sub-agents`), and a skill whose agent its agent's first run could not
+  start is warned of as the agent is built (`skill_agent_not_startable`);
+  the app still starts. A skill without the key loads as before; one whose
+  frontmatter already had a top-level `agent` key for another use now asks
+  for that agent type. `agentic_cli.tools.skills` (provisional):
+  `SKILL_AGENT_KEY`, `skill_agent`, `skill_started_by`, `SkillAgents`;
+  `make_skill_toolset(..., agents=)` and `make_skill_tools(..., agents=)`
+  take an agent's `SkillAgents` (without it every skill loads as ADK
+  loads it), and the manager's delegations' `types` lists every agent
+  type. On ADK the framework's `load_skill` (`SkillLoadTool`, with ADK's
+  declaration) takes the place of ADK's in an agent's toolset only when one
+  of its skills names an agent type.
+
 - **`AgentConfig.model_choices`: the models a delegation may run a type on
   instead of its own, on both backends.** References, bare model ids or
   roles (`model_choices=("fast",)`; the agent YAML's `model_choices:
