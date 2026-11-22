@@ -31,7 +31,7 @@ from prompt_toolkit.history import InMemoryHistory
 
 from thinking_prompt import AppInfo, ThinkingPromptSession, ThinkingPromptStyles
 
-from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view
+from agentic_cli.cli.agent_view import AgentView, bind_ctrl_c, leave_view, open_view, start_view
 from agentic_cli.cli.commands import Command, CommandRegistry
 from agentic_cli.cli.dialogs import serialize_dialogs
 from agentic_cli.cli.message_processor import MessageProcessor, _says_so_when_stopped
@@ -652,6 +652,20 @@ class BaseCLIApp:
             that could not be read, or a workflow that does not run.
         """
         return await open_view(self, instance)
+
+    async def start_agent(self, agent_type: str, objective: str) -> bool:
+        """Start a new sub-agent of ``agent_type`` on ``objective`` and open its view (provisional).
+
+        What ``/agent new <type> <objective>`` calls (``cli/agent_view.py``):
+        the workflow's ``start_instance``, whose run streams in the new
+        instance's view. In a view it leaves that one first.
+
+        Returns:
+            Whether the view opened. False, said: a type the user may not
+            start, a blank objective, or a conversation another process has
+            open.
+        """
+        return await start_view(self, agent_type, objective)
 
     async def leave_agent_view(self) -> bool:
         """Leave the open sub-agent's view, back to the main conversation

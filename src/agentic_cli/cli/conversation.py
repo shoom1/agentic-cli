@@ -640,6 +640,51 @@ class ConversationCore:
             turns=False,
         )
 
+    async def start_instance(
+        self,
+        agent_type: str,
+        objective: str,
+        parts: TurnParts,
+        *,
+        opens: Callable[[str], Awaitable[None]] | None = None,
+    ) -> bool:
+        """Start a new sub-agent instance for the user (``/agent new``), its first run in its view.
+
+        A write to the conversation under the turn lock, as ``run_instance``
+        is: held to write, the conversations ``/new`` left dropped around
+        it, ``written`` once it reached a ready workflow, not ``turned``.
+        ``opens`` is called with the new instance's id once its run's start
+        names it (``MessageProcessor.process_start``).
+
+        Args:
+            agent_type: The type to start.
+            objective: The user's objective for it.
+            parts: The app's parts it runs on (the new view's processor).
+            opens: Called once with the new instance's id.
+
+        Returns:
+            Whether it ran: False when another process has the conversation
+            open (said), and nothing ran.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
+                or while it waited for the turn lock.
+        """
+        return await self._write(
+            parts,
+            lambda: parts.processor.process_start(
+                agent_type,
+                objective,
+                workflow_controller=parts.controller,
+                ui=parts.ui,
+                settings=parts.settings,
+                usage_tracker=parts.tracker,
+                session_id=self.session_id,
+                opens=opens,
+            ),
+            turns=False,
+        )
+
     async def tell_root(self, text: str, parts: TurnParts) -> bool:
         """Tell the main agent what the user did in a sub-agent's view, as a turn.
 

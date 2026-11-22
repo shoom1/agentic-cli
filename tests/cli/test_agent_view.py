@@ -19,6 +19,7 @@ view is read-only.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from types import MethodType, SimpleNamespace
 
@@ -61,6 +62,7 @@ from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     SESSION,
     SMALL_ENTRY,
     SMALL_MODEL,
+    STARTING,
     USER,
     Crew,
     agent,
@@ -79,6 +81,7 @@ from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     says,
     until,
     use,
+    user_team,
 )
 
 RULE = "── researcher-1 · researcher · idle ──"
@@ -1011,3 +1014,183 @@ class TestTheMainConversationInAView:
         assert await app.resume_finished_jobs() == 0
         assert crew.requests("coordinator") == 2
         assert [r.job_id for r in jobs.awaiting_resume()] == [record.job_id]
+
+
+# -- /agent new: a new instance's view, its first run streamed there ---------------------
+
+NEW_RULE = "── helper-1 · helper · running ──"
+
+
+async def new_view(make_crew, *, team=None, **crew_args) -> tuple[Crew, BaseCLIApp]:
+    """A crew with a helper only the user may start (``user_team``), and an app
+    in its main conversation."""
+    crew = make_crew(team or user_team(), subagents=STARTING, **crew_args)
+    return crew, await app_on(crew)
+
+
+class TestANewInstancesView:
+    """``/agent new <type> <objective>`` starts an instance for the user
+    (``start_instance``) and opens its view once its run's start names it:
+    the run streams there, a line typed steers it, Ctrl+C is the user's stop
+    and ``/back`` tells the main agent once, as for a follow-up run."""
+
+    async def test_its_view_opens_and_its_first_run_streams_there(self, make_crew):
+        crew, app = await new_view(make_crew, helper=[says("Helped with X.", usage=(900, 30))])
+
+        await typed(app, "/agent new helper Help with X.")
+
+        assert said(app.session, "add_message")[-2:] == ["/agent new helper Help with X.", NEW_RULE]
+        (recap,) = app.session.add_rich.call_args.args
+        assert rows_of(recap) == [
+            ("Title", "Help with X."), ("Objective", "Help with X."),
+            ("Last run", "#1 · running"), ("Tokens", "0 in / 0 out"),
+        ]
+        assert said(app.session, "add_response") == ["Helped with X."]
+        assert app.agent_view.instance == "helper-1"
+        assert app.session.message == "helper-1> "
+        assert status(app).startswith("helper-1 · idle")
+        assert [(r.ref.run, r.status, r.started_by) for r in crew.records()] == [
+            ("helper-1#1", RUN_COMPLETED, "user"),
+        ]
+        assert crew.requests("coordinator") == 0
+
+    async def test_a_line_typed_while_its_first_run_works_is_given_to_that_run(self, make_crew):
+        crew, app = await new_view(
+            make_crew, helper=[calls(use("contract_hold", "h1")), says("X is 42; Z is 9.")],
+        )
+
+        await app.process_input("/agent new helper Hold on.")
+        await asyncio.wait_for(HELD["started"].wait(), 10)
+        await app.process_input("Also find Z.")
+        HELD["go"].set()
+        await settled_or_fail(app)
+
+        assert said(app.session, "add_message")[-2:] == [
+            "Also find Z.", STEERED.format(instance="helper-1"),
+        ]
+        assert crew.last_message("helper", -1) == "Also find Z."
+        assert [r.ref.run for r in crew.records()] == ["helper-1#1"]
+        assert said(app.session, "add_response")[-1] == "X is 42; Z is 9."
+
+    async def test_ctrl_c_stops_its_first_run_the_users_stop(self, make_crew):
+        crew, app = await new_view(
+            make_crew, helper=[calls(use("contract_block", "h1")), says("Went on.")],
+        )
+
+        await app.process_input("/agent new helper Wait here.")
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert app.agent_view.stop() is True
+        await settled_or_fail(app)
+
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_CANCELLED, "user")
+        assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
+        assert app.session.message == "helper-1> "
+        assert status(app).startswith("helper-1 · stopped")
+        await typed(app, "Go on.")
+        assert crew.instances() == [("helper-1", INSTANCE_IDLE)]
+        assert said(app.session, "add_response")[-1] == "Went on."
+
+    async def test_back_tells_the_main_agent_once(self, make_crew):
+        crew, app = await new_view(
+            make_crew, coordinator=[says("Noted: helped.")], helper=[says("Helped with X.")],
+        )
+
+        await typed(app, "/agent new helper Help with X.", "/back")
+
+        latest = crew.manager.instance_result("helper-1", session_id=SESSION)
+        assert latest["result"] == "Helped with X."
+        assert said(app.session, "add_message")[-3:] == [
+            "/back", BACK_RULE, TELLING.format(instance="helper-1"),
+        ]
+        assert crew.last_message("coordinator") == view_notice("helper-1", latest)
+        assert said(app.session, "add_response")[-1] == "Noted: helped."
+        assert app.session.message == ">>> "
+        # Back in its view and out again: nothing new to tell.
+        await typed(app, "/agent helper-1", "/back")
+        assert crew.requests("coordinator") == 1
+
+    async def test_a_type_you_cannot_start_opens_no_view(self, make_crew):
+        crew, app = await new_view(make_crew)
+
+        await typed(app, "/agent new researcher Find X.")
+
+        assert said(app.session, "add_error")[-1] == (
+            "You cannot start 'researcher' here. Types you can start: helper."
+        )
+        assert app.agent_view is None
+        assert app.session.message == ">>> "
+        assert crew.records() == []
+
+    async def test_in_a_view_it_leaves_that_view_first(self, make_crew):
+        crew, app = await in_a_view(
+            make_crew, team=[*follow_team(), *user_team()[2:]], subagents=STARTING,
+            coordinator=[says("Noted.")], researcher=[says("Y is 7.")], helper=[says("Helped.")],
+        )
+
+        await typed(app, "Now find Y.", "/agent new helper Help.")
+
+        assert said(app.session, "add_message")[-4:] == [
+            "/agent new helper Help.", BACK_RULE, TELLING.format(instance="researcher-1"),
+            NEW_RULE,
+        ]
+        assert said(app.session, "add_response")[-2:] == ["Noted.", "Helped."]
+        assert app.agent_view.instance == "helper-1"
+
+    async def test_ctrl_c_before_its_view_opens_stops_the_run_and_opens_none(self, make_crew):
+        """thinking-prompt's Ctrl+C cancels the command while the start waits
+        for the store (before its run started): the run that starts is
+        stopped by the user, said once, and no view opens."""
+        crew, app = await new_view(make_crew, helper=[says("[never asked]")])
+        delegations = crew.manager._delegations
+        read, gate = asyncio.Event(), asyncio.Event()
+        stored = delegations._stored
+
+        async def slow(conversation):
+            read.set()
+            await gate.wait()
+            return await stored(conversation)
+
+        delegations._stored = slow
+
+        command = asyncio.create_task(app.process_input("/agent new helper Go."))
+        await asyncio.wait_for(read.wait(), 10)
+        command.cancel()
+        await asyncio.sleep(0.05)
+        gate.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(command, 10)
+
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_CANCELLED, "user")
+        assert crew.instances() == [("helper-1", INSTANCE_STOPPED)]
+        assert said(app.session, "add_message").count(CANCELLED_LINE) == 1
+        assert app.agent_view is None
+        assert crew.requests("helper") == 0
+
+    async def test_an_interrupt_leaves_it_idle(self, make_crew):
+        """What the app's exit does to the run in view (``AgentView.interrupt``):
+        no stop of the user's."""
+        crew, app = await new_view(
+            make_crew, helper=[calls(use("contract_block", "h1")), says("Went on.")],
+        )
+
+        await app.process_input("/agent new helper Wait here.")
+        await asyncio.wait_for(BLOCKING["started"].wait(), 10)
+        assert app.agent_view.interrupt() is True
+        await settled_or_fail(app)
+
+        (record,) = crew.records()
+        assert (record.status, record.cancelled_by) == (RUN_INTERRUPTED, None)
+        assert crew.instances() == [("helper-1", INSTANCE_IDLE)]
+
+    async def test_it_blocks_no_event_loop(self, make_crew):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+        app = await app_on(crew)
+
+        with no_blocking_calls():
+            await typed(app, "/agent new helper Help.", "/back")
+
+        assert said(app.session, "add_response") == ["Helped.", "Noted."]
