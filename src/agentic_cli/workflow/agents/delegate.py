@@ -180,6 +180,7 @@ from agentic_cli.workflow.agents.runs import (
 from agentic_cli.workflow.agents.slots import NEW, Slot, SlotPool
 from agentic_cli.workflow.agents.spawn import (
     AGENT_SOURCE,
+    USER_SOURCE,
     depth_sentence_applies,
     may_spawn,
     spawnable,
@@ -219,8 +220,15 @@ RUNS_PER_TURN_ERROR = (
 )
 
 
-#: ``started_by`` of a run the user starts (a follow-up from a view).
+#: ``started_by`` of a run the user starts (a follow-up from a view, or
+#: ``/agent new``'s first run).
 USER = "user"
+#: What the user's start of a type they may not start is told (``types``: those
+#: they may, ", "-joined), and the start in an app that lets them start none.
+USER_START_ERROR = "You cannot start '{agent_type}' here. Types you can start: {types}."
+NO_USER_TYPES_ERROR = "This app lets you start no agent types."
+#: The user's start with no objective (not text, or blank).
+NO_OBJECTIVE_ERROR = "A new agent needs an objective."
 #: What a follow-up to an instance its sender may not continue is told.
 NOT_YOURS_ERROR = "'{instance}' is not one of your sub-agents. {yours}"
 YOURS = "Yours: {instances}."
@@ -803,6 +811,68 @@ class Delegations:
                 history=request.history if config.inherit_context else None,
                 tools=request.tools, model=request.model,
             )
+
+    def startable_by_user(self) -> tuple[str, ...]:
+        """The types the user may start (``/agent new``), in config order.
+
+        ``spawnable`` for ``"user"``: the policy's ``spawn_sources`` and the
+        type's ``spawnable_by`` both name the user. An inheriting one too: its
+        parent is the root, whose conversation it reads.
+        """
+        return spawnable(list(self._types.values()), self.policy, USER_SOURCE)
+
+    def user_start_refused(self, agent_type: str, objective: str) -> str | None:
+        """Why the user may not start ``agent_type`` on ``objective``, else None.
+
+        A type they may not start (``startable_by_user``), named with those
+        they may (``NO_USER_TYPES_ERROR`` for none), then an objective that
+        is not text or is blank.
+        """
+        startable = self.startable_by_user()
+        if agent_type not in startable:
+            if not startable:
+                return NO_USER_TYPES_ERROR
+            return USER_START_ERROR.format(agent_type=agent_type, types=", ".join(startable))
+        if not isinstance(objective, str) or not objective.strip():
+            return NO_OBJECTIVE_ERROR
+        return None
+
+    async def start_by_user(
+        self,
+        conversation: SessionRef | None,
+        agent_type: str,
+        objective: str,
+        *,
+        state: Mapping[str, Any] | None = None,
+        history: Callable[[], Any] | None = None,
+    ) -> Delegated:
+        """The user's new instance of ``agent_type`` (``/agent new``), run to its end; its envelope.
+
+        Through ``start``: no caller and no call, so its parent is the root
+        and its depth 1 (``max_spawn_depth`` never refuses it),
+        ``started_by`` the user, counted toward no turn's runs, a working
+        slot taken while it works. Its brief is the objective, titled with
+        its first line (``run_title``). One the user may not start
+        (``user_start_refused``) is the error result, and nothing else
+        happens.
+
+        Args:
+            conversation: The conversation; None: the active turn's.
+            agent_type: The type to start.
+            objective: What the run is to do, as the user wrote it.
+            state: The conversation's shared state (its outside-content
+                mark), which the run starts from.
+            history: Called once, only when the type inherits: the
+                conversation, as the backend reads it.
+        """
+        error = self.user_start_refused(agent_type, objective)
+        if error is not None:
+            return _refused(error)
+        return await self.start(StartRequest(
+            agent_type=agent_type, brief=Brief(title=run_title(objective), objective=objective),
+            started_by=USER, conversation=conversation, state=dict(state or {}),
+            history=history, counted=False,
+        ))
 
     async def follow_up(
         self,
