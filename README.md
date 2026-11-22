@@ -1535,12 +1535,18 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   conversation is opened, after a summary and after `/compact`.
 - **The user's control.** `/agents` picks a sub-agent and opens its view, as
   `/agent <id>` does (next bullet);
+  `/agent new <type> <objective>` starts a new one of a type the app lets you
+  start (its `spawnable_by` and the policy's `spawn_sources` both name
+  `"user"`): its parent is the main agent, its brief the objective (the rest
+  of the line), and its view opens on its first run, which streams there;
   `/agent stop <id>` (its run cancelled by you, `cancelled_by: user`; it is
   then `stopped`: its parent's messages are refused, only you can start its
   next run) and `/agent close <id>` (it and its own sub-agents). The
   manager's entry points (provisional, on the open conversation, any of its
   sub-agents): `run_instance(id, message)` (a turn of its own, counted toward
   no turn's runs; stopping the stream is your stop of the run),
+  `start_instance(type, objective)` (your new sub-agent's first run, a turn of
+  its own as `run_instance`'s, its run's start first),
   `interrupt_instance(id)` (that run ends `interrupted`, as at a process
   exit, not your stop), `stop_instance(id)`, `close_instance(id)`,
   `steer_instance(id, message)`,
@@ -2406,7 +2412,7 @@ Built-in slash commands available in all apps:
 | `/sandbox` | `/sb` | List / reset stateful sandbox sessions |
 | `/jobs` | | List and manage long-running background jobs (`/jobs all`, `/jobs <id>`, `/jobs cancel <id>`, `/jobs clean`; `/jobs resume` tells the agent this conversation's finished jobs) |
 | `/agents` | | Pick one of this conversation's sub-agents, each under the one that started it: id, type, status (`running`, `idle`, `stopped`, `closed`), title; Enter opens its view (`/agents <id>` shows one instance or run, each run's status and time, the first lines of its result, its error and its tokens by model) |
-| `/agent` | | One sub-agent: `/agent <id>` opens its view (a line typed there is its next run, or steers the run that works; `/back` returns), `/agent stop <id>` stops it (its run, if one works; only you can start its next run), `/agent close <id>` closes it and its own sub-agents (no more runs; its work stays readable) |
+| `/agent` | | One sub-agent: `/agent <id>` opens its view (a line typed there is its next run, or steers the run that works; `/back` returns), `/agent new <type> <objective>` starts a new one of a type the app lets you start and opens its view on its first run, `/agent stop <id>` stops it (its run, if one works; only you can start its next run), `/agent close <id>` closes it and its own sub-agents (no more runs; its work stays readable) |
 | `/papers` | `/docs` | List knowledge-base documents (filter by source, query, --global) |
 | `/sessions` | `/sess` | List the saved sessions of every installed backend: backend, title, turns, last update (delete one with `--delete=<id>`; `--backend=<name>` picks one of an id two backends keep); on the memory store it says none are kept |
 | `/back` | | Leave a sub-agent's view, back to the main conversation; the main agent is told what you did there |
