@@ -8,8 +8,11 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 - reads the brief against what the calling run may start (``brief.read_brief``;
   ``offered``: its own sub-agents, then, while the run's depth is below
   ``max_spawn_depth``, the types agents start at run time,
-  ``agents/spawn.py``): a brief that cannot start a run is the call's error
-  result, and nothing else happens (no run, no record, no event);
+  ``agents/spawn.py``), then its tools against the type's own and its model
+  against the type's choices (``brief.read_choices``): a brief that cannot
+  start a run, tools that are not some of the type's own and a model that is
+  none of its choices are the call's error result, and nothing else happens
+  (no run, no record, no event, no count);
 
 Then ``start``, the one entry for an instance's first run, whoever starts it
 (a ``StartRequest``: the type, the brief, who starts it):
@@ -53,6 +56,11 @@ instance and its descendants closed, a running one's at its run's end) and
 through ``steer``. A message steered to a run that its transcript does not
 hold when the run ends (``RunControl.unstored``) is kept for the instance's
 next run, which starts with it steered: a message is never lost.
+
+Every run of an instance has the tools and the model its first run's
+delegation gave it (``AgentRun.tools``, ``AgentRun.model``, kept in its
+``InstanceRecord``); a follow-up to an instance whose type no longer has
+them is refused (``CHOICE_GONE_ERROR``).
 
 Each run works under its ``RunControl`` (``agents/control.py``,
 ``AgentRun.control``): its limits (its type's over the policy's), the time
@@ -108,7 +116,15 @@ the run works. A run ends:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -122,10 +138,11 @@ from agentic_cli.workflow.agents.brief import (
     BriefError,
     TaskOffer,
     read_brief,
+    read_choices,
     task_message,
     task_offer,
 )
-from agentic_cli.workflow.agents.control import PARENT_CAUSE, RunControl
+from agentic_cli.workflow.agents.control import KEPT_TOOLS, PARENT_CAUSE, RunControl
 from agentic_cli.workflow.agents.envelope import (
     CANCELLED_BY,
     INTERRUPTED_ERROR,
@@ -207,6 +224,12 @@ CLOSED_ERROR = "{instance} is closed; start a new one with task."
 STOPPED_ERROR = "{instance} was stopped by the user; only the user can continue it."
 RUNNING_ERROR = "{instance} is running: an instance runs one run at a time."
 TYPE_GONE_ERROR = "{instance}'s type '{agent}' is not one of this app's agents."
+#: A follow-up to an instance started with a model or tools its type no longer has
+#: (``what``: ``the model <m>`` or ``the tools <a>, <b>``).
+CHOICE_GONE_ERROR = (
+    "{instance} was started with {what}, which '{agent}' no longer has; "
+    "start a new one with task."
+)
 NO_MESSAGE_ERROR = "A follow-up needs a message."
 #: A message that is not text, or is blank.
 MESSAGE_NEEDED_ERROR = "message_agent needs a message."
@@ -303,6 +326,11 @@ class StartRequest:
         counted: Whether the run counts toward its turn's runs
             (``SubAgentPolicy.max_runs_per_turn``); False for a run the
             user starts.
+        tools: The type's own tools the run may use (the asker checked them
+            against the type's: ``read_choices``); None: all of them. Every
+            later run of the instance keeps them.
+        model: One of the type's ``model_choices``, as written, to run it on;
+            None: the type's own model. Every later run keeps it.
     """
 
     agent_type: str
@@ -314,6 +342,8 @@ class StartRequest:
     state: Mapping[str, Any] = field(default_factory=dict)
     history: Callable[[], Any] | None = None
     counted: bool = True
+    tools: frozenset[str] | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +366,10 @@ class AgentRun:
             exists, ``message`` is the follow-up as written (no task
             message), ``history`` is None, and ``state`` is the caller's
             shared state (the outside-content mark).
+        tools: The type's own tools it may use (``control.tools``); None: all.
+        model: The type's model choice it runs on, as ``model_choices``
+            writes it; the backend runs the type's agent built on it. None:
+            the type's own model.
     """
 
     ref: RunRef
@@ -346,10 +380,14 @@ class AgentRun:
     history: Any = None
     control: RunControl = None  # type: ignore[assignment]  # filled below when None
     follow_up: bool = False
+    tools: frozenset[str] | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
         if self.control is None:
-            object.__setattr__(self, "control", RunControl(self.ref, AgentLimits()))
+            object.__setattr__(
+                self, "control", RunControl(self.ref, AgentLimits(), tools=self.tools)
+            )
 
 
 @dataclass(frozen=True)
@@ -430,6 +468,8 @@ RunHook = Callable[[AgentRun], Awaitable[RunAnswer]]
 #: How many instances of each type a conversation's store already keeps, by
 #: type: the highest instance number (``BaseWorkflowManager._stored_instances``).
 StoredInstances = Callable[[SessionRef], Awaitable[Mapping[str, int]]]
+#: A backend's names for an agent type's own tools (``_agent_tool_names``).
+ToolNames = Callable[[str], Awaitable[Collection[str]]]
 
 
 @dataclass
@@ -562,6 +602,10 @@ class Delegations:
             named, so what another manager ran there (before a restart, or
             in another process between two turns) is numbered past. None:
             every conversation is numbered from 1.
+        tool_names: The names of an agent type's own tools, as its backend
+            gives them (``BaseWorkflowManager._agent_tool_names``), asked
+            only for a call that names ``tools`` and for a follow-up of a
+            narrowed instance. None: the names of the type's configured tools.
     """
 
     def __init__(
@@ -574,6 +618,7 @@ class Delegations:
         ledgers: UsageLedgers | None = None,
         stored: StoredInstances | None = None,
         open_calls: OpenCalls | None = None,
+        tool_names: ToolNames | None = None,
     ) -> None:
         self._runs = runs
         self.policy = policy
@@ -582,6 +627,7 @@ class Delegations:
         self._ledgers = ledgers
         self._stored = stored
         self._open_calls = open_calls
+        self._tool_names = tool_names
         # Each conversation's turn its stored instances were last read in
         # (its span, ``current_turn_scope``: held here, so no later turn's
         # can be the same object), and each conversation's lock, which a
@@ -655,21 +701,27 @@ class Delegations:
     async def delegate(self, request: DelegationRequest) -> Delegated:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
-        A brief that cannot start a run is the error result, and nothing
-        else happens; otherwise it ends in ``start``, started by the
-        calling run.
+        A brief that cannot start a run, then tools that are not some of the
+        type's own and a model that is none of its choices, is the error
+        result, and nothing else happens (no run, no count); otherwise it ends
+        in ``start``, started by the calling run.
         """
         depth = request.caller.depth if request.caller is not None else 0
         try:
             config, brief = read_brief(
                 request.arguments, self.offered(request.caller_agent, depth)
             )
+            own = (
+                await self._own_tools(config)
+                if request.arguments.get("tools") is not None else ()
+            )
+            tools, model = read_choices(request.arguments, config, own)
         except BriefError as error:
             return _refused(str(error))
         return await self.start(StartRequest(
             agent_type=config.name, brief=brief, started_by=started_by(request.caller),
             caller=request.caller, call_id=request.call_id, state=request.state,
-            history=request.history,
+            history=request.history, tools=tools, model=model,
         ))
 
     async def start(self, request: StartRequest) -> Delegated:
@@ -704,12 +756,15 @@ class Delegations:
                 ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
                 brief=brief.fields(), started_by=request.started_by, mode=BLOCKING,
                 inherit_context=config.inherit_context, continuable=config.continuable,
+                tools=sorted(request.tools) if request.tools is not None else None,
+                model=request.model,
             ))
             return await self._run(
                 ref, config, conversation, request.call_id,
                 message=task_message(brief, inherit=config.inherit_context),
                 state=request.state,
                 history=request.history if config.inherit_context else None,
+                tools=request.tools, model=request.model,
             )
 
     async def follow_up(
@@ -726,14 +781,20 @@ class Delegations:
         the user continues it), a running one (one run per instance at a
         time) and a blank message. An agent's follow-up counts toward its
         turn's runs (``SubAgentPolicy.max_runs_per_turn``), the user's does
-        not. Everything up to the run's start event is one synchronous step,
-        so two follow-ups of one instance cannot both start.
+        not. The run has the tools and the model its instance's first run
+        had; an instance whose type no longer has its model or some of its
+        tools is refused (``CHOICE_GONE_ERROR``). Everything up to the run's
+        start event is one synchronous step, so two follow-ups of one
+        instance cannot both start: the type's tool names a narrowed instance
+        is checked against are awaited before it, which suspends only where
+        a backend lists them for the first time.
         """
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
+        own = await self._instance_tools(conversation, request.instance)
         with _as_turn(conversation):
-            error = self._follow_up_refused(conversation, request)
+            error = self._follow_up_refused(conversation, request, own_tools=own)
             if error is not None:
                 return Delegated(result={"success": False, "error": error}, state={}, run=None)
             instance = self._runs.instance(conversation, request.instance)
@@ -759,6 +820,8 @@ class Delegations:
             return await self._run(
                 ref, config, conversation, request.call_id,
                 message=request.message, state=request.state, history=None, follow_up=True,
+                tools=frozenset(instance.tools) if instance.tools is not None else None,
+                model=instance.model,
             )
 
     def close(self, conversation: SessionRef | None, instance: str, *, reason: str) -> list[str]:
@@ -826,6 +889,7 @@ class Delegations:
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
+        own = await self._instance_tools(conversation, request.instance)
         with _as_turn(conversation):
             if not isinstance(request.message, str) or not request.message.strip():
                 return _refused(MESSAGE_NEEDED_ERROR)
@@ -847,7 +911,9 @@ class Delegations:
             ended = self._ends[(conversation, ref.run or "")]
             made_here = False
             if interrupt and not stopping:
-                error = self._follow_up_refused(conversation, request, running_ok=True)
+                error = self._follow_up_refused(
+                    conversation, request, running_ok=True, own_tools=own
+                )
                 if error is None and request.started_by != USER:
                     refused = self._past_runs_per_turn(ref.agent)
                     error = refused.result["error"] if refused is not None else None
@@ -1213,11 +1279,15 @@ class Delegations:
         request: FollowUpRequest,
         *,
         running_ok: bool = False,
+        own_tools: Collection[str] | None = None,
     ) -> str | None:
         """Why ``request`` cannot start a run, else None.
 
         ``running_ok``: a running instance is no reason (an interrupt asks
         whether the message could start a run once the instance's run ends).
+        ``own_tools``: the names of the instance's type's own tools now
+        (``_instance_tools``), which a narrowed instance's must still be
+        among; None: not checked.
         """
         message = request.message
         if not isinstance(message, str) or not message.strip():
@@ -1238,7 +1308,44 @@ class Delegations:
             return RUNNING_ERROR.format(instance=found.instance)
         if found.agent not in self._types:
             return TYPE_GONE_ERROR.format(instance=found.instance, agent=found.agent)
+        config = self._types[found.agent]
+        what = None
+        if found.model is not None and found.model not in config.model_choices:
+            what = f"the model {found.model}"
+        elif found.tools is not None and own_tools is not None:
+            gone = sorted(set(found.tools) - set(own_tools))
+            if gone:
+                what = f"the tools {', '.join(gone)}"
+        if what is not None:
+            return CHOICE_GONE_ERROR.format(instance=found.instance, what=what, agent=found.agent)
         return None
+
+    async def _own_tools(self, config: AgentConfig) -> Collection[str]:
+        """The names of ``config``'s own tools: its backend's, else its configured tools'."""
+        if self._tool_names is not None:
+            return await self._tool_names(config.name)
+        names = (
+            tool if isinstance(tool, str) else getattr(tool, "__name__", "")
+            for tool in config.tools
+        )
+        return frozenset(name for name in names if name and name not in KEPT_TOOLS)
+
+    async def _instance_tools(
+        self, conversation: SessionRef | None, instance: str
+    ) -> frozenset[str] | None:
+        """The names of the own tools of ``instance``'s type, when it is a narrowed one; else None.
+
+        What a follow-up checks the instance's tools against. Awaited before
+        the follow-up's synchronous step, and only for an instance that has
+        tools to check, so any other never waits.
+        """
+        record = self._runs.instance(conversation, instance)
+        if record is None or record.tools is None:
+            return None
+        config = self._types.get(record.agent)
+        if config is None:
+            return None
+        return frozenset(await self._own_tools(config))
 
     async def _run(
         self,
@@ -1251,14 +1358,18 @@ class Delegations:
         state: Mapping[str, Any],
         history: Callable[[], Any] | None,
         follow_up: bool = False,
+        tools: frozenset[str] | None = None,
+        model: str | None = None,
     ) -> Delegated:
         """Run ``ref``'s run, started and reported already, to its end; its envelope.
 
         What a first run and a follow-up share: the run's control, its task,
-        the caller's slot lent while it waits.
+        the caller's slot lent while it waits. ``tools`` and ``model`` are
+        the instance's.
         """
         control = RunControl(
-            ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref)
+            ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref),
+            tools=tools,
         )
         # What an earlier run was steered and did not store: this run's, after its own message.
         for unread in self._unread.pop((conversation, ref.instance), ()):
@@ -1267,6 +1378,7 @@ class Delegations:
             self._in_run(
                 ref, config, conversation, call_id, control,
                 message=message, state=state, history=history, follow_up=follow_up,
+                model=model,
             ),
             name=f"agent run {ref.run}",
         )
@@ -1452,6 +1564,7 @@ class Delegations:
         state: Mapping[str, Any],
         history: Callable[[], Any] | None,
         follow_up: bool,
+        model: str | None = None,
     ) -> RunAnswer:
         """The run, in its own task: the active run, and no tool call active.
 
@@ -1475,6 +1588,8 @@ class Delegations:
             history=history() if history is not None else None,
             control=control,
             follow_up=follow_up,
+            tools=control.tools,
+            model=model,
         )
         pool = self.slots(conversation)
         queued = pool.free == 0

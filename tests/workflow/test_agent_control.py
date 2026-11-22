@@ -14,6 +14,7 @@ import asyncio
 import pytest
 
 from agentic_cli.workflow.agents.control import (
+    KEPT_TOOLS,
     PARENT_CAUSE,
     STEP_LIMIT_NOTE,
     TIME_LIMIT_CAUSE,
@@ -416,3 +417,30 @@ class TestStopping:
         made.finish()
 
         assert made.stopping is True
+
+
+class TestTheToolsItKeeps:
+    """A narrowed run's tools: its own ``tools``, and those every run keeps."""
+
+    def test_a_run_not_narrowed_keeps_every_tool(self):
+        control = RunControl(REF, AgentLimits())
+
+        assert control.tools is None
+        assert control.keeps("lookup") and control.keeps("anything")
+
+    def test_a_narrowed_run_keeps_its_tools_its_plan_and_its_delegation_tools(self):
+        control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
+
+        names = ["lookup", "fetch_page", "save_plan", "get_tasks", "task", "check_agents"]
+        assert [name for name in names if control.keeps(name)] == [
+            "lookup", "save_plan", "get_tasks", "task", "check_agents",
+        ]
+        assert not RunControl(REF, AgentLimits(), tools=frozenset()).keeps("lookup")
+
+    def test_every_run_keeps_the_state_tools_and_the_delegation_tools(self):
+        from agentic_cli.tools._core import state_tools
+        from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
+
+        assert KEPT_TOOLS == {
+            *(name for name, _ in state_tools._STATE_TOOLS), TASK_TOOL, *FOLLOW_UP_TOOLS,
+        }

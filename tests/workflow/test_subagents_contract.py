@@ -6469,3 +6469,47 @@ class TestAParentOfRunTimeTypesOnly:
         assert crew.opening("coordinator", -1) == [
             roster("- helper-1 (helper, idle): Help with X. — Helped."), "Go.",
         ]
+
+
+# -- a delegation's tools and model ------------------------------------------------------
+
+
+def narrow_team(**researcher: Any) -> list[AgentConfig]:
+    """A coordinator, and a researcher with two tools of its own and its plan's tools."""
+    return [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_lookup, contract_whoami), include_state_tools=True,
+              **researcher),
+    ]
+
+
+class TestWhatATypeCannotTake:
+    """A ``task`` call whose ``tools`` are not some of the type's own, or whose
+    ``model`` is none of its choices, is its error result naming what it may
+    be: no run starts, and the turn's runs are not counted."""
+
+    @pytest.mark.parametrize("researcher, fields, error", [
+        ({}, {"tools": ["contract_lookup", "write_file"]},
+         "The tools for 'researcher' must be some of its own: contract_lookup, contract_whoami."),
+        ({}, {"model": "fast"}, "'researcher' has no model choices; leave model out."),
+        ({"model_choices": ("anthropic:claude-haiku-4-5",)}, {"model": "fast"},
+         "The model for 'researcher' must be one of its model choices: "
+         "anthropic:claude-haiku-4-5."),
+    ], ids=["tools", "no-choices", "model"])
+    async def test_starts_no_run_and_takes_no_count(self, make_crew, researcher, fields, error):
+        crew = make_crew(
+            narrow_team(**researcher), subagents=SubAgentPolicy(max_runs_per_turn=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", **fields)),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator", 1)["c1"]) == {
+            "success": False, "error": error,
+        }
+        # The turn's one run is still its to start.
+        assert envelope_read(crew.results_read("coordinator", 2)["c2"])["result"] == "Y is 7."
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
+        assert [e.metadata["status"] for e in runs_of(events)] == [RUN_STARTED, RUN_COMPLETED]

@@ -32,6 +32,9 @@ the run's own task, and hands it to the backend's hook as
   stays unstored until its backend says the run's transcript holds it
   (``stored``); ``Delegations`` gives the unstored ones (``unstored``) to
   the instance's next run, so a message is never lost.
+- ``tools`` narrows the run: the backend offers the model only those (and
+  ``KEPT_TOOLS``), and answers a call of any other as one of a tool the
+  agent does not have; ``keeps(tool)`` says whether the run may use it.
 - ``stop_cause`` is what a call the run left at its permission prompt, or
   running, is told stopped the run: its parent, its time limit or its token
   limit (None for the user's stop).
@@ -61,6 +64,14 @@ STEP_LIMIT_NOTE = (
     "You have reached the most model calls this task may make. Answer now with your best "
     "result from what you have; no tools are available for this answer."
 )
+#: The tools a narrowed run keeps whatever its ``tools``: its plan's (the state
+#: tools, ``tools/_core/state_tools.py``) and the delegation tools
+#: (``tools/_core/delegation.py``), which follow what the run may start. Named
+#: here, not imported: this module imports no tool.
+KEPT_TOOLS = frozenset({
+    "save_plan", "get_plan", "save_tasks", "get_tasks",
+    "task", "message_agent", "stop_agent", "check_agents",
+})
 #: Who cancels a run at one of its limits.
 LIMIT = "limit"
 #: What stopped a run, as a call it left at its prompt is told.
@@ -79,10 +90,13 @@ class RunControl:
             tools' side calls, its summaries; not its own steps, which
             ``used`` counts), input plus output tokens, as its usage record
             counts them: counted with its own at each check. None: none.
+        tools: The type's own tools this run may use, by name; None: all of
+            them. ``KEPT_TOOLS`` are kept whatever it says.
 
     Attributes:
         ref: The run.
         limits: Its limits.
+        tools: The names it narrowed the run's tools to, or None.
         cancelled: ``(by, error)`` once it is cancelled: who cancelled it
             (``parent``, ``user`` or ``limit``) and why, one line.
     """
@@ -93,9 +107,11 @@ class RunControl:
         limits: AgentLimits,
         *,
         side_tokens: Callable[[], int] | None = None,
+        tools: frozenset[str] | None = None,
     ) -> None:
         self.ref = ref
         self.limits = limits
+        self.tools = tools
         self._side_tokens = side_tokens
         self.cancelled: tuple[str, str] | None = None
         self._steering: list[str] = []
@@ -110,6 +126,11 @@ class RunControl:
         self._cancelled_task = False
         # Whether the hook said the run's work has ended (finish()).
         self._finished = False
+
+    def keeps(self, tool: str) -> bool:
+        """Whether the run may use ``tool``: all of them unless narrowed, then its
+        ``tools`` and ``KEPT_TOOLS``."""
+        return self.tools is None or tool in self.tools or tool in KEPT_TOOLS
 
     # -- the run's task --------------------------------------------------------
 
