@@ -36,8 +36,10 @@ In ``researcher-1``'s view a line is its next run (``run_instance``): ``hold``
 says ``Holding.`` and waits for a line given to it (``steer_instance``), then
 says ``Steered: <line>``; ``slow`` says ``Working on it.`` and waits until
 Ctrl+C stops it (the user's stop: the instance is stopped); anything else
-says ``Researched: <line>``. The main agent's notice after the view
-(``tell_root``) is answered ``Told: <the notice's first clause>``.
+says ``Researched: <line>``. ``/agent new researcher <objective>``
+(``start_instance``) starts a new researcher whose first run does the same
+with its objective; another type is refused. The main agent's notice after
+the view (``tell_root``) is answered ``Told: <the notice's first clause>``.
 
 ``/compact`` reports that a summary is being written, waits until a file
 named ``summarized`` appears, then reports its usage and what it did: 2
@@ -233,6 +235,29 @@ class ScriptedManager:
                                           started_by="user", mode="blocking")
         self._observe(conversation, started)
         yield started
+        async for event in self._work(conversation, ref, message):
+            yield event
+
+    async def start_instance(self, agent_type, objective, *, session_id=None, user_id=None):
+        if agent_type != "researcher":
+            yield WorkflowEvent.error(
+                f"You cannot start '{agent_type}' here. Types you can start: researcher."
+            )
+            return
+        conversation = self.session_ref(session_id)  # one user here
+        ref = self.agent_runs.run_for(conversation, None, None, agent_type)
+        started = WorkflowEvent.agent_run(
+            ref, "started", title=objective, brief={"title": objective, "objective": objective},
+            started_by="user", mode="blocking",
+        )
+        self._observe(conversation, started)
+        yield started
+        async for event in self._work(conversation, ref, objective):
+            yield event
+
+    async def _work(self, conversation, ref, message: str):
+        """A run the user started, on ``message``: its text, then its end."""
+        instance = ref.instance
         ended = WorkflowEvent.agent_run(ref, "cancelled", error="stopped by the user",
                                         cancelled_by="user", instance_status="stopped")
         try:
