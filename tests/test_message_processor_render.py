@@ -634,6 +634,11 @@ class _Viewing(_Watching):
         async for event in self.process(message, user_id, session_id):
             yield event
 
+    async def start_instance(self, agent_type, objective, *, session_id=None, user_id=None):
+        self.asked.append(("start_instance", agent_type, objective, session_id, user_id))
+        async for event in self.process(objective, user_id, session_id):
+            yield event
+
     async def tell_root(self, text, *, session_id=None, user_id=None):
         self.asked.append(("tell_root", text, session_id, user_id))
         async for event in self.process(text, user_id, session_id):
@@ -734,3 +739,70 @@ class TestANoticeTurn:
             ("tell_root", "The user worked with researcher-1 directly.", "s1", "tester"),
         ]
         assert ui.responses() == ["Noted: Y is 7."]
+
+
+HELPER_1 = RunRef("helper", "helper-1", "helper-1#1", None, 1)
+CHECKER_1 = RunRef("checker", "checker-1", "checker-1#1", "helper-1#1", 2)
+
+
+class TestAStartInItsView:
+    """``process_start``: the user's new instance (``/agent new``,
+    ``start_instance``), drawn as a view's run once its start names it:
+    ``opens`` is told the instance before that start is drawn, and from then
+    on the instance's text is the reply and its lines name nobody."""
+
+    async def test_opens_is_told_the_instance_its_start_names_then_it_is_in_view(self):
+        events = [
+            WorkflowEvent.agent_run(HELPER_1, "started", title="Help.", started_by="user"),
+            _by(HELPER_1, WorkflowEvent.tool_call("lookup", {"q": "x"})),
+            _by(CHECKER_1, WorkflowEvent.tool_call("check", {})),
+            _text_of(HELPER_1, "Helped."),
+            WorkflowEvent.agent_run(HELPER_1, "completed", result="Helped."),
+        ]
+        ui = _Watched()
+        workflow = _Viewing(events, ui)
+        opened: list[tuple[str, int]] = []
+
+        async def opens(instance: str) -> None:
+            opened.append((instance, len(workflow.lines)))
+
+        result = await MessageProcessor().process_start(
+            "helper", "Help.", workflow_controller=ReplayController(workflow), ui=ui,
+            settings=_settings(), session_id="s1", opens=opens,
+        )
+
+        assert result.delivered
+        assert workflow.asked == [("start_instance", "helper", "Help.", "s1", "tester")]
+        assert opened == [("helper-1", 0)]  # before its start was drawn
+        assert workflow.lines == [
+            "Processing...", "Calling: lookup", "checker-1 › Calling: check",
+            "checker-1 › Calling: check", "checker-1 › Calling: check",
+        ]
+        assert ui.responses() == ["Helped."]
+
+    async def test_a_refusal_is_the_turns_error_and_opens_nothing(self):
+        ui = _Watched()
+        workflow = _Viewing([WorkflowEvent.error("You cannot start 'x' here.")], ui)
+        opened: list[str] = []
+
+        async def opens(instance: str) -> None:
+            opened.append(instance)
+
+        result = await MessageProcessor().process_start(
+            "x", "Go.", workflow_controller=ReplayController(workflow), ui=ui,
+            settings=_settings(), opens=opens,
+        )
+
+        assert not result.delivered
+        assert ui.errors() == ["You cannot start 'x' here."]
+        assert opened == []
+
+    async def test_the_main_agents_turn_opens_nothing(self):
+        """``opens`` is a start's: a turn's run starts are drawn as before."""
+        ui, lines = await _watch([
+            WorkflowEvent.agent_run(HELPER_1, "started", title="Help."),
+            _text_of(HELPER_1, "Helped."),
+        ])
+
+        assert lines == ["Processing...", "helper-1 › Helped."]
+        assert ui.responses() == []
