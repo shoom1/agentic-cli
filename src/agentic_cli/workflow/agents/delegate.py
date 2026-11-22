@@ -128,6 +128,7 @@ from collections.abc import (
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from agentic_cli.constants import truncate
@@ -683,6 +684,11 @@ class Delegations:
         if pool is None:
             pool = self._pools[conversation] = SlotPool(self.policy.max_active)
         return pool
+
+    @property
+    def types(self) -> Mapping[str, AgentConfig]:
+        """Every agent type, by name, in config order (read-only): what ``start`` starts."""
+        return MappingProxyType(self._types)
 
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
         """The types ``agent`` may start, by name, in its ``sub_agents``' order."""

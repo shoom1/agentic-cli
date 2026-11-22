@@ -31,6 +31,10 @@ other tools (``build_follow_up_tools``: ``message_agent``, ``stop_agent``,
 ``check_agents``), each bound to its own declaration and answering as
 ``task`` does: its result as JSON, one ``ToolMessage``, the shared state a
 follow-up run changed in the same ``Command``.
+
+A ``load_skill`` call of a skill that names an agent type starts that run here
+too (``start_skill_run``, from ``tools/skills/langchain_tools.py``), answered
+as ``task`` is.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from langgraph.prebuilt import ToolRuntime
 from langgraph.types import Command
 
 from agentic_cli.logging import Loggers
-from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
+from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, LOAD_SKILL_TOOL, TASK_TOOL
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
 from agentic_cli.workflow.agents.brief import (
     follow_up_description,
@@ -63,6 +67,7 @@ from agentic_cli.workflow.sessions import get_active_run
 from agentic_cli.workflow.tool_errors import unknown_tool_result
 
 if TYPE_CHECKING:
+    from agentic_cli.tools.skills.agents import SkillAgents
     from agentic_cli.workflow.agents.delegate import Delegations
 
 logger = Loggers.workflow()
@@ -125,6 +130,33 @@ def build_task_tool(
     )
     bind_tool_identity(tool, get_registry().get(TASK_TOOL))
     return tool
+
+
+async def start_skill_run(agents: SkillAgents, skill: Any, runtime: ToolRuntime) -> Command:
+    """A ``load_skill`` of ``skill``, which names an agent type: the run it starts.
+
+    Answered as ``task`` is: one ``ToolMessage`` with the envelope (or the
+    refusal) as JSON, and the shared state the run changed in the same
+    ``Command``.
+
+    Args:
+        agents: The loading agent's ``SkillAgents``.
+        skill: The skill, an ADK ``Skill``.
+        runtime: The call's runtime, which the tool node injects.
+    """
+    state = runtime.state
+    delegated = await agents.start(
+        skill,
+        call_id=runtime.tool_call_id,
+        state={key: state[key] for key in SHARED_KEYS if key in state},
+        history=lambda: inherited_messages(state),
+    )
+    answer = ToolMessage(
+        json.dumps(delegated.result, ensure_ascii=False),
+        tool_call_id=runtime.tool_call_id,
+        name=LOAD_SKILL_TOOL,
+    )
+    return Command(update={**delegated.state, "messages": [answer]})
 
 
 def build_follow_up_tools(delegations: Callable[[], Delegations]) -> list[StructuredTool]:

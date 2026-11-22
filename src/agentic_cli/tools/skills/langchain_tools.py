@@ -34,23 +34,35 @@ Each tool object is bound, in the framework registry, to the definition ADK's
 skill tools are bound to (``permissions.py``): both backends gate a skill
 tool by the same contract (EXEMPT), and an object the framework did not build
 is denied, whatever its name.
+
+A skill whose frontmatter names an agent type starts a run of it when loaded
+(``agents.py``), where the app lets a skill start an agent, given the agent's
+``SkillAgents`` (``make_skill_tools(agents=)``):
+``load_skill`` takes the call's runtime, which LangGraph's tool node injects,
+and hands the skill to ``workflow/deepagents/task_tool.py::start_skill_run``.
+The tools' declarations are unchanged, and any other skill loads as above.
 """
 
 from __future__ import annotations
 
 import base64
 import copy
+import functools
 import json
 import mimetypes
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from google.adk.skills.prompt import format_skills_as_xml
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
+from langgraph.prebuilt import ToolRuntime
 
 from agentic_cli.models import ProviderKind
 from agentic_cli.tools.registry import bind_tool_identity, get_registry
 from agentic_cli.workflow.sessions import get_active_turn
+
+if TYPE_CHECKING:
+    from agentic_cli.tools.skills.agents import SkillAgents
 
 LIST_SKILLS = "list_skills"
 LOAD_SKILL = "load_skill"
@@ -161,7 +173,10 @@ _NO_TURN = object()
 
 
 def make_skill_tools(
-    skills: Sequence[Any], *, provider: ProviderKind | None = None
+    skills: Sequence[Any],
+    *,
+    provider: ProviderKind | None = None,
+    agents: SkillAgents | None = None,
 ) -> tuple[list[BaseTool], str]:
     """One agent's skills as its three skill tools, and its skills instruction.
 
@@ -170,6 +185,10 @@ def make_skill_tools(
         provider: The agent's model's provider kind. A binary resource is sent
             as an image only to a provider that reads one in a tool result;
             without it, every binary resource is a status.
+        agents: The agent's ``SkillAgents``. Given, and the app lets a skill
+            start an agent, a skill that names an agent type starts it when
+            loaded (one its agent could not start, or the app lets no skill
+            start, is warned of now). None: every skill loads as ADK loads it.
 
     Returns:
         The tools, bound to the framework's skill tool definitions, and the
@@ -182,7 +201,7 @@ def make_skill_tools(
     """
     if not skills:
         return [], ""
-    answers = _SkillAnswers(skills, images=provider in _IMAGE_PROVIDERS)
+    answers = _SkillAnswers(skills, images=provider in _IMAGE_PROVIDERS, agents=agents)
     tools = [
         _tool(LIST_SKILLS, answers.list_skills),
         _tool(LOAD_SKILL, answers.load_skill),
@@ -227,7 +246,9 @@ def _error_content(error: ToolException) -> str:
 class _SkillAnswers:
     """What one agent's skill tools answer, from its skills in memory."""
 
-    def __init__(self, skills: Sequence[Any], *, images: bool = False) -> None:
+    def __init__(
+        self, skills: Sequence[Any], *, images: bool = False, agents: SkillAgents | None = None
+    ) -> None:
         self._images = images
         self._skills: dict[str, Any] = {}
         for skill in skills:
@@ -237,16 +258,27 @@ class _SkillAnswers:
         self._misses_turn: object = _NO_TURN
         self._misses = 0
         self._resource_paths = _adk_resource_listing()
+        self._agents = agents
+        self._start = _starter(agents, list(self._skills.values()))
 
     # Unknown arguments are ignored, as ADK ignores them.
 
     async def list_skills(self, **_: Any) -> str:
         return format_skills_as_xml(list(self._skills.values()))
 
-    async def load_skill(self, skill_name: Any = None, **_: Any) -> dict[str, Any]:
+    async def load_skill(
+        self, skill_name: Any = None, runtime: ToolRuntime | None = None, **_: Any
+    ) -> Any:
+        """A skill's instructions; a skill that names an agent type starts it instead.
+
+        ``runtime`` is injected by the tool node; a call without one (outside
+        a graph) loads every skill as plain instructions.
+        """
         if not skill_name:
             raise _Failed("Argument 'skill_name' is required.", "INVALID_ARGUMENTS")
         skill = self._skill(skill_name)
+        if self._start is not None and runtime is not None and self._agents.starts(skill):
+            return await self._start(skill, runtime)
         answer: dict[str, Any] = {
             "skill_name": skill_name,
             "instructions": skill.instructions,
@@ -308,6 +340,25 @@ class _SkillAnswers:
             self._misses_turn, self._misses = turn, 0
         self._misses += 1
         return self._misses
+
+
+def _starter(
+    agents: SkillAgents | None, skills: Sequence[Any]
+) -> Callable[[Any, ToolRuntime], Awaitable[Any]] | None:
+    """What starts the agent a skill names, or None when no skill does.
+
+    Imported when the tools are built: a first import during a call would
+    hold the event loop. The skills whose agent could not be started, or
+    whose key is ignored, are warned of here.
+    """
+    if agents is None:
+        return None
+    agents.check(skills)
+    if not any(agents.starts(skill) for skill in skills):
+        return None
+    from agentic_cli.workflow.deepagents.task_tool import start_skill_run
+
+    return functools.partial(start_skill_run, agents)
 
 
 def _adk_resource_listing() -> Callable[[Any], list[str]] | None:

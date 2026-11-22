@@ -237,3 +237,121 @@ class TestSkillsIntegration:
         )
         cfg = load_agents_from_yaml(path)[0]
         assert cfg.skills == ["pdf-tools", "./skills/sql"]
+
+
+# ---------------------------------------------------------------------------
+# A skill that starts an agent: the framework's load_skill
+# ---------------------------------------------------------------------------
+
+
+def _starting_skill(parent: Path, name: str = "research", agent: str = "helper") -> Path:
+    """A skill whose frontmatter names the agent type ``agent``."""
+    skill_dir = parent / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Researches.\nagent: {agent}\n---\nLook into it.\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def _agents(sources: frozenset[str] | set[str] = frozenset({"skill"})):
+    """The root ``lead``'s ``SkillAgents``, over delegations that may start ``helper``
+    (from ``sources``)."""
+    from agentic_cli.tools.skills import SkillAgents
+    from agentic_cli.workflow.agents import AgentRuns, SubAgentPolicy
+    from agentic_cli.workflow.agents.delegate import Delegations
+
+    async def never(run):  # pragma: no cover - no run starts here
+        raise AssertionError(run)
+
+    delegations = Delegations(
+        runs=AgentRuns(), policy=SubAgentPolicy(spawn_sources=sources), hook=never,
+        types={
+            "lead": AgentConfig(name="lead", prompt="p"),
+            "helper": AgentConfig(name="helper", prompt="p", spawnable_by=frozenset({"skill"})),
+        },
+    )
+    return SkillAgents("lead", lambda: delegations, root=True)
+
+
+def _load_skill(toolset):
+    (tool,) = [t for t in toolset._tools if t.name == "load_skill"]
+    return tool
+
+
+class TestTheFrameworksLoadSkill:
+    def test_an_agent_with_a_skill_that_starts_one_gets_it_declared_as_adks(self, tmp_path):
+        from google.adk.tools.skill_toolset import SkillToolset
+
+        from agentic_cli.tools.registry import get_registry, identify_tool
+        from agentic_cli.workflow.adk.skill_tool import SkillLoadTool
+
+        skills = SkillStore().resolve([str(_make_skill(tmp_path)), str(_starting_skill(tmp_path))])
+
+        toolset = make_skill_toolset(skills, agents=_agents())
+
+        tool = _load_skill(toolset)
+        assert type(tool) is SkillLoadTool
+        assert identify_tool(tool) is get_registry().get("load_skill")
+        adks = _load_skill(SkillToolset(skills=skills))
+        assert tool._get_declaration() == adks._get_declaration()
+        assert [t.name for t in toolset._tools] == [
+            t.name for t in make_skill_toolset(skills)._tools
+        ]
+
+    def test_without_such_a_skill_or_without_its_agents_it_is_adks_own(self, tmp_path):
+        from google.adk.tools.skill_toolset import LoadSkillTool
+
+        plain = SkillStore().resolve([str(_make_skill(tmp_path))])
+        starting = SkillStore().resolve([str(_starting_skill(tmp_path))])
+
+        for toolset in (make_skill_toolset(plain, agents=_agents()), make_skill_toolset(starting)):
+            assert type(_load_skill(toolset)) is LoadSkillTool
+
+    @pytest.mark.parametrize("sources", [set(), {"agent"}], ids=["default", "agents-only"])
+    def test_while_no_skill_may_start_one_the_toolset_is_adks_own(self, tmp_path, sources):
+        """The key is ignored: ``load_skill`` is ADK's own, object for object."""
+        from google.adk.tools.skill_toolset import LoadSkillTool
+
+        skills = SkillStore().resolve([str(_starting_skill(tmp_path))])
+
+        toolset = make_skill_toolset(skills, agents=_agents(sources))
+
+        assert type(_load_skill(toolset)) is LoadSkillTool
+
+    async def test_the_gate_lets_the_one_the_framework_built_through_and_no_other(
+        self, tmp_path
+    ):
+        from agentic_cli.workflow.adk.permission_plugin import PermissionPlugin
+        from agentic_cli.workflow.adk.skill_tool import SkillLoadTool
+
+        skills = SkillStore().resolve([str(_starting_skill(tmp_path))])
+        toolset = make_skill_toolset(skills, agents=_agents())
+        unbound = SkillLoadTool(toolset, {}, _agents())
+
+        async def gate(tool):
+            return await PermissionPlugin().before_tool_callback(
+                tool=tool, tool_args={"skill_name": "research"}, tool_context=None
+            )
+
+        assert await gate(_load_skill(toolset)) is None
+        denied = await gate(unbound)
+        assert denied["success"] is False and "not registered" in denied["error"]
+
+    def test_what_it_rests_on_of_adks_load_skill(self, tmp_path):
+        """ADK's toolset holds one exact ``LoadSkillTool``, made from the toolset,
+        whose ``run_async`` takes ``args`` and ``tool_context`` by keyword."""
+        import inspect
+
+        from google.adk.tools.skill_toolset import LoadSkillTool, SkillToolset
+
+        toolset = SkillToolset(skills=SkillStore().resolve([str(_make_skill(tmp_path))]))
+
+        assert [type(t) for t in toolset._tools].count(LoadSkillTool) == 1
+        assert LoadSkillTool(toolset).name == "load_skill"
+        parameters = inspect.signature(LoadSkillTool.run_async).parameters
+        assert {name: p.kind for name, p in parameters.items() if name != "self"} == {
+            "args": inspect.Parameter.KEYWORD_ONLY,
+            "tool_context": inspect.Parameter.KEYWORD_ONLY,
+        }

@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Any, Callable
 
 from google.genai import types
 
-from agentic_cli.tools._core.delegation import ENVELOPE_TOOLS, FOLLOW_UP_TOOLS, TASK_TOOL
+from agentic_cli.tools._core.delegation import ENVELOPE_TOOLS, FOLLOW_UP_TOOLS
 from agentic_cli.tools._core.tasks import task_progress_data
 from agentic_cli.workflow.adk.call_clock import call_latency
 from agentic_cli.workflow.adk.subagent_outcome_plugin import OUTCOME_KEY
@@ -93,7 +93,8 @@ class ADKEventProcessor:
     A tool's result is a failed ``TOOL_RESULT`` when it says so (``success``
     false, an ``error`` value) or is an MCP tool's error result (``isError``),
     its error in ``metadata["error"]``, as on Deep Agents. A ``task`` call's
-    result (and that of each of the parent's other tools) is the JSON text
+    result (and that of each of the parent's other tools, and a
+    ``load_skill`` that started a run, ``adk/skill_tool.py``) is the JSON text
     of what the delegation returned (``adk/task_tool.py``), read back as its
     dict, as Deep Agents reads its
     ``ToolMessage``; an envelope (``task``'s, ``message_agent``'s run) is
@@ -406,7 +407,7 @@ class ADKEventProcessor:
         if hasattr(part, "function_response") and part.function_response:
             tool_name = part.function_response.name
             response = part.function_response.response
-            if tool_name == TASK_TOOL or tool_name in FOLLOW_UP_TOOLS:
+            if tool_name in ENVELOPE_TOOLS or tool_name in FOLLOW_UP_TOOLS:
                 response = _delegated(response)
             success, error = _outcome(response)
 
@@ -501,8 +502,13 @@ def _with_call_id(event: WorkflowEvent, call_id: Any) -> WorkflowEvent:
 
 
 def _delegated(response: Any) -> Any:
-    """A ``task`` call's result (or a parent's tool's) as it returned it: the dict whose
-    JSON text ADK stores under ``result`` (``adk/task_tool.py``); anything else as it is."""
+    """The result of a call that delegates, as it returned it.
+
+    That is a ``task`` call's (or a parent's tool's), or a ``load_skill`` that
+    started a run or was refused one: the dict whose JSON text ADK stores under
+    ``result`` (``adk/task_tool.py``, ``adk/skill_tool.py``). Anything else is
+    returned as it is.
+    """
     if isinstance(response, dict) and set(response) == {"result"}:
         try:
             parsed = json.loads(response["result"])
