@@ -135,6 +135,7 @@ class TestLoadAgentsFromYaml:
         assert cfg.limits is None
         assert cfg.continuable is True
         assert cfg.spawnable_by is None
+        assert cfg.model_choices == ()
 
     def test_a_sub_agents_inherit_context(self, tmp_path):
         path = _write(
@@ -290,6 +291,34 @@ class TestLoadAgentsFromYaml:
         with pytest.raises(AgentGraphError, match="'researcher' has spawnable_by frozenset"):
             validate_agent_graph(configs)
 
+    def test_model_choices(self, tmp_path):
+        path = _write(
+            tmp_path,
+            """
+            agents:
+              - name: coordinator
+                instruction: Lead.
+                sub_agents: [researcher]
+              - name: researcher
+                instruction: Find facts.
+                model: strong
+                model_choices: [fast, anthropic:claude-haiku-4-5]
+            """,
+        )
+        configs = load_agents_from_yaml(path)
+        assert [c.model_choices for c in configs] == [
+            (), ("fast", "anthropic:claude-haiku-4-5"),
+        ]
+        assert validate_agent_graph(configs).root_name == "coordinator"
+
+    def test_model_choices_is_a_list(self, tmp_path):
+        path = _write(
+            tmp_path, "agents:\n  - name: a\n    instruction: hi\n    model_choices: fast\n"
+        )
+        with pytest.raises(ValidationError) as exc:
+            load_agents_from_yaml(path)
+        message = str(exc.value)
+        assert "agents.0.model_choices" in message and "valid list" in message
     def test_brief_required_is_a_list(self, tmp_path):
         path = _write(
             tmp_path,

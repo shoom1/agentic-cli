@@ -23,6 +23,7 @@ Example YAML::
         brief_required: [objective, deliverable]  # what a delegation must fill
         limits: {max_model_calls: 30, timeout: 600}  # over the policy's, per field
         continuable: true  # false: one-shot, closed when its run ends
+        model_choices: [fast]  # what a delegation may run it on instead of its model
       - name: fact_checker
         instruction: Check one claim.
         spawnable_by: [agent]  # in no sub_agents: a type agents start at run time
@@ -100,6 +101,8 @@ class AgentSpec(BaseModel):
     continuable: bool = True
     # None: only its parent starts it.
     spawnable_by: list[str] | None = None
+    # Empty: only its own model.
+    model_choices: list[str] = Field(default_factory=list)
 
 
 class AgentsFile(BaseModel):
@@ -192,6 +195,7 @@ def load_agents_from_yaml(path: str | Path) -> list[AgentConfig]:
                 include_state_tools=spec.include_state_tools,
                 inherit_context=spec.inherit_context,
                 continuable=spec.continuable,
+                model_choices=tuple(spec.model_choices),
                 **delegation,
             )
         )

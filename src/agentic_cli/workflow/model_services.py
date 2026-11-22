@@ -145,8 +145,8 @@ def model_references(
 
     In order: the manager's own model (``manager_model``), ``default_model``,
     each ``model_roles`` value (so the model of each mapped role an agent
-    names), then each agent's model that is a reference or a bare model id.
-    One that does not parse is left out: validation reports it.
+    names), then each agent's model that is a reference or a bare model id,
+    and each of its model choices that is one. One that does not parse is left out: validation reports it.
     """
     return tuple(_named_references(settings, agent_configs, manager_model))
 
@@ -158,7 +158,8 @@ def reference_settings(
 ) -> dict[ModelRef, str]:
     """Where each model ``model_references`` gives is named, in its order:
     ``the manager's model``, ``default_model``, ``model_roles['fast']``, ``agent
-    'writer'``, those that name one model joined with "and". The catalog's
+    'writer'``, ``agent 'writer' model_choices``, those that name one model
+    joined with "and". The catalog's
     warning that a provider does not serve a model says which setting to change.
     """
     named = _named_references(settings, agent_configs, manager_model)
@@ -188,6 +189,10 @@ def _named_references(
         parsed = _agent_model(config)
         if isinstance(parsed, ModelRef):
             named.setdefault(parsed, []).append(f"agent {config.name!r}")
+        where = f"agent {config.name!r} model_choices"
+        for choice in _agent_choices(config):
+            if isinstance(choice, ModelRef) and where not in named.setdefault(choice, []):
+                named[choice].append(where)
     return named
 
 
@@ -200,7 +205,8 @@ def computed_roles(
 
     ``default`` when neither the manager's own model nor ``default_model`` is
     set, and each other built-in role an agent names that ``model_roles``
-    does not map. (An app's own role nobody maps runs on the default model.)
+    does not map, as a model or as a model choice. (An app's own role nobody
+    maps runs on the default model.)
     """
     computed: set[str] = set()
     if not manager_model and not settings.default_model:
@@ -217,9 +223,25 @@ def computed_roles(
 
 
 def _agent_models(agent_configs: Iterable["AgentConfig"]) -> list[ModelRef | RoleRef]:
-    """Each agent's model that names one (None runs on the default) and parses."""
-    parsed = (_agent_model(config) for config in agent_configs)
-    return [model for model in parsed if model is not None]
+    """Each agent's model that names one (None runs on the default), then its choices; those that parse."""
+    models: list[ModelRef | RoleRef] = []
+    for config in agent_configs:
+        model = _agent_model(config)
+        if model is not None:
+            models.append(model)
+        models.extend(_agent_choices(config))
+    return models
+
+
+def _agent_choices(config: "AgentConfig") -> list[ModelRef | RoleRef]:
+    """The agent's model choices that parse (validation reports the others)."""
+    parsed: list[ModelRef | RoleRef] = []
+    for choice in getattr(config, "model_choices", None) or ():
+        try:
+            parsed.append(parse_spec(choice))
+        except (ModelSpecError, TypeError, AttributeError):
+            continue
+    return parsed
 
 
 def _agent_model(config: "AgentConfig") -> ModelRef | RoleRef | None:
