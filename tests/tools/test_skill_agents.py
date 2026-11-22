@@ -184,13 +184,33 @@ class TestTheKeyWhileNoSkillMayStart:
         agents.check([skill])
 
         assert not agents.starts(skill)
-        assert agents.refusal(skill, 0) is None
+        # A load treats it as instructions before asking; a start is refused.
+        assert agents.refusal(skill, 0) == (
+            f"The skill 'research' starts the agent '{named}', which "
+            "this app does not let a skill start."
+        )
         assert logged == [{
             "event": "skill_agent_ignored", "log_level": "warning", "agent": "lead",
             "skill": "research", "agent_type": named,
             "message": f"The skill 'research' names the agent '{named}', but this app lets "
                        "no skill start an agent: it loads as instructions.",
         }]
+
+    @pytest.mark.parametrize("policy", [SubAgentPolicy(), SubAgentPolicy(spawn_sources={"agent"})],
+                             ids=["default", "agents-only"])
+    async def test_a_start_is_refused_and_counts_none(self, tmp_path, policy):
+        hook, asked = answering()
+        delegations = made(hook, policy=policy)
+        agents = SkillAgents("lead", lambda: delegations, root=True)
+
+        out, events = await loaded(agents, make_skill(tmp_path, "research", "agent: helper\n"))
+
+        assert out["result"].result == {
+            "success": False,
+            "error": "The skill 'research' starts the agent 'helper', which "
+                     "this app does not let a skill start.",
+        }
+        assert (out["result"].run, asked, events, out["counted"]) == (None, [], [], 0)
 
     def test_where_a_skill_may_start_it_starts(self, tmp_path, logged):
         skill = make_skill(tmp_path, "research", "agent: helper\n")

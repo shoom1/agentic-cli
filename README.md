@@ -1477,26 +1477,27 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   # The coordinator's call: {"agent_type": "researcher", "title": "Look it up",
   #   "objective": "...", "tools": ["web_search"], "model": "fast"}
   ```
-- **Skills that start an agent.** A skill may name an agent type at the top
-  of its `SKILL.md` frontmatter, `agent: researcher`; with the type's
+- **Skills that start an agent.** A skill may name an agent type at the
+  top of its `SKILL.md` frontmatter, `agent: researcher`; with the type's
   `spawnable_by={"skill"}` and `SubAgentPolicy(spawn_sources={"skill"})`,
   an agent that loads the skill starts a run of that type instead of
   reading the skill's instructions. Without `"skill"` in `spawn_sources`
-  (the default) the key is ignored: the skill loads as instructions, as any
-  skill does, and the build warns of it (`skill_agent_ignored`). The run's task message is the skill's
-  body under its name (`# Task: research`, `## Objective`), its parent the
-  loading agent's run (`started_by: skill:research`), and it counts toward
-  `max_runs_per_turn`; the `load_skill` call's result is the run's envelope
-  with `"skill": "research"` added. The skill gives no tools and no system
-  prompt: the run has its type's. A load is refused, no run started, when
-  the type is not one of the app's, when the type or the policy does not
-  let a skill start it, for a skill with no instructions (nothing to be the
-  task), or from a run that may start no type
-  (`max_spawn_depth`; an inheriting agent starts none, and an inheriting
-  type is started by the main agent alone): `{"success": false, "error":
-  "The skill 'research' starts the agent 'researcher', which this app does
-  not let a skill start."}`. Such a skill is also warned of as its agent is
-  built (`skill_agent_not_startable`), and the app still starts.
+  (the default) the key is ignored: the skill loads as instructions, as
+  any skill does, and the build warns of it (`skill_agent_ignored`). The
+  run's task message is the skill's body under its name (`# Task:
+  research`, `## Objective`), its parent the loading agent's run
+  (`started_by: skill:research`), and it counts toward
+  `max_runs_per_turn`; the `load_skill` call's result is the run's
+  envelope with `"skill": "research"` added. The skill gives no tools and
+  no system prompt: the run has its type's. A load is refused, no run
+  started, when the type is not one of the app's, when the type does not
+  let a skill start it, for a skill with no instructions (nothing to be
+  the task), or from a run that may start no type (`max_spawn_depth`; an
+  inheriting agent starts none, and an inheriting type is started by the
+  main agent alone): `{"success": false, "error": "The skill 'research'
+  starts the agent 'researcher', which this app does not let a skill
+  start."}`. Such a skill is also warned of as its agent is built
+  (`skill_agent_not_startable`), and the app still starts.
 
   ```markdown
   ---

@@ -44,7 +44,7 @@ logger = Loggers.tools()
 #: The frontmatter key (top level) that names the agent type a skill starts.
 SKILL_AGENT_KEY = "agent"
 
-#: What a refused load says; ``reason`` is one of the three below.
+#: What a refused load says; ``reason`` is one of the four below.
 SKILL_AGENT_ERROR = "The skill '{skill}' starts the agent '{agent}', which {reason}."
 UNKNOWN_TYPE = "is not one of this app's agent types"
 NOT_FOR_SKILLS = "this app does not let a skill start"
@@ -131,11 +131,16 @@ class SkillAgents:
         return None
 
     def refusal(self, skill: Any, depth: int) -> str | None:
-        """The error a load of ``skill`` from a run at ``depth`` gets, or None to start it."""
+        """The error a start of ``skill`` from a run at ``depth`` gets, or None to start it.
+
+        A skill that names no agent is no start (None). One whose key the app
+        ignores (``starts`` is false) is refused too: a load treats it as
+        instructions before asking, and a start that comes anyway starts nothing.
+        """
         name = skill_agent(skill)
-        if name is None or not self.starts(skill):
+        if name is None:
             return None
-        reason = self._reason(skill, name, depth)
+        reason = self._reason(skill, name, depth) if self.starts(skill) else NOT_FOR_SKILLS
         if reason is None:
             return None
         return SKILL_AGENT_ERROR.format(skill=skill.name, agent=name, reason=reason)
