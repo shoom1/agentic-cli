@@ -2012,7 +2012,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
     async def _keep_conversation(self, ref: SessionRef, objective: str) -> None:
         """Store the conversation when it is not yet (``keep_conversation``)."""
-        await keep_conversation(self._session_service, ref, objective)
+        await keep_conversation(
+            self._session_service, ref, objective, author=self._root_agent_name
+        )
 
     async def _inherited_history(self, ref: SessionRef) -> list[Any]:
         """``ref``'s conversation as an inheriting run the user starts reads it.

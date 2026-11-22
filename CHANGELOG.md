@@ -594,9 +594,10 @@ the start of the entry's title.
   tools: `follow_ups`, and a sub-agent it may start or a type agents may
   start). A conversation whose only work is a start is stored, titled with
   the objective, so `/resume`, `--continue` and `--resume` reach it. In
-  another sub-agent's view it leaves that one first. A type you cannot start opens nothing ("You cannot start
-  'writer' here. Types you can start: researcher."; "This app lets you start
-  no agent types." when there is none), and a missing type or objective says
+  another sub-agent's view it leaves that one first. A type you cannot start
+  opens nothing ("You cannot start 'writer' here. Types you can start:
+  researcher."; "This app lets you start no agent types." when there is
+  none), and a missing type or objective says
   `Usage: /agent new <type> <objective>`. The manager's entry point
   (provisional): `start_instance(agent_type, objective)`, a turn of its own
   whose first event is the run's start, which names the instance; a refusal

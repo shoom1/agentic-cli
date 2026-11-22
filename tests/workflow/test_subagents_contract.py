@@ -7577,9 +7577,52 @@ class TestTheUsersStartStoresItsConversation:
         await crew.turn("Now you.")
 
         (row,) = await crew.manager.list_sessions(user_id=USER)
-        assert row.turns == 1
+        assert (row.title, row.turns) == ("Help with X.", 1)
         events = await user_start(crew, "helper", "Again.")
         assert runs_of(events)[-1].metadata["status"] == RUN_COMPLETED
+
+    async def test_the_main_agents_notice_keeps_the_objectives_title_and_no_turns(
+        self, make_crew
+    ):
+        """``/back``'s notice is no typed prompt: the row stays as the start left it."""
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+        await user_start(crew, "helper", "Objective title.")
+
+        _ = [event async for event in crew.manager.tell_root(
+            "The user worked with helper-1 directly.", session_id=SESSION, user_id=USER
+        )]
+
+        (row,) = await crew.manager.list_sessions(user_id=USER)
+        assert (row.title, row.turns) == ("Objective title.", 0)
+
+    async def test_the_first_typed_prompt_after_it_counts_one_and_keeps_the_title(
+        self, make_crew
+    ):
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+        await user_start(crew, "helper", "Objective title.")
+
+        await crew.turn("First typed prompt.")
+
+        (row,) = await crew.manager.list_sessions(user_id=USER)
+        assert (row.title, row.turns) == ("Objective title.", 1)
+
+    async def test_the_first_root_turn_after_it_logs_no_unknown_agent_warning(
+        self, make_crew, caplog
+    ):
+        """ADK's router warns of an event whose author is none of the app's agents."""
+        import logging
+
+        crew = make_crew(user_team(), subagents=STARTING, store="sqlite",
+                         coordinator=[says("Noted.")], helper=[says("Helped.")])
+        await user_start(crew, "helper", "Objective title.")
+
+        with caplog.at_level(logging.DEBUG):
+            await crew.turn("First typed prompt.")
+
+        assert [r.getMessage() for r in caplog.records
+                if "unknown agent" in r.getMessage()] == []
 
     async def test_a_refusal_stores_nothing(self, make_crew):
         crew = make_crew(user_team(), subagents=STARTING, store="sqlite")

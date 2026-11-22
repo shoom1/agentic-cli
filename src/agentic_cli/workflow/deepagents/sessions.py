@@ -276,7 +276,8 @@ class CheckpointSessions:
             return
         row = SessionInfo(ref.session_id, session_title(objective), 0, datetime.now(timezone.utc))
         await self._store.aput(
-            _rows_of(ref.app_name, ref.user_id), ref.session_id, _value(row), index=False
+            _rows_of(ref.app_name, ref.user_id), ref.session_id, _value(row, kept=True),
+            index=False,
         )
 
     async def info(self, ref: SessionRef) -> SessionInfo | None:
@@ -305,21 +306,34 @@ class CheckpointSessions:
         ends, however it ends, and after ``/compact``, without ``adding``,
         which corrects that row. A conversation without a message has none:
         a first turn stopped before its input was stored takes its row back.
+        A row ``keep`` wrote (a conversation started by a run the user began)
+        is the exception: it keeps its title, the objective's, whatever is
+        typed later, and a turn that stored no message leaves it.
         A failed write is logged at debug and costs nothing else: the
         conversation's next turn writes its row again.
         """
         namespace = _rows_of(ref.app_name, ref.user_id)
         try:
             item = await self._root(ref)
+            held = await self._store.aget(namespace, ref.session_id)
+            kept = held.value if held is not None and _is_kept(held.value) else None
             if adding:
                 messages = [*_messages(item), *adding]
                 row = _row_of(ref.session_id, messages, datetime.now(timezone.utc))
             elif _messages(item):
                 row = _row(ref.session_id, item)
+            elif kept is not None:
+                return
             else:
                 await self._store.adelete(namespace, ref.session_id)
                 return
-            await self._store.aput(namespace, ref.session_id, _value(row), index=False)
+            if kept is not None:
+                title = _from_value(ref.session_id, kept)
+                if title is not None:
+                    row = SessionInfo(row.session_id, title.title, row.turns, row.updated)
+            await self._store.aput(
+                namespace, ref.session_id, _value(row, kept=kept is not None), index=False
+            )
         except Exception:  # noqa: BLE001 - the turn is not the index's to fail
             logger.debug(
                 "session_row_not_written", session_id=ref.session_id, exc_info=True
@@ -680,14 +694,22 @@ def _marks_of(app_name: str, user_id: str) -> tuple[str, ...]:
     return (*_BACKFILLS, _label(app_name), _label(user_id))
 
 
-def _value(row: SessionInfo) -> dict[str, Any]:
-    """A row as the index stores it."""
-    return {
+def _value(row: SessionInfo, *, kept: bool = False) -> dict[str, Any]:
+    """A row as the index stores it (``kept``: ``keep`` wrote it, and its title stays)."""
+    value: dict[str, Any] = {
         "title": row.title,
         "turns": row.turns,
         "updated": row.updated.isoformat(),
         "v": _ROW_VERSION,
     }
+    if kept:
+        value["kept"] = True
+    return value
+
+
+def _is_kept(value: Any) -> bool:
+    """Whether a stored row is one ``keep`` wrote."""
+    return isinstance(value, dict) and value.get("kept") is True
 
 
 def _from_value(session_id: str, value: Any) -> SessionInfo | None:

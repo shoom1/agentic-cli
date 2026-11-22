@@ -409,14 +409,18 @@ def turn_state(session: "Session", message: str) -> dict[str, Any]:
     return delta
 
 
-async def keep_conversation(service: "BaseSessionService", ref: SessionRef, objective: str) -> None:
+async def keep_conversation(
+    service: "BaseSessionService", ref: SessionRef, objective: str, *, author: str
+) -> None:
     """Store ``ref``'s conversation when it holds no event yet, titled from ``objective``.
 
     ADK lists a session only once it holds an event, and keeps its state only
     through events: the session is made when there is none, and one state-only
-    event (``RECORDS_AUTHOR``, no content: no request carries it) sets its
-    title and no turns of the user's, the row ``turn_state`` would leave. A
-    session with events, or with a row of its own, is left as it is.
+    event (no content: no request carries it) sets its title and no turns of
+    the user's, the row ``turn_state`` would leave. Its ``author`` is the root
+    agent's name: it is only ever the first event of a new conversation, and
+    ADK's router, which warns of an event from an agent the app lacks, picks
+    the root for it as it would anyway. A session with events is left as it is.
     """
     from google.adk.events import Event, EventActions
     from google.adk.sessions.base_session_service import GetSessionConfig
@@ -433,7 +437,7 @@ async def keep_conversation(service: "BaseSessionService", ref: SessionRef, obje
         )
     delta: dict[str, Any] = {TURNS_KEY: 0, TITLE_KEY: session_title(objective)}
     await service.append_event(session, Event(
-        author=RECORDS_AUTHOR, actions=EventActions(state_delta=delta),
+        author=author, actions=EventActions(state_delta=delta),
     ))
 
 

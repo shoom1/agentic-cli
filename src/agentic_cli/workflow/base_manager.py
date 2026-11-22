@@ -1027,13 +1027,13 @@ class BaseWorkflowManager(ABC):
         is ``stopped``; a stop before the run started stops the run as it
         starts. ``interrupt_instance`` ends it as a turn's cancel does.
 
-        Yields:
-            The run's ``WorkflowEvent``s, its start first.
-
         A conversation that is not stored yet is stored first, titled from
         the objective with no turns of the user's with the main agent
         (``_keep_conversation``), so what the user did here is found by
         ``/resume``, ``--continue`` and ``--resume``.
+
+        Yields:
+            The run's ``WorkflowEvent``s, its start first.
 
         Raises:
             Exception: The store's, when the conversation's sub-agent records,
