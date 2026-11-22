@@ -9,10 +9,19 @@ only the ``deepagents`` extra installs.
 Importing this package registers the skill tool names with the permission
 registry, so both backends bind their skill tools to the same definitions
 (the ADK PermissionPlugin and the Deep Agents gate both allow them).
+
+A skill whose frontmatter names an agent type starts a run of it when loaded
+(``agents``).
 """
 
 from typing import Any
 
+from agentic_cli.tools.skills.agents import (
+    SKILL_AGENT_KEY,
+    SkillAgents,
+    skill_agent,
+    skill_started_by,
+)
 from agentic_cli.tools.skills.permissions import register_skill_tool_permissions
 from agentic_cli.tools.skills.store import SkillStore
 from agentic_cli.tools.skills.toolset import make_skill_toolset
@@ -21,7 +30,15 @@ from agentic_cli.tools.skills.toolset import make_skill_toolset
 register_skill_tool_permissions()
 
 # make_skill_tools is left out: a star import would load LangChain.
-__all__ = ["SkillStore", "make_skill_toolset", "register_skill_tool_permissions"]
+__all__ = [
+    "SKILL_AGENT_KEY",
+    "SkillAgents",
+    "SkillStore",
+    "make_skill_toolset",
+    "register_skill_tool_permissions",
+    "skill_agent",
+    "skill_started_by",
+]
 
 
 def __getattr__(name: str) -> Any:
