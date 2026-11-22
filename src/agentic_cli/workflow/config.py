@@ -321,11 +321,10 @@ def validate_agent_graph(
         c.name for c in configs if c.spawnable_by is not None and c.name not in parents
     )
     # The root is the agent nobody delegates to that is no free type.
-    # Selecting "first config with
-    # sub_agents" made the root depend on declaration order (listing a
-    # sub-coordinator before its parent promoted the child to root) and
-    # silently accepted a forest: only one root is ever run, so every other
-    # tree — and every agent under it — was unreachable.
+    # Selecting "first config with sub_agents" made the root depend on
+    # declaration order (listing a sub-coordinator before its parent promoted
+    # the child to root) and silently accepted a forest: only one root is ever
+    # run, so every other tree — and every agent under it — was unreachable.
     roots = [c.name for c in configs if c.name not in parents and c.name not in free]
     if not roots:
         if len(free) == 1:

@@ -3741,8 +3741,9 @@ def at(depth: int, agent: str = "middle") -> RunRef:
 
 class TestWhatARunMayStart:
     """``offered``: a run's own sub-agents in their order, then, while the
-    run's depth is below ``max_spawn_depth`` and it does not inherit, the types agents
-    may start at run time; an inheriting one only for the root."""
+    run's depth is below ``max_spawn_depth`` and it does not inherit, the
+    types agents may start at run time; an inheriting one only for the
+    root."""
 
     def test_with_the_default_policy_its_own_sub_agents(self):
         made = delegations(answering()[0], types=SPAWNING)

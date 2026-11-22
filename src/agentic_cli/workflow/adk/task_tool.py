@@ -1,18 +1,18 @@
 """ADK's ``task`` tool: the framework's delegation, as an ADK tool.
 
-An agent built from configs that can have sub-agents (its own, or types it
-may start at run time: ``agents/spawn.py::can_have_children``) gets one
+An agent built from configs that can have sub-agents (its own, or types it may
+start at run time: ``agents/spawn.py::can_have_children``) gets one
 ``TaskTool``, whatever its sub-agents (they are no ADK ``sub_agents``: each
 runs on a runner of its own, ``GoogleADKWorkflowManager._run_agent``). Its
-declaration is the framework's, made for each request (ADK asks the tool
-for it per model call, in the run's own context): what the run that asks
-may start (``Delegations.task_offer``, ``agents/brief.py``'s
-``task_parameters`` and ``task_description``), as Deep Agents' ``task``'s is,
-and none at all for a run that may start nothing: ADK adds a tool to a
-request only for a declaration, so the model is offered no ``task``, and a
-call of the name gets ADK's answer for a tool it does not have. A call
-hands its arguments, as the model wrote them, to the manager's
-``Delegations`` (``agents/delegate.py``): it reads the brief, runs the sub-agent and returns the result envelope.
+declaration is the framework's, made for each request (ADK asks the tool for
+it per model call, in the run's own context): what the run that asks may start
+(``Delegations.task_offer``, ``agents/brief.py``'s ``task_parameters`` and
+``task_description``), as Deep Agents' ``task``'s is, and none at all for a
+run that may start nothing: ADK adds a tool to a request only for a
+declaration, so the model is offered no ``task``, and a call of the name gets
+ADK's answer for a tool it does not have. A call hands its arguments, as the
+model wrote them, to the manager's ``Delegations`` (``agents/delegate.py``):
+it reads the brief, runs the sub-agent and returns the result envelope.
 
 The call's result is the envelope as JSON text, which ADK stores as
 ``{"result": <text>}``: every model adapter sends that text whole (ADK's

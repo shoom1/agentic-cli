@@ -675,15 +675,14 @@ class Delegations:
     async def start(self, request: StartRequest) -> Delegated:
         """Run a first run of ``request.agent_type`` to its end; its envelope.
 
-        A call past the runs its turn may start (when ``request.counted``)
-        is the error result, and nothing else happens. Otherwise the run is
-        named (its instance ``<type>-<n>``, numbered past the stored
-        instances, and its run ``<instance>#1``, under the caller's run) and
-        starts with its ``AGENT_RUN`` event, which carries
-        ``request.started_by``. A caller that is a
-        run lends its slot while it waits for this one. A cancel of the
-        caller's task (the turn's) ends the run ``interrupted`` once it has
-        stopped, and goes on.
+        A call past the runs its turn may start (when ``request.counted``) is
+        the error result, and nothing else happens. Otherwise the run is named
+        (its instance ``<type>-<n>``, numbered past the stored instances, and
+        its run ``<instance>#1``, under the caller's run) and starts with its
+        ``AGENT_RUN`` event, which carries ``request.started_by``. A caller
+        that is a run lends its slot while it waits for this one. A cancel of
+        the caller's task (the turn's) ends the run ``interrupted`` once it
+        has stopped, and goes on.
 
         Raises:
             KeyError: ``request.agent_type`` is not one of the manager's types.

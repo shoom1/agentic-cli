@@ -3,18 +3,18 @@
 Every agent is its own graph, built apart from the others, on the manager's
 checkpointer (a sub-agent's runs are on a thread of its instance's own, which
 its follow-ups continue); a tree built without a checkpointer compiles its
-sub-agents with none. An agent with sub-agents, its own or types it may
-start at run time (``spawn.can_have_children``), gets the framework's ``task``
-tool (``task_tool.build_task_tool``) among its tools (the root's offer fixed
-when it is built, a sub-agent's rewritten for each model call by
+sub-agents with none. An agent with sub-agents, its own or types it may start
+at run time (``spawn.can_have_children``), gets the framework's ``task`` tool
+(``task_tool.build_task_tool``) among its tools (the root's offer fixed when
+it is built, a sub-agent's rewritten for each model call by
 ``RunControlMiddleware``; with ``SubAgentPolicy.follow_ups``, also the
 parent's other tools, ``task_tool.build_follow_up_tools``): a call hands the
 brief to the manager's ``Delegations``, which runs the sub-agent's graph apart
-from the caller's stream (``DeepAgentsWorkflowManager._run_agent``) and answers with the result
-envelope. Only the configured sub-agents are offered: there is no automatic
-general-purpose sub-agent, and none of Deep Agents' file tools. ``graphs``,
-when given, is filled with every agent's graph by name: what the manager runs
-a sub-agent on.
+from the caller's stream (``DeepAgentsWorkflowManager._run_agent``) and
+answers with the result envelope. Only the configured sub-agents are offered:
+there is no automatic general-purpose sub-agent, and none of Deep Agents' file
+tools. ``graphs``, when given, is filled with every agent's graph by name:
+what the manager runs a sub-agent on.
 
 Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a tool
 call a cancelled turn or a crash left without a result, before each run, as
