@@ -9,6 +9,10 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
   ``offered``: its own sub-agents, then, above ``max_spawn_depth``, the types
   agents start at run time, ``agents/spawn.py``): a brief that cannot start a run is the call's error result, and nothing
   else happens (no run, no record, no event);
+
+Then ``start``, the one entry for an instance's first run, whoever starts it
+(a ``StartRequest``: the type, the brief, who starts it):
+
 - counts the run against its turn's (``SubAgentPolicy.max_runs_per_turn``,
   runs at any depth: ``sessions.runs_this_turn``): a call past it is the
   error result ``RUNS_PER_TURN_ERROR`` says, and nothing else happens;
@@ -113,6 +117,7 @@ from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents.brief import (
+    Brief,
     BriefError,
     TaskOffer,
     read_brief,
@@ -273,6 +278,41 @@ class DelegationRequest:
     arguments: Mapping[str, Any]
     state: Mapping[str, Any] = field(default_factory=dict)
     history: Callable[[], Any] | None = None
+
+
+@dataclass(frozen=True)
+class StartRequest:
+    """A first run of an agent type, as whoever starts it hands it over.
+
+    Who may start the type is the asker's to check (``Delegations.offered``
+    for a ``task`` call); ``Delegations.start`` runs what it is given.
+
+    Attributes:
+        agent_type: The type to run: one of the manager's agent types.
+        brief: The run's brief (a title and an objective at least).
+        started_by: Who starts it: ``agent:<instance>`` (``agent:root`` for
+            the root), ``skill:<name>`` or ``user``.
+        caller: The run that starts it; None for the root, or the user.
+        call_id: The caller's tool call; None for the user's start.
+        conversation: The conversation; None: the active turn's.
+        state: The caller's shared state (the outside-content mark), which
+            the run starts from.
+        history: Called once, only when the type inherits its parent's
+            conversation: that conversation, as the backend reads it.
+        counted: Whether the run counts toward its turn's runs
+            (``SubAgentPolicy.max_runs_per_turn``); False for a run the
+            user starts.
+    """
+
+    agent_type: str
+    brief: Brief
+    started_by: str
+    caller: RunRef | None = None
+    call_id: str | None = None
+    conversation: SessionRef | None = None
+    state: Mapping[str, Any] = field(default_factory=dict)
+    history: Callable[[], Any] | None = None
+    counted: bool = True
 
 
 @dataclass(frozen=True)
@@ -614,11 +654,9 @@ class Delegations:
     async def delegate(self, request: DelegationRequest) -> Delegated:
         """Run the sub-agent ``request`` asks for, to its end; its envelope.
 
-        A brief that cannot start a run, or a call past the runs its turn
-        may start, is the error result, and nothing else happens. A caller
-        that is a run lends its slot while it waits for this one. A cancel
-        of the caller's task (the turn's) ends the run ``interrupted`` once
-        it has stopped, and goes on.
+        A brief that cannot start a run is the error result, and nothing
+        else happens; otherwise it ends in ``start``, started by the
+        calling run.
         """
         depth = request.caller.depth if request.caller is not None else 0
         try:
@@ -626,25 +664,49 @@ class Delegations:
                 request.arguments, self.offered(request.caller_agent, depth)
             )
         except BriefError as error:
-            return Delegated(result={"success": False, "error": str(error)}, state={}, run=None)
-        refused = self._past_runs_per_turn(config.name)
-        if refused is not None:
-            return refused
-        count_run_this_turn()
-        conversation = get_active_turn()
-        await self._number_past_stored(conversation)
-        ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
-        self._emit(WorkflowEvent.agent_run(
-            ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
-            brief=brief.fields(), started_by=started_by(request.caller), mode=BLOCKING,
-            inherit_context=config.inherit_context, continuable=config.continuable,
+            return _refused(str(error))
+        return await self.start(StartRequest(
+            agent_type=config.name, brief=brief, started_by=started_by(request.caller),
+            caller=request.caller, call_id=request.call_id, state=request.state,
+            history=request.history,
         ))
-        return await self._run(
-            ref, config, conversation, request.call_id,
-            message=task_message(brief, inherit=config.inherit_context),
-            state=request.state,
-            history=request.history if config.inherit_context else None,
+
+    async def start(self, request: StartRequest) -> Delegated:
+        """Run a first run of ``request.agent_type`` to its end; its envelope.
+
+        A call past the runs its turn may start (when ``request.counted``)
+        is the error result, and nothing else happens. A caller that is a
+        run lends its slot while it waits for this one. A cancel of the
+        caller's task (the turn's) ends the run ``interrupted`` once it has
+        stopped, and goes on.
+
+        Raises:
+            KeyError: ``request.agent_type`` is not one of the manager's types.
+        """
+        config = self._types[request.agent_type]
+        conversation = (
+            request.conversation if request.conversation is not None else get_active_turn()
         )
+        with _as_turn(conversation):
+            if request.counted:
+                refused = self._past_runs_per_turn(config.name)
+                if refused is not None:
+                    return refused
+                count_run_this_turn()
+            await self._number_past_stored(conversation)
+            ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
+            brief = request.brief
+            self._emit(WorkflowEvent.agent_run(
+                ref, RUN_STARTED, call_id=request.call_id, title=run_title(brief.title),
+                brief=brief.fields(), started_by=request.started_by, mode=BLOCKING,
+                inherit_context=config.inherit_context, continuable=config.continuable,
+            ))
+            return await self._run(
+                ref, config, conversation, request.call_id,
+                message=task_message(brief, inherit=config.inherit_context),
+                state=request.state,
+                history=request.history if config.inherit_context else None,
+            )
 
     async def follow_up(
         self, request: FollowUpRequest, *, _reserved: list[bool] | None = None

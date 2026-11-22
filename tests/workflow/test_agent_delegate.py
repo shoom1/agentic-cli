@@ -57,6 +57,7 @@ from agentic_cli.workflow.agents.delegate import (
     FollowUpRequest,
     RunAnswer,
     RunFailed,
+    StartRequest,
     started_by,
     waiting_on_user,
 )
@@ -3891,3 +3892,182 @@ class TestADelegationToATypeStartedAtRunTime:
         (run,) = asked
         assert (run.ref.depth, run.ref.parent_run) == (2, "researcher-1#1")
         assert events[0].metadata["started_by"] == "agent:researcher-1"
+
+
+# -- one entry for a first run: start -------------------------------------------------
+
+def start_request(agent_type: str = "researcher", **fields: Any) -> StartRequest:
+    return StartRequest(
+        agent_type=agent_type,
+        brief=fields.pop("brief", Brief(title="Find X", objective="Find X.")),
+        started_by=fields.pop("started_by", "skill:find"), call_id=fields.pop("call_id", "c1"),
+        **fields,
+    )
+
+
+async def started(made: Delegations, asked: StartRequest) -> tuple[Any, list[WorkflowEvent]]:
+    """``made.start(asked)`` in a turn of ``CONVERSATION`` (its span open); its result, and
+    what it reported."""
+    live = LiveEvents()
+    out: dict[str, Any] = {}
+
+    async def source():
+        token = set_active_turn(CONVERSATION)
+        scope = open_turn_scope()
+        try:
+            with live_events.reporting(live):
+                out["result"] = await made.start(asked)
+                out["counted"] = runs_this_turn()
+        finally:
+            close_turn_scope(scope)
+            reset_active_turn(token)
+        if False:  # pragma: no cover
+            yield
+
+    events = [item async for item in merged(source(), live)]
+    return out, events
+
+
+class TestStart:
+    """``start``: a first run of a type, whoever starts it, run as a
+    delegation's: numbered, reported with who started it, run to its end."""
+
+    async def test_runs_the_type_to_its_end_and_says_who_started_it(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+
+        out, events = await started(delegations(hook, runs=runs), start_request())
+
+        assert out["result"].result == {
+            "success": True, "agent": "researcher-1", "run": "researcher-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "X is 42.", "error": None,
+        }
+        (run,) = asked
+        assert run.message == task_message(Brief(title="Find X", objective="Find X."))
+        assert (run.ref, run.history, run.follow_up) == (RESEARCHER, None, False)
+        assert events[0].metadata == {
+            "status": RUN_STARTED, "agent": "researcher", "partial": False, "call_id": "c1",
+            "title": "Find X", "brief": {"title": "Find X", "objective": "Find X."},
+            "started_by": "skill:find", "mode": "blocking",
+            "inherit_context": False, "continuable": True,
+        }
+        assert out["counted"] == 1
+        (record,) = runs.records(CONVERSATION)
+        assert record.started_by == "skill:find"
+
+    async def test_under_the_run_that_starts_it(self):
+        hook, asked = answering()
+
+        await started(delegations(hook), start_request(
+            "leaf", caller=at(1), started_by="agent:middle-1", call_id="m1",
+        ))
+
+        (run,) = asked
+        assert (run.ref.instance, run.ref.depth, run.ref.parent_run) == (
+            "leaf-1", 2, "middle-1#1"
+        )
+
+    async def test_one_not_counted_is_not_refused_past_the_runs_a_turn_may_start(self):
+        hook, asked = answering()
+        made = delegations(hook, policy=SubAgentPolicy(max_runs_per_turn=1))
+        live = LiveEvents()
+        results: list[Any] = []
+
+        async def source():
+            token = set_active_turn(CONVERSATION)
+            scope = open_turn_scope()
+            try:
+                with live_events.reporting(live):
+                    results.append(await made.start(start_request(call_id="c1")))
+                    results.append(await made.start(start_request(call_id="c2")))
+                    results.append(await made.start(start_request(
+                        call_id="c3", started_by="user", counted=False,
+                    )))
+                    results.append(runs_this_turn())
+            finally:
+                close_turn_scope(scope)
+                reset_active_turn(token)
+            if False:  # pragma: no cover
+                yield
+
+        async for _ in merged(source(), live):
+            pass
+
+        first, refused, uncounted, counted = results
+        assert first.result["status"] == RUN_COMPLETED
+        assert refused.result == {
+            "success": False, "error": RUNS_PER_TURN_ERROR.format(limit=1),
+        }
+        assert (uncounted.result["status"], uncounted.result["agent"]) == (
+            RUN_COMPLETED, "researcher-2"
+        )
+        assert counted == 1
+        assert len(asked) == 2
+
+    async def test_numbered_past_the_stored(self):
+        hook, _ = answering()
+        stored, asked = storing({"researcher": 4})
+
+        out, _ = await started(delegations(hook, stored=stored), start_request())
+
+        assert out["result"].result["agent"] == "researcher-5"
+        assert asked == [CONVERSATION]
+
+    async def test_an_inheriting_type_reads_its_history_once(self):
+        hook, asked = answering()
+        read: list[int] = []
+
+        def history() -> list[str]:
+            read.append(1)
+            return ["the conversation"]
+
+        await started(delegations(hook), start_request(
+            "reader", brief=Brief(title="Read", objective="Read it."), history=history,
+        ))
+
+        (run,) = asked
+        assert (run.history, read) == (["the conversation"], [1])
+        assert run.message.endswith(INHERITED_CONTEXT_NOTE)
+
+    async def test_a_fresh_type_never_reads_it(self):
+        hook, asked = answering()
+
+        def history() -> list[str]:
+            raise AssertionError("a fresh run read the conversation")
+
+        await started(delegations(hook), start_request(history=history))
+
+        assert asked[0].history is None
+
+    async def test_its_state_is_the_runs_and_its_conversation_the_one_named(self):
+        hook, asked = answering()
+        other = SessionRef("app", "u", "other")
+
+        await started(delegations(hook), start_request(
+            conversation=other, state={"outside_content": "web_fetch"},
+        ))
+
+        (run,) = asked
+        assert (run.conversation, run.state) == (other, {"outside_content": "web_fetch"})
+
+    async def test_a_type_that_is_no_type_is_a_key_error(self):
+        hook, asked = answering()
+
+        with pytest.raises(KeyError):
+            await delegations(hook).start(start_request("nobody"))
+        assert asked == []
+
+    def test_its_fields_and_defaults(self):
+        made = StartRequest(agent_type="researcher", brief=Brief(title="T", objective="O"),
+                            started_by="user")
+        assert (made.caller, made.call_id, made.conversation, made.state, made.history,
+                made.counted) == (None, None, None, {}, None, True)
+
+
+async def test_a_start_blocks_no_event_loop():
+    hook, _ = answering()
+
+    with no_blocking_calls():
+        out, events = await started(delegations(hook), start_request())
+
+    assert out["result"].result["status"] == RUN_COMPLETED
