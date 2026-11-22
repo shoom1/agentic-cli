@@ -339,12 +339,13 @@ def validate_settings(
     The static half of model validation:
 
     - every reference parses: ``default_model``, ``model_roles`` and each
-      agent's ``model`` (a role must map to a model, never another role);
-      ``models`` keys are checked when the settings load;
+      agent's ``model`` and each of its ``model_choices`` (a role must map to
+      a model, never another role); ``models`` keys are checked when the settings load;
     - every provider a reference names is built in or defined in
       ``model_providers``;
     - every provider a model will run on can be called: the default model's,
-      each agent's, and that of each role an agent names (a built-in has its
+      each agent's and each of its model choices', and that of each role an
+      agent names (a built-in has its
       key; a configured provider's ``api_key_env`` is set, in the environment
       or the app's user-level env files, or it names none);
     - a built-in role that is computed, not mapped (``default`` without a
@@ -363,7 +364,8 @@ def validate_settings(
 
     Args:
         settings: Settings to validate.
-        agent_configs: Optional agent configs whose ``model`` is checked too.
+        agent_configs: Optional agent configs whose ``model`` and
+            ``model_choices`` are checked too.
 
     Raises:
         SettingsValidationError: Listing every problem, one per line.
@@ -461,24 +463,33 @@ def _model_settings_problems(
             errors.append(str(exc))
 
     for config in agent_configs or []:
-        spec = getattr(config, "model", None)
-        if not spec:
-            continue
-        who = f"Agent {getattr(config, 'name', '?')!r}"
-        try:
-            parsed = parse_spec(spec)
-        except ModelSpecError as exc:
-            errors.append(f"{who}: {exc}")
-            continue
-        if isinstance(parsed, RoleRef):
-            # A mapped role runs on its model; an unmapped one is computed
-            # from the catalog at startup.
-            mapped = roles.spec_for(parsed.role) if roles is not None else None
-            if mapped is not None and parsed.role != "default":
-                runs.append((f"{who} (role {parsed.role!r})", mapped))
-            continue
-        named.append((who, parsed))
-        runs.append((who, parsed))
+        name = getattr(config, "name", "?")
+        choices = getattr(config, "model_choices", None) or ()
+        for who, spec, own in (
+            (f"Agent {name!r}", getattr(config, "model", None), True),
+            *(
+                (f"Agent {name!r} (model choice {choice!r})", choice, False)
+                for choice in choices
+            ),
+        ):
+            if not spec:
+                continue
+            try:
+                parsed = parse_spec(spec)
+            except ModelSpecError as exc:
+                errors.append(f"{who}: {exc}")
+                continue
+            if isinstance(parsed, RoleRef):
+                # A mapped role runs on its model; an unmapped one is computed
+                # from the catalog at startup.
+                mapped = roles.spec_for(parsed.role) if roles is not None else None
+                if mapped is not None and parsed.role != "default":
+                    runs.append(
+                        (f"{who} (role {parsed.role!r})" if own else who, mapped)
+                    )
+                continue
+            named.append((who, parsed))
+            runs.append((who, parsed))
 
     for who, ref in named:
         if ref.provider not in providers:

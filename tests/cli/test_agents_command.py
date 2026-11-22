@@ -82,11 +82,13 @@ class Runs:
         self.conversation = conversation
 
     def start(self, agent: str, call_id: str, request: str, *, at: int,
-              parent: RunRef | None = None, brief: dict[str, str] | None = None) -> RunRef:
+              parent: RunRef | None = None, brief: dict[str, str] | None = None,
+              tools: list[str] | None = None, model: str | None = None) -> RunRef:
         ref = self.manager.agent_runs.run_for(self.conversation, parent, call_id, agent)
         title = request.splitlines()[0]
         self._observe(WorkflowEvent.agent_run(
-            ref, "started", title=title, call_id=call_id, brief=brief,
+            ref, "started", title=title, call_id=call_id, brief=brief, tools=tools,
+            model=model,
         ), at)
         return ref
 
@@ -248,6 +250,26 @@ class TestOne:
             ("  Result", "X is 42.\nSource: a.\nSource: b.\n…"),
             ("  Tokens", f"{SONNET}: 1.2k in / 300 out · 1 call"),
             ("", f"{HAIKU}: 100 in / 10 out · 1 call"),
+        ]
+
+    @pytest.mark.parametrize("tools, model, shown", [
+        (["lookup", "fetch_page"], "fast",
+         [("Model", "fast"), ("Tools", "lookup, fetch_page")]),
+        ([], None, [("Tools", "none of its own")]),
+        (None, HAIKU, [("Model", HAIKU)]),
+    ])
+    async def test_an_instances_model_choice_and_narrowed_tools_after_its_title(
+        self, manager, tools, model, shown
+    ):
+        runs = Runs(manager, manager.session_ref("s1"))
+        ref = runs.start("researcher", "c1", "Find X.", at=0, tools=tools, model=model)
+        runs.end(ref, "completed", at=5, result="X is 42.")
+
+        session = await agents(manager, "researcher-1")
+
+        (panel,) = session.add_rich.call_args.args
+        assert rows_of(panel.renderable)[:3 + len(shown)] == [
+            ("Type", "researcher"), ("Parent", "root"), ("Title", "Find X."), *shown,
         ]
 
     async def test_a_runs_own_plan_and_tasks_after_its_result(self, manager):

@@ -355,15 +355,22 @@ def _team_chat() -> type:
     Deep Agents summarizes an agent's conversation on that agent's model; the
     scenarios script the summaries apart, as ADK sends them apart.
     """
+    from pydantic import Field
+
     from tests.workflow.deepagents.fakes import ScriptedChat
 
     class TeamChat(ScriptedChat):
         #: The chat that answers summary requests (Any: not copied by pydantic).
         summaries: Any = None
+        #: The model id this copy was built for, and each request's, in order:
+        #: a copy (``model_copy``) shares the script, the requests and this list.
+        model_id: str = ""
+        sent_models: list[str] = Field(default_factory=list)
 
         def _answer(self, messages):
             if self.summaries is not None and SUMMARY_MARKER in (messages[-1].text or ""):
                 return self.summaries._answer(messages)
+            self.sent_models.append(self.model_id)
             return super()._answer(messages)
 
     return TeamChat
@@ -495,6 +502,7 @@ class Crew:
     _models: Callable[[str], list[str]] | None = None
     _opening: Callable[[str, int], list[str]] | None = None
     _declared: Callable[[str, str, int], dict[str, Any] | None] | None = None
+    _sent_models: Callable[[str], list[str]] | None = None
     #: The turns ``start`` started: one a failed test left running is stopped
     #: before its manager is cleaned up (the cleanup waits for its turn).
     started: list["asyncio.Task[Any]"] = field(default_factory=list)
@@ -538,6 +546,12 @@ class Crew:
         Deep Agents each build's (``ScriptedModels.built``)."""
         assert self._models is not None
         return self._models(agent)
+
+    def sent_models(self, agent: str) -> list[str]:
+        """The model each of ``agent``'s requests went to, as a model id, in order:
+        ADK each request's, Deep Agents the model each request's chat was built for."""
+        assert self._sent_models is not None
+        return self._sent_models(agent)
 
     def opening(self, agent: str, call: int = -1) -> list[str]:
         """The text blocks of the first user message ``agent``'s model request
@@ -783,7 +797,7 @@ def _adk_crew(
         "adk", manager, manager.session_ref(SESSION, USER), results_read, requests, result_ids,
         answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=models,
-        _opening=opening, _declared=declared,
+        _opening=opening, _declared=declared, _sent_models=models,
     )
 
 
@@ -810,7 +824,15 @@ def _deepagents_crew(
             models.chats[name] = _team_chat()(
                 label=chat.label, script=chat.script, summaries=summaries
             )
-    monkeypatch.setattr(deepagents_manager, "build_chat_model", models)
+
+    def chat_for(resolved: Any, *, settings: Any, app_name: str) -> Any:
+        # Each agent's chat, as built for this model: what its requests went to.
+        chat = models(resolved, settings=settings, app_name=app_name)
+        if resolved.agent is None:
+            return chat
+        return chat.model_copy(update={"model_id": resolved.ref.model})
+
+    monkeypatch.setattr(deepagents_manager, "build_chat_model", chat_for)
     manager = deepagents_manager.DeepAgentsWorkflowManager(
         agent_configs=team, settings=_settings(store, entries), subagents=subagents
     )
@@ -910,6 +932,7 @@ def _deepagents_crew(
         result_ids, answers, last_message, bodies, tool_names, message_count, state, marked,
         _call_results=call_results, _instance_mark=instance_mark, _models=built_models,
         _opening=opening, _declared=declared,
+        _sent_models=lambda name: list(models.chats[name].sent_models),
     )
 
 
@@ -1370,7 +1393,9 @@ class TestACallIsItsOwnRuns:
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert (ended.run, ended.metadata["result"]) == (RESEARCHER, "X is 42.")
         assert events.index(results[0]) < events.index(ended) < events.index(results[1])
-        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "X is 42."
 
     async def test_after_ctrl_c_a_delegation_is_answered_as_interrupted(self, make_crew):
         crew = make_crew(
@@ -1628,7 +1653,9 @@ class TestRefusalAndCutOff:
 
         events = await crew.turn()
 
-        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "X is 42."
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert ended.metadata["partial"] is False
         assert [e for e in events if e.type is EventType.ERROR] == []
@@ -2824,7 +2851,9 @@ class TestAnEmptyLastAnswer:
 
         events = await crew.turn()
 
-        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "X is 42."
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "X is 42."
         (ended,) = runs_of(events, RUN_COMPLETED)
         assert ended.metadata["result"] == "X is 42."
 
@@ -3593,7 +3622,9 @@ class TestWorkingSlots:
         assert working(events, RUN_STARTED, RUN_QUEUED, RUN_RUNNING, RUN_COMPLETED) == [
             ("researcher-2", RUN_STARTED), ("researcher-2", RUN_COMPLETED),
         ]
-        assert envelope_read(crew.results_read("coordinator")["c3"])["result"] == "Y is 7."
+        assert envelope_read(
+            crew.results_read("coordinator")["c3"]
+        )["result"] == "Y is 7."
 
 
 def asking_crew(make_crew, *, holder: Step, **scripts: list[Step]) -> Crew:
@@ -3652,7 +3683,9 @@ class TestWaitingOnTheUser:
         assert ended.index(("asker-1", RUN_COMPLETED)) < ended.index(
             ("researcher-1", RUN_COMPLETED)
         )
-        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "Asked."
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 
     async def test_a_run_answered_while_its_slot_works_for_another_waits_queued(self, make_crew):
@@ -3683,7 +3716,9 @@ class TestWaitingOnTheUser:
         assert [status for instance, status in working(
             events, RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
         ) if instance == "asker-1"] == [RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING]
-        assert envelope_read(crew.results_read("coordinator")["c1"])["result"] == "Asked."
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "Asked."
         assert (crew.slots().free, crew.slots().waiting) == (1, 0)
 
     async def test_two_runs_at_permission_prompts_with_one_slot_both_finish(
@@ -4282,7 +4317,9 @@ class TestAFollowUp:
 
         await crew.turn("Go on.")
 
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
         assert crew.message_count("researcher", 1) == 1
 
     async def test_a_follow_up_that_ends_without_text_returns_none_of_the_first_runs(
@@ -4299,7 +4336,9 @@ class TestAFollowUp:
 
         await crew.turn()
 
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == ""
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == ""
 
     async def test_an_inheriting_instance_sees_its_parents_conversation_once(self, make_crew):
         """The copy of the parent's conversation is made at the instance's first
@@ -4319,7 +4358,9 @@ class TestAFollowUp:
         first, second = crew.bodies("researcher")
         assert first.count("The parent said hello.") == 1
         assert second.count("The parent said hello.") == 1
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
         assert [len(answers) for _, answers in crew.call_results("researcher", 1)] == [
             len(answers) for _, answers in crew.call_results("researcher", 0)
         ]
@@ -4337,7 +4378,9 @@ class TestAFollowUp:
         with no_blocking_calls():
             await crew.turn("Go on.")
 
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
 
 
 class TestARefusedFollowUp:
@@ -4492,7 +4535,9 @@ class TestAFollowUpAfterAStop:
         assert json.loads(answers["r1"]) == {"success": True, "value": 42}
         assert INTERRUPTED_BY_USER in answers["r2"]
         assert crew.last_message("researcher", 1) == "Go on."
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
         assert [(r.ref.run, r.status) for r in crew.records()] == [
             ("researcher-1#1", RUN_INTERRUPTED), ("researcher-1#2", RUN_COMPLETED),
         ]
@@ -4518,7 +4563,9 @@ class TestAFollowUpAfterAStop:
         assert json.loads(answers["r1"]) == {"success": True, "value": 42}
         assert json.loads(answers["r2"]) == interrupted(interrupted_by(cause))
         assert INTERRUPTED_BY_USER not in answers["r2"]
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
 
     async def test_after_a_crash_in_a_new_process(self, make_crew, monkeypatch):
         first = make_crew(
@@ -4551,7 +4598,9 @@ class TestAFollowUpAfterAStop:
         assert [(call_id, len(held)) for call_id, held in second.call_results("coordinator", 0)
                 if call_id == "c1"] == [("c1", 1)]
         assert INTERRUPTED in second.results_read("coordinator", 0)["c1"]
-        assert envelope_read(second.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            second.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
         assert [(r.ref.run, r.status) for r in second.records()][-1] == (
             "researcher-1#2", RUN_COMPLETED,
         )
@@ -4570,7 +4619,9 @@ class TestAFollowUpAfterAModelSwitch:
         await crew.manager.reinitialize(model="claude-haiku-4-5", preserve_sessions=True)
         await crew.turn("Now Y.")
 
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
         assert "X is 42." in crew.bodies("researcher")[1]
         assert crew.models("researcher") == ["claude-sonnet-4-6", "claude-haiku-4-5"]
         assert [(r.ref.run, r.status) for r in crew.records()] == [
@@ -5411,7 +5462,9 @@ class TestADeletedConversation:
         assert (crew.records(), crew.instances()) == ([], [])
         assert crew.ledger().totals() == UsageTotals()
         await crew.turn("Again.")
-        assert envelope_read(crew.results_read("coordinator")["c4"])["result"] == "Z is 3."
+        assert envelope_read(
+            crew.results_read("coordinator")["c4"]
+        )["result"] == "Z is 3."
         assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
 
 
@@ -5460,7 +5513,9 @@ class TestALongTranscriptKeepsItsBrief:
                 if e.type is EventType.CONTEXT_TRIMMED] == ["researcher"]
         # ...and still held the brief, once.
         assert last.count("# Task: Find X.") == 1
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
 
 
 def roster(*lines: str) -> str:
@@ -5725,7 +5780,9 @@ class TestTheUsersFollowUp:
         assert crew.manager.interrupt_instance("researcher-1") is False
         # Its parent continues it.
         await crew.turn("Go on.")
-        assert envelope_read(crew.results_read("coordinator")["c2"])["result"] == "Went on."
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Went on."
 
     async def test_one_that_cannot_run_is_one_error_and_nothing_runs(self, make_crew):
         crew = make_crew(
@@ -6317,7 +6374,8 @@ class TestAFreeTypeListedFirst:
 
 
 #: ``task``'s declaration for ``team()``'s coordinator, as both backends send it
-#: with the default policy: what an app that starts no type at run time keeps.
+#: with the default policy: what an app that starts no type at run time keeps,
+#: and the ``tools`` every call may narrow its run to.
 TEAM_TASK = {
     "description": (
         "Hand a task to a sub-agent. The sub-agent works on it on its own, with its own "
@@ -6352,6 +6410,13 @@ TEAM_TASK = {
                 ),
             },
             "done_when": {"type": "string", "description": "The criteria for the task to be done."},
+            "tools": {
+                "type": "array", "items": {"type": "string"},
+                "description": (
+                    "Optional: names of the agent's own tools to give this task, to narrow "
+                    "it; leave it out for all of them."
+                ),
+            },
         },
         "required": ["agent_type", "title", "objective"],
     },
@@ -6370,7 +6435,8 @@ def agent_types(declared: dict[str, Any] | None) -> list[str]:
 
 
 class TestTheDefaultPolicyKeepsTask:
-    """With nothing started at run time, ``task`` is what it was, byte for byte."""
+    """With nothing started at run time, ``task`` is what it was, byte for byte,
+    but for the ``tools`` argument every call has."""
 
     async def test_its_schema_and_description(self, make_crew):
         crew = make_crew(team(), coordinator=[says("Hi.")])
@@ -6460,3 +6526,327 @@ class TestAParentOfRunTimeTypesOnly:
         assert crew.opening("coordinator", -1) == [
             roster("- helper-1 (helper, idle): Help with X. — Helped."), "Go.",
         ]
+
+
+# -- a delegation's tools and model ------------------------------------------------
+
+
+def narrow_team(**researcher: Any) -> list[AgentConfig]:
+    """A coordinator, and a researcher with two tools of its own and its plan's
+    tools."""
+    return [
+        agent("coordinator", sub_agents=("researcher",)),
+        agent("researcher", tools=(contract_lookup, contract_whoami),
+              include_state_tools=True,
+              **researcher),
+    ]
+
+
+#: The researcher's own tool it was not given, called anyway: what its call reads.
+WHOAMI_NOT_FOUND = {
+    "success": False,
+    "error": "contract_whoami failed: ValueError: Tool 'contract_whoami' not found.\n"
+             "Available tools: contract_lookup, get_plan, get_tasks, save_plan, save_tasks",
+}
+#: The researcher's requests, narrowed to ``contract_lookup``: it and its plan's tools.
+NARROWED = ["contract_lookup", "save_plan", "get_plan", "save_tasks", "get_tasks"]
+
+
+class TestANarrowedRun:
+    """``task``'s ``tools``: the run is offered only those of its type's tools and
+    the tools every run keeps (its plan's, the delegation tools); a call of
+    any other is answered as one of a tool it does not have, and the run goes
+    on. A static sub-agent as a type started at run time."""
+
+    async def test_its_requests_offer_only_its_tools_and_a_call_of_another_is_unknown(
+        self, make_crew
+    ):
+        crew = make_crew(
+            narrow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1",
+                                        tools=["contract_lookup"])), says("Done.")],
+            researcher=[calls(use("contract_whoami", "r1")),
+                        calls(use("contract_lookup", "r2", q="x")), says("X is 42.")],
+        )
+
+        with no_blocking_calls():
+            await crew.turn()
+
+        assert [crew.tool_names("researcher", n) for n in range(3)] == [NARROWED] * 3
+        assert json.loads(crew.results_read("researcher", 1)["r1"]) == WHOAMI_NOT_FOUND
+        assert json.loads(crew.results_read("researcher", 2)["r2"]) == {
+            "success": True, "value": 42,
+        }
+        assert SEEN == []  # contract_whoami never ran
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "X is 42."
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.tools, instance.model) == (("contract_lookup",), None)
+
+    async def test_left_out_it_has_them_all(self, make_crew):
+        crew = make_crew(
+            narrow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("researcher") == [
+            "contract_lookup", "contract_whoami", "save_plan", "get_plan", "save_tasks",
+            "get_tasks",
+        ]
+
+    async def test_a_type_started_at_run_time_is_narrowed_alike(self, make_crew):
+        crew = make_crew(
+            [*team(), helper(tools=(contract_lookup, contract_whoami))],
+            subagents=SPAWNING,
+            coordinator=[calls(delegate("helper", "Help.", "c1",
+                                        tools=["contract_whoami"])),
+                         says("Done.")],
+            helper=[says("Helped.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("helper") == ["contract_whoami"]
+
+    async def test_a_follow_up_keeps_them(self, make_crew):
+        crew = make_crew(
+            narrow_team(), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1",
+                                        tools=["contract_lookup"])), says("Asked."),
+                         calls(message("researcher-1", "Now find Y.", "c2")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn()
+        await crew.turn("Find Y too.")
+
+        assert crew.tool_names("researcher", 1) == NARROWED
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
+
+
+class TestWhatATypeCannotTake:
+    """A ``task`` call whose ``tools`` are not some of the type's own, or whose
+    ``model`` is none of its choices, is its error result naming what it may
+    be: no run starts, and the turn's runs are not counted."""
+
+    @pytest.mark.parametrize("researcher, fields, error", [
+        ({}, {"tools": ["contract_lookup", "write_file"]},
+         "The tools for 'researcher' must be some of its own: contract_lookup, contract_whoami."),
+        ({}, {"model": "fast"}, "'researcher' has no model choices; leave model out."),
+        ({"model_choices": ("anthropic:claude-haiku-4-5",)}, {"model": "fast"},
+         "The model for 'researcher' must be one of its model choices: "
+         "anthropic:claude-haiku-4-5."),
+    ], ids=["tools", "no-choices", "model"])
+    async def test_starts_no_run_and_takes_no_count(
+        self, make_crew, researcher, fields, error
+    ):
+        crew = make_crew(
+            narrow_team(**researcher), subagents=SubAgentPolicy(max_runs_per_turn=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", **fields)),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("Y is 7.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator", 1)["c1"]) == {
+            "success": False, "error": error,
+        }
+        # The turn's one run is still its to start.
+        assert envelope_read(
+            crew.results_read("coordinator", 2)["c2"]
+        )["result"] == "Y is 7."
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
+        assert [e.metadata["status"] for e in runs_of(events)] == [
+            RUN_STARTED, RUN_COMPLETED
+        ]
+
+
+#: A cheaper model the researcher may be run on: a model choice.
+CHOICE = "anthropic:claude-haiku-4-5"
+
+
+class TestAModelChoice:
+    """``task``'s ``model``: the run goes to the choice's model (its type's agent
+    built on it), its usage is that model's, and its instance keeps it."""
+
+    async def test_task_offers_it_and_names_a_types_choices(self, make_crew):
+        from agentic_cli.workflow.agents.brief import MODEL_DESCRIPTION
+
+        crew = make_crew(narrow_team(model_choices=("fast", CHOICE)),
+                         coordinator=[says("Hi.")])
+
+        await crew.turn()
+
+        parameters = crew.declared("coordinator")["parameters"]
+        assert list(parameters["properties"])[-2:] == ["tools", "model"]
+        assert parameters["properties"]["model"] == {
+            "type": "string", "description": MODEL_DESCRIPTION,
+        }
+        assert parameters["properties"]["agent_type"]["description"] == (
+            "The agent to hand the task to:\n- researcher (model choices: fast, "
+            "anthropic:claude-haiku-4-5): The researcher."
+        )
+
+    async def test_its_requests_go_to_the_choices_model_and_its_usage_is_under_it(
+        self, make_crew
+    ):
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE),
+                               delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[
+                says("X is 42.", usage=(100, 10)), says("Y is 7.", usage=(80, 8))
+            ],
+        )
+
+        with no_blocking_calls():
+            await crew.turn()
+
+        by_run = {r.ref.run: r for r in crew.records()}
+        assert sorted(crew.sent_models("researcher")) == [
+            "claude-haiku-4-5", "claude-sonnet-4-6"
+        ]
+        assert by_run["researcher-1#1"].usage == {CHOICE: {"input": 100, "output": 10}}
+        assert by_run["researcher-2#1"].usage == {
+            "anthropic:claude-sonnet-4-6": {"input": 80, "output": 8},
+        }
+        assert crew.ledger().by_model(run="researcher-1#1") == {
+            CHOICE: UsageTotals(input=100, output=10, calls=1),
+        }
+        assert [(i.instance, i.model) for i in crew.manager.agent_runs.instances(
+            crew.conversation
+        )] == [("researcher-1", CHOICE), ("researcher-2", None)]
+
+    async def test_a_follow_up_runs_on_it_after_a_model_switch_too(self, make_crew):
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
+                         says("Asked."), calls(message("researcher-1", "Now find Y.",
+                                                       "c2")),
+                         says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+
+        await crew.turn()
+        await crew.manager.reinitialize(model="claude-opus-4-7", preserve_sessions=True)
+        await crew.turn("Find Y too.")
+
+        assert crew.sent_models("researcher") == [
+            "claude-haiku-4-5", "claude-haiku-4-5"
+        ]
+        assert crew.sent_models("coordinator")[-1] == "claude-opus-4-7"
+        assert "X is 42." in crew.bodies("researcher")[1]
+        assert envelope_read(
+            crew.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
+
+
+class TestAModelChoiceInTheRawLog:
+    async def test_its_calls_records_name_the_choices_model(
+        self, make_crew, monkeypatch
+    ):
+        settings = BaseSettings(
+            session_store="memory", default_model="claude-sonnet-4-6",
+            raw_llm_logging=True
+        )
+        monkeypatch.setattr(
+            sys.modules[__name__], "_settings", lambda store, models=None: settings
+        )
+        crew = make_crew(
+            narrow_team(model_choices=(CHOICE,)),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE)),
+                         says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        log = Path.home() / f".{settings.app_name}" / "logs" / "llm_events.jsonl"
+        records = [json.loads(line) for line in log.read_text().splitlines()]
+        assert {
+            (r["metadata"]["agent"], r["metadata"]["model"]) for r in records
+            if r["type"] in ("llm_request", "llm_response")
+        } == {("coordinator", "anthropic:claude-sonnet-4-6"), ("researcher", CHOICE)}
+
+
+class TestChoicesKeptAcrossARestart:
+    """An instance on a model choice and narrowed tools, continued after a
+    restart (its records restored by a new manager): its follow-up runs on
+    the same model with the same tools."""
+
+    async def test_the_follow_up_runs_as_its_first_run_did(self, make_crew):
+        first = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING, store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=CHOICE,
+                                        tools=["contract_lookup"])), says("Asked.")],
+            researcher=[says("X is 42.")],
+        )
+        await first.turn()
+        await first.manager.cleanup()
+        second = make_crew(
+            narrow_team(model_choices=(CHOICE,)), subagents=FOLLOWING, store="sqlite",
+            coordinator=[calls(message("researcher-1", "Now find Y.", "c2")),
+                         says("Done.")],
+            researcher=[says("Y is 7.")],
+        )
+
+        await second.manager.initialize_services()
+        await second.manager.load_session(SESSION, user_id=USER)
+        (instance,) = second.manager.agent_runs.instances(second.conversation)
+        await second.turn("Find Y too.")
+
+        assert (instance.tools, instance.model) == (("contract_lookup",), CHOICE)
+        assert second.sent_models("researcher") == ["claude-haiku-4-5"]
+        assert second.tool_names("researcher") == NARROWED
+        assert envelope_read(
+            second.results_read("coordinator")["c2"]
+        )["result"] == "Y is 7."
+
+
+class TestAChoicesSmallerWindow:
+    """A model choice whose window is smaller than its type's own: an
+    inheriting run on it, over a long conversation, is kept within the
+    choice's numbers (ADK's fit guard trims it, Deep Agents summarizes it),
+    where on the type's own model it is sent whole."""
+
+    @pytest.mark.parametrize(
+        "chosen", [SMALL_MODEL, None], ids=["the-choice", "its-own"]
+    )
+    async def test_its_requests_fit_the_choices_budget(self, make_crew, chosen):
+        crew = make_crew(
+            [agent("coordinator", sub_agents=("reader",)),
+             agent("reader", inherit_context=True, model_choices=(SMALL_MODEL,))],
+            models=SMALL_ENTRY,
+            coordinator=[says("Noted."), says("Noted again."),
+                         calls(delegate("reader", "Sum it up.", "c1",
+                                        **({"model": chosen} if chosen else {}))),
+                         says("Done.")],
+            reader=[says("It was words.")],
+            summaries=[says("The user sent many words twice.")],
+        )
+        await crew.turn("First: " + "word " * 8_000)
+        await crew.turn("Second: " + "word " * 8_000)
+
+        events = await crew.turn("Have the reader sum it up.")
+
+        sent = crew.bodies("reader")[-1]
+        trimmed = [
+            e.metadata["agent"] for e in events if e.type is EventType.CONTEXT_TRIMMED
+        ]
+        if chosen:
+            assert crew.sent_models("reader") == ["claude-haiku-4-5"]
+            assert "First: word" not in sent and trimmed == ["reader"]
+        else:
+            assert crew.sent_models("reader") == ["claude-sonnet-4-6"]
+            assert "First: word" in sent and trimmed == []
+        assert envelope_read(
+            crew.results_read("coordinator")["c1"]
+        )["result"] == "It was words."

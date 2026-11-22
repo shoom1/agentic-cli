@@ -14,11 +14,13 @@ import asyncio
 import pytest
 
 from agentic_cli.workflow.agents.control import (
+    KEPT_TOOLS,
     PARENT_CAUSE,
     STEP_LIMIT_NOTE,
     TIME_LIMIT_CAUSE,
     TOKEN_LIMIT_CAUSE,
     RunControl,
+    configured_tool_names,
 )
 from agentic_cli.workflow.agents.envelope import TIME_LIMIT_ERROR, TOKEN_LIMIT_ERROR
 from agentic_cli.workflow.agents.policy import AgentLimits
@@ -416,3 +418,49 @@ class TestStopping:
         made.finish()
 
         assert made.stopping is True
+
+
+class TestTheToolsItKeeps:
+    """A narrowed run's tools: its own ``tools``, and those every run keeps."""
+
+    def test_a_run_not_narrowed_keeps_every_tool(self):
+        control = RunControl(REF, AgentLimits())
+
+        assert control.tools is None
+        assert control.keeps("lookup") and control.keeps("anything")
+
+    def test_a_narrowed_run_keeps_its_tools_its_plan_and_its_delegation_tools(self):
+        control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
+
+        names = ["lookup", "fetch_page", "save_plan", "get_tasks", "task",
+                 "check_agents"]
+        assert [name for name in names if control.keeps(name)] == [
+            "lookup", "save_plan", "get_tasks", "task", "check_agents",
+        ]
+        assert not RunControl(REF, AgentLimits(), tools=frozenset()).keeps("lookup")
+
+    def test_every_run_keeps_the_state_tools_and_the_delegation_tools(self):
+        from agentic_cli.tools._core import state_tools
+        from agentic_cli.tools._core.delegation import FOLLOW_UP_TOOLS, TASK_TOOL
+
+        assert KEPT_TOOLS == {
+            *(name for name, _ in state_tools._STATE_TOOLS), TASK_TOOL,
+            *FOLLOW_UP_TOOLS,
+        }
+
+
+class TestConfiguredToolNames:
+    """The names a type's configured tools go by: one rule for every caller."""
+
+    def test_a_name_a_dotted_path_and_a_callable_each_by_its_own(self):
+        def lookup():
+            return {}
+
+        names = configured_tool_names(
+            ["web_fetch", "my_pkg.tools.custom_tool", lookup, "  padded  "]
+        )
+
+        assert names == {"web_fetch", "custom_tool", "lookup", "padded"}
+
+    def test_the_state_and_delegation_tools_are_left_out(self):
+        assert configured_tool_names(["save_plan", "task", "lookup", ""]) == {"lookup"}

@@ -4,7 +4,13 @@ In each sub-agent type's plugin chain (``GoogleADKWorkflowManager._agent_plugin_
 for the run in progress (``get_active_run``: the run's own task,
 ``agents/delegate.py``), whose control the manager's ``Delegations`` holds:
 
-- before each model call, the messages steered to the run since its last
+- before each model call, a run narrowed to some of its type's tools
+  (``RunControl.tools``) has the others left out of the request and of
+  its ``tools_dict``, which ADK resolves a call from, so a call of one is
+  answered as one of a tool the agent does not have (``narrow``: before
+  the fit guard, which measures the narrowed request; a skill toolset's
+  instruction text stays in the system prompt, only its calls are refused);
+- before each, the messages steered to the run since its last
   (``RunControl.take_steering``) go after its last message, each a user
   event appended to the run's child session (through the callback
   context's session service: the invocation's own session, which a session
@@ -94,6 +100,8 @@ class RunControlPlugin(BasePlugin):
         control = self._control()
         if control is None:
             return None
+        if control.tools is not None:
+            narrow(llm_request, control.keeps)
         steered = control.take_steering()
         if steered:
             self._stamped[callback_context.invocation_id] = await _steer(
@@ -169,6 +177,32 @@ async def _steer(
         llm_request.contents.append(content)
         stamped = event.timestamp
     return stamped
+
+
+def narrow(llm_request: LlmRequest, keeps: Callable[[str], bool]) -> None:
+    """Leave the function tools ``keeps`` refuses out of ``llm_request``, in place.
+
+    Out of ``tools_dict`` (what ADK resolves a call from: a call of a name
+    left out gets ADK's answer for a tool that is not there) and out of the
+    declarations the model is sent. A tool left with no declaration and
+    nothing else (a built-in's field) goes; the others stay as they are.
+    """
+    for name in [name for name in llm_request.tools_dict if not keeps(name)]:
+        del llm_request.tools_dict[name]
+    kept: list[types.Tool] = []
+    for tool in llm_request.config.tools or ():
+        declarations = tool.function_declarations
+        if declarations is None:
+            kept.append(tool)
+            continue
+        left = [d for d in declarations if d.name is None or keeps(d.name)]
+        if len(left) == len(declarations):
+            kept.append(tool)
+        elif left or tool.model_dump(
+            exclude={"function_declarations"}, exclude_none=True
+        ):
+            kept.append(tool.model_copy(update={"function_declarations": left or None}))
+    llm_request.config.tools = kept or None
 
 
 def with_note(contents: list[types.Content], note: str) -> list[types.Content]:

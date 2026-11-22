@@ -1,7 +1,8 @@
 """Deep Agents: a sub-agent run's limits at its model calls (``RunControlMiddleware``).
 
 What the middleware does to a request and an answer, alone: a run's limits, and the
-``task`` its request offers (what the run may start). Whole turns, on
+``task`` its request offers (what the run may start), and the tools a narrowed
+run is offered and may call. Whole turns, on
 both backends, are in the contract suite (``TestTheStepLimit``,
 ``TestTheTokenLimit``).
 """
@@ -16,7 +17,7 @@ from structlog.testing import capture_logs
 
 pytest.importorskip("deepagents")
 
-from langchain.agents.middleware import ModelRequest  # noqa: E402
+from langchain.agents.middleware import ModelRequest, ToolCallRequest  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
 
@@ -278,3 +279,84 @@ async def test_a_task_call_by_a_run_offered_nothing_is_logged_at_info():
     assert message.status == "error"
     assert json.loads(message.content) == unknown_tool_result("task", ["lookup"])
     assert [(log["log_level"], log["event"]) for log in logs] == [("info", "tool_not_found")]
+
+
+# -- a narrowed run: its tools, and a call of one it was not given ---------------------
+
+
+def _named(name: str) -> StructuredTool:
+    return StructuredTool.from_function(lambda q="": name, name=name, description=name)
+
+
+def _narrowing(tools: frozenset[str] | None, *, task_offered: bool = False):
+    """The middleware, over delegations whose run has ``tools`` (and offers ``task`` or
+    not)."""
+    control = RunControl(REF, AgentLimits(), tools=tools)
+    delegations = SimpleNamespace(
+        control=lambda run: control,
+        task_offer=lambda agent, depth: object() if task_offered else None,
+    )
+    return RunControlMiddleware(lambda: delegations)
+
+
+TOOLS = [_named(name) for name in ("lookup", "fetch_page", "save_plan", "task",
+                                   "check_agents")]
+
+
+async def test_a_narrowed_runs_request_offers_its_tools_and_those_every_run_keeps():
+    sent: list[list[str]] = []
+
+    async def handler(request):
+        sent.append([tool.name for tool in request.tools])
+        return AIMessage("Done.")
+
+    await _narrowing(frozenset({"lookup"})).awrap_model_call(
+        _request(list(TOOLS)), handler
+    )
+
+    assert sent == [["lookup", "save_plan", "task", "check_agents"]]
+
+
+async def _called(middleware, name: str) -> tuple[object, list[str]]:
+    """A call of the tool ``name`` through ``middleware``: its answer, and what ran."""
+    ran: list[str] = []
+
+    async def handler(request):
+        ran.append(request.tool_call["name"])
+        return ToolMessage("ran", tool_call_id="r2")
+
+    tool = next(t for t in TOOLS if t.name == name)
+    request = ToolCallRequest(
+        tool_call={"name": name, "args": {}, "id": "r2", "type": "tool_call"},
+        tool=tool, state={}, runtime=SimpleNamespace(tools=list(TOOLS)),
+    )
+    return await middleware.awrap_tool_call(request, handler), ran
+
+
+@pytest.mark.parametrize("task_offered, available", [
+    (False, "check_agents, lookup, save_plan"),
+    (True, "check_agents, lookup, save_plan, task"),
+])
+async def test_a_call_of_a_tool_it_was_not_given_is_one_it_does_not_have(
+    task_offered, available
+):
+    answer, ran = await _called(
+        _narrowing(frozenset({"lookup"}), task_offered=task_offered), "fetch_page"
+    )
+
+    assert ran == []
+    assert (answer.status, json.loads(answer.content)) == ("error", {
+        "success": False,
+        "error": "fetch_page failed: ValueError: Tool 'fetch_page' not found.\n"
+                 f"Available tools: {available}",
+    })
+
+
+@pytest.mark.parametrize("tools, name", [
+    (frozenset({"lookup"}), "lookup"), (frozenset({"lookup"}), "save_plan"),
+    (None, "fetch_page"),
+])
+async def test_a_call_of_a_tool_it_has_runs(tools, name):
+    answer, ran = await _called(_narrowing(tools), name)
+
+    assert (ran, answer.content) == ([name], "ran")

@@ -14,7 +14,9 @@ from the caller's stream (``DeepAgentsWorkflowManager._run_agent``) and
 answers with the result envelope. Only the configured sub-agents are offered:
 there is no automatic general-purpose sub-agent, and none of Deep Agents' file
 tools. ``graphs``, when given, is filled with every agent's graph by name:
-what the manager runs a sub-agent on.
+what the manager runs a sub-agent on. A sub-agent type's model choices are
+built once more each (``Variant``, ``variants=``): the type's graph on
+another model, filled into ``variant_graphs`` by key.
 
 Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a tool
 call a cancelled turn or a crash left without a result, before each run, as
@@ -53,7 +55,8 @@ has neither.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -101,6 +104,26 @@ if TYPE_CHECKING:
     from agentic_cli.workflow.agents.delegate import Delegations
 
 
+@dataclass(frozen=True)
+class Variant:
+    """One more graph of a sub-agent type, on another model (a model choice's).
+
+    Built as the type's own is, with its tools and prompt, but its model
+    side from ``resolved`` and its summarization from ``budget``.
+
+    Attributes:
+        config: The type.
+        chat_model: The chat model of the choice.
+        resolved: The choice's resolved model (None: a unit test's, with no model side).
+        budget: The choice's context numbers; None: computed from ``resolved``.
+    """
+
+    config: AgentConfig
+    chat_model: "BaseChatModel"
+    resolved: "ResolvedModel | None"
+    budget: ContextBudget | None = None
+
+
 def build_agent_tree(
     configs: list[AgentConfig],
     *,
@@ -122,6 +145,8 @@ def build_agent_tree(
     graphs: "dict[str, CompiledStateGraph] | None" = None,
     roster: Callable[[], str] | None = None,
     root: str | None = None,
+    variants: "Mapping[Hashable, Variant] | None" = None,
+    variant_graphs: "dict[Hashable, CompiledStateGraph] | None" = None,
 ) -> "CompiledStateGraph":
     """Build every agent, each on its own, and return the root.
 
@@ -184,6 +209,11 @@ def build_agent_tree(
         root: The root's name (the validated graph's ``AgentGraph.root_name``).
             None: the first agent nobody delegates to that sets no
             ``spawnable_by``.
+        variants: Sub-agent types on other models (a type's model choices),
+            by key: each is built as the type's graph is, from its own chat
+            model, resolved model and budget, with the type's tools and
+            prompt, and filled into ``variant_graphs``.
+        variant_graphs: Filled, when given, with each variant's graph, by key.
 
     Raises:
         AgentGraphError: A delegating agent's own tools include one named
@@ -198,58 +228,117 @@ def build_agent_tree(
         )
 
     def build(name: str) -> "CompiledStateGraph":
-        config = config_map[name]
-        model = chat_models[name]
-        model_side = _model_side(
-            model, resolved.get(name), settings,
+        is_root = name == root
+        return build_agent(
+            config_map[name], root=is_root, configs=configs,
+            chat_model=chat_models[name], resolved=resolved.get(name),
+            tools=tools.get(name, []), prompt=prompts[name],
+            settings=settings, checkpointer=checkpointer, bound=bound,
             budget=budgets.get(name) if budgets is not None else None,
-            memory_index=memory_index if name == root else None,
-            memory_index_cached=memory_index_cached if name == root else None,
-            memory_index_forget=memory_index_forget if name == root else None,
-            roster=roster if name == root else None,
-        )
-        if name != root:
-            # Inside the outcome middleware, which reads the answer whose
-            # calls it dropped as final; outside the summarization, which
-            # counts its note.
-            if delegations is not None:
-                model_side = [RunControlMiddleware(delegations), *model_side]
-            # Outermost: it sees the answer every other model-side
-            # middleware let through, as the run's answer is read.
-            model_side = [SubAgentOutcomeMiddleware(), *model_side]
-        if summarizers is not None:
-            summarizers.update(
-                (name, middleware) for middleware in model_side
-                if isinstance(middleware, ReportingSummarizationMiddleware)
-            )
-        delegates = delegations is not None and can_have_children(
-            config, configs, delegations().policy, root=name == root
-        )
-        follows = delegates and delegations is not None and delegations().policy.follow_ups
-        own = _own_tools(config, tools.get(name, []), delegates=delegates, follows=follows)
-        if delegates and delegations is not None:
-            own = [*own, build_task_tool(name, delegations, root=name == root)]
-            if follows:
-                own = [*own, *build_follow_up_tools(delegations)]
-        return create_agent(
-            model=model,
-            tools=own,
-            system_prompt=prompts[name],
-            middleware=[
-                PatchToolCallsMiddleware() if open_calls is None
-                else InterruptedCallsMiddleware(open_calls, root=name == root),
-                *model_side,
-                *_tool_side(config, settings, bound=bound, open_calls=open_calls, marks=marks),
-            ],
-            state_schema=AgentCliState,
-            name=name,
-            checkpointer=checkpointer if name == root or checkpointer is not None else False,
+            summarizers=summarizers, open_calls=open_calls, marks=marks,
+            memory_index=memory_index if is_root else None,
+            memory_index_cached=memory_index_cached if is_root else None,
+            memory_index_forget=memory_index_forget if is_root else None,
+            delegations=delegations, roster=roster if is_root else None,
         )
 
     built = {name: build(name) for name in config_map}
     if graphs is not None:
         graphs.update(built)
+    for key, variant in (variants or {}).items():
+        name = variant.config.name
+        graph = build_agent(
+            variant.config, root=False, configs=configs, chat_model=variant.chat_model,
+            resolved=variant.resolved, tools=tools.get(name, []), prompt=prompts[name],
+            settings=settings, checkpointer=checkpointer, bound=bound,
+            budget=variant.budget,
+            open_calls=open_calls, marks=marks, delegations=delegations,
+        )
+        if variant_graphs is not None:
+            variant_graphs[key] = graph
     return built[root]
+
+
+def build_agent(
+    config: AgentConfig,
+    *,
+    root: bool,
+    configs: list[AgentConfig],
+    chat_model: "BaseChatModel",
+    resolved: "ResolvedModel | None",
+    tools: list["BaseTool"],
+    prompt: str,
+    settings: "BaseSettings | None",
+    checkpointer: "BaseCheckpointSaver | None",
+    bound: Callable[[object], ToolDefinition | None] = identify_tool,
+    budget: ContextBudget | None = None,
+    summarizers: dict[str, ReportingSummarizationMiddleware] | None = None,
+    open_calls: OpenCalls | None = None,
+    marks: OutsideContentMarks | None = None,
+    memory_index: Callable[[], str] | None = None,
+    memory_index_cached: Callable[[], str] | None = None,
+    memory_index_forget: Callable[[], None] | None = None,
+    delegations: "Callable[[], Delegations] | None" = None,
+    roster: Callable[[], str] | None = None,
+) -> "CompiledStateGraph":
+    """Build one agent's graph: ``config`` on ``chat_model``, with its tools and prompt.
+
+    What ``build_agent_tree`` builds each agent with (its arguments, for one
+    agent), and builds a model choice's variant of a sub-agent type with.
+    ``root`` says whether this is the root: only it has the memory index and
+    the roster (passed only for it), and every other agent has the run
+    control and the outcome middleware; a sub-agent's graph has no
+    checkpointer of its own unless the tree has one.
+
+    Raises:
+        AgentGraphError: A delegating agent's own tools include one named
+            ``task``, the name of its delegation tool.
+    """
+    name = config.name
+    model_side = _model_side(
+        chat_model, resolved, settings, budget=budget,
+        memory_index=memory_index, memory_index_cached=memory_index_cached,
+        memory_index_forget=memory_index_forget, roster=roster,
+    )
+    if not root:
+        # Inside the outcome middleware, which reads the answer whose
+        # calls it dropped as final; outside the summarization, which
+        # counts its note.
+        if delegations is not None:
+            model_side = [RunControlMiddleware(delegations), *model_side]
+        # Outermost: it sees the answer every other model-side
+        # middleware let through, as the run's answer is read.
+        model_side = [SubAgentOutcomeMiddleware(), *model_side]
+    if summarizers is not None:
+        summarizers.update(
+            (name, middleware) for middleware in model_side
+            if isinstance(middleware, ReportingSummarizationMiddleware)
+        )
+    delegates = delegations is not None and can_have_children(
+        config, configs, delegations().policy, root=root
+    )
+    follows = delegates and delegations is not None and delegations().policy.follow_ups
+    own = _own_tools(config, tools, delegates=delegates, follows=follows)
+    if delegates and delegations is not None:
+        own = [*own, build_task_tool(name, delegations, root=root)]
+        if follows:
+            own = [*own, *build_follow_up_tools(delegations)]
+    return create_agent(
+        model=chat_model,
+        tools=own,
+        system_prompt=prompt,
+        middleware=[
+            PatchToolCallsMiddleware() if open_calls is None
+            else InterruptedCallsMiddleware(open_calls, root=root),
+            *model_side,
+            *_tool_side(
+                config, settings, bound=bound, open_calls=open_calls, marks=marks
+            ),
+        ],
+        state_schema=AgentCliState,
+        name=name,
+        checkpointer=checkpointer if root or checkpointer is not None else False,
+    )
 
 
 def _own_tools(

@@ -1,8 +1,9 @@
-"""ADK: a sub-agent run's limits at its model calls (``workflow/adk/run_control_plugin.py``).
+"""ADK: a sub-agent run's limits, and the tools a narrowed run is offered, at its model
+calls (``workflow/adk/run_control_plugin.py``).
 
 What the plugin does to a request and an answer, alone. Whole turns, on both
 backends, are in the contract suite (``TestTheStepLimit``,
-``TestTheTokenLimit``).
+``TestTheTokenLimit``, ``TestANarrowedRun``).
 """
 
 from __future__ import annotations
@@ -16,11 +17,13 @@ pytest.importorskip("google.adk")
 
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
+from google.adk.tools import BaseTool  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from agentic_cli.workflow.adk.run_control_plugin import (  # noqa: E402
     RunControlPlugin,
     drop_calls,
+    narrow,
     with_note,
 )
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE, RunControl  # noqa: E402
@@ -232,3 +235,65 @@ class TestSteering:
 
         assert service.stored == ["Also Z."]
         assert control.unstored() == ["In metric units."]
+
+
+def offering(*names: str) -> LlmRequest:
+    """A request that offers a function tool of each of ``names``, and Google search."""
+    request = LlmRequest(contents=[user(text("# Task: Find X."))])
+    request.config.tools = [
+        types.Tool(function_declarations=[
+            types.FunctionDeclaration(name=name, description=name) for name in names
+        ]),
+        types.Tool(google_search=types.GoogleSearch()),
+    ]
+    request.tools_dict = {name: BaseTool(name=name, description=name) for name in names}
+    return request
+
+
+def declared(request: LlmRequest) -> list[str]:
+    return [
+        d.name for tool in request.config.tools or ()
+        for d in tool.function_declarations or ()
+    ]
+
+
+class TestANarrowedRunsTools:
+    """A run narrowed to some of its type's tools (``RunControl.tools``) is
+    offered those and the tools every run keeps, in ``tools_dict`` (what ADK
+    resolves a call from) and in what the model is sent."""
+
+    async def test_its_tools_and_those_every_run_keeps_and_no_other(self):
+        control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+        request = offering("lookup", "fetch_page", "save_plan", "task", "check_agents")
+
+        await plugin.before_model_callback(callback_context=None, llm_request=request)
+
+        assert list(request.tools_dict) == ["lookup", "save_plan", "task",
+                                            "check_agents"]
+        assert declared(request) == ["lookup", "save_plan", "task", "check_agents"]
+        # What is no function declaration stays.
+        assert request.config.tools[1].google_search is not None
+
+    def test_a_tool_left_with_no_declaration_goes(self):
+        request = LlmRequest(contents=[user(text("Go."))])
+        request.config.tools = [types.Tool(function_declarations=[
+            types.FunctionDeclaration(name="fetch_page", description="Fetch."),
+        ])]
+        request.tools_dict = {"fetch_page": BaseTool(name="fetch_page",
+                                                     description="Fetch.")}
+
+        narrow(request, lambda name: False)
+
+        assert (request.tools_dict, request.config.tools) == ({}, None)
+
+    async def test_a_run_not_narrowed_keeps_them_all(self):
+        control = RunControl(REF, AgentLimits())
+        plugin = RunControlPlugin(lambda: control, "anthropic")
+        request = offering("lookup", "fetch_page")
+
+        await plugin.before_model_callback(callback_context=None, llm_request=request)
+
+        assert (list(request.tools_dict), declared(request)) == (
+            ["lookup", "fetch_page"], ["lookup", "fetch_page"]
+        )

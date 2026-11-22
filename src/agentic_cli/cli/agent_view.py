@@ -6,7 +6,8 @@ picker) prints a rule, ``── researcher-2 · researcher · idle ──``, and
 recap of it: its brief's title and objective, its last run's status, the
 first lines of its result and its tokens; nothing is replayed. The prompt
 becomes ``researcher-2> `` and the status bar names it and its status, its
-context (``ctx``: its own last prompt against its own summary trigger) and
+context (``ctx``: its own last prompt against its own summary trigger, the
+numbers of its model choice when it runs on one) and
 its tokens, the jobs segment kept.
 
 A line typed there is the user's message to the instance: while it is idle
@@ -170,10 +171,10 @@ class AgentView:
         if record is None:
             return [("Sub-agent", f"{self.instance} (gone)")]
         rows = [("Sub-agent", f"{self.instance} ({record.agent}, {record.status})")]
-        model = getattr(workflow, "agent_models", {}).get(record.agent)
+        model = _model(workflow, record)
         if model is not None:
             rows.append(("Model", str(model.ref)))
-        budget = _budget(workflow, record.agent)
+        budget = _budget(workflow, record)
         if budget is not None:
             window = (
                 format_tokens(budget.window) if budget.window_known
@@ -496,10 +497,23 @@ def _runs_of(workflow: Any, conversation: "SessionRef", instance: str) -> list["
     ]
 
 
-def _budget(workflow: Any, agent: str) -> Any:
-    """``agent``'s context budget; None when its manager manages none."""
+def _model(workflow: Any, record: "InstanceRecord") -> Any:
+    """The model the instance runs on: its model choice's when it has one, else its
+    type's."""
+    if record.model is not None:
+        return getattr(workflow, "choice_models", {}).get((record.agent, record.model))
+    return getattr(workflow, "agent_models", {}).get(record.agent)
+
+
+def _budget(workflow: Any, record: "InstanceRecord") -> Any:
+    """The instance's context budget (its model choice's, when it has one).
+
+    None when its manager manages none.
+    """
     try:
-        return workflow.context_budget(agent)
+        if record.model is not None:
+            return workflow.context_budget(record.agent, model=record.model)
+        return workflow.context_budget(record.agent)
     except (KeyError, RuntimeError, AttributeError):
         return None
 
@@ -518,8 +532,9 @@ def _last_prompt(workflow: Any, conversation: "SessionRef", record: "InstanceRec
 
 def _context(workflow: Any, conversation: "SessionRef", record: "InstanceRecord") -> str:
     """The status bar's ``ctx`` for the instance: its last prompt against its
-    own trigger, as the main agent's is shown (``UsageTracker.format_context``)."""
-    budget = _budget(workflow, record.agent)
+    own trigger (its model choice's, when it has one), as the main agent's is
+    shown (``UsageTracker.format_context``)."""
+    budget = _budget(workflow, record)
     return UsageTracker(
         last_prompt_tokens=_last_prompt(workflow, conversation, record),
         context_trigger=budget.trigger if budget is not None else None,

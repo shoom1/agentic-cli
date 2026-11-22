@@ -6,9 +6,10 @@
 deeper. Enter opens the view of the one picked (``/agent <id>``), Esc
 nothing; ``/agents <id>`` shows one instance
 (``researcher-2``) or one run (``researcher-2#1``): its type, its parent, its
-title, then each run's status (while it works ``running``, ``queued`` waiting
-for a free working slot, or ``needs you`` waiting on the user; a completion
-cut at its output limit ``completed (partial)``) and how long it ran (or has
+title, the model choice it runs on and the tools its delegation narrowed it
+to (when it was given any), then each run's status (while it works ``running``,
+``queued`` waiting for a free working slot, or ``needs you`` waiting on the user; a
+completion cut at its output limit ``completed (partial)``) and how long it ran (or has
 been running), the fields of its brief its parent filled (its objective,
 deliverable, constraints, what was known, when it is done; a follow-up's
 message in their place), the first lines of its result, the plan and the
@@ -60,6 +61,8 @@ if TYPE_CHECKING:
 
 #: How many lines of a run's result ``/agents <id>`` shows.
 RESULT_LINES = 3
+#: What ``/agents <id>`` says of an instance narrowed to none of its type's own tools.
+NO_OWN_TOOLS = "none of its own"
 #: What ``/agents`` says for a conversation with no run recorded.
 NO_RUNS = "No sub-agent runs in this conversation yet."
 #: The title of ``/agents``'s picker.
@@ -199,7 +202,10 @@ def show(app: Any, workflow: Any, conversation: "SessionRef", wanted: str) -> No
     mine = [found] if found.ref.run == wanted else [
         r for r in runs.records(conversation) if r.ref.instance == found.ref.instance
     ]
-    app.session.add_rich(_one(mine, workflow.usage_of(conversation)))
+    app.session.add_rich(_one(
+        mine, workflow.usage_of(conversation),
+        instance=runs.instance(conversation, found.ref.instance),
+    ))
 
 
 async def _load(app: Any, workflow: Any, conversation: "SessionRef") -> bool:
@@ -248,8 +254,17 @@ def _workflow(app: Any) -> Any:
     return workflow
 
 
-def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
-    """``/agents <id>``'s panel: one instance's runs (one run's, for a run id)."""
+def _one(
+    records: list["RunRecord"],
+    ledger: "UsageLedger",
+    *,
+    instance: "InstanceRecord | None" = None,
+) -> Panel:
+    """``/agents <id>``'s panel: one instance's runs (one run's, for a run id).
+
+    After its title it names the model choice and the tools of ``instance``
+    (its record) when its delegation gave it any.
+    """
     first = records[0]
     table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     table.add_column("Key", style="bold cyan", no_wrap=True)
@@ -257,6 +272,10 @@ def _one(records: list["RunRecord"], ledger: "UsageLedger") -> Panel:
     table.add_row("Type", Text(first.ref.agent))
     table.add_row("Parent", Text(first.ref.parent_run or "root"))
     table.add_row("Title", Text(first.title or "—"))
+    if instance is not None and instance.model is not None:
+        table.add_row("Model", Text(instance.model))
+    if instance is not None and instance.tools is not None:
+        table.add_row("Tools", Text(", ".join(instance.tools) or NO_OWN_TOOLS))
     now = _now()
     for record in records:
         table.add_row(f"Run {_run_number(record)}", f"{_status(record)} · {_duration(record, now)}")

@@ -575,6 +575,55 @@ the start of the entry's title.
 
 ### Added
 
+- **`AgentConfig.model_choices`: the models a delegation may run a type on
+  instead of its own, on both backends.** References, bare model ids or
+  roles (`model_choices=("fast",)`; the agent YAML's `model_choices:
+  [fast]`; empty by default), each resolved with the type's
+  `model_settings` when the manager initializes, all or nothing with the
+  agents' models (`validate_settings` parses them and checks their
+  providers' keys first; a built-in role no setting maps, such as `fast`,
+  is computed from the model list, its provider listed at startup), and
+  given its own context numbers: a window too small to work in fails
+  startup (`ContextBudgetError`), as a type's own model does. Each choice
+  is its type built once more at initialization, on that model: on ADK an
+  agent and a runner of its own, whose plugin chain reads the choice's
+  model, provider kind and context numbers under the type's name, so the
+  fit guard and the overflow handler keep a run within them; on Deep
+  Agents a graph of its own, summarized by the choice's numbers. A model
+  switch builds them again, and the release closes them with the type's. A
+  run on a choice keeps its type's name in its events and records; its
+  usage is the choice's model's (`RunRecord.usage`, the ledger's
+  `by_model`, the raw LLM log). The manager gives each choice's model and
+  numbers: `choice_models[(agent, choice)]` and `context_budget(agent,
+  model=choice)`. `validate_agent_graph` raises `AgentGraphError` for
+  `model_choices` on the root, for one that is no tuple or list of texts,
+  and for a choice named twice.
+- **`task`'s `tools` and `model`: a delegation may narrow its run's tools and
+  pick a cheaper model, never widen, on both backends.** Every `task` call
+  may give `tools`, some of the type's own tools (its registered, skill and
+  MCP tools, by the names its model is offered them; the plan's tools and
+  the delegation tools are always kept): the run's model is offered only
+  those, and a call of any other is answered as one of a tool the agent
+  does not have ("<tool> failed: ValueError: Tool '<tool>' not found.", then
+  the tools it has), and the run goes on. A call to a type with model
+  choices may give `model`, one of them: the run is on that model. Anything
+  else is the call's error result, and no run starts nor counts toward the
+  turn's ("The tools for 'researcher' must be some of its own: lookup.",
+  "The model for 'researcher' must be one of its model choices: fast.",
+  "'researcher' has no model choices; leave model out."; a backend that
+  cannot list the type's MCP tools just now says so, "The tools of
+  'researcher' could not be listed just now (OSError: …); try again.").
+  `task`'s schema always has `tools` (with the default policy it is otherwise as
+  it was), and `model` when a type it offers has choices, which its line names
+  (`- researcher (model choices: fast): …`). The instance keeps them
+  (`InstanceRecord.tools`, `.model`, in the records beside the
+  conversation; records written before them read as all the tools and the
+  type's own model): its follow-ups, the user's and after a restart, run
+  with them, and one whose type no longer has them is refused
+  ("researcher-1 was started with the model fast, which 'researcher' no
+  longer has; start a new one with task."). `/agents <id>` shows `Model`
+  and `Tools`, and the instance's view its model and its context against
+  the choice's numbers (the status bar's `ctx`, `/status`).
 - **Agent types started at run time: `AgentConfig.spawnable_by`, free types
   and `SubAgentPolicy.spawn_sources`, on both backends.** A type may be
   started while the app runs, besides by its parent in the configured tree,
@@ -582,8 +631,9 @@ the start of the entry's title.
   `"skill"`, `"user"`; the agent YAML's `spawnable_by: [agent]`; None, the
   default, for a type only its parent starts) and the policy's
   `spawn_sources` (the same three, `frozenset()` by default: nothing is
-  started at run time, and an app keeps its `task` as it was, byte for
-  byte). An agent's `task` call is the `"agent"` source: `task` lists, after
+  started at run time, and an app keeps its `task` as it was, but for the
+  `tools` argument every call has: see **`task`'s `tools` and `model`…**).
+  An agent's `task` call is the `"agent"` source: `task` lists, after
   the caller's own sub-agents, the types agents may start, each with its
   description (`agentic_cli.workflow.agents.spawn`, provisional: `spawnable`,
   `may_spawn`, `can_have_children`; the manager's delegations'
@@ -1953,7 +2003,9 @@ the start of the entry's title.
   may start (its own sub-agents first),
   each listed in the tool's description with what it does and the brief
   fields it requires, then the brief, `title` and `objective` (required),
-  `deliverable`, `constraints`, `known` and `done_when`. The run's first
+  `deliverable`, `constraints`, `known` and `done_when`, then `tools` (and, for
+  a type with model choices, `model`: see Added: **`task`'s `tools` and
+  `model`…**). The run's first
   message is the task message, `# Task: <title>` and a section per filled
   field (`## Objective`, `## Deliverable`, `## Constraints`, `## What is
   already known`, `## Done when`). A call whose brief misses a field its

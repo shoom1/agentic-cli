@@ -67,6 +67,7 @@ from agentic_cli.workflow.config import (
     validate_agent_graph,
 )
 from agentic_cli.workflow import live_events
+from agentic_cli.workflow.agents.control import KEPT_TOOLS
 from agentic_cli.workflow.agents.delegate import AgentRun, RunAnswer, RunFailed, failure_reason
 from agentic_cli.workflow.agents.runs import own_plan_and_tasks
 from agentic_cli.workflow.context import (
@@ -75,7 +76,7 @@ from agentic_cli.workflow.context import (
     is_context_overflow,
     subagent_overflow_message,
 )
-from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree
+from agentic_cli.workflow.deepagents.agent_builder import Variant, build_agent_tree
 from agentic_cli.workflow.deepagents.event_processor import (
     DeepAgentsEventProcessor,
     RunCallback,
@@ -193,6 +194,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root: CompiledStateGraph | None = None
         # Every agent's graph, by name: what a sub-agent run runs on.
         self._agent_graphs: dict[str, CompiledStateGraph] = {}
+        # Each sub-agent type's graph on each of its model choices, by (type,
+        # choice): what a run on a choice runs on.
+        self._variant_graphs: dict[tuple[str, str], CompiledStateGraph] = {}
+        # Each agent's own tools' names as its model sees them (its tools, skill
+        # tools and MCP tools), the framework's state and delegation tools left
+        # out: what a task call's `tools` may name.
+        self._own_tool_names: dict[str, frozenset[str]] = {}
         # The root agent's summarization middleware, which compact() uses.
         self._root_summarization: ReportingSummarizationMiddleware | None = None
 
@@ -281,11 +289,31 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             if config.mcp_servers:
                 own = await self._with_mcp_tools(config, own)
             tools[config.name] = own
+        self._own_tool_names = {
+            name: frozenset(t.name for t in own if t.name not in KEPT_TOOLS)
+            for name, own in tools.items()
+        }
         summarizers: dict[str, ReportingSummarizationMiddleware] = {}
         root = self._root_agent_name  # from the graph the base validated
         index_wanted = self._memory_index_wanted(root)
         roster_wanted = self._roster_wanted(root)
         graphs: dict[str, CompiledStateGraph] = {}
+        variant_graphs: dict[Any, CompiledStateGraph] = {}
+        variants = {
+            (config.name, choice): Variant(
+                config=config,
+                chat_model=build_chat_model(
+                    self._choice_models[(config.name, choice)],
+                    settings=self._settings,
+                    app_name=self.app_name,
+                ),
+                resolved=self._choice_models[(config.name, choice)],
+                budget=self._choice_budgets.get((config.name, choice)),
+            )
+            for config in self._agent_configs
+            if config.name != root
+            for choice in config.model_choices
+        }
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -315,8 +343,11 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             delegations=lambda: self._delegations,
             graphs=graphs,
             root=root,
+            variants=variants,
+            variant_graphs=variant_graphs,
         )
         self._agent_graphs = graphs
+        self._variant_graphs = variant_graphs
         self._root_summarization = summarizers.get(root)
 
         logger.info(
@@ -427,7 +458,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """
         self._root = None
         self._agent_graphs = {}
+        self._variant_graphs = {}
         self._root_summarization = None
+        self._own_tool_names = {}
         self._pending_notices = []
         sessions, self._mcp = self._mcp, MCPSessions()
         return [("mcp_sessions", sessions.aclose)]
@@ -444,6 +477,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._checkpointer = None
         self._sessions = None
         return [("checkpointer", functools.partial(self._close_connection, connection))]
+
+    async def _agent_tool_names(self, agent: str) -> frozenset[str]:
+        """The names a ``task`` call's ``tools`` may give for ``agent``: its built
+        tools'."""
+        names = self._own_tool_names.get(agent)
+        return names if names is not None else await super()._agent_tool_names(agent)
 
     async def _close_connection(self, connection: "AbstractAsyncContextManager | None") -> None:
         """Exit what owns the checkpointer's and the index's connections.
@@ -769,6 +808,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
     async def _run_agent(self, run: AgentRun) -> RunAnswer:
         """Run one sub-agent run on its agent's graph (the base's hook, ``Delegations``'s).
 
+        A run on a model choice (``run.model``) runs on its type's graph built
+        on that model (``_variant_graphs``), its usage and context the
+        choice's (``_run_models``).
+
         In the run's own task (``agents/delegate.py``), apart from its
         caller's stream: the graph is streamed with the run's own config,
         its callbacks this run's ``RunCallback``, and LangGraph's ambient
@@ -819,7 +862,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         conversation = run.conversation
         if conversation is None:
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
-        graph = self._agent_graphs[run.ref.agent]
+        # A run on a model choice runs on its type's graph built on that model.
+        graph = (
+            self._agent_graphs[run.ref.agent] if run.model is None
+            else self._variant_graphs[(run.ref.agent, run.model)]
+        )
+        models, budgets = self._run_models(run)
         task_id = f"agentic-cli-task-{uuid.uuid4().hex}"
         # A first run's message is its instance's brief, which its summaries keep.
         task = (
@@ -850,19 +898,19 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             inputs = {**run.state, "messages": [*(run.history or ()), task]}
         processor = DeepAgentsEventProcessor(
             root=self._root_agent_name,
-            agent_models=self._resolved_models,
+            agent_models=models,
             session_id=conversation.session_id,
-            budgets=self._budgets,
+            budgets=budgets,
             ledgers=self._usage_ledgers,
             run=run.ref,
         )
         callback = RunCallback(
             root=self._root_agent_name,
-            agent_models=self._resolved_models,
+            agent_models=models,
             llm_log=self._raw_llm_log(),
             # Run outside a turn there is no one to report to.
             live=live_events.current() or LiveEvents(),
-            budgets=self._budgets,
+            budgets=budgets,
             ledgers=self._usage_ledgers,
         )
         final: dict[str, Any] = {}
@@ -898,7 +946,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             # The run fails with the text it wrote before it.
             wrote = _last_text(_answers_in(final, task.id))
             if is_context_overflow(error):
-                model = self._resolved_models.get(run.ref.agent)
+                model = models.get(run.ref.agent)
                 raise RunFailed(
                     subagent_overflow_message(
                         run.ref.agent, str(model.ref) if model is not None else "the model"

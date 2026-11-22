@@ -460,6 +460,41 @@ def test_reference_settings_say_where_each_reference_is_named():
     )
 
 
+def test_model_choices_are_named_references_too():
+    """Each agent's model choices, after its model: the catalog lists their
+    providers at startup, and its warning names the agent's model_choices."""
+    settings = BaseSettings(default_model="gemini-2.5-flash")
+    agents = [AgentConfig(
+        name="writer", prompt="p", model="google:gemini-2.5-pro",
+        model_choices=("anthropic:claude-haiku-4-5", "fast", "gemini-2.5-flash", "x y"),
+    )]
+
+    assert model_services.model_references(settings, agents) == (
+        ModelRef("google", "gemini-2.5-flash"),
+        ModelRef("google", "gemini-2.5-pro"),
+        ModelRef("anthropic", "claude-haiku-4-5"),
+    )
+    assert model_services.reference_settings(settings, agents) == {
+        ModelRef("google", "gemini-2.5-flash"): (
+            "default_model and agent 'writer' model_choices"
+        ),
+        ModelRef("google", "gemini-2.5-pro"): "agent 'writer'",
+        ModelRef("anthropic", "claude-haiku-4-5"): "agent 'writer' model_choices",
+    }
+
+
+def test_a_role_choice_is_computed():
+    settings = BaseSettings(default_model="gemini-2.5-flash",
+                            model_roles={"strong": "o3"})
+    agents = [
+        AgentConfig(name="writer", prompt="p", model_choices=("fast", "strong")),
+        # an app's role
+        AgentConfig(name="critic", prompt="p", model_choices=("vision",)),
+    ]
+
+    assert model_services.computed_roles(settings, agents) == ("fast",)
+
+
 def test_model_references_skip_what_does_not_parse():
     """Validation reports each of them, before any catalog is built."""
     agents = _agents("x y", "Lab:qwen3", "lab:", "")

@@ -628,6 +628,69 @@ class TestSettingsValidation:
         # A mapping no agent uses costs nothing.
         validate_settings(settings, [AgentConfig(name="w", prompt="p")])
 
+    def test_a_model_choice_needs_its_provider_s_key(self, temp_workspace: Path):
+        """Each of an agent's model choices runs as its model does: checked alike."""
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+        agents = [AgentConfig(name="writer", prompt="p", model="gemini-2.5-pro",
+                              model_choices=("gemini-2.5-flash", "claude-haiku-4-5"))]
+
+        assert self._problems(settings, agents) == [
+            "Agent 'writer' (model choice 'claude-haiku-4-5'): model "
+            "'anthropic:claude-haiku-4-5' needs the anthropic API key; set ANTHROPIC_API_KEY."
+        ]
+
+    def test_a_role_choice_needs_its_mapped_model_s_key(self, temp_workspace: Path):
+        settings = self._settings(
+            temp_workspace, {"GOOGLE_API_KEY": "test-key"},
+            model_roles={"fast": "anthropic:claude-haiku-4-5"},
+        )
+        agents = [AgentConfig(name="writer", prompt="p", model_choices=("fast",))]
+
+        assert self._problems(settings, agents) == [
+            "Agent 'writer' (model choice 'fast'): model 'anthropic:claude-haiku-4-5' needs "
+            "the anthropic API key; set ANTHROPIC_API_KEY."
+        ]
+
+    def test_a_malformed_model_choice_is_an_error(self, temp_workspace: Path):
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+        agents = [AgentConfig(
+            name="writer", prompt="p", model_choices=("fast", "gemini")
+        )]
+
+        (problem,) = self._problems(settings, agents)
+        assert problem.startswith("Agent 'writer' (model choice 'gemini'): ")
+
+    def test_a_model_choice_on_an_undefined_provider_is_an_error(
+        self, temp_workspace: Path
+    ):
+        settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
+        agents = [AgentConfig(
+            name="writer", prompt="p", model_choices=("third-box:mistral",)
+        )]
+
+        (problem,) = self._problems(settings, agents)
+        assert problem.startswith(
+            "Agent 'writer' (model choice 'third-box:mistral'): model 'third-box:mistral' "
+            "names provider 'third-box'"
+        )
+
+    def test_a_computed_role_choice_needs_a_tier(
+        self, temp_workspace: Path, monkeypatch
+    ):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+        settings = self._settings(
+            temp_workspace,
+            model_providers=self.OPENROUTER,
+            default_model="openrouter:qwen/qwen3.7-plus",
+        )
+        agents = [AgentConfig(name="writer", prompt="p", model_choices=("fast",))]
+
+        assert self._problems(settings, agents) == [
+            "No model for role 'fast': map it in model_roles['fast'], or set a Google, "
+            "Anthropic or OpenAI key (GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY) so "
+            "the newest fast-tier model is used.",
+        ]
+
     def test_a_malformed_agent_model_is_an_error(self, temp_workspace: Path):
         settings = self._settings(temp_workspace, {"GOOGLE_API_KEY": "test-key"})
         agents = [AgentConfig(name="writer", prompt="p", model="gemini")]

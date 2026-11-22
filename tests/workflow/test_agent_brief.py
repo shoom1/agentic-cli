@@ -9,7 +9,8 @@ fields out under one heading each, and an inheriting type's ends with
 ``INHERITED_CONTEXT_NOTE``. ``task_parameters`` and ``task_description`` are
 the tool's schema and description, which both backends build ``task`` from;
 ``follow_up_parameters`` and ``follow_up_description`` are the parent's other
-tools'.
+tools'. Every call may narrow its run's tools (``tools``), and one to a type
+with model choices may pick one (``model``), which ``read_choices`` checks.
 """
 
 from __future__ import annotations
@@ -24,12 +25,15 @@ from agentic_cli.workflow.agents.brief import (
     BRIEF_FIELDS,
     DEPTH_SENTENCE,
     INHERITED_CONTEXT_NOTE,
+    MODEL_DESCRIPTION,
+    TOOLS_DESCRIPTION,
     Brief,
     BriefError,
     TaskOffer,
     follow_up_description,
     follow_up_parameters,
     read_brief,
+    read_choices,
     task_description,
     task_message,
     task_offer,
@@ -45,6 +49,18 @@ WRITER = AgentConfig(
 )
 NOTES = AgentConfig(name="notes", prompt="p", inherit_context=True)
 TYPES = {"researcher": RESEARCHER, "writer": WRITER}
+#: A type a delegation may run on a cheaper model.
+CHOOSING = AgentConfig(name="checker", prompt="p", description="Checks a claim.",
+                       model_choices=("fast", "anthropic:claude-haiku-4-5"))
+#: The ``tools`` argument, as every ``task`` declares it.
+TOOLS_ARGUMENT = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": (
+        "Optional: names of the agent's own tools to give this task, to narrow it; "
+        "leave it out for all of them."
+    ),
+}
 
 
 @pytest.fixture
@@ -257,9 +273,29 @@ class TestTaskParameters:
                     ),
                 },
                 "done_when": {"type": "string", "description": "The criteria for the task to be done."},
+                "tools": TOOLS_ARGUMENT,
             },
             "required": ["agent_type", "title", "objective"],
         }
+
+    def test_the_tools_and_model_arguments_texts(self):
+        assert TOOLS_DESCRIPTION == TOOLS_ARGUMENT["description"]
+        assert MODEL_DESCRIPTION == (
+            "Optional: one of the agent's model choices (named with it below) to run this "
+            "task on; leave it out for its own model."
+        )
+
+    def test_a_model_argument_once_a_type_has_model_choices(self):
+        schema = task_parameters({"researcher": RESEARCHER, "checker": CHOOSING})
+        properties = schema["properties"]
+        assert list(properties) == ["agent_type", "title", *BRIEF_FIELDS, "tools",
+                                    "model"]
+        assert properties["model"] == {"type": "string",
+                                       "description": MODEL_DESCRIPTION}
+        assert properties["agent_type"]["description"].endswith(
+            "- checker (model choices: fast, anthropic:claude-haiku-4-5): Checks a claim."
+        )
+        assert schema["required"] == ["agent_type", "title", "objective"]
 
     def test_it_is_json(self):
         schema = task_parameters(TYPES)
@@ -267,7 +303,7 @@ class TestTaskParameters:
 
     def test_its_arguments_are_the_ones_read_brief_reads(self):
         properties = task_parameters(TYPES)["properties"]
-        assert list(properties) == ["agent_type", "title", *BRIEF_FIELDS]
+        assert list(properties) == ["agent_type", "title", *BRIEF_FIELDS, "tools"]
 
     def test_it_warns_of_nothing(self, logged):
         task_parameters({"notes": NOTES})
@@ -291,6 +327,14 @@ class TestTaskDescription:
             "- writer (its brief also needs: deliverable, done_when): Writes the report."
         )
         assert logged == []
+
+    def test_a_types_model_choices_are_named_last_in_its_notes(self):
+        both = dataclasses.replace(CHOOSING, brief_required=("objective", "known"))
+        text = task_description({"checker": both}, SubAgentPolicy())
+        assert text.endswith(
+            "- checker (its brief also needs: known; model choices: fast, "
+            "anthropic:claude-haiku-4-5): Checks a claim."
+        )
 
     def test_an_inheriting_type_says_so(self):
         text = task_description({"notes": NOTES, "researcher": RESEARCHER}, SubAgentPolicy())
@@ -375,6 +419,77 @@ class TestTaskOffer:
         assert DEPTH_SENTENCE in offer.description
         assert [e["event"] for e in logged] == ["subagent_without_description"]
 
+
+#: What a type's own tools are called, as its backend lists them.
+OWN = frozenset({"lookup", "fetch_page", "mcp_search"})
+
+
+class TestReadChoices:
+    """``read_choices``: the tools and the model a ``task`` call gives its run,
+    each None when left out; anything but some of the type's own tools, or
+    one of its model choices, is a ``BriefError`` naming what it may be."""
+
+    def test_both_left_out(self):
+        assert read_choices({"agent_type": "checker"}, CHOOSING) == (None, None)
+
+    def test_null_is_left_out(self):
+        assert read_choices(
+            {"tools": None, "model": None}, CHOOSING, OWN
+        ) == (None, None)
+
+    def test_some_of_its_own_tools(self):
+        tools, model = read_choices({"tools": ["lookup", "mcp_search", "lookup"]},
+                                    CHOOSING, OWN)
+        assert (tools, model) == (frozenset({"lookup", "mcp_search"}), None)
+
+    def test_none_of_them_is_a_narrowing_too(self):
+        assert read_choices({"tools": []}, CHOOSING, OWN) == (frozenset(), None)
+
+    @pytest.mark.parametrize("tools", [["lookup", "write_file"], "lookup", [3],
+                                       {"lookup": 1}])
+    def test_anything_else_names_its_own(self, tools):
+        with pytest.raises(BriefError) as exc:
+            read_choices({"tools": tools}, CHOOSING, OWN)
+        assert str(exc.value) == (
+            "The tools for 'checker' must be some of its own: fetch_page, lookup, mcp_search."
+        )
+
+    def test_a_type_with_no_tools_of_its_own(self):
+        with pytest.raises(BriefError) as exc:
+            read_choices({"tools": ["lookup"]}, CHOOSING, frozenset())
+        assert str(exc.value) == "'checker' has no tools of its own; leave tools out."
+        assert read_choices({"tools": []}, CHOOSING, frozenset()) == (frozenset(), None)
+
+    @pytest.mark.parametrize("given, chosen", [
+        ("fast", "fast"),
+        (" anthropic:claude-haiku-4-5 ", "anthropic:claude-haiku-4-5"),
+    ])
+    def test_one_of_its_model_choices_as_written(self, given, chosen):
+        assert read_choices({"model": given}, CHOOSING) == (None, chosen)
+
+    @pytest.mark.parametrize("model", ["strong", "claude-haiku-4-5", "", 3])
+    def test_any_other_model_names_its_choices(self, model):
+        with pytest.raises(BriefError) as exc:
+            read_choices({"model": model}, CHOOSING)
+        assert str(exc.value) == (
+            "The model for 'checker' must be one of its model choices: fast, "
+            "anthropic:claude-haiku-4-5."
+        )
+
+    def test_a_type_with_no_model_choices(self):
+        with pytest.raises(BriefError) as exc:
+            read_choices({"model": "fast"}, RESEARCHER)
+        assert str(exc.value) == "'researcher' has no model choices; leave model out."
+
+    def test_the_tools_are_read_first(self):
+        with pytest.raises(BriefError, match="The tools for 'checker'"):
+            read_choices({"tools": ["nope"], "model": "nope"}, CHOOSING, OWN)
+
+    def test_read_brief_takes_both_arguments(self):
+        arguments = {"agent_type": "checker", "title": "T", "objective": "O",
+                     "tools": ["lookup"], "model": "fast"}
+        config, brief = read_brief(arguments, {"checker": CHOOSING})
+        assert (config, brief) == (CHOOSING, Brief(title="T", objective="O"))
 
 AGENT_ID = "The sub-agent's id, such as researcher-2."
 

@@ -1,4 +1,5 @@
-"""A sub-agent type's delegation fields: ``brief_required``, ``limits``, ``continuable`` and ``spawnable_by``.
+"""A sub-agent type's delegation fields: ``brief_required``, ``limits``,
+``continuable``, ``spawnable_by`` and ``model_choices``.
 
 ``brief_required`` names the brief fields a delegation to the type must fill
 (the title and the objective are always needed); ``limits`` are the type's
@@ -13,6 +14,10 @@ never delegated to.
 it and is in no ``sub_agents`` list is a free type, never the root, and
 ``validate_agent_graph`` checks its sources, refuses it on the root and warns
 of a free type the policy lets no source start.
+
+``model_choices`` are the models (or roles) a delegation may run the type on
+instead of its own: a tuple or list of texts, none named twice, and none on
+the root.
 """
 
 from __future__ import annotations
@@ -54,8 +59,13 @@ class TestTheFields:
     def test_they_follow_inherit_context(self):
         # Appended: a positional AgentConfig(...) written before them still binds.
         names = [f.name for f in dataclasses.fields(AgentConfig)]
-        assert names[-5:] == ["inherit_context", "brief_required", "limits", "continuable",
-                              "spawnable_by"]
+        assert names[-6:] == [
+            "inherit_context", "brief_required", "limits", "continuable",
+            "spawnable_by", "model_choices",
+        ]
+
+    def test_no_model_choices_by_default(self):
+        assert AgentConfig(name="a", prompt="p").model_choices == ()
 
     def test_only_its_parent_starts_it_by_default(self):
         assert AgentConfig(name="a", prompt="p").spawnable_by is None
@@ -382,3 +392,50 @@ class TestAFreeTypeNoSourceCanStart:
     def test_the_policy_must_be_a_policy(self):
         with pytest.raises(TypeError, match="subagents must be a SubAgentPolicy or None"):
             validate_agent_graph(team(), policy={"spawn_sources": {"agent"}})
+
+
+class TestModelChoices:
+    """``model_choices``: the models a delegation may pick instead of the type's own."""
+
+    @pytest.mark.parametrize("value", [
+        ("fast",), ["fast", "anthropic:claude-haiku-4-5"], ("claude-opus-4-7",),
+    ])
+    def test_a_tuple_or_list_of_models_or_roles(self, value):
+        assert validate_agent_graph(
+            team(writer={"model_choices": value})
+        ).root_name == "lead"
+
+    @pytest.mark.parametrize("value", ["fast", ("fast", ""), ("fast", "  "), (1,), None,
+                                       {"fast"}])
+    def test_each_is_text(self, value):
+        # A string would be read letter by letter.
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(writer={"model_choices": value}))
+        assert str(exc.value) == (
+            "model_choices must be a tuple or list of models or roles, each as text: "
+            f"'writer' ({value!r})."
+        )
+
+    def test_none_is_named_twice(self):
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(
+                writer={"model_choices": ("fast", "strong", "fast")},
+                researcher={"model_choices": ["strong", "strong"]},
+            ))
+        assert str(exc.value) == (
+            "model_choices names a model twice: 'researcher' ('strong'), 'writer' ('fast')."
+        )
+
+    def test_the_root_sets_none(self):
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(lead={"model_choices": ("fast",)}))
+        assert str(exc.value) == (
+            "Agent 'lead' is the root agent, but sets model_choices: they apply to a "
+            "delegation, and the root is never delegated to. Remove them from the root."
+        )
+
+    def test_a_free_type_may_set_them(self):
+        configs = with_free(AgentConfig(
+            name="helper", prompt="p", spawnable_by={"agent"}, model_choices=("fast",),
+        ))
+        assert validate_agent_graph(configs, policy=AGENTS).free_types == ("helper",)

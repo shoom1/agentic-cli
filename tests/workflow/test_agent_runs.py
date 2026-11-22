@@ -442,6 +442,35 @@ class TestInstances:
 
         record = runs.instance(ONE, "researcher-1")
         assert (record.inherit_context, record.continuable) == (False, True)
+        assert (record.tools, record.model) == (None, None)
+
+    def test_a_first_runs_start_keeps_the_tools_and_model_it_was_given(self):
+        runs = AgentRuns()
+        ref = runs.run_for(ONE, None, "c1", "researcher")
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_STARTED, title="Find X.", call_id="c1", tools=["lookup", "fetch"],
+            model="fast",
+        )))
+
+        record = runs.instance(ONE, "researcher-1")
+        assert (record.tools, record.model) == (("lookup", "fetch"), "fast")
+
+    def test_a_follow_ups_start_changes_neither(self):
+        runs = AgentRuns()
+        ref = runs.run_for(ONE, None, "c1", "researcher")
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_STARTED, title="Find X.", call_id="c1", tools=[], model="fast",
+        )))
+        ended(runs, ONE, ref)
+        second = runs.next_run(ONE, "researcher-1", parent_run=None)
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            second, RUN_STARTED, title="Go on.", call_id="c2", input="Go on.",
+        )))
+
+        record = runs.instance(ONE, "researcher-1")
+        assert (record.tools, record.model) == ((), "fast")
 
     def test_a_childs_parent_is_its_parent_runs_instance(self):
         runs = AgentRuns()
@@ -691,7 +720,7 @@ def a_conversation(runs: AgentRuns) -> None:
     in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
         first, RUN_STARTED, title="Find X.", call_id="c1", brief={"title": "Find X.",
         "objective": "Find X."}, started_by="agent:root", mode="blocking",
-        inherit_context=False, continuable=True,
+        inherit_context=False, continuable=True, tools=["lookup"], model="fast",
     )))
     ended(runs, ONE, first, usage={"m": {"input": 120, "output": 30}}, instance_status="idle")
     second = runs.next_run(ONE, "researcher-1", parent_run=None)
@@ -754,6 +783,7 @@ class TestExportAndRestore:
                 "instance": "researcher-1", "agent": "researcher", "parent": "root",
                 "depth": 1, "inherit_context": False, "title": "researcher work",
                 "status": INSTANCE_IDLE, "runs": ["researcher-1#1"], "continuable": True,
+                "tools": None, "model": None,
             }],
             "runs": [{
                 "run": "researcher-1#1", "agent": "researcher", "instance": "researcher-1",
@@ -847,6 +877,47 @@ class TestExportAndRestore:
             runs.restore(ONE, data)
 
         assert (runs.records(ONE), runs.instances(ONE)) == before
+
+    def test_an_instances_tools_are_a_list_and_read_back_as_given(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+
+        data = json.loads(json.dumps(runs.export(ONE)))
+
+        assert (data["instances"][0]["tools"], data["instances"][0]["model"]) == (
+            ["lookup"], "fast"
+        )
+        again = AgentRuns()
+        again.restore(ONE, data)
+        assert (again.instance(ONE, "researcher-1").tools,
+                again.instance(ONE, "researcher-1").model) == (("lookup",), "fast")
+
+    def test_records_written_before_tools_and_model_read_them_as_none(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+        data = json.loads(json.dumps(runs.export(ONE)))
+        for instance in data["instances"]:
+            del instance["tools"], instance["model"]
+        again = AgentRuns()
+
+        assert again.restore(ONE, data) == ["writer-1#1"]
+
+        assert {(i.tools, i.model) for i in again.instances(ONE)} == {(None, None)}
+
+    @pytest.mark.parametrize("field, value", [
+        ("tools", "lookup"), ("tools", [1]), ("tools", {"lookup": True}), ("model", 3),
+        ("model", ["fast"]),
+    ])
+    def test_tools_or_a_model_that_do_not_read_are_records_it_cannot_read(
+        self, field, value
+    ):
+        runs = AgentRuns()
+        a_conversation(runs)
+        data = json.loads(json.dumps(runs.export(ONE)))
+        data["instances"][0][field] = value
+
+        with pytest.raises(ValueError, match="do not read"):
+            AgentRuns().restore(ONE, data)
 
     def test_the_instances_records_name(self):
         runs = AgentRuns()

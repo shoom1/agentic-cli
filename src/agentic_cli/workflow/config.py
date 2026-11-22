@@ -1,6 +1,7 @@
 """Configuration classes for workflow management."""
 
 import inspect
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Any, TYPE_CHECKING
 
@@ -87,6 +88,12 @@ class AgentConfig:
             ``sub_agents`` starts it. A type that sets it and is in no
             ``sub_agents`` list is a free type: no root, started at run time
             only. Only on sub-agents.
+        model_choices: The models a delegation may run this type on instead
+            of its own, as ``model`` takes them: references, bare ids or
+            roles (a list is read as a tuple). Each is resolved with the
+            agent's ``model_settings`` and given its own context numbers
+            at initialization. Empty (the default): its own model alone.
+            Only on sub-agents.
     """
 
     name: str
@@ -104,6 +111,7 @@ class AgentConfig:
     limits: AgentLimits | None = None
     continuable: bool = True
     spawnable_by: frozenset[str] | None = None
+    model_choices: tuple[str, ...] = ()
 
     def get_prompt(self, settings: "BaseSettings | None" = None) -> str:
         """Get the prompt string, calling the factory if the prompt is callable.
@@ -247,8 +255,10 @@ def validate_agent_graph(
     12. each agent's ``limits`` is None or an ``AgentLimits``;
     13. each agent's ``continuable`` is True or False;
     14. the root sets none of ``brief_required`` (beyond its default, the
-        objective), ``limits`` and ``continuable`` (beyond True): it is never
-        delegated to.
+        objective), ``limits``, ``continuable`` (beyond True) and
+        ``model_choices``: it is never delegated to;
+    15. each agent's ``model_choices`` is a tuple (or list) of texts, none
+        blank and none named twice.
 
     A free type that no source ``policy`` enables can start is warned of
     (``subagent_type_unreachable``), once for each validation.
@@ -449,7 +459,9 @@ def _check_inherit_context(config_map: dict[str, AgentConfig], root: str) -> Non
 
 
 def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> None:
-    """Each agent's ``brief_required``, ``limits`` and ``continuable`` are what they say, and the root sets none.
+    """Each agent's delegation fields are what they say, and the root sets none.
+
+    ``brief_required``, ``limits``, ``continuable`` and ``model_choices``.
 
     Raises:
         AgentGraphError: Naming the agent(s), the value and what to change.
@@ -495,6 +507,7 @@ def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> N
             ("brief_required", tuple(config.brief_required) != _DEFAULT_BRIEF_REQUIRED),
             ("limits", config.limits is not None),
             ("continuable", config.continuable is False),
+            ("model_choices", bool(config.model_choices)),
         )
         if is_set
     ]
@@ -505,11 +518,38 @@ def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> N
             "Remove them from the root."
         )
 
+    not_texts = [
+        f"{name!r} ({config.model_choices!r})"
+        for name, config in config_map.items()
+        if not _are_texts(config.model_choices)
+    ]
+    if not_texts:
+        raise AgentGraphError(
+            "model_choices must be a tuple or list of models or roles, each as "
+            f"text: {', '.join(not_texts)}."
+        )
+
+    twice = sorted(
+        f"{name!r} ({choice!r})"
+        for name, config in config_map.items()
+        for choice, count in Counter(config.model_choices).items()
+        if count > 1
+    )
+    if twice:
+        raise AgentGraphError(f"model_choices names a model twice: {', '.join(twice)}.")
+
 
 def _names_brief_fields(value: object) -> bool:
     """Whether ``value`` is a tuple or list of brief field names (a string is neither)."""
     return isinstance(value, (tuple, list)) and all(
         isinstance(name, str) and name in _BRIEF_NAMES for name in value
+    )
+
+
+def _are_texts(value: object) -> bool:
+    """Whether ``value`` is a tuple or list of non-blank texts (a string is neither)."""
+    return isinstance(value, (tuple, list)) and all(
+        isinstance(item, str) and item.strip() for item in value
     )
 
 
