@@ -59,6 +59,8 @@ from tests.workflow.test_subagents_contract import (  # noqa: F401 - fixtures
     FOLLOWING,
     HELD,
     SESSION,
+    SMALL_ENTRY,
+    SMALL_MODEL,
     USER,
     Crew,
     agent,
@@ -529,6 +531,49 @@ class TestTheMainConversationsCommands:
         models = [value for label, value in rows_of(panel.renderable) if label == "Model"]
         assert models == [str(crew.manager.agent_models["researcher"].ref)]
 
+
+class TestAnInstanceOnAModelChoice:
+    """An instance on a model choice with narrowed tools, continued after a
+    restart (its records restored in a new manager): ``/agents <id>`` and its
+    view say its model and tools, its view's context is its choice's, and
+    its next run is on that model with those tools."""
+
+    async def test_after_a_restart_its_view_and_panel_say_so(self, make_crew):
+        first = make_crew(
+            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite", models=SMALL_ENTRY,
+            coordinator=[calls(delegate("researcher", "Find X.", "c1", model=SMALL_MODEL,
+                                        tools=["contract_lookup"])), says("Done.")],
+            researcher=[says("X is 42.", usage=(1_200, 40))],
+        )
+        await first.turn()
+        await first.manager.cleanup()
+        second = make_crew(
+            follow_team(model_choices=(SMALL_MODEL,)), store="sqlite", models=SMALL_ENTRY,
+            researcher=[says("Y is 7.", usage=(900, 30))],
+        )
+        app = await app_on(second)
+
+        await typed(app, "/agents researcher-1")
+        (panel,) = app.session.add_rich.call_args.args
+        rows = dict(rows_of(panel.renderable))
+        await typed(app, "/agent researcher-1", "Now find Y.")
+        bar = status(app)
+        await typed(app, "/status")
+        (shown,) = app.session.add_rich.call_args.args
+
+        assert (rows["Model"], rows["Tools"]) == (SMALL_MODEL, "contract_lookup")
+        assert second.sent_models("researcher") == ["claude-haiku-4-5"]
+        assert second.tool_names("researcher") == ["contract_lookup"]
+        budget = second.manager.context_budget("researcher", model=SMALL_MODEL)
+        assert budget != second.manager.context_budget("researcher")
+        assert UsageTracker(
+            last_prompt_tokens=900, context_trigger=budget.trigger,
+            window_known=budget.window_known,
+        ).format_context() in bar
+        context = dict(rows_of(shown.renderable))
+        assert (context["Model"], context["Summarize At"]) == (
+            SMALL_MODEL, format_tokens(budget.trigger)
+        )
 
 class TestOffTheLoop:
     async def test_it_blocks_no_event_loop(self, make_crew):
