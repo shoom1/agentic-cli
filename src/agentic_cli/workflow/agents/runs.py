@@ -205,6 +205,9 @@ class InstanceRecord:
         model: The model choice its first run's delegation ran it on, as the
             type writes it (``task``'s ``model``); None for the type's own
             model. Every run of it keeps it.
+        based_on: For an instance of the built-in ``general_purpose`` type,
+            the type that started it, whose tools and model it has; None for
+            any other. Every run of it keeps it.
     """
 
     instance: str
@@ -218,6 +221,7 @@ class InstanceRecord:
     continuable: bool = True
     tools: tuple[str, ...] | None = None
     model: str | None = None
+    based_on: str | None = None
 
 
 def own_plan_and_tasks(state: Mapping[str, Any]) -> tuple[str, list[dict[str, Any]]]:
@@ -630,6 +634,7 @@ class AgentRuns:
                 continuable=bool(metadata.get("continuable", True)),
                 tools=tuple(tools) if tools is not None else None,
                 model=metadata.get("model"),
+                based_on=metadata.get("based_on"),
             )
         return record
 
@@ -748,9 +753,10 @@ def _instance_from(value: Any) -> InstanceRecord:
         runs=list(runs),
         continuable=_get(value, "continuable", bool),
         # Written since records first kept them: missing in older ones (all
-        # of the type's tools, its own model).
+        # of the type's tools, its own model, no general-purpose spawner).
         tools=_tools(value.get("tools")),
         model=_get_new(value, "model", str, _NONE),
+        based_on=_get_new(value, "based_on", str, _NONE),
     )
 
 

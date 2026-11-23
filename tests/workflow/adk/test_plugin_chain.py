@@ -224,6 +224,47 @@ async def test_a_model_choices_runner_has_its_types_chain_on_the_choices_numbers
     assert (manager._variant_runners, manager._variant_agents) == ({}, {})
 
 
+async def test_a_general_purpose_runner_has_a_sub_agents_chain_on_its_spawners_model(project):
+    """With the policy's ``general_purpose``, each type that may start it has a
+    general-purpose agent of its own and its runner: the spawner's model, a
+    sub-agent's chain reading that model's numbers, kind and reference under
+    ``general_purpose``, and no delegation tool, and the release empties the maps (that it closes the
+    runner, and the MCP server with it, is ``test_adk_mcp_lifecycle.py``'s)."""
+    spawner_model = "claude-haiku-4-5"
+    manager = GoogleADKWorkflowManager(
+        agent_configs=[
+            AgentConfig(name="lead", prompt="Lead.", sub_agents=["helper"], model=spawner_model),
+            AgentConfig(name="helper", prompt="Help.", description="Helps."),
+        ],
+        settings=_settings(extras=True),
+        subagents=SubAgentPolicy(spawn_sources={"agent"}, general_purpose=True),
+    )
+
+    try:
+        await manager.initialize_services()
+        runner = manager._general_runners["lead"]
+        agent = runner.app.root_agent
+        plugins = {plugin.name: plugin for plugin in runner.app.plugins}
+        budget = manager.context_budget("lead")
+        assert set(manager._general_runners) == set(manager._general_agents) == {"lead"}
+        assert manager._general_agents["lead"] is agent
+        assert (agent.name, agent.model.model) == ("general_purpose", spawner_model)
+        assert [p.name for p in runner.app.plugins] == [
+            p.name for p in manager._agent_runners["helper"].app.plugins
+        ]
+        assert plugins["fit_guard"]._budgets["general_purpose"] == budget
+        assert plugins["context_overflow"]._budgets["general_purpose"] == budget
+        assert plugins["context_overflow"]._models["general_purpose"] == (
+            f"anthropic:{spawner_model}"
+        )
+        assert "task" not in {getattr(tool, "name", "") for tool in agent.tools}
+        assert "general_purpose" not in manager._agent_runners
+    finally:
+        await manager.cleanup()
+
+    assert (manager._general_runners, manager._general_agents) == ({}, {})
+
+
 async def test_a_main_agent_that_continues_its_sub_agents_gets_the_roster(project):
     """With the policy's ``follow_ups`` the main agent has ``message_agent``:
     its chain carries the roster, before the memory index; a sub-agent type's

@@ -29,8 +29,10 @@ from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message  # noqa: E402
 from tests.workflow.test_manager_models import route  # noqa: E402
 from tests.workflow.test_subagents_contract import (  # noqa: E402,F401 - fixtures
+    ADK_MCP_WARNINGS,
     CHOICE,
     FOLLOWING,
+    GENERAL,
     agent,
     backend,
     calls,
@@ -315,3 +317,38 @@ async def test_a_model_choices_runner_is_released_with_the_backend(
     assert alive(pid_dir) == [], "a server outlived cleanup()"
     assert getattr(manager, "_variant_graphs", {}) == {}
     assert dict(getattr(manager, "_variant_runners", {})) == {}
+
+
+@ADK_MCP_WARNINGS
+async def test_a_general_purpose_agents_runner_is_released_with_the_backend(
+    make_crew, backend, pid_dir
+):
+    """A type with an MCP server that starts the built-in general-purpose type:
+    its agent has a server of its own (ADK: a toolset of its runner's; Deep
+    Agents: sessions of its own), which a model switch and cleanup stop."""
+    server = MCPServerConfig(
+        name="atlas", command=sys.executable, args=[str(SERVER)], timeout=30,
+        env={"MCP_TEST_PID_DIR": str(pid_dir)}, tool_name_prefix="atlas",
+    )
+    crew = make_crew(
+        [agent("coordinator", mcp_servers=[server])], subagents=GENERAL,
+        coordinator=[calls(delegate("general_purpose", "Find X.", "c1")), says("Done.")],
+        general_purpose=[says("X is 42.")],
+    )
+    manager = crew.manager
+    try:
+        await crew.turn()
+        assert len(manager._general_graphs if backend == "deepagents"
+                   else manager._general_runners) == 1
+        # The spawner's own server and the general-purpose agent's.
+        assert len(alive(pid_dir)) == 2
+
+        await manager.reinitialize(model="claude-opus-4-7", preserve_sessions=True)
+        if backend == "adk":
+            assert alive(pid_dir) == []  # no runner of the old build is left open
+    finally:
+        await manager.cleanup()
+
+    assert alive(pid_dir) == [], "a server outlived cleanup()"
+    assert getattr(manager, "_general_graphs", {}) == {}
+    assert dict(getattr(manager, "_general_runners", {})) == {}

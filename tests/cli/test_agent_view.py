@@ -1207,3 +1207,32 @@ class TestANewInstancesView:
             await typed(app, "/agent new helper Help.", "/back")
 
         assert said(app.session, "add_response") == ["Helped.", "Noted."]
+
+
+class TestAGeneralPurposeInstancesView:
+    async def test_it_says_the_model_and_context_of_the_type_that_started_it(self, make_crew):
+        """A ``general_purpose`` instance runs on its spawner type's model: its view
+        names that model, and its context is that model's."""
+        from agentic_cli.workflow.agents import SubAgentPolicy
+
+        crew = make_crew(
+            [agent("coordinator", model=SMALL_MODEL)], models=SMALL_ENTRY,
+            subagents=SubAgentPolicy(spawn_sources={"agent"}, general_purpose=True),
+            coordinator=[calls(delegate("general_purpose", "Sum it up.", "c1")), says("Done.")],
+            general_purpose=[says("Summed.", usage=(900, 30))],
+        )
+        app = await app_on(crew)
+
+        await typed(app, "Sum it up.", "/agent general_purpose-1")
+        bar = status(app)
+        await typed(app, "/status")
+
+        (panel,) = app.session.add_rich.call_args.args
+        rows = dict(rows_of(panel.renderable))
+        budget = crew.manager.context_budget("coordinator")
+        assert rows["Sub-agent"] == "general_purpose-1 (general_purpose, idle)"
+        assert (rows["Model"], rows["Summarize At"]) == (SMALL_MODEL, format_tokens(budget.trigger))
+        assert UsageTracker(
+            last_prompt_tokens=900, context_trigger=budget.trigger,
+            window_known=budget.window_known,
+        ).format_context() in bar

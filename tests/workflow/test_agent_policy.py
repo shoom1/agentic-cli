@@ -156,7 +156,7 @@ class TestRunTimeStarts:
 
     def test_they_come_after_follow_ups(self):
         # Appended: a positional SubAgentPolicy(...) written before them still binds.
-        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-2:] == [
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][5:7] == [
             "spawn_sources", "max_spawn_depth",
         ]
 
@@ -191,6 +191,36 @@ class TestRunTimeStarts:
 
     def test_policies_with_the_same_sources_are_equal(self):
         assert SubAgentPolicy(spawn_sources=["agent"]) == SubAgentPolicy(spawn_sources={"agent"})
+
+
+class TestTheGeneralPurposeType:
+    """``general_purpose``: the built-in general-purpose type, off by default,
+    and only with a source that could start it."""
+
+    def test_it_is_off_by_default_and_comes_last(self):
+        assert SubAgentPolicy().general_purpose is False
+        # Appended: a positional SubAgentPolicy(...) written before it still binds.
+        assert [f.name for f in dataclasses.fields(SubAgentPolicy)][-1] == "general_purpose"
+
+    @pytest.mark.parametrize("sources", [{"agent"}, {"skill"}, {"user"}])
+    def test_any_source_lets_it_on(self, sources):
+        assert SubAgentPolicy(spawn_sources=sources, general_purpose=True).general_purpose is True
+
+    def test_with_no_source_it_is_refused(self):
+        with pytest.raises(ValueError) as exc:
+            SubAgentPolicy(general_purpose=True)
+        assert str(exc.value) == (
+            "SubAgentPolicy.general_purpose needs spawn_sources: with none, nothing could "
+            "start it."
+        )
+
+    @pytest.mark.parametrize("value", [1, 0, None, "yes"])
+    def test_it_is_true_or_false(self, value):
+        with pytest.raises(ValueError) as exc:
+            SubAgentPolicy(spawn_sources={"agent"}, general_purpose=value)
+        assert str(exc.value) == (
+            f"SubAgentPolicy.general_purpose must be True or False, not {value!r}."
+        )
 
 
 class TestAsPolicy:

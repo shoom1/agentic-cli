@@ -112,6 +112,14 @@ class TestAnInstancesStatus:
 
         assert "tools" not in event.metadata and "model" not in event.metadata
 
+    def test_a_general_purpose_runs_start_carries_its_spawner_type(self):
+        ref = RunRef("general_purpose", "general_purpose-1", "general_purpose-1#1", None, 1)
+
+        event = WorkflowEvent.agent_run(ref, "started", title="Sum it up.", based_on="lead")
+
+        assert event.metadata["based_on"] == "lead"
+        assert "based_on" not in WorkflowEvent.agent_run(ref, "started").metadata
+
     def test_a_follow_ups_start_carries_its_input(self):
         second = RunRef("researcher", "researcher-1", "researcher-1#2", None, 1)
 

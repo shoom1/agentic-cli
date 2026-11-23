@@ -720,3 +720,49 @@ class TestAVariant:
         )
         assert [tool.name for tool in variant["tools"]] == ["save_plan"]
         assert RunControlMiddleware in [type(m) for m in variant["middleware"]]
+
+
+class TestTheGeneralPurposeAgent:
+    """The general-purpose agent made for a type (``general``): built as a
+    variant is, with its own tools and prompt, a sub-agent's stack, and no
+    ``task`` even where a sub-agent of the app's would get one."""
+
+    async def test_its_own_tools_and_prompt_and_no_task(self, monkeypatch):
+        from agentic_cli.workflow.agents.spawn import general_purpose_config
+
+        made: list[dict] = []
+        real = agent_builder.create_agent
+
+        def spy(*args, **kwargs):
+            made.append(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(agent_builder, "create_agent", spy)
+        chat = ScriptedChat(script=[ai("Summed.")])
+        general_graphs: dict = {}
+        deeper = SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2,
+                                general_purpose=True)
+
+        _tree(
+            [COORDINATOR, RESEARCHER],
+            {"coordinator": ScriptedChat(), "researcher": ScriptedChat()},
+            policy=deeper, checkpointer=InMemorySaver(),
+            general={"coordinator": Variant(
+                config=general_purpose_config(COORDINATOR), chat_model=chat, resolved=None,
+                tools=to_langchain_tools([save_plan]), prompt="Its own prompt.",
+            )},
+            general_graphs=general_graphs,
+        )
+        await general_graphs["coordinator"].ainvoke(
+            {"messages": [HumanMessage("# Task: Sum it up.")]},
+            {"configurable": {"thread_id": "g"}},
+        )
+
+        assert len(chat.requests) == 1
+        *_, built = made
+        assert [m["name"] for m in made] == ["coordinator", "researcher", "general_purpose"]
+        assert (built["model"], built["system_prompt"]) == (chat, "Its own prompt.")
+        assert [tool.name for tool in built["tools"]] == ["save_plan"]
+        # A sub-agent of the app's at this depth gets task; the general-purpose one does not.
+        assert "task" in [tool.name for tool in made[1]["tools"]]
+        assert RunControlMiddleware in [type(m) for m in built["middleware"]]

@@ -439,3 +439,36 @@ class TestModelChoices:
             name="helper", prompt="p", spawnable_by={"agent"}, model_choices=("fast",),
         ))
         assert validate_agent_graph(configs, policy=AGENTS).free_types == ("helper",)
+
+
+class TestTheGeneralPurposeName:
+    """With the built-in ``general_purpose`` type on, no agent of the app's may
+    take its name; with it off, the name is any agent's."""
+
+    GENERAL = SubAgentPolicy(spawn_sources={"agent"}, general_purpose=True)
+
+    #: The root named so, and a sub-agent named so.
+    NAMED = {
+        "root": {"lead": {"name": "general_purpose"}},
+        "sub-agent": {"lead": {"sub_agents": ["researcher", "general_purpose"]},
+                      "writer": {"name": "general_purpose"}},
+    }
+
+    @pytest.mark.parametrize("named", NAMED.values(), ids=NAMED.keys())
+    def test_an_agent_of_that_name_is_refused_while_it_is_on(self, named):
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(**named), policy=self.GENERAL)
+        assert str(exc.value) == (
+            "An agent named 'general_purpose' clashes with the built-in general_purpose "
+            "type, which this app's SubAgentPolicy enables."
+        )
+
+    def test_with_it_off_the_name_is_any_agents(self):
+        graph = validate_agent_graph(team(**self.NAMED["sub-agent"]), policy=AGENTS)
+        assert "general_purpose" in graph.config_map
+
+    def test_the_names_are_checked_for_duplicates_first(self):
+        configs = [*team(), AgentConfig(name="writer", prompt="p"),
+                   AgentConfig(name="general_purpose", prompt="p")]
+        with pytest.raises(AgentGraphError, match="Duplicate agent name"):
+            validate_agent_graph(configs, policy=self.GENERAL)

@@ -575,6 +575,46 @@ the start of the entry's title.
 
 ### Added
 
+- **The built-in `general_purpose` type: `SubAgentPolicy.general_purpose`, on
+  both backends.** With `general_purpose=True` (False by default; True with
+  no `spawn_sources` is a `ValueError`: "SubAgentPolicy.general_purpose needs
+  spawn_sources: with none, nothing could start it."), every source the
+  policy enables may start `general_purpose`, a type the app does not
+  configure: an agent's `task` lists it after the app's types ("-
+  general_purpose: A general-purpose agent with your own tools (but not the
+  ones that start agents) and your model, for a self-contained task no other
+  agent fits."), a skill may name it (`agent: general_purpose`), and the user
+  may start it (`/agent new general_purpose <objective>`). Its run has the
+  tools, MCP servers, skills and model of the type that started it (the
+  caller's type for `task` and a skill, the main agent for the user; the
+  type's own model, never a run's model choice), the framework's system
+  prompt, a fresh context and the plan's tools, and it starts no agent: no
+  `task`, none of the parent's tools, and a skill it loads that names an
+  agent is refused. `task`'s `tools` narrows it against its spawner's tools;
+  its `model` is refused (it has no model choices). Each backend builds one
+  for every type that may start it, at initialization (the main agent, and
+  with `max_spawn_depth` 2 or more every type that does not inherit when
+  agents may start types, and every type with skills when skills may), with
+  MCP connections of its own (ADK: an agent and a runner of its own,
+  connecting at first use; Deep Agents: a graph of its own, whose MCP
+  sessions open at initialization, so a server that cannot start is a notice
+  for it too, naming its spawner in `metadata["spawner"]`, and one that never
+  answers is waited for once more per spawner), built again by a model
+  switch and released with the others; a main agent with no sub-agents gets
+  `task` for it alone when agents may start it. Its instances are `general_purpose-<n>`, and the
+  records keep the type each was made for (`InstanceRecord.based_on`, from
+  the run's start, `WorkflowEvent.agent_run(based_on=)`; records written
+  before it read None), so its follow-ups, the user's and after a restart,
+  run as its first run did (one whose type no longer makes one is refused as
+  a type that is gone), and its view shows that type's model and context.
+  While the policy enables it, an app's agent of that name is refused
+  (`AgentGraphError`: "An agent named 'general_purpose' clashes with the
+  built-in general_purpose type, which this app's SubAgentPolicy
+  enables."). `agentic_cli.workflow.agents.spawn` (provisional):
+  `GENERAL_PURPOSE`, `GENERAL_PURPOSE_PROMPT`, `GENERAL_PURPOSE_DESCRIPTION`,
+  `general_purpose_config`, `general_purpose_spawners`, `root_type`; the
+  manager's delegations' `general_purpose` and `config_for(agent_type,
+  based_on=)`.
 - **`/agent new <type> <objective>`: you start a sub-agent, and its view
   opens on its first run.** A type whose `spawnable_by` names `"user"`, in
   an app whose policy's `spawn_sources` names it too

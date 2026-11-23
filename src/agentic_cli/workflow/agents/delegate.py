@@ -8,7 +8,8 @@ task tool (ADK's ``adk/task_tool.py::TaskTool``, Deep Agents'
 - reads the brief against what the calling run may start (``brief.read_brief``;
   ``offered``: its own sub-agents, then, while the run's depth is below
   ``max_spawn_depth``, the types agents start at run time,
-  ``agents/spawn.py``), then its tools against the type's own and its model
+  ``agents/spawn.py``, and the built-in ``general_purpose`` type made for the
+  caller's type when the policy enables it), then its tools against the type's own and its model
   against the type's choices (``brief.read_choices``): a brief that cannot
   start a run, tools that are not some of the type's own and a model that is
   none of its choices are the call's error result, and nothing else happens
@@ -60,7 +61,10 @@ next run, which starts with it steered: a message is never lost.
 Every run of an instance has the tools and the model its first run's
 delegation gave it (``AgentRun.tools``, ``AgentRun.model``, kept in its
 ``InstanceRecord``); a follow-up to an instance whose type no longer has
-them is refused (``CHOICE_GONE_ERROR``).
+them is refused (``CHOICE_GONE_ERROR``). A ``general_purpose`` instance
+also keeps the type it was made for (``AgentRun.based_on``,
+``InstanceRecord.based_on``), whose tools and model it has; one whose type no
+longer makes it is refused as a type that is gone (``TYPE_GONE_ERROR``).
 
 Each run works under its ``RunControl`` (``agents/control.py``,
 ``AgentRun.control``): its limits (its type's over the policy's), the time
@@ -180,9 +184,13 @@ from agentic_cli.workflow.agents.runs import (
 from agentic_cli.workflow.agents.slots import NEW, Slot, SlotPool
 from agentic_cli.workflow.agents.spawn import (
     AGENT_SOURCE,
+    GENERAL_PURPOSE,
     USER_SOURCE,
     depth_sentence_applies,
+    general_purpose_config,
+    general_purpose_spawners,
     may_spawn,
+    root_type,
     spawnable,
 )
 from agentic_cli.workflow.events import WorkflowEvent
@@ -371,6 +379,11 @@ class StartRequest:
             later run of the instance keeps them.
         model: One of the type's ``model_choices``, as written, to run it on;
             None: the type's own model. Every later run keeps it.
+        based_on: For the built-in ``general_purpose`` type, the type it is
+            made for (``Delegations.config_for``): the caller's type for a
+            ``task`` call or a skill, the root for the user's start; its
+            tools and model are the run's. None (or any value, for another
+            type): none.
     """
 
     agent_type: str
@@ -384,6 +397,7 @@ class StartRequest:
     counted: bool = True
     tools: frozenset[str] | None = None
     model: str | None = None
+    based_on: str | None = None
 
 
 @dataclass(frozen=True)
@@ -410,6 +424,9 @@ class AgentRun:
         model: The type's model choice it runs on, as ``model_choices``
             writes it; the backend runs the type's agent built on it. None:
             the type's own model.
+        based_on: A run of the built-in ``general_purpose`` type: the type it
+            is made for (``config`` is ``general_purpose_config`` of it),
+            whose general-purpose agent the backend runs; None for any other.
     """
 
     ref: RunRef
@@ -422,6 +439,7 @@ class AgentRun:
     follow_up: bool = False
     tools: frozenset[str] | None = None
     model: str | None = None
+    based_on: str | None = None
 
     def __post_init__(self) -> None:
         if self.control is None:
@@ -627,6 +645,8 @@ class Delegations:
         types: Every agent type, by name: a caller may start its own
             sub-agents (``AgentConfig.sub_agents``) and, as the policy
             allows, the types agents may start at run time (``offered``).
+            The built-in ``general_purpose`` type is no entry: it is made
+            for each of these types that may start it (``general_purpose``).
         hook: Runs one run (``BaseWorkflowManager._run_agent``).
         ledgers: The manager's usage ledgers: a run's end carries what it
             used, by model, and its token limit counts its side calls
@@ -668,6 +688,12 @@ class Delegations:
         self._stored = stored
         self._open_calls = open_calls
         self._tool_names = tool_names
+        # The general-purpose type made for each type that may start it, by
+        # the type's name: the one place those configs are made.
+        self._general: Mapping[str, AgentConfig] = MappingProxyType({
+            name: general_purpose_config(self._types[name])
+            for name in general_purpose_spawners(list(self._types.values()), policy)
+        })
         # Each conversation's turn its stored instances were last read in
         # (its span, ``current_turn_scope``: held here, so no later turn's
         # can be the same object), and each conversation's lock, which a
@@ -698,6 +724,31 @@ class Delegations:
         """Every agent type, by name, in config order (read-only): what ``start`` starts."""
         return MappingProxyType(self._types)
 
+    @property
+    def general_purpose(self) -> Mapping[str, AgentConfig]:
+        """The general-purpose type made for each type that may start it, by that type's name.
+
+        Empty unless the policy enables it (``general_purpose_spawners``);
+        the backends build their agents of it from this (read-only).
+        """
+        return self._general
+
+    def config_for(self, agent_type: str, *, based_on: str | None = None) -> AgentConfig | None:
+        """The config a run of ``agent_type`` has, else None.
+
+        The app's config of that name; for the built-in ``general_purpose``
+        type (when the policy enables it), the one made for ``based_on``, the
+        type that starts it: None for no ``based_on``, or one that may not
+        start it here.
+        """
+        if self._is_general(agent_type):
+            return self._general.get(based_on) if based_on is not None else None
+        return self._types.get(agent_type)
+
+    def _is_general(self, agent_type: str) -> bool:
+        """Whether ``agent_type`` is the built-in general-purpose type, and the policy enables it."""
+        return self.policy.general_purpose and agent_type == GENERAL_PURPOSE
+
     def sub_agents(self, agent: str) -> dict[str, AgentConfig]:
         """The types ``agent`` may start, by name, in its ``sub_agents``' order."""
         caller = self._types.get(agent)
@@ -719,7 +770,9 @@ class Delegations:
         if caller is None or caller.inherit_context or not may_spawn(depth, self.policy):
             return offered
         for name in spawnable(list(self._types.values()), self.policy, AGENT_SOURCE):
-            config = self._types[name]
+            config = self.config_for(name, based_on=caller_agent)
+            if config is None:
+                continue
             if name not in offered and (depth == 0 or not config.inherit_context):
                 offered[name] = config
         return offered
@@ -756,8 +809,9 @@ class Delegations:
             config, brief = read_brief(
                 request.arguments, self.offered(request.caller_agent, depth)
             )
+            based_on = request.caller_agent if self._is_general(config.name) else None
             own = (
-                await self._own_tools(config)
+                await self._own_tools(config, based_on=based_on)
                 if request.arguments.get("tools") is not None else ()
             )
             tools, model = read_choices(request.arguments, config, own)
@@ -766,7 +820,7 @@ class Delegations:
         return await self.start(StartRequest(
             agent_type=config.name, brief=brief, started_by=started_by(request.caller),
             caller=request.caller, call_id=request.call_id, state=request.state,
-            history=request.history, tools=tools, model=model,
+            history=request.history, tools=tools, model=model, based_on=based_on,
         ))
 
     async def start(self, request: StartRequest) -> Delegated:
@@ -782,9 +836,14 @@ class Delegations:
         has stopped, and goes on.
 
         Raises:
-            KeyError: ``request.agent_type`` is not one of the manager's types.
+            KeyError: ``request.agent_type`` is not one of the manager's types
+                (the built-in ``general_purpose`` type: with no
+                ``request.based_on`` that may start it).
         """
-        config = self._types[request.agent_type]
+        based_on = request.based_on if self._is_general(request.agent_type) else None
+        config = self.config_for(request.agent_type, based_on=based_on)
+        if config is None:
+            raise KeyError(request.agent_type)
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
@@ -802,14 +861,14 @@ class Delegations:
                 brief=brief.fields(), started_by=request.started_by, mode=BLOCKING,
                 inherit_context=config.inherit_context, continuable=config.continuable,
                 tools=sorted(request.tools) if request.tools is not None else None,
-                model=request.model,
+                model=request.model, based_on=based_on,
             ))
             return await self._run(
                 ref, config, conversation, request.call_id,
                 message=task_message(brief, inherit=config.inherit_context),
                 state=request.state,
                 history=request.history if config.inherit_context else None,
-                tools=request.tools, model=request.model,
+                tools=request.tools, model=request.model, based_on=based_on,
             )
 
     def startable_by_user(self) -> tuple[str, ...]:
@@ -817,9 +876,17 @@ class Delegations:
 
         ``spawnable`` for ``"user"``: the policy's ``spawn_sources`` and the
         type's ``spawnable_by`` both name the user. An inheriting one too: its
-        parent is the root, whose conversation it reads.
+        parent is the root, whose conversation it reads. The built-in
+        ``general_purpose`` type only where it is made for the root.
         """
-        return spawnable(list(self._types.values()), self.policy, USER_SOURCE)
+        names = spawnable(list(self._types.values()), self.policy, USER_SOURCE)
+        # The general-purpose type is made for the root: an app with no
+        # configured types (a native ADK app) has none to make it for.
+        return tuple(
+            name for name in names
+            if not self._is_general(name)
+            or self.config_for(name, based_on=root_type(self._types.values())) is not None
+        )
 
     def user_start_refused(self, agent_type: str, objective: str) -> str | None:
         """Why the user may not start ``agent_type`` on ``objective``, else None.
@@ -872,6 +939,8 @@ class Delegations:
             agent_type=agent_type, brief=Brief(title=run_title(objective), objective=objective),
             started_by=USER, conversation=conversation, state=dict(state or {}),
             history=history, counted=False,
+            # The user's spawner is the root.
+            based_on=root_type(self._types.values()) if self._is_general(agent_type) else None,
         ))
 
     async def follow_up(
@@ -918,7 +987,9 @@ class Delegations:
                 return Delegated(result={"success": False, "error": error}, state={}, run=None)
             instance = self._runs.instance(conversation, request.instance)
             assert instance is not None
-            config = self._types[instance.agent]
+            based_on = instance.based_on if self._is_general(instance.agent) else None
+            config = self.config_for(instance.agent, based_on=based_on)
+            assert config is not None  # _follow_up_refused answered otherwise
             if request.started_by != USER:
                 if _reserved is None:
                     refused = self._past_runs_per_turn(instance.agent)
@@ -940,7 +1011,7 @@ class Delegations:
                 ref, config, conversation, request.call_id,
                 message=request.message, state=request.state, history=None, follow_up=True,
                 tools=frozenset(instance.tools) if instance.tools is not None else None,
-                model=instance.model,
+                model=instance.model, based_on=based_on,
             )
 
     def close(self, conversation: SessionRef | None, instance: str, *, reason: str) -> list[str]:
@@ -1428,9 +1499,11 @@ class Delegations:
             return STOPPED_ERROR.format(instance=found.instance)
         if found.status == INSTANCE_RUNNING and not running_ok:
             return RUNNING_ERROR.format(instance=found.instance)
-        if found.agent not in self._types:
+        config = self.config_for(
+            found.agent, based_on=found.based_on if self._is_general(found.agent) else None
+        )
+        if config is None:
             return TYPE_GONE_ERROR.format(instance=found.instance, agent=found.agent)
-        config = self._types[found.agent]
         what = None
         if found.model is not None and found.model not in config.model_choices:
             what = f"the model {found.model}"
@@ -1444,9 +1517,14 @@ class Delegations:
             )
         return None
 
-    async def _own_tools(self, config: AgentConfig) -> Collection[str]:
+    async def _own_tools(
+        self, config: AgentConfig, *, based_on: str | None = None
+    ) -> Collection[str]:
         """The names of ``config``'s own tools: its backend's, else its configured
         tools'.
+
+        A general-purpose type's are its spawner's (``based_on``): the same
+        names, which the backend lists for that type.
 
         The one place the backend's hook is asked.
 
@@ -1457,7 +1535,7 @@ class Delegations:
         if self._tool_names is None:
             return configured_tool_names(config.tools)
         try:
-            return await self._tool_names(config.name)
+            return await self._tool_names(based_on if based_on is not None else config.name)
         except ToolsUnlistedError as error:
             raise BriefError(
                 TOOLS_UNLISTED_ERROR.format(agent_type=config.name, error=error.reason)
@@ -1479,10 +1557,11 @@ class Delegations:
         record = self._runs.instance(conversation, instance)
         if record is None or record.tools is None:
             return None
-        config = self._types.get(record.agent)
+        based_on = record.based_on if self._is_general(record.agent) else None
+        config = self.config_for(record.agent, based_on=based_on)
         if config is None:
             return None
-        return frozenset(await self._own_tools(config))
+        return frozenset(await self._own_tools(config, based_on=based_on))
 
     async def _run(
         self,
@@ -1497,12 +1576,13 @@ class Delegations:
         follow_up: bool = False,
         tools: frozenset[str] | None = None,
         model: str | None = None,
+        based_on: str | None = None,
     ) -> Delegated:
         """Run ``ref``'s run, started and reported already, to its end; its envelope.
 
         What a first run and a follow-up share: the run's control, its task,
         the caller's slot lent while it waits. ``tools`` and ``model`` are
-        the instance's.
+        the instance's, ``based_on`` a general-purpose one's.
         """
         control = RunControl(
             ref, self._limits(config), side_tokens=self._side_tokens(conversation, ref),
@@ -1515,7 +1595,7 @@ class Delegations:
             self._in_run(
                 ref, config, conversation, call_id, control,
                 message=message, state=state, history=history, follow_up=follow_up,
-                model=model,
+                model=model, based_on=based_on,
             ),
             name=f"agent run {ref.run}",
         )
@@ -1702,6 +1782,7 @@ class Delegations:
         history: Callable[[], Any] | None,
         follow_up: bool,
         model: str | None = None,
+        based_on: str | None = None,
     ) -> RunAnswer:
         """The run, in its own task: the active run, and no tool call active.
 
@@ -1727,6 +1808,7 @@ class Delegations:
             follow_up=follow_up,
             tools=control.tools,
             model=model,
+            based_on=based_on,
         )
         pool = self.slots(conversation)
         queued = pool.free == 0

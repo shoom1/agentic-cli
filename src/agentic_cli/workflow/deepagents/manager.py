@@ -115,6 +115,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.graph.state import CompiledStateGraph
 
+    from agentic_cli.models import ResolvedModel
     from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.sessions import SessionInfo, SessionRef
 
@@ -197,6 +198,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         # Each sub-agent type's graph on each of its model choices, by (type,
         # choice): what a run on a choice runs on.
         self._variant_graphs: dict[tuple[str, str], CompiledStateGraph] = {}
+        # The built-in general-purpose type's graph for each type that may start
+        # it, by that type's name: what a run of it runs on.
+        self._general_graphs: dict[str, CompiledStateGraph] = {}
         # Each agent's own tools' names as its model sees them (its tools, skill
         # tools and MCP tools), the framework's state and delegation tools left
         # out: what a task call's `tools` may name.
@@ -278,17 +282,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             }
         tools: dict[str, list[BaseTool]] = {}
         for config in self._agent_configs:
-            own = to_langchain_tools(self._build_tools(config, service_map))
-            # Skill tools before MCP tools: an MCP tool named like one is skipped.
-            if config.skills:
-                skill_tools, instruction = self._skill_tools(config, own)
-                own = [*own, *skill_tools]
-                prompts[config.name] = _with_instruction(
-                    prompts[config.name], instruction
-                )
-            if config.mcp_servers:
-                own = await self._with_mcp_tools(config, own)
-            tools[config.name] = own
+            tools[config.name], prompts[config.name] = await self._agent_tools(
+                config, service_map, prompts[config.name],
+                model=self._resolved_models[config.name],
+            )
         self._own_tool_names = {
             name: frozenset(t.name for t in own if t.name not in KEPT_TOOLS)
             for name, own in tools.items()
@@ -314,6 +311,31 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             if config.name != root
             for choice in config.model_choices
         }
+        # The general-purpose agent of each type that may start one: its
+        # spawner's tools and MCP servers (sessions of its own), its prompt,
+        # its spawner's model and numbers.
+        general_graphs: dict[str, CompiledStateGraph] = {}
+        general: dict[str, Variant] = {}
+        for spawner, config in self._delegations.general_purpose.items():
+            model = self._general_model(spawner)
+            # Deep Agents opens MCP sessions at initialization (ADK connects at
+            # first use), so each general-purpose agent starts its spawner's
+            # servers once more here: one that never answers is waited for once
+            # more per spawner, and one that cannot start is a notice for it too.
+            own, prompt = await self._agent_tools(
+                config, service_map, config.get_prompt(self._settings), model=model,
+                spawner=spawner,
+            )
+            general[spawner] = Variant(
+                config=config,
+                chat_model=build_chat_model(
+                    model, settings=self._settings, app_name=self.app_name
+                ),
+                resolved=model,
+                budget=self._budgets.get(spawner),
+                tools=own,
+                prompt=prompt,
+            )
         self._root = build_agent_tree(
             self._agent_configs,
             chat_models={
@@ -345,9 +367,12 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             root=root,
             variants=variants,
             variant_graphs=variant_graphs,
+            general=general,
+            general_graphs=general_graphs,
         )
         self._agent_graphs = graphs
         self._variant_graphs = variant_graphs
+        self._general_graphs = general_graphs
         self._root_summarization = summarizers.get(root)
 
         logger.info(
@@ -388,8 +413,39 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._checkpointer, self._checkpointer_cm = saver, connections
         self._sessions = CheckpointSessions(saver, store, backfill=kind != "memory")
 
+    async def _agent_tools(
+        self,
+        config: AgentConfig,
+        service_map: dict[str, Callable],
+        prompt: str,
+        *,
+        model: "ResolvedModel",
+        spawner: str | None = None,
+    ) -> tuple[list[BaseTool], str]:
+        """``config``'s tools as its model sees them, and its prompt with its skills' instruction.
+
+        Its registered tools, then its skill tools (before the MCP tools: an
+        MCP tool named like one is skipped), then its MCP servers' tools,
+        opened now on sessions of this agent's own. ``model`` is the model it
+        runs on (the provider its skill tools are worded for): the
+        general-purpose agent's is its spawner's, and ``spawner`` names that
+        type for the notices about its MCP servers.
+        """
+        own = to_langchain_tools(self._build_tools(config, service_map))
+        if config.skills:
+            skill_tools, instruction = self._skill_tools(config, own, model=model)
+            own = [*own, *skill_tools]
+            prompt = _with_instruction(prompt, instruction)
+        if config.mcp_servers:
+            own = await self._with_mcp_tools(config, own, spawner=spawner)
+        return own, prompt
+
     def _skill_tools(
-        self, config: AgentConfig, tools: list[BaseTool]
+        self,
+        config: AgentConfig,
+        tools: list[BaseTool],
+        *,
+        model: "ResolvedModel | None" = None,
     ) -> tuple[list[BaseTool], str]:
         """``config``'s skills as skill tools, and the instruction its prompt gets.
 
@@ -413,7 +469,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         skills = SkillStore(self._settings.skills_dirs or []).resolve(config.skills)
         skill_tools, instruction = make_skill_tools(
             skills,
-            provider=self._resolved_models[config.name].record.kind,
+            provider=(model if model is not None else self._resolved_models[config.name]).record.kind,
             # The base validated the graph before this build, so the root is set.
             agents=SkillAgents(
                 config.name, lambda: self._delegations,
@@ -426,14 +482,19 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return skill_tools, instruction
 
     async def _with_mcp_tools(
-        self, config: AgentConfig, tools: list[BaseTool]
+        self, config: AgentConfig, tools: list[BaseTool], *, spawner: str | None = None
     ) -> list[BaseTool]:
         """``tools`` and the tools of ``config``'s MCP servers, opened now.
 
         A server that cannot start, and a tool whose name is taken, become
-        notices for the next turn; the agent runs without them.
+        notices for the next turn; the agent runs without them. A
+        general-purpose agent's notices name its ``spawner`` too
+        (``metadata["spawner"]``), since every type that may start one has an
+        agent of that name.
         """
-        loaded, unavailable = await self._mcp.start(config.name, config.mcp_servers)
+        loaded, unavailable = await self._mcp.start(
+            config.name, config.mcp_servers, spawner=spawner
+        )
         kept, skipped = without_clashes(config.name, tools, loaded)
         for message, code in [
             *((message, "mcp_unavailable") for message in unavailable),
@@ -441,6 +502,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         ]:
             notice = WorkflowEvent.error(message, error_code=code, recoverable=True)
             notice.metadata["agent"] = config.name
+            if spawner is not None:
+                notice.metadata["spawner"] = spawner
             self._pending_notices.append(notice)
         return [*tools, *kept]
 
@@ -466,6 +529,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._root = None
         self._agent_graphs = {}
         self._variant_graphs = {}
+        self._general_graphs = {}
         self._root_summarization = None
         self._own_tool_names = {}
         self._pending_notices = []
@@ -832,7 +896,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
 
         A run on a model choice (``run.model``) runs on its type's graph built
         on that model (``_variant_graphs``), its usage and context the
-        choice's (``_run_models``).
+        choice's (``_run_models``). A run of the built-in ``general_purpose``
+        type (``run.based_on``) runs on the graph built for that type
+        (``_general_graphs``), on that type's model.
 
         In the run's own task (``agents/delegate.py``), apart from its
         caller's stream: the graph is streamed with the run's own config,
@@ -884,11 +950,14 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         conversation = run.conversation
         if conversation is None:
             raise RuntimeError("A sub-agent run runs in a conversation's turn.")
-        # A run on a model choice runs on its type's graph built on that model.
-        graph = (
-            self._agent_graphs[run.ref.agent] if run.model is None
-            else self._variant_graphs[(run.ref.agent, run.model)]
-        )
+        # A run on a model choice runs on its type's graph built on that model;
+        # a general-purpose run on the graph built for the type it is made for.
+        if run.based_on is not None:
+            graph = self._general_graphs[run.based_on]
+        elif run.model is None:
+            graph = self._agent_graphs[run.ref.agent]
+        else:
+            graph = self._variant_graphs[(run.ref.agent, run.model)]
         models, budgets = self._run_models(run)
         task_id = f"agentic-cli-task-{uuid.uuid4().hex}"
         # A first run's message is its instance's brief, which its summaries keep.

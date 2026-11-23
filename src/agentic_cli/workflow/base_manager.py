@@ -73,7 +73,7 @@ from agentic_cli.workflow.agents.runs import (
     RUN_STARTED,
     AgentRuns,
 )
-from agentic_cli.workflow.agents.spawn import can_have_children
+from agentic_cli.workflow.agents.spawn import GENERAL_PURPOSE, can_have_children
 from agentic_cli.workflow.usage import (
     PURPOSE_MEMORY_EXTRACTION,
     PURPOSE_SIDE_CALL,
@@ -1402,7 +1402,10 @@ class BaseWorkflowManager(ABC):
         its type's tools (``run.control.tools``) is offered only those and the
         tools every run keeps (``KEPT_TOOLS``), and a call of another is
         answered as one of a tool the agent does not have
-        (``unknown_tool_result``).
+        (``unknown_tool_result``). A run of the built-in ``general_purpose``
+        type (``run.based_on``: the type it is made for) runs on the
+        general-purpose agent built for that type (``Delegations.general_purpose``),
+        on that type's own model (``_general_model``).
 
         Raises:
             NotImplementedError: This backend runs no sub-agent.
@@ -1418,19 +1421,36 @@ class BaseWorkflowManager(ABC):
         Those of the manager's, except that a run on a model choice
         (``run.model``) has its type's entries the choice's: its backend's
         event processing, usage and overflow messages then name and count
-        the model the run went to, under the type's name.
+        the model the run went to, under the type's name. A run of the
+        built-in ``general_purpose`` type (``run.based_on``) has its entry
+        the model and numbers of the type it is made for.
 
         Raises:
             KeyError: ``run.model`` is not one of its type's model choices.
         """
-        if run.model is None:
+        if run.model is None and run.based_on is None:
             return self._resolved_models, self._budgets
-        key = (run.ref.agent, run.model)
-        models = {**self._resolved_models, run.ref.agent: self._choice_models[key]}
+        models = dict(self._resolved_models)
         budgets = dict(self._budgets)
-        if key in self._choice_budgets:
-            budgets[run.ref.agent] = self._choice_budgets[key]
+        if run.based_on is not None:
+            models[run.ref.agent] = self._general_model(run.based_on)
+            if run.based_on in self._budgets:
+                budgets[run.ref.agent] = self._budgets[run.based_on]
+        if run.model is not None:
+            key = (run.ref.agent, run.model)
+            models[run.ref.agent] = self._choice_models[key]
+            if key in self._choice_budgets:
+                budgets[run.ref.agent] = self._choice_budgets[key]
         return models, budgets
+
+    def _general_model(self, spawner: str) -> "ResolvedModel":
+        """The model of the general-purpose agent made for the type ``spawner``.
+
+        ``spawner``'s own resolved model (never a run's model choice), named
+        for ``general_purpose``: a backend keys an agent's own reasoning and
+        its usage by that name.
+        """
+        return dataclasses.replace(self._resolved_models[spawner], agent=GENERAL_PURPOSE)
 
     async def _agent_tool_names(self, agent: str) -> frozenset[str]:
         """The names a ``task`` call's ``tools`` may give for ``agent`` (a backend

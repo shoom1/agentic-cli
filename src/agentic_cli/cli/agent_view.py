@@ -583,21 +583,22 @@ def _runs_of(workflow: Any, conversation: "SessionRef", instance: str) -> list["
 
 def _model(workflow: Any, record: "InstanceRecord") -> Any:
     """The model the instance runs on: its model choice's when it has one, else its
-    type's."""
+    type's (a ``general_purpose`` one's, the type that started it: ``based_on``)."""
     if record.model is not None:
         return getattr(workflow, "choice_models", {}).get((record.agent, record.model))
-    return getattr(workflow, "agent_models", {}).get(record.agent)
+    return getattr(workflow, "agent_models", {}).get(record.based_on or record.agent)
 
 
 def _budget(workflow: Any, record: "InstanceRecord") -> Any:
-    """The instance's context budget (its model choice's, when it has one).
+    """The instance's context budget (its model choice's, when it has one; a
+    ``general_purpose`` one's, the type that started it: ``based_on``).
 
     None when its manager manages none.
     """
     try:
         if record.model is not None:
             return workflow.context_budget(record.agent, model=record.model)
-        return workflow.context_budget(record.agent)
+        return workflow.context_budget(record.based_on or record.agent)
     except (KeyError, RuntimeError, AttributeError):
         return None
 

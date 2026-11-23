@@ -91,19 +91,22 @@ class MCPSessions:
         self._identities = ToolRegistry()
 
     async def start(
-        self, agent: str, servers: Sequence[MCPServerConfig]
+        self, agent: str, servers: Sequence[MCPServerConfig], *, spawner: str | None = None
     ) -> tuple[list[BaseTool], list[str]]:
         """Open ``agent``'s servers, at once, and load their tools.
 
         Args:
             agent: The agent the sessions are for.
             servers: Its servers, in order.
+            spawner: For a general-purpose agent, the type it is made for,
+                which its notices and log lines name too.
 
         Returns:
             The tools, server by server, filtered, prefixed and bound; and a
             notice for each server that could not start (none started within
             its ``timeout``, or ``STARTUP_TIMEOUT``).
         """
+        who = f"'{agent}' (for '{spawner}')" if spawner is not None else f"'{agent}'"
         owners = [self._open(agent, server) for server in servers]
         outcomes = await asyncio.gather(
             *(self._started(owner, server) for owner, server in zip(owners, servers))
@@ -115,11 +118,12 @@ class MCPSessions:
                 logger.warning(
                     "mcp_server_unavailable",
                     agent=agent,
+                    spawner=spawner,
                     server=server.name,
                     reason=outcome,
                 )
                 notices.append(
-                    f"MCP server '{server.name}' is unavailable, so agent '{agent}' "
+                    f"MCP server '{server.name}' is unavailable, so agent {who} "
                     f"runs without its tools: {outcome}"
                 )
                 continue
