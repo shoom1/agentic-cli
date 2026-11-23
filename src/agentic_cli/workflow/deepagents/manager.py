@@ -280,6 +280,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 config.name: config.get_prompt(self._settings)
                 for config in self._agent_configs
             }
+        # What this build's skill checks warned of: a type's model choices have
+        # skill tools of their own, and warn once.
+        self._skill_warned: set[tuple[str, str]] = set()
         tools: dict[str, list[BaseTool]] = {}
         for config in self._agent_configs:
             tools[config.name], prompts[config.name] = await self._agent_tools(
@@ -306,6 +309,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
                 ),
                 resolved=self._choice_models[(config.name, choice)],
                 budget=self._choice_budgets.get((config.name, choice)),
+                tools=self._choice_tools(
+                    config, tools[config.name], model=self._choice_models[(config.name, choice)]
+                ),
             )
             for config in self._agent_configs
             if config.name != root
@@ -440,6 +446,26 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             own = await self._with_mcp_tools(config, own, spawner=spawner)
         return own, prompt
 
+    def _choice_tools(
+        self, config: AgentConfig, tools: list[BaseTool], *, model: "ResolvedModel"
+    ) -> list[BaseTool] | None:
+        """A model choice's tools: its type's ``tools``, with skill tools made for
+        the choice's ``model``, as the type's are made for its own (its provider
+        decides how a binary resource is sent, ``make_skill_tools``).
+
+        The registered and MCP tools are the type's own objects: no MCP session
+        opens again for a choice. None for a type with no skills: the type's
+        tools as they are.
+        """
+        if not config.skills:
+            return None
+        # The type's own skill tools left out, or their names would clash.
+        made, _ = self._skill_tools(
+            config, [tool for tool in tools if tool.name not in SKILL_TOOL_NAMES], model=model
+        )
+        by_name = {tool.name: tool for tool in made}
+        return [by_name.get(tool.name, tool) for tool in tools]
+
     def _skill_tools(
         self,
         config: AgentConfig,
@@ -474,6 +500,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             agents=SkillAgents(
                 config.name, lambda: self._delegations,
                 root=config.name == self._root_agent_name,
+                warned=getattr(self, "_skill_warned", None),
             ),
         )
         logger.debug(

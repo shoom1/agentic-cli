@@ -112,8 +112,9 @@ class Variant:
     """One more graph of a sub-agent type, on another model (a model choice's).
 
     Built as the type's own is, with its tools and prompt (or its own: the
-    general-purpose agent's), but its model side from ``resolved`` and its
-    summarization from ``budget``.
+    general-purpose agent's, and a model choice's skill tools, made for its
+    provider), but its model side from ``resolved`` and its summarization
+    from ``budget``.
 
     Attributes:
         config: The type.
@@ -121,7 +122,9 @@ class Variant:
         resolved: The choice's resolved model (None: a unit test's, with no model side).
         budget: The choice's context numbers; None: computed from ``resolved``.
         tools: Its tools; None: the type's (``build_agent_tree``'s ``tools``). A
-            type in no ``configs`` (the general-purpose one) has its own.
+            type in no ``configs`` (the general-purpose one) has its own, and a
+            model choice of a type with skills the type's with its skill tools
+            made for the choice's provider.
         prompt: Its system prompt; None: the type's.
     """
 

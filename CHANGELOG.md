@@ -699,17 +699,18 @@ the start of the entry's title.
   agent and a runner of its own, whose plugin chain reads the choice's
   model, provider kind and context numbers under the type's name, so the
   fit guard and the overflow handler keep a run within them; on Deep
-  Agents a graph of its own, summarized by the choice's numbers. A model
-  switch builds them again, and the release closes them with the type's. A
-  run on a choice keeps its type's name in its events and records; its
-  usage is the choice's model's (`RunRecord.usage`, the ledger's
-  `by_model`, the raw LLM log). The manager gives each choice's model and
-  numbers: `choice_models[(agent, choice)]` and `context_budget(agent,
-  model=choice)`. `validate_agent_graph` raises `AgentGraphError` for
-  `model_choices` on the root, for one that is no tuple or list of texts,
-  for a choice written with spaces around it ("Agent 'researcher' has the
-  model choice ' fast' with surrounding spaces: write it without them.")
-  and for a choice named twice.
+  Agents a graph of its own, summarized by the choice's numbers, its skill
+  tools made for the choice's provider (how a binary resource is sent). A
+  model switch builds them again, and the release closes them with the
+  type's. A run on a choice keeps its type's name in its events and
+  records; its usage is the choice's model's (`RunRecord.usage`, the
+  ledger's `by_model`, the raw LLM log). The manager gives each choice's
+  model and numbers: `choice_models[(agent, choice)]` and
+  `context_budget(agent, model=choice)`. `validate_agent_graph` raises
+  `AgentGraphError` for `model_choices` on the root, for one that is no
+  tuple or list of texts, for a choice written with spaces around it
+  ("Agent 'researcher' has the model choice ' fast' with surrounding
+  spaces: write it without them.") and for a choice named twice.
 - **`task`'s `tools` and `model`: a delegation may narrow its run's tools and
   pick a cheaper model, never widen, on both backends.** Every `task` call
   may give `tools`, some of the type's own tools (its registered, skill and
