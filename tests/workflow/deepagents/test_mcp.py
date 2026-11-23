@@ -907,8 +907,8 @@ class TestLifecycle:
         real_start = MCPSessions.start
         started = asyncio.Event()
 
-        async def start_then_hang(self, agent, configs):
-            loaded = await real_start(self, agent, configs)
+        async def start_then_hang(self, agent, configs, **kwargs):
+            loaded = await real_start(self, agent, configs, **kwargs)
             started.set()
             await asyncio.Event().wait()
             return loaded
