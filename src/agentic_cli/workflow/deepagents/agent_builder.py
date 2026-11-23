@@ -11,12 +11,15 @@ it is built, a sub-agent's rewritten for each model call by
 parent's other tools, ``task_tool.build_follow_up_tools``): a call hands the
 brief to the manager's ``Delegations``, which runs the sub-agent's graph apart
 from the caller's stream (``DeepAgentsWorkflowManager._run_agent``) and
-answers with the result envelope. Only the configured sub-agents are offered:
-there is no automatic general-purpose sub-agent, and none of Deep Agents' file
-tools. ``graphs``, when given, is filled with every agent's graph by name:
+answers with the result envelope. Only the app's agent types are offered (and
+the framework's own ``general_purpose`` type, when the app's policy enables it):
+there is no automatic general-purpose sub-agent of Deep Agents', and none of its
+file tools. ``graphs``, when given, is filled with every agent's graph by name:
 what the manager runs a sub-agent on. A sub-agent type's model choices are
 built once more each (``Variant``, ``variants=``): the type's graph on
-another model, filled into ``variant_graphs`` by key.
+another model, filled into ``variant_graphs`` by key. The general-purpose agent
+made for a type (``spawn.general_purpose_config``) is a ``Variant`` too, with
+tools and a prompt of its own (``general``, filling ``general_graphs``).
 
 Every stack, outermost first: ``InterruptedCallsMiddleware`` (answers a tool
 call a cancelled turn or a crash left without a result, before each run, as
@@ -108,20 +111,26 @@ if TYPE_CHECKING:
 class Variant:
     """One more graph of a sub-agent type, on another model (a model choice's).
 
-    Built as the type's own is, with its tools and prompt, but its model
-    side from ``resolved`` and its summarization from ``budget``.
+    Built as the type's own is, with its tools and prompt (or its own: the
+    general-purpose agent's), but its model side from ``resolved`` and its
+    summarization from ``budget``.
 
     Attributes:
         config: The type.
         chat_model: The chat model of the choice.
         resolved: The choice's resolved model (None: a unit test's, with no model side).
         budget: The choice's context numbers; None: computed from ``resolved``.
+        tools: Its tools; None: the type's (``build_agent_tree``'s ``tools``). A
+            type in no ``configs`` (the general-purpose one) has its own.
+        prompt: Its system prompt; None: the type's.
     """
 
     config: AgentConfig
     chat_model: "BaseChatModel"
     resolved: "ResolvedModel | None"
     budget: ContextBudget | None = None
+    tools: "list[BaseTool] | None" = None
+    prompt: str | None = None
 
 
 def build_agent_tree(
@@ -147,6 +156,8 @@ def build_agent_tree(
     root: str | None = None,
     variants: "Mapping[Hashable, Variant] | None" = None,
     variant_graphs: "dict[Hashable, CompiledStateGraph] | None" = None,
+    general: "Mapping[str, Variant] | None" = None,
+    general_graphs: "dict[str, CompiledStateGraph] | None" = None,
 ) -> "CompiledStateGraph":
     """Build every agent, each on its own, and return the root.
 
@@ -214,6 +225,13 @@ def build_agent_tree(
             model, resolved model and budget, with the type's tools and
             prompt, and filled into ``variant_graphs``.
         variant_graphs: Filled, when given, with each variant's graph, by key.
+        general: The built-in general-purpose type made for each type that
+            may start it (``Delegations.general_purpose``), by that type's
+            name: each is built as a variant is, with the tools and prompt
+            of its own, and filled into ``general_graphs``. It starts no
+            agent (``can_have_children``), so it gets no ``task``.
+        general_graphs: Filled, when given, with each general-purpose
+            graph, by its spawner's name.
 
     Raises:
         AgentGraphError: A delegating agent's own tools include one named
@@ -245,17 +263,27 @@ def build_agent_tree(
     built = {name: build(name) for name in config_map}
     if graphs is not None:
         graphs.update(built)
-    for key, variant in (variants or {}).items():
+
+    def build_variant(variant: Variant) -> "CompiledStateGraph":
         name = variant.config.name
-        graph = build_agent(
+        return build_agent(
             variant.config, root=False, configs=configs, chat_model=variant.chat_model,
-            resolved=variant.resolved, tools=tools.get(name, []), prompt=prompts[name],
+            resolved=variant.resolved,
+            tools=variant.tools if variant.tools is not None else tools.get(name, []),
+            prompt=variant.prompt if variant.prompt is not None else prompts[name],
             settings=settings, checkpointer=checkpointer, bound=bound,
             budget=variant.budget,
             open_calls=open_calls, marks=marks, delegations=delegations,
         )
+
+    for key, variant in (variants or {}).items():
+        graph = build_variant(variant)
         if variant_graphs is not None:
             variant_graphs[key] = graph
+    for spawner, variant in (general or {}).items():
+        graph = build_variant(variant)
+        if general_graphs is not None:
+            general_graphs[spawner] = graph
     return built[root]
 
 
