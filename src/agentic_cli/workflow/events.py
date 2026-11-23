@@ -217,6 +217,7 @@ class WorkflowEvent:
         continuable: bool | None = None,
         tools: Sequence[str] | None = None,
         model: str | None = None,
+        based_on: str | None = None,
     ) -> "WorkflowEvent":
         """Create a sub-agent run's event: its start, or how it ended (``AGENT_RUN``).
 
@@ -224,7 +225,8 @@ class WorkflowEvent:
         ``started`` (with its ``title``, its ``brief``, who it was
         ``started_by`` and its ``mode``; a first run of an instance also
         says whether the instance ``inherit_context`` and is ``continuable``,
-        and the ``tools`` and ``model`` its delegation gave it; a follow-up's
+        and the ``tools`` and ``model`` its delegation gave it, and a general-purpose
+        run the type it is ``based_on``; a follow-up's
         start carries its ``input``, the message as written), then one end status
         (``completed``, ``failed``, ``refused``, ``cancelled``, ``interrupted``: the
         constants of ``workflow/agents/runs.py``) with the first of its ``result``, its
@@ -262,6 +264,9 @@ class WorkflowEvent:
                 of them); None for all of them.
             model: A first run's start: the model choice it runs on, as the
                 type writes it; None for the type's own model.
+            based_on: A first run's start of the built-in ``general_purpose``
+                type: the type that started it, whose tools and model it has
+                (``agents/spawn.py::general_purpose_config``); None for any other.
         """
         metadata: dict[str, Any] = {"status": status, "agent": ref.agent, "partial": partial}
         if title is not None:
@@ -298,6 +303,8 @@ class WorkflowEvent:
             metadata["tools"] = list(tools)
         if model is not None:
             metadata["model"] = model
+        if based_on is not None:
+            metadata["based_on"] = based_on
         return cls(
             type=EventType.AGENT_RUN,
             content=f"{ref.instance} {status}",

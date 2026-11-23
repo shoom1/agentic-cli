@@ -472,6 +472,17 @@ class TestInstances:
         record = runs.instance(ONE, "researcher-1")
         assert (record.tools, record.model) == (("lookup", "fetch"), "fast")
 
+    def test_a_first_runs_start_keeps_its_spawner_type(self):
+        runs = AgentRuns()
+        ref = runs.run_for(ONE, None, "c1", "general_purpose")
+
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            ref, RUN_STARTED, title="Sum it up.", call_id="c1", based_on="lead",
+        )))
+
+        record = runs.instance(ONE, "general_purpose-1")
+        assert (record.agent, record.based_on) == ("general_purpose", "lead")
+
     def test_a_follow_ups_start_changes_neither(self):
         runs = AgentRuns()
         ref = runs.run_for(ONE, None, "c1", "researcher")
@@ -799,7 +810,7 @@ class TestExportAndRestore:
                 "instance": "researcher-1", "agent": "researcher", "parent": "root",
                 "depth": 1, "inherit_context": False, "title": "researcher work",
                 "status": INSTANCE_IDLE, "runs": ["researcher-1#1"], "continuable": True,
-                "tools": None, "model": None,
+                "tools": None, "model": None, "based_on": None,
             }],
             "runs": [{
                 "run": "researcher-1#1", "agent": "researcher", "instance": "researcher-1",
@@ -920,9 +931,37 @@ class TestExportAndRestore:
 
         assert {(i.tools, i.model) for i in again.instances(ONE)} == {(None, None)}
 
+    def test_a_spawner_type_is_kept_and_read_back(self):
+        runs = AgentRuns()
+        ref = started(runs, ONE, "c1", "general_purpose")
+        in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(
+            runs.run_for(ONE, None, "c2", "general_purpose"), RUN_STARTED, title="More.",
+            call_id="c2", based_on="lead",
+        )))
+        ended(runs, ONE, ref)
+
+        data = json.loads(json.dumps(runs.export(ONE)))
+
+        assert [i["based_on"] for i in data["instances"]] == [None, "lead"]
+        again = AgentRuns()
+        again.restore(ONE, data)
+        assert [i.based_on for i in again.instances(ONE)] == [None, "lead"]
+
+    def test_records_written_before_a_spawner_type_read_it_as_none(self):
+        runs = AgentRuns()
+        a_conversation(runs)
+        data = json.loads(json.dumps(runs.export(ONE)))
+        for instance in data["instances"]:
+            del instance["based_on"]
+        again = AgentRuns()
+
+        assert again.restore(ONE, data) == ["writer-1#1"]
+
+        assert {i.based_on for i in again.instances(ONE)} == {None}
+
     @pytest.mark.parametrize("field, value", [
         ("tools", "lookup"), ("tools", [1]), ("tools", {"lookup": True}), ("model", 3),
-        ("model", ["fast"]),
+        ("model", ["fast"]), ("based_on", 1), ("based_on", ["lead"]),
     ])
     def test_tools_or_a_model_that_do_not_read_are_records_it_cannot_read(
         self, field, value
