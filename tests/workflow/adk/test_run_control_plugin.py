@@ -2,9 +2,10 @@
 registered, skill and MCP tools, and ADK's built-ins), at its model calls
 (``workflow/adk/run_control_plugin.py``).
 
-What the plugin does to a request and an answer, alone. Whole turns, on both
-backends, are in the contract suite (``TestTheStepLimit``,
-``TestTheTokenLimit``, ``TestANarrowedRun``).
+What the plugin does to a request and an answer, alone, and one whole ADK run
+that only ADK's built-ins concern. Whole turns, on both backends, are in the
+contract suite (``TestTheStepLimit``, ``TestTheTokenLimit``,
+``TestANarrowedRun``).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.adk.tools import BaseTool, FunctionTool, google_search  # noqa: E402
+from google.adk.tools.google_search_tool import GoogleSearchTool  # noqa: E402
 from google.adk.tools.tool_context import ToolContext  # noqa: E402
 from google.genai import types  # noqa: E402
 
@@ -382,3 +384,106 @@ class TestANarrowedRunsTools:
         assert (list(request.tools_dict), declared(request)) == (
             ["lookup", "fetch_page"], ["lookup", "fetch_page"]
         )
+
+
+class CountedBuiltIn(BaseTool):
+    """A built-in of an app's: it adds a request entry, and counts how often it was asked."""
+
+    def __init__(self) -> None:
+        super().__init__(name="counted_search", description="counted_search")
+        self.asked = 0
+
+    async def process_llm_request(self, *, tool_context, llm_request) -> None:
+        self.asked += 1
+        llm_request.config.tools = [
+            *(llm_request.config.tools or ()), types.Tool(google_search=types.GoogleSearch()),
+        ]
+
+
+class TestABuiltInsEntriesLearned:
+    """What a refused built-in adds to a request is learned once per model, for
+    the build (the plugin, made again by a reinitialize): its
+    ``process_llm_request`` may do work, and runs again at no model call."""
+
+    async def test_once_for_two_model_calls_of_a_narrowed_run(self):
+        counted = CountedBuiltIn()
+        tools = [FunctionTool(lookup), counted]
+        context = await agent_context(tools)
+        control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
+        plugin = RunToolsPlugin(lambda: control)
+        requests = [await processed(context, tools) for _ in range(2)]
+        asked = counted.asked  # ADK's own processing of each request
+
+        for request in requests:
+            await plugin.before_model_callback(callback_context=context, llm_request=request)
+
+        assert counted.asked - asked == 1
+        assert all(not request.config.tools[1:] for request in requests)
+
+    async def test_one_that_cannot_say_drops_nothing_and_is_logged_once(self, monkeypatch):
+        """A built-in that raises on its own request (ADK's ``google_search`` with
+        ``bypass_multi_tools_limit`` on a model it does not serve: ADK sends it
+        as an agent tool instead) is taken to add nothing; its run goes on."""
+        from agentic_cli.workflow.adk import run_control_plugin
+
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(run_control_plugin, "logger", type("Recorder", (), {
+            "debug": staticmethod(lambda event, **fields: logged.append((event, fields))),
+        })())
+        search = GoogleSearchTool(bypass_multi_tools_limit=True)
+        context = await agent_context([FunctionTool(lookup), search])
+        control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
+        plugin = RunToolsPlugin(lambda: control)
+
+        for _ in range(2):
+            request = offering("lookup")
+            request.model = "claude-sonnet-4-6"
+            await plugin.before_model_callback(callback_context=context, llm_request=request)
+            assert request.config.tools[1].google_search is not None  # nothing dropped
+
+        assert [(event, fields["tool"], fields["model"]) for event, fields in logged] == [
+            ("built_in_entries_unknown", "google_search", "claude-sonnet-4-6"),
+        ]
+        assert "not supported" in logged[0][1]["error"]
+
+
+# --- a whole run --------------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_project(tmp_path, monkeypatch):
+    """A hermetic cwd and HOME, with a fake Claude key."""
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test-key")
+
+
+async def test_a_run_narrowed_without_a_bypass_google_search_on_claude_completes(
+    claude_project, monkeypatch
+):
+    """ADK sends ``google_search`` with ``bypass_multi_tools_limit`` as an agent
+    tool, and it serves Gemini alone: on Claude, its own request processing
+    raises. A run narrowed without it runs as it did before narrowing knew of
+    built-ins."""
+    from tests.workflow.test_subagents_contract import (
+        SIDE_CALLS, SUMMARIES, _adk_crew, agent, calls, contract_lookup, delegate,
+        envelope_read, says,
+    )
+
+    crew = _adk_crew(
+        [agent("coordinator", sub_agents=("researcher",)),
+         agent("researcher", tools=(contract_lookup,
+                                    GoogleSearchTool(bypass_multi_tools_limit=True)))],
+        {"coordinator": [calls(delegate("researcher", "Find X.", "c1",
+                                        tools=["contract_lookup"])), says("Done.")],
+         "researcher": [says("X is 42.")], SIDE_CALLS: [], SUMMARIES: []},
+        monkeypatch,
+    )
+    try:
+        await crew.turn()
+        envelope = envelope_read(crew.results_read("coordinator", 1)["c1"])
+    finally:
+        await crew.manager.cleanup()
+
+    assert (envelope["status"], envelope["result"]) == ("completed", "X is 42.")

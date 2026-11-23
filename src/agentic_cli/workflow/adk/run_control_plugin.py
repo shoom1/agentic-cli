@@ -12,7 +12,9 @@ from, so a call of one is answered as one of a tool the agent does not have
 ``url_context``: it runs inside the model, so what it adds to the request is
 no function declaration and nothing in ``tools_dict``) is left out too, its
 entries found by having it process a request of its own
-(``built_in_entries``); one the run keeps is sent as ADK made it. It runs
+(``built_in_entries``), once per model for the build (the plugin keeps them;
+a reinitialize makes a new chain): one that raises there adds nothing to
+leave out. One the run keeps is sent as ADK made it. It runs
 before the permission gate, whose mark for the built-ins a request carries
 then follows what is sent, and before the fit guard, which measures the
 narrowed request; a skill toolset's instruction text stays in the system
@@ -72,6 +74,7 @@ from google.adk.tools import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE
 from agentic_cli.workflow.usage import UsageTotals, adk_tokens
 
@@ -81,6 +84,13 @@ if TYPE_CHECKING:
     from google.adk.models.llm_response import LlmResponse
 
     from agentic_cli.workflow.agents.control import RunControl
+
+logger = Loggers.workflow()
+
+#: What a built-in adds to a request on a model (``built_in_entries``), learned
+#: once: by the tool's id and the model, the tool kept with them (an id is only
+#: its own while it lives).
+Learned = dict[tuple[int, "str | None"], tuple[BaseTool, list[types.Tool]]]
 
 #: How much later than a steered message the run's next events are stamped,
 #: at least: past what a durable store keeps of a time (``DatabaseSessionService``
@@ -99,6 +109,8 @@ class RunToolsPlugin(BasePlugin):
     def __init__(self, control: Callable[[], RunControl | None]) -> None:
         super().__init__(name="run_tools")
         self._control = control
+        # The entries each refused built-in adds, per model, for the build.
+        self._learned: Learned = {}
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
@@ -106,7 +118,9 @@ class RunToolsPlugin(BasePlugin):
         control = self._control()
         if control is None or control.tools is None:
             return None
-        built_ins = await built_in_entries(callback_context, llm_request, control.keeps)
+        built_ins = await built_in_entries(
+            callback_context, llm_request, control.keeps, learned=self._learned
+        )
         narrow(llm_request, control.keeps, built_ins=built_ins)
         return None
 
@@ -216,6 +230,8 @@ async def built_in_entries(
     callback_context: CallbackContext | None,
     llm_request: LlmRequest,
     keeps: Callable[[str], bool],
+    *,
+    learned: Learned | None = None,
 ) -> dict[str, list[types.Tool]]:
     """What each of the running agent's built-ins that ``keeps`` refuses added to
     ``llm_request``, by the tool's name.
@@ -226,10 +242,14 @@ async def built_in_entries(
     request is a tool entry that is no function declaration. Which entry is
     whose the request does not say, so each such tool processes a request of
     its own, for the same model and with a tool context of the same
-    invocation, as ADK had it process this one (``process_llm_request``), at
-    each model call of a narrowed run; of what it adds there, the entries that
-    are more than function declarations are its. No callback context (no
-    agent to ask): none.
+    invocation, as ADK had it process this one (``process_llm_request``); of
+    what it adds there, the entries that are more than function declarations
+    are its. Given ``learned``, each is asked once per model (its processing
+    may do work: ``PreloadMemoryTool`` searches the memory) and kept there. A
+    tool that raises on its own request adds nothing to leave out (logged at
+    debug, once per model): ``google_search`` with
+    ``bypass_multi_tools_limit`` on a model it does not serve, which ADK sends
+    as an agent tool instead. No callback context (no agent to ask): none.
     """
     get = getattr(callback_context, "get_invocation_context", None)
     invocation = get() if get is not None else None
@@ -242,14 +262,33 @@ async def built_in_entries(
             or tool.name in llm_request.tools_dict
         ):
             continue
+        key = (id(tool), llm_request.model)
+        known = learned.get(key) if learned is not None else None
+        if known is not None and known[0] is tool:
+            found[tool.name] = known[1]
+            continue
         alone = LlmRequest(model=llm_request.model)
-        await tool.process_llm_request(
-            tool_context=ToolContext(invocation), llm_request=alone
-        )
-        found[tool.name] = [
+        error: Exception | None = None
+        try:
+            await tool.process_llm_request(
+                tool_context=ToolContext(invocation), llm_request=alone
+            )
+        except Exception as raised:  # noqa: BLE001 - it adds nothing, the run goes on
+            error = raised
+        entries = [] if error is not None else [
             entry for entry in alone.config.tools or ()
             if entry.model_dump(exclude={"function_declarations"}, exclude_none=True)
         ]
+        found[tool.name] = entries
+        if learned is not None and learned.get(key, (None,))[0] is tool:
+            continue  # another run of the build learned it meanwhile
+        if learned is not None:
+            learned[key] = (tool, entries)
+        if error is not None:
+            logger.debug(
+                "built_in_entries_unknown", tool=tool.name, model=llm_request.model,
+                error=f"{type(error).__name__}: {error}",
+            )
     return found
 
 
