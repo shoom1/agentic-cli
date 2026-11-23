@@ -69,6 +69,7 @@ from agentic_cli.workflow.agents.envelope import (
     TOKEN_LIMIT_ERROR,
 )
 from agentic_cli.workflow.agents.outcome import CUT, REFUSAL_ERROR, REFUSED
+from agentic_cli.workflow.agents.spawn import general_purpose_config
 from agentic_cli.workflow.config import AgentConfig
 from agentic_cli.workflow.events import EventType, WorkflowEvent
 from agentic_cli.workflow.interrupts import OpenCalls
@@ -4650,3 +4651,216 @@ class TestTheUsersStart:
             "You cannot start 'nobody' here. Types you can start: asked, reads."
         )
         assert made.user_start_refused("asked", " ") == "A new agent needs an objective."
+
+
+# -- the built-in general-purpose type ---------------------------------------------------
+
+#: Every source may start the general-purpose type; runs from the root alone.
+GENERAL = SubAgentPolicy(spawn_sources={"agent", "skill", "user"}, general_purpose=True)
+#: The same, and one level more: a type the root starts may start one too.
+GENERAL_DEEPER = SubAgentPolicy(
+    spawn_sources={"agent", "skill", "user"}, max_spawn_depth=2, general_purpose=True
+)
+#: A lead with tools of its own, its sub-agent, and a free type agents may start.
+TOOLED = AgentConfig(name="lead", prompt="p", sub_agents=["researcher"],
+                     tools=[contract_tool, "web_fetch"])
+GENERAL_TYPES = {"lead": TOOLED, "researcher": TYPES["researcher"], "helper": HELPER}
+SUM_UP = {"agent_type": "general_purpose", "title": "Sum up", "objective": "Sum it up."}
+#: The line ``task`` offers it by.
+GENERAL_LINE = (
+    "- general_purpose: A general-purpose agent with your own tools (but not the ones that "
+    "start agents) and your model, for a self-contained task no other agent fits."
+)
+
+
+class TestTheGeneralPurposeType:
+    """``general_purpose``: offered last to a run that may start a type, made
+    for the caller's type (``general_purpose_config``, ``based_on``), which its
+    run, its start, its instance and every later run of it keep."""
+
+    def test_offered_last_made_for_its_caller(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL)
+
+        offered = made.offered("lead", 0)
+
+        assert list(offered) == ["researcher", "helper", "general_purpose"]
+        assert offered["general_purpose"] == general_purpose_config(TOOLED)
+        assert made.task_offer("lead", 0).description.endswith(GENERAL_LINE)
+
+    def test_not_offered_with_the_policy_off_or_past_the_depth(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=AGENTS)
+        assert "general_purpose" not in made.offered("lead", 0)
+        on = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL)
+        assert on.offered("researcher", 1) == {}
+
+    def test_a_type_one_level_down_is_offered_its_own(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL_DEEPER)
+
+        offered = made.offered("helper", 1)
+
+        assert list(offered) == ["helper", "general_purpose"]
+        assert offered["general_purpose"] == general_purpose_config(HELPER)
+
+    def test_its_own_runs_start_nothing(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL_DEEPER)
+        assert made.offered("general_purpose", 1) == {}
+        assert made.task_offer("general_purpose", 1) is None
+
+    def test_one_for_each_type_that_may_start_it(self):
+        assert delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL).general_purpose \
+            == {"lead": general_purpose_config(TOOLED)}
+        deeper = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL_DEEPER)
+        assert list(deeper.general_purpose) == ["lead", "researcher", "helper"]
+        assert delegations(answering()[0], types=GENERAL_TYPES).general_purpose == {}
+
+    def test_config_for(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL)
+        assert made.config_for("researcher") is TYPES["researcher"]
+        assert made.config_for("general_purpose", based_on="lead") == (
+            general_purpose_config(TOOLED)
+        )
+        # No spawner, or one that may not start it here.
+        assert made.config_for("general_purpose") is None
+        assert made.config_for("general_purpose", based_on="helper") is None
+        assert made.config_for("nobody") is None
+        off = delegations(answering()[0], types=GENERAL_TYPES, policy=AGENTS)
+        assert off.config_for("general_purpose", based_on="lead") is None
+
+    async def test_the_root_starts_one_with_its_own_tools_and_model(self):
+        hook, asked = answering("Summed.")
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=GENERAL_TYPES, policy=GENERAL)
+
+        result, events = await delegated(made, request(SUM_UP, caller_agent="lead"))
+
+        assert result.result == {
+            "success": True, "agent": "general_purpose-1", "run": "general_purpose-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Summed.", "error": None,
+        }
+        (run,) = asked
+        assert (run.config, run.based_on, run.tools, run.model) == (
+            general_purpose_config(TOOLED), "lead", None, None,
+        )
+        assert (run.ref.depth, run.ref.parent_run) == (1, None)
+        start = runs_of_status(events, RUN_STARTED)[0]
+        assert (start.metadata["based_on"], start.metadata["started_by"]) == ("lead", "agent:root")
+        instance = runs.instance(CONVERSATION, "general_purpose-1")
+        assert (instance.agent, instance.based_on) == ("general_purpose", "lead")
+
+    async def test_its_tools_narrow_against_its_spawners(self):
+        hook, asked = answering()
+        tools_asked: list[str] = []
+        made = delegations(hook, types=GENERAL_TYPES, policy=GENERAL,
+                           tool_names=own_tools({"lead": {"lookup", "fetch"}}, tools_asked))
+
+        await delegated(made, request({**SUM_UP, "tools": ["lookup"]}, caller_agent="lead"))
+        refused, _ = await delegated(made, request(
+            {**SUM_UP, "tools": ["write_file"]}, caller_agent="lead", call_id="c2",
+        ))
+
+        assert asked[0].tools == frozenset({"lookup"})
+        assert tools_asked == ["lead", "lead"]
+        assert refused.result == {
+            "success": False,
+            "error": "The tools for 'general_purpose' must be some of its own: fetch, lookup.",
+        }
+
+    async def test_a_model_is_refused(self):
+        hook, asked = answering()
+        made = delegations(hook, types=GENERAL_TYPES, policy=GENERAL)
+
+        result, events = await delegated(
+            made, request({**SUM_UP, "model": "fast"}, caller_agent="lead")
+        )
+
+        assert result.result == {
+            "success": False, "error": "'general_purpose' has no model choices; leave model out.",
+        }
+        assert (asked, events) == ([], [])
+
+    async def test_a_follow_up_and_a_restored_instance_run_on_the_same_spawners(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=GENERAL_TYPES, policy=GENERAL)
+        await turned(lambda: made.delegate(request(SUM_UP, caller_agent="lead")))
+
+        followed, _ = await turned(lambda: made.follow_up(follow("general_purpose-1")))
+        again = AgentRuns()
+        again.restore(CONVERSATION, runs.export(CONVERSATION))
+        restarted = delegations(hook, runs=again, types=GENERAL_TYPES, policy=GENERAL)
+        resumed, _ = await turned(lambda: restarted.follow_up(users("general_purpose-1")))
+
+        assert [r.result["run"] for r in (followed, resumed)] == [
+            "general_purpose-1#2", "general_purpose-1#3",
+        ]
+        assert [(run.config, run.based_on) for run in asked[1:]] == [
+            (general_purpose_config(TOOLED), "lead"),
+        ] * 2
+
+    @pytest.mark.parametrize("policy", [AGENTS, SubAgentPolicy(
+        spawn_sources={"agent"}, general_purpose=True,
+    )], ids=["off", "on"])
+    async def test_a_follow_up_the_app_no_longer_allows_is_refused(self, policy):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=GENERAL_TYPES, policy=GENERAL)
+        await turned(lambda: made.delegate(request(SUM_UP, caller_agent="lead")))
+        again = AgentRuns()
+        again.restore(CONVERSATION, runs.export(CONVERSATION))
+        # The type off, or its spawner gone.
+        types = GENERAL_TYPES if policy is AGENTS else {
+            "boss": AgentConfig(name="boss", prompt="p"), "helper": HELPER,
+        }
+        restarted = delegations(hook, runs=again, types=types, policy=policy)
+
+        result, events = await turned(lambda: restarted.follow_up(users("general_purpose-1")))
+
+        assert result.result == {
+            "success": False,
+            "error": "general_purpose-1's type 'general_purpose' is not one of this app's agents.",
+        }
+        assert (events, len(asked)) == ([], 1)
+
+    async def test_the_user_starts_one_on_the_roots(self):
+        hook, asked = answering()
+        made = delegations(hook, types=GENERAL_TYPES, policy=GENERAL)
+
+        assert made.startable_by_user() == ("general_purpose",)
+        out, events = await users_start(made, "general_purpose", "Sum it up.")
+
+        assert out["result"].result["agent"] == "general_purpose-1"
+        assert (asked[0].config, asked[0].based_on) == (general_purpose_config(TOOLED), "lead")
+        assert events[0].metadata["based_on"] == "lead"
+
+    async def test_a_start_request_names_its_spawner(self):
+        hook, asked = answering()
+        made = delegations(hook, types=GENERAL_TYPES, policy=GENERAL_DEEPER)
+
+        await started(made, start_request("general_purpose", based_on="helper"))
+
+        assert (asked[0].config, asked[0].based_on) == (general_purpose_config(HELPER), "helper")
+
+    async def test_without_a_spawner_that_may_start_it_start_has_no_such_type(self):
+        made = delegations(answering()[0], types=GENERAL_TYPES, policy=GENERAL)
+        with pytest.raises(KeyError):
+            await made.start(start_request("general_purpose"))
+        with pytest.raises(KeyError):
+            await made.start(start_request("general_purpose", based_on="helper"))
+
+    async def test_based_on_is_the_general_purpose_types_alone(self):
+        hook, asked = answering()
+        runs = AgentRuns()
+        made = delegations(hook, runs=runs, types=GENERAL_TYPES, policy=GENERAL)
+
+        _, events = await started(made, start_request("researcher", based_on="lead"))
+
+        assert asked[0].based_on is None
+        assert "based_on" not in events[0].metadata
+        assert runs.instance(CONVERSATION, "researcher-1").based_on is None
+
+    def test_the_fields_default_to_none(self):
+        made = StartRequest(agent_type="researcher", brief=Brief(title="T", objective="O"),
+                            started_by="user")
+        run = AgentRun(ref=RESEARCHER, config=TYPES["researcher"], message="m",
+                       conversation=None, state={})
+        assert (made.based_on, run.based_on) == (None, None)
