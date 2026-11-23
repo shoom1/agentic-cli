@@ -13,6 +13,7 @@ from agentic_cli.workflow.agents.policy import (
     SubAgentPolicy,
     as_policy,
 )
+from agentic_cli.workflow.agents.spawn import GENERAL_PURPOSE
 
 if TYPE_CHECKING:
     from agentic_cli.config import BaseSettings
@@ -235,7 +236,8 @@ def validate_agent_graph(
     Checks, in order, so the first failure is the most fundamental:
 
     1. at least one agent;
-    2. no duplicate agent names;
+    2. no duplicate agent names, and, with the policy's ``general_purpose``,
+       none named ``general_purpose``, the built-in type's name;
     3. every ``sub_agents`` entry resolves to a configured agent;
     4. no agent lists itself as a sub-agent;
     5. no delegation cycle;
@@ -267,7 +269,7 @@ def validate_agent_graph(
         configs: The declared agents.
         backend: Backend name, used only in error messages.
         policy: The app's sub-agent policy (None: ``SubAgentPolicy()``);
-            only the free types' warning reads it.
+            the free types' warning and the built-in type's name read it.
 
     Returns:
         The validated graph plus a build order in which every agent comes after
@@ -291,6 +293,11 @@ def validate_agent_graph(
         raise AgentGraphError(
             f"Duplicate agent name(s): {', '.join(sorted(set(duplicates)))}. "
             "Agent names must be unique."
+        )
+    if policy.general_purpose and GENERAL_PURPOSE in config_map:
+        raise AgentGraphError(
+            f"An agent named {GENERAL_PURPOSE!r} clashes with the built-in {GENERAL_PURPOSE} "
+            "type, which this app's SubAgentPolicy enables."
         )
 
     missing = [
