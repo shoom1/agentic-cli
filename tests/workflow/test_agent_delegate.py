@@ -4858,6 +4858,17 @@ class TestTheGeneralPurposeType:
         assert "based_on" not in events[0].metadata
         assert runs.instance(CONVERSATION, "researcher-1").based_on is None
 
+    async def test_with_no_configured_types_the_user_may_not_start_it(self):
+        """A native ADK app has no configs: no root, so no type to make it for."""
+        made = delegations(answering()[0], types={}, policy=GENERAL)
+
+        assert made.startable_by_user() == ()
+        result = await made.start_by_user(CONVERSATION, "general_purpose", "Sum it up.")
+        assert result.result == {
+            "success": False, "error": "This app lets you start no agent types.",
+        }
+        assert made.offered("anyone", 0) == {}
+
     def test_the_fields_default_to_none(self):
         made = StartRequest(agent_type="researcher", brief=Brief(title="T", objective="O"),
                             started_by="user")

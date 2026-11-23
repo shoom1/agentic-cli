@@ -143,6 +143,23 @@ class TestRunnerClose:
         assert order == ["runner", "runner", "session_service"]
         assert dict(mgr._agent_runners) == {}
 
+    async def test_each_general_purpose_runner_is_closed_too(self):
+        order: list[str] = []
+
+        class Service:
+            async def close(self) -> None:
+                order.append("session_service")
+
+        mgr = _manager(Service())
+        mgr._runner = _Runner(order)
+        mgr._general_runners = {"lead": _Runner(order), "helper": _Runner(order)}
+        mgr._general_agents = {"lead": object(), "helper": object()}
+
+        await mgr.cleanup()
+
+        assert order == ["runner", "runner", "runner", "session_service"]
+        assert (dict(mgr._general_runners), dict(mgr._general_agents)) == ({}, {})
+
     async def test_cleanup_closes_it_before_the_session_service(self):
         order: list[str] = []
 
@@ -346,6 +363,27 @@ class TestDirectInitializationFailure:
             assert mgr._session_service is None
             assert mgr.is_initialized is False
             assert mgr.services == {}
+        finally:
+            ctx.__exit__(None, None, None)
+
+    async def test_a_failed_initialization_closes_the_general_purpose_runners(self):
+        mgr, created, state, ctx = _real_manager()
+        runner = _Runner()
+        real = mgr._do_initialize
+
+        async def _do_init():
+            mgr._general_runners = {"a": runner}
+            mgr._general_agents = {"a": object()}
+            await real()
+
+        mgr._do_initialize = _do_init
+        try:
+            state["boom"] = True
+            with pytest.raises(RuntimeError, match="backend init failed"):
+                await mgr.initialize_services()
+
+            assert runner.closes == 1, "the general-purpose runner leaked"
+            assert (dict(mgr._general_runners), dict(mgr._general_agents)) == ({}, {})
         finally:
             ctx.__exit__(None, None, None)
 
@@ -666,6 +704,16 @@ class TestDeepAgentsMCPClose:
 
         assert (mcp.closes, connection.closes) == (1, 1)
 
+    async def test_cleanup_drops_the_general_purpose_graphs_and_closes_their_sessions(self):
+        connection, mcp = _CountedConnection(), _CountedMCP()
+        mgr = _deepagents_manager(connection, mcp)
+        mgr._general_graphs = {"a": object()}
+
+        await mgr.cleanup()
+
+        assert mgr._general_graphs == {}
+        assert (mcp.closes, connection.closes) == (1, 1)
+
     async def test_a_release_that_keeps_the_checkpointer_still_closes_them(self):
         connection, mcp = _CountedConnection(), _CountedMCP()
         mgr = _deepagents_manager(connection, mcp)
@@ -819,6 +867,18 @@ class TestDeepAgentsReinitializeTransaction:
         assert mgr._checkpointer is None
         assert mgr.is_initialized is False
         assert mgr.services == {}
+
+    async def test_a_failed_initialization_drops_the_general_purpose_graphs(
+        self, deepagents_manager
+    ):
+        mgr, created, state = deepagents_manager
+        state["boom"] = True
+        mgr._general_graphs = {"a": object()}
+
+        with pytest.raises(RuntimeError, match="backend init failed"):
+            await mgr.initialize_services()
+
+        assert mgr._general_graphs == {}
 
     async def test_it_can_be_initialized_after_a_failure(self, deepagents_manager):
         mgr, created, state = deepagents_manager

@@ -1305,6 +1305,8 @@ run time only, and no root however it is listed; the root may not set
 `spawnable_by`, and a `spawnable_by` that is empty or names a source other
 than `agent`, `skill` and `user` raises too (a free type the app's policy lets
 no source start is a warning: `validate_agent_graph(configs, policy=...)`).
+An agent named `general_purpose` raises too while the policy enables the
+built-in type of that name (`SubAgentPolicy(general_purpose=True)`).
 `model_choices` on the root, one that is no tuple or list of texts, and a choice
 named twice raise it too.
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
@@ -1524,7 +1526,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   and starts no agent itself; `task`'s `tools` narrows it as any type, and
   it has no model choices. One is built for each type that may start it
   (the main agent, and with `max_spawn_depth` 2 or more each type that does
-  not inherit), with MCP connections of its own. Its instances
+  not inherit when agents may start types, and each type with skills when
+  skills may), with MCP connections of its own. Its instances
   (`general_purpose-1`) keep the type that started them, so a follow-up runs
   as the first run did. An agent of the app's named `general_purpose` is
   refused while the policy enables it.

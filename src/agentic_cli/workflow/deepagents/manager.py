@@ -318,8 +318,13 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         general: dict[str, Variant] = {}
         for spawner, config in self._delegations.general_purpose.items():
             model = self._general_model(spawner)
+            # Deep Agents opens MCP sessions at initialization (ADK connects at
+            # first use), so each general-purpose agent starts its spawner's
+            # servers once more here: one that never answers is waited for once
+            # more per spawner, and one that cannot start is a notice for it too.
             own, prompt = await self._agent_tools(
-                config, service_map, config.get_prompt(self._settings), model=model
+                config, service_map, config.get_prompt(self._settings), model=model,
+                spawner=spawner,
             )
             general[spawner] = Variant(
                 config=config,
@@ -415,6 +420,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         prompt: str,
         *,
         model: "ResolvedModel",
+        spawner: str | None = None,
     ) -> tuple[list[BaseTool], str]:
         """``config``'s tools as its model sees them, and its prompt with its skills' instruction.
 
@@ -422,7 +428,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         MCP tool named like one is skipped), then its MCP servers' tools,
         opened now on sessions of this agent's own. ``model`` is the model it
         runs on (the provider its skill tools are worded for): the
-        general-purpose agent's is its spawner's.
+        general-purpose agent's is its spawner's, and ``spawner`` names that
+        type for the notices about its MCP servers.
         """
         own = to_langchain_tools(self._build_tools(config, service_map))
         if config.skills:
@@ -430,7 +437,7 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             own = [*own, *skill_tools]
             prompt = _with_instruction(prompt, instruction)
         if config.mcp_servers:
-            own = await self._with_mcp_tools(config, own)
+            own = await self._with_mcp_tools(config, own, spawner=spawner)
         return own, prompt
 
     def _skill_tools(
@@ -475,12 +482,15 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         return skill_tools, instruction
 
     async def _with_mcp_tools(
-        self, config: AgentConfig, tools: list[BaseTool]
+        self, config: AgentConfig, tools: list[BaseTool], *, spawner: str | None = None
     ) -> list[BaseTool]:
         """``tools`` and the tools of ``config``'s MCP servers, opened now.
 
         A server that cannot start, and a tool whose name is taken, become
-        notices for the next turn; the agent runs without them.
+        notices for the next turn; the agent runs without them. A
+        general-purpose agent's notices name its ``spawner`` too
+        (``metadata["spawner"]``), since every type that may start one has an
+        agent of that name.
         """
         loaded, unavailable = await self._mcp.start(config.name, config.mcp_servers)
         kept, skipped = without_clashes(config.name, tools, loaded)
@@ -490,6 +500,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         ]:
             notice = WorkflowEvent.error(message, error_code=code, recoverable=True)
             notice.metadata["agent"] = config.name
+            if spawner is not None:
+                notice.metadata["spawner"] = spawner
             self._pending_notices.append(notice)
         return [*tools, *kept]
 

@@ -593,10 +593,14 @@ the start of the entry's title.
   agent is refused. `task`'s `tools` narrows it against its spawner's tools;
   its `model` is refused (it has no model choices). Each backend builds one
   for every type that may start it, at initialization (the main agent, and
-  with `max_spawn_depth` 2 or more every type that does not inherit), with
-  MCP connections of its own (ADK: an agent and a runner of its own; Deep
-  Agents: a graph of its own), built again by a model switch and released
-  with the others; a main agent with no sub-agents gets `task` for it alone
+  with `max_spawn_depth` 2 or more every type that does not inherit when
+  agents may start types, and every type with skills when skills may), with
+  MCP connections of its own (ADK: an agent and a runner of its own,
+  connecting at first use; Deep Agents: a graph of its own, whose MCP
+  sessions open at initialization, so a server that cannot start is a notice
+  for it too, naming its spawner in `metadata["spawner"]`, and one that never
+  answers is waited for once more per spawner), built again by a model
+  switch and released with the others; a main agent with no sub-agents gets `task` for it alone
   when agents may start it. Its instances are `general_purpose-<n>`, and the
   records keep the type each was made for (`InstanceRecord.based_on`, from
   the run's start, `WorkflowEvent.agent_run(based_on=)`; records written

@@ -8088,6 +8088,37 @@ class TestTheGeneralPurposeType:
         )
 
 
+class TestTheGeneralPurposeTypeStartsNone:
+    async def test_below_the_depth_limit_it_has_no_task_and_no_follow_up_tools(self, make_crew):
+        deep = SubAgentPolicy(follow_ups=True, spawn_sources={"agent"}, max_spawn_depth=3,
+                              general_purpose=True)
+        crew = make_crew(
+            general_team(), subagents=deep,
+            coordinator=[calls(delegate("general_purpose", "Look X up.", "c1")), says("Done.")],
+            general_purpose=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        # The coordinator's own, the researcher it delegates to and the plan's tools:
+        # nothing that starts or follows an agent.
+        assert crew.tool_names(GENERAL_PURPOSE) == GENERAL_TOOLS
+        assert crew.tool_names("coordinator")[-4:] == [
+            "task", "message_agent", "stop_agent", "check_agents",
+        ]
+
+    async def test_with_the_default_policy_none_is_built(self, make_crew):
+        crew = make_crew(general_team(), coordinator=[says("Hi.")])
+
+        await crew.manager.initialize_services()
+
+        manager = crew.manager
+        assert not any(
+            getattr(manager, name, None)
+            for name in ("_general_agents", "_general_runners", "_general_graphs")
+        )
+
+
 class TestTheGeneralPurposeTypeFromASkillAndTheUser:
     async def test_a_skill_that_names_it_starts_one_made_for_the_loading_agent(
         self, make_crew, project
@@ -8154,6 +8185,16 @@ def _alive(pid: int) -> bool:
     return True
 
 
+#: What ADK itself says as its MCP toolset connects and lists tools (its own
+#: ``MCPTool`` class's deprecation, three experimental features it turns on): a
+#: scenario with an MCP server on ADK filters exactly these.
+ADK_MCP_WARNINGS = pytest.mark.filterwarnings(
+    "ignore:MCPTool class is deprecated:DeprecationWarning",
+    r"ignore:\[EXPERIMENTAL\] feature FeatureName\.(_MCP_GRACEFUL_ERROR_HANDLING"
+    r"|BASE_AUTHENTICATED_TOOL|JSON_SCHEMA_FOR_FUNC_DECL) is enabled:UserWarning",
+)
+
+
 class TestAGeneralPurposeAgentAcrossAModelSwitch:
     """A general-purpose agent made for a type with an MCP server has
     connections of its own: across a model switch (``reinitialize``) each
@@ -8161,6 +8202,7 @@ class TestAGeneralPurposeAgentAcrossAModelSwitch:
     working, and a follow-up of the general-purpose instance runs on the new
     build (its spawner's new model)."""
 
+    @ADK_MCP_WARNINGS
     async def test_each_connection_opens_and_closes_once(self, make_crew, project):
         pytest.importorskip("mcp")
         from agentic_cli.workflow.mcp import MCPServerConfig

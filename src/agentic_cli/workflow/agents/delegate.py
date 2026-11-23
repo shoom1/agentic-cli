@@ -876,9 +876,17 @@ class Delegations:
 
         ``spawnable`` for ``"user"``: the policy's ``spawn_sources`` and the
         type's ``spawnable_by`` both name the user. An inheriting one too: its
-        parent is the root, whose conversation it reads.
+        parent is the root, whose conversation it reads. The built-in
+        ``general_purpose`` type only where it is made for the root.
         """
-        return spawnable(list(self._types.values()), self.policy, USER_SOURCE)
+        names = spawnable(list(self._types.values()), self.policy, USER_SOURCE)
+        # The general-purpose type is made for the root: an app with no
+        # configured types (a native ADK app) has none to make it for.
+        return tuple(
+            name for name in names
+            if not self._is_general(name)
+            or self.config_for(name, based_on=root_type(self._types.values())) is not None
+        )
 
     def user_start_refused(self, agent_type: str, objective: str) -> str | None:
         """Why the user may not start ``agent_type`` on ``objective``, else None.

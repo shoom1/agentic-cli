@@ -637,6 +637,34 @@ class TestNotices:
         assert [e.content for e in of(first, EventType.TEXT)] == ["Without it."]
         assert of(second, EventType.ERROR) == []
 
+    async def test_a_general_purpose_agents_notice_names_its_spawner(
+        self, ctx, servers, monkeypatch
+    ):
+        """Each type that may start the general-purpose type has an agent of it with
+        sessions of its own, so a server that cannot start is a notice for it too,
+        which says whose spawner it is."""
+        from agentic_cli.workflow.agents import SubAgentPolicy
+
+        scripted(monkeypatch, lead=[ai("Hello.")], general_purpose=[])
+        manager = DeepAgentsWorkflowManager(
+            agent_configs=[AgentConfig(
+                name="lead", prompt="Lead.", include_state_tools=False,
+                mcp_servers=[servers("broken", env={"MCP_TEST_FAIL": "no licence"})],
+            )],
+            settings=ctx.settings, model="gemini-2.5-flash",
+            subagents=SubAgentPolicy(spawn_sources={"agent"}, general_purpose=True),
+        )
+        try:
+            events = await turn(manager)
+        finally:
+            await manager.cleanup()
+
+        notices = of(events, EventType.ERROR)
+        assert [(n.metadata["agent"], n.metadata.get("spawner")) for n in notices] == [
+            ("lead", None), ("general_purpose", "lead"),
+        ]
+        assert all(n.metadata["error_code"] == "mcp_unavailable" for n in notices)
+
     @pytest.mark.parametrize("rename, configs, taken_by", [
         ("add=read_file", lambda server: [_researcher(server, tools=[read_file])],
          "the agent already has a tool of that name"),
