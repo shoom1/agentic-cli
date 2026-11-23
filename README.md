@@ -1307,8 +1307,8 @@ than `agent`, `skill` and `user` raises too (a free type the app's policy lets
 no source start is a warning: `validate_agent_graph(configs, policy=...)`).
 An agent named `general_purpose` raises too while the policy enables the
 built-in type of that name (`SubAgentPolicy(general_purpose=True)`).
-`model_choices` on the root, one that is no tuple or list of texts, and a choice
-named twice raise it too.
+`model_choices` on the root, one that is no tuple or list of texts, a choice
+written with spaces around it and a choice named twice raise it too.
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
 on an agent below another sub-agent, and an `inherit_context` that is not True
 or False, raise it too, and, when the agents are built, so does a coordinator

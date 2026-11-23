@@ -536,6 +536,20 @@ def _check_delegation_fields(config_map: dict[str, AgentConfig], root: str) -> N
             f"text: {', '.join(not_texts)}."
         )
 
+    # A call names a choice stripped (``brief.read_choices``): one written with
+    # spaces around it could never be picked, nor be caught as named twice.
+    spaced = next(
+        ((name, choice) for name, config in config_map.items()
+         for choice in config.model_choices if choice != choice.strip()),
+        None,
+    )
+    if spaced is not None:
+        name, choice = spaced
+        raise AgentGraphError(
+            f"Agent {name!r} has the model choice {choice!r} with surrounding spaces: "
+            "write it without them."
+        )
+
     twice = sorted(
         f"{name!r} ({choice!r})"
         for name, config in config_map.items()

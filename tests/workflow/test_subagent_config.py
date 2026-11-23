@@ -416,6 +416,17 @@ class TestModelChoices:
             f"'writer' ({value!r})."
         )
 
+    @pytest.mark.parametrize("choice", [" fast", "fast ", "\tfast\n"])
+    def test_none_has_surrounding_spaces(self, choice):
+        """A choice is picked by the name a call gives, stripped: one written with
+        spaces could never be picked, and would not count as named twice."""
+        with pytest.raises(AgentGraphError) as exc:
+            validate_agent_graph(team(writer={"model_choices": ("strong", choice, "fast")}))
+        assert str(exc.value) == (
+            f"Agent 'writer' has the model choice {choice!r} with surrounding spaces: "
+            "write it without them."
+        )
+
     def test_none_is_named_twice(self):
         with pytest.raises(AgentGraphError) as exc:
             validate_agent_graph(team(

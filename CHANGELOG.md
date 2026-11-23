@@ -707,6 +707,8 @@ the start of the entry's title.
   numbers: `choice_models[(agent, choice)]` and `context_budget(agent,
   model=choice)`. `validate_agent_graph` raises `AgentGraphError` for
   `model_choices` on the root, for one that is no tuple or list of texts,
+  for a choice written with spaces around it ("Agent 'researcher' has the
+  model choice ' fast' with surrounding spaces: write it without them.")
   and for a choice named twice.
 - **`task`'s `tools` and `model`: a delegation may narrow its run's tools and
   pick a cheaper model, never widen, on both backends.** Every `task` call
