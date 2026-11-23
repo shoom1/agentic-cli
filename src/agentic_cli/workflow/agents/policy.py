@@ -122,6 +122,12 @@ class SubAgentPolicy:
         max_spawn_depth: A run at depth ``d`` (the root's is 0) may start an
             agent type at run time while ``d`` is below this; the configured
             tree keeps its depth.
+        general_purpose: Whether the built-in ``general_purpose`` type is
+            one of the types started at run time (``agents/spawn.py``): its
+            spawner's own tools but the ones that start agents, its
+            spawner's model and the framework's system prompt, startable by
+            every source ``spawn_sources`` enables. False (the default): no
+            such type. True needs a source.
     """
 
     max_active: int = 4
@@ -131,6 +137,7 @@ class SubAgentPolicy:
     follow_ups: bool = False
     spawn_sources: frozenset[str] = frozenset()
     max_spawn_depth: int = 1
+    general_purpose: bool = False
 
     def __post_init__(self) -> None:
         _check_count("SubAgentPolicy", "max_active", self.max_active, optional=False)
@@ -146,6 +153,16 @@ class SubAgentPolicy:
         _check_count("SubAgentPolicy", "max_open", self.max_open, optional=False)
         object.__setattr__(self, "spawn_sources", _sources(self.spawn_sources))
         _check_count("SubAgentPolicy", "max_spawn_depth", self.max_spawn_depth, optional=False)
+        if not isinstance(self.general_purpose, bool):
+            raise ValueError(
+                f"SubAgentPolicy.general_purpose must be True or False, not "
+                f"{self.general_purpose!r}."
+            )
+        if self.general_purpose and not self.spawn_sources:
+            raise ValueError(
+                "SubAgentPolicy.general_purpose needs spawn_sources: with none, nothing could "
+                "start it."
+            )
 
 
 def _sources(value: object) -> frozenset[str]:
