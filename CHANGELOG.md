@@ -601,12 +601,13 @@ the start of the entry's title.
   for it too, naming its spawner in `metadata["spawner"]`, and one that never
   answers is waited for once more per spawner), built again by a model
   switch and released with the others; a main agent with no sub-agents gets
-  `task` for it alone when agents may start it. Its instances are `general_purpose-<n>`, and the
-  records keep the type each was made for (`InstanceRecord.based_on`, from
-  the run's start, `WorkflowEvent.agent_run(based_on=)`; records written
-  before it read None), so its follow-ups, the user's and after a restart,
-  run as its first run did (one whose type no longer makes one is refused as
-  a type that is gone), and its view shows that type's model and context.
+  `task` for it alone when agents may start it. Its instances are
+  `general_purpose-<n>`, and the records keep the type each was made for
+  (`InstanceRecord.based_on`, from the run's start,
+  `WorkflowEvent.agent_run(based_on=)`; records written before it read
+  None), so its follow-ups, the user's and after a restart, run as its first
+  run did (one whose type no longer makes one is refused as a type that is
+  gone), and its view shows that type's model and context.
   While the policy enables it, an app's agent of that name is refused
   (`AgentGraphError`: "An agent named 'general_purpose' clashes with the
   built-in general_purpose type, which this app's SubAgentPolicy
@@ -684,7 +685,6 @@ the start of the entry's title.
   ADK's declaration) takes the place of ADK's in an agent's toolset only
   when one of its skills names an agent type and the app lets a skill
   start one.
-
 - **`AgentConfig.model_choices`: the models a delegation may run a type on
   instead of its own, on both backends.** References, bare model ids or
   roles (`model_choices=("fast",)`; the agent YAML's `model_choices:
