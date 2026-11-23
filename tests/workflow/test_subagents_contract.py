@@ -7691,6 +7691,8 @@ class TestTheUsersStopOfANewInstance:
         import inspect
 
         crew = make_crew(user_team(), subagents=STARTING, helper=[says("[never asked]")])
+        # Ready first: only the start's own steps run inside the window searched.
+        await crew.manager.initialize_services()
         entered = watch_hook(crew)
 
         async def view() -> None:
@@ -7698,8 +7700,10 @@ class TestTheUsersStopOfANewInstance:
                 pass
 
         viewing = asyncio.create_task(view())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
         landed = False
-        for _ in range(10_000):
+        while loop.time() < deadline:
             await asyncio.sleep(0)
             pumps = [t for t in asyncio.all_tasks() if t.get_name() == live_events.PUMP_TASK]
             if pumps and inspect.getcoroutinestate(pumps[0].get_coro()) == inspect.CORO_CREATED:
@@ -7708,7 +7712,13 @@ class TestTheUsersStopOfANewInstance:
                 break
             if viewing.done():
                 break
-        assert landed, "the cancel could not be landed in the window"
+        if not landed:
+            ended = (
+                f"the start ended first: {viewing.exception() or 'no error'}"
+                if viewing.done() and not viewing.cancelled() else "no window within 10 s"
+            )
+            viewing.cancel()
+            raise AssertionError(f"the cancel could not be landed in the window: {ended}")
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.wait_for(viewing, 10)
 
