@@ -833,7 +833,8 @@ class Delegations:
         ``AGENT_RUN`` event, which carries ``request.started_by``. A caller
         that is a run lends its slot while it waits for this one. A cancel of
         the caller's task (the turn's) ends the run ``interrupted`` once it
-        has stopped, and goes on.
+        has stopped, and goes on; one before the run started (while it is
+        numbered) starts none and gives the turn back the run it counted.
 
         Raises:
             KeyError: ``request.agent_type`` is not one of the manager's types
@@ -852,8 +853,15 @@ class Delegations:
                 refused = self._past_runs_per_turn(config.name)
                 if refused is not None:
                     return refused
+                # Counted as it is checked, so a start in the same answer cannot
+                # pass the limit while this one is numbered.
                 count_run_this_turn()
-            await self._number_past_stored(conversation)
+            try:
+                await self._number_past_stored(conversation)
+            except BaseException:
+                if request.counted:
+                    release_run_this_turn()  # no run started from it: give its place back
+                raise
             ref = self._runs.run_for(conversation, request.caller, request.call_id, config.name)
             brief = request.brief
             self._emit(WorkflowEvent.agent_run(

@@ -4032,6 +4032,32 @@ class TestStart:
         assert counted == 1
         assert len(asked) == 2
 
+    async def test_one_cancelled_while_it_is_numbered_gives_its_count_back(self):
+        """The count is taken before the instances are numbered (two starts at
+        once must not both pass the limit); a cancel there starts no run, and
+        the turn's runs are what they were."""
+        hook, asked = answering()
+        # The first ask waits for good; the next (the second start's) answers.
+        stored, read = storing(asyncio.Event(), {"researcher": 0})
+        made = delegations(hook, stored=stored, policy=SubAgentPolicy(max_runs_per_turn=1))
+        counts: list[int | None] = []
+
+        async def work():
+            starting = asyncio.create_task(made.start(start_request(call_id="c1")))
+            await until(lambda: read != [])
+            counts.append(runs_this_turn())  # counted, while it is numbered
+            starting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await starting
+            counts.append(runs_this_turn())
+            return await made.start(start_request(call_id="c2"))
+
+        second, _ = await turned(work)
+
+        assert counts == [1, 0]
+        assert second.result["status"] == RUN_COMPLETED
+        assert [run.ref.run for run in asked] == ["researcher-1#1"]
+
     async def test_numbered_past_the_stored(self):
         hook, _ = answering()
         stored, asked = storing({"researcher": 4})
