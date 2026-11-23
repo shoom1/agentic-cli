@@ -368,3 +368,68 @@ class TestALoadStartsARun:
             "success": False, "error": RUNS_PER_TURN_ERROR.format(limit=1),
         }
         assert len(asked) == 1
+
+
+class TestTheGeneralPurposeType:
+    """A skill may name ``general_purpose``: with the policy's ``general_purpose``
+    and ``"skill"`` among its sources, the load starts one made for the
+    loading agent's type. A general-purpose agent's own loads start none."""
+
+    GENERAL = SubAgentPolicy(spawn_sources={"skill"}, general_purpose=True)
+
+    async def test_it_starts_one_made_for_the_loading_agents_type(self, tmp_path, logged):
+        from agentic_cli.workflow.agents.spawn import general_purpose_config
+
+        hook, asked = answering("Found it.")
+        runs = AgentRuns()
+        delegations = made(hook, policy=self.GENERAL, runs=runs)
+        agents = SkillAgents("lead", lambda: delegations, root=True)
+        skill = make_skill(tmp_path, "research", "agent: general_purpose\n")
+
+        agents.check([skill])
+        out, events = await loaded(agents, skill)
+
+        assert logged == []
+        assert out["result"].result["agent"] == "general_purpose-1"
+        (run,) = asked
+        assert (run.config, run.based_on) == (general_purpose_config(TYPES["lead"]), "lead")
+        assert events[0].metadata["based_on"] == "lead"
+        assert runs.instance(CONVERSATION, "general_purpose-1").based_on == "lead"
+
+    @pytest.mark.parametrize("policy, reason", [
+        (SKILLS, "is not one of this app's agent types"),
+        (SubAgentPolicy(spawn_sources={"agent"}, general_purpose=True),
+         "this app does not let a skill start"),
+    ], ids=["off", "not-for-skills"])
+    def test_with_the_type_off_or_not_for_skills_it_is_refused(self, tmp_path, policy, reason):
+        skill = make_skill(tmp_path, "research", "agent: general_purpose\n")
+        agents = SkillAgents("lead", lambda: made(policy=policy), root=True)
+
+        assert agents.refusal(skill, 0) == (
+            f"The skill 'research' starts the agent 'general_purpose', which {reason}."
+        )
+
+    @pytest.mark.parametrize("named", ["helper", "general_purpose"])
+    def test_a_general_purpose_agent_starts_none_and_is_not_warned_of(
+        self, tmp_path, logged, named
+    ):
+        deeper = SubAgentPolicy(spawn_sources={"skill"}, max_spawn_depth=3, general_purpose=True)
+        skill = make_skill(tmp_path, "research", f"agent: {named}\n")
+        agents = SkillAgents("general_purpose", lambda: made(policy=deeper), root=False)
+
+        agents.check([skill])
+
+        assert logged == []
+        assert agents.refusal(skill, 1) == (
+            f"The skill 'research' starts the agent '{named}', which cannot be started "
+            "here: sub-agents cannot start sub-agents."
+        )
+
+    def test_past_the_depth_it_is_refused_as_any_type(self, tmp_path):
+        skill = make_skill(tmp_path, "research", "agent: general_purpose\n")
+        agents = SkillAgents("middle", lambda: made(policy=self.GENERAL), root=False)
+
+        assert agents.refusal(skill, 1) == (
+            "The skill 'research' starts the agent 'general_purpose', which cannot be started "
+            "here: sub-agents cannot start sub-agents."
+        )

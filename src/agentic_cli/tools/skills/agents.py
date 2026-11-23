@@ -21,6 +21,12 @@ skill whose agent its agent's first run could not start is warned of as the
 agent is built: the app still starts, since a skill file can come from a
 user's folder.
 
+A skill may name the built-in ``general_purpose`` type (with the policy's
+``general_purpose``): its run is made for the loading agent's type, whose tools
+and model it has. A general-purpose agent's own loads start no agent (it starts
+none: ``spawn.can_have_children``), and its skills are not warned of: its
+spawner's build warns of its own.
+
 ``SkillAgents`` is one loading agent's: ADK's ``adk/skill_tool.py::SkillLoadTool``
 and Deep Agents' ``task_tool.start_skill_run`` call it. Imports no backend.
 """
@@ -33,7 +39,12 @@ from typing import TYPE_CHECKING, Any
 from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents.brief import Brief
 from agentic_cli.workflow.agents.delegate import Delegated, StartRequest
-from agentic_cli.workflow.agents.spawn import SKILL_SOURCE, may_spawn, spawnable
+from agentic_cli.workflow.agents.spawn import (
+    GENERAL_PURPOSE,
+    SKILL_SOURCE,
+    may_spawn,
+    spawnable,
+)
 from agentic_cli.workflow.sessions import get_active_run
 
 if TYPE_CHECKING:
@@ -109,19 +120,25 @@ class SkillAgents:
             and SKILL_SOURCE in self._delegations().policy.spawn_sources
         )
 
+    def _general(self) -> bool:
+        """Whether this is a general-purpose agent's skill: it starts no agent."""
+        return self._agent == GENERAL_PURPOSE and self._delegations().policy.general_purpose
+
     def _reason(self, skill: Any, name: str, depth: int) -> str | None:
         """Why this agent's run at ``depth`` may not start the type ``name`` for ``skill``."""
         delegations = self._delegations()
         types = delegations.types
-        config = types.get(name)
-        if config is None:
-            return UNKNOWN_TYPE
         policy = delegations.policy
+        config = delegations.config_for(name, based_on=self._agent)
+        if config is None and not (name == GENERAL_PURPOSE and policy.general_purpose):
+            return UNKNOWN_TYPE
         if name not in spawnable(list(types.values()), policy, SKILL_SOURCE):
             return NOT_FOR_SKILLS
         caller = types.get(self._agent)
         if (
-            not may_spawn(depth, policy)
+            config is None  # the general-purpose type, from an agent that may not start it
+            or self._general()
+            or not may_spawn(depth, policy)
             or (caller is not None and caller.inherit_context)
             or (depth > 0 and config.inherit_context)
         ):
@@ -148,6 +165,8 @@ class SkillAgents:
     def check(self, skills: Sequence[Any]) -> None:
         """Warn, once per skill, of each that names an agent this agent's first run
         could not start, or that the app lets no skill start (the key is ignored)."""
+        if self._general():
+            return
         for skill in skills:
             name = skill_agent(skill)
             if name is None or (self._agent, skill.name) in self._warned:
@@ -187,6 +206,7 @@ class SkillAgents:
             brief=Brief(title=skill.name, objective=skill.instructions),
             started_by=skill_started_by(skill.name),
             caller=caller, call_id=call_id, state=state, history=history, counted=True,
+            based_on=self._agent if skill_agent(skill) == GENERAL_PURPOSE else None,
         ))
         if delegated.run is None:
             return delegated
