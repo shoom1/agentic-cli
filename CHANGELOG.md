@@ -653,7 +653,7 @@ the start of the entry's title.
   lets a skill start an agent (`"skill"` in
   `SubAgentPolicy.spawn_sources`; with the default policy it does not,
   and the key is ignored: the skill loads as instructions, as any skill
-  does, and the build warns of it, `skill_agent_ignored`, since other
+  does, and the build logs it at info, `skill_agent_ignored`, since other
   tools give skills an `agent` key of their own), when an agent loads it
   (`load_skill`), a run of that type starts instead of the skill's
   instructions being handed back: its task message is the skill's body

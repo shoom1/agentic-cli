@@ -1486,8 +1486,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   an agent that loads the skill starts a run of that type instead of
   reading the skill's instructions. Without `"skill"` in `spawn_sources`
   (the default) the key is ignored: the skill loads as instructions, as
-  any skill does, and the build warns of it (`skill_agent_ignored`). The
-  run's task message is the skill's body under its name (`# Task:
+  any skill does, and the build logs it at info (`skill_agent_ignored`).
+  The run's task message is the skill's body under its name (`# Task:
   research`, `## Objective`), its parent the loading agent's run
   (`started_by: skill:research`), and it counts toward
   `max_runs_per_turn`; the `load_skill` call's result is the run's

@@ -7096,7 +7096,7 @@ class TestASkillThatStartsAnAgent:
         )
 
     @pytest.mark.parametrize("sources", [set(), {"agent"}], ids=["default", "agents-only"])
-    async def test_while_no_skill_may_start_one_the_key_is_ignored_and_warned_of(
+    async def test_while_no_skill_may_start_one_the_key_is_ignored_and_logged_at_info(
         self, make_crew, project, monkeypatch, sources
     ):
         warned = recorded_warnings(monkeypatch)
@@ -7127,12 +7127,13 @@ class TestASkillThatStartsAnAgent:
                 for call, e in shown.items()} == {
             "c1": (True, "notes"), "c2": (True, "research"), "c3": (True, "explore"),
         }
-        # Warned of once each, as the coordinator was built.
+        # Logged once each, as the coordinator was built: at info, since the
+        # skill loads as before and the app's user can do nothing about it.
         assert sorted((w["skill"], w["agent_type"]) for w in warned) == [
             ("explore", "Explore"), ("research", "helper"),
         ]
         assert {(w["event"], w["log_level"], w["agent"]) for w in warned} == {
-            ("skill_agent_ignored", "warning", "coordinator"),
+            ("skill_agent_ignored", "info", "coordinator"),
         }
         assert all(w["message"] == (
             f"The skill '{w['skill']}' names the agent '{w['agent_type']}', but this app lets "
