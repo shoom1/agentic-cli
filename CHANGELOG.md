@@ -714,13 +714,15 @@ the start of the entry's title.
 - **`task`'s `tools` and `model`: a delegation may narrow its run's tools and
   pick a cheaper model, never widen, on both backends.** Every `task` call
   may give `tools`, some of the type's own tools (its registered, skill and
-  MCP tools, by the names its model is offered them; the plan's tools and
-  the delegation tools are always kept): the run's model is offered only
-  those, and a call of any other is answered as one of a tool the agent
-  does not have ("<tool> failed: ValueError: Tool '<tool>' not found.", then
-  the tools it has), and the run goes on. A call to a type with model
-  choices may give `model`, one of them: the run is on that model. Anything
-  else is the call's error result, and no run starts nor counts toward the
+  MCP tools, and on ADK its built-ins such as `google_search`, by the names
+  its model is offered them; the plan's tools and the delegation tools are
+  always kept): the run's model is offered only those (a built-in it was not
+  given is not in its requests, so it marks no conversation either), and a
+  call of any other is answered as one of a tool the agent does not have
+  ("<tool> failed: ValueError: Tool '<tool>' not found.", then the tools it
+  has), and the run goes on. A call to a type with model choices may give
+  `model`, one of them: the run is on that model. Anything else is the
+  call's error result, and no run starts nor counts toward the
   turn's ("The tools for 'researcher' must be some of its own: lookup.",
   "The model for 'researcher' must be one of its model choices: fast.",
   "'researcher' has no model choices; leave model out."; a backend that

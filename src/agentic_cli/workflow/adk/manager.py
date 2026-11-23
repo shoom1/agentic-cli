@@ -134,6 +134,7 @@ if TYPE_CHECKING:
     from agentic_cli.models import Provider, ResolvedModel, RoleMap
     from agentic_cli.workflow.context import ContextBudget
     from agentic_cli.workflow.adk.build import ADKBuild
+    from agentic_cli.workflow.agents.control import RunControl
     from agentic_cli.workflow.agents.policy import SubAgentPolicy
     from agentic_cli.workflow.sessions import SessionRef
 
@@ -381,11 +382,14 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         agent's.
 
         Its tools as its model sees them (callables, ADK tools, a skill
-        toolset's tools) and each MCP toolset's, which ADK lists by connecting:
-        done when first asked, once a build (the toolset stays connected for the
-        agent's runs, and its runner stops it; for a narrowed run on a model
-        choice that is one more idle connection, the type's own, until the
-        release). The state and delegation tools are left out.
+        toolset's tools; an ADK built-in such as ``google_search`` too, which
+        a narrowed run's requests leave out unless it is given,
+        ``run_control_plugin.RunToolsPlugin``) and each MCP toolset's, which
+        ADK lists by connecting: done when first asked, once a build (the
+        toolset stays connected for the agent's runs, and its runner stops
+        it; for a narrowed run on a model choice that is one more idle
+        connection, the type's own, until the release). The state and
+        delegation tools are left out.
 
         Raises:
             ToolsUnlistedError: A toolset's listing failed (logged, and
@@ -881,6 +885,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         Its own instances, in the app's order, but for what a sub-agent is:
 
+        - ``RunToolsPlugin`` first in the head: a narrowed run's request
+          holds only its tools (an ADK built-in it was not given left out
+          too) before the permission gate marks the conversation for the
+          built-ins a request carries, so the mark follows what is sent;
         - the permission gate writes no outside-content mark at a model
           call (a run's mark reaches the conversation with its result,
           ``adk/task_tool.py``), and the raw log is the app's own instance
@@ -903,11 +911,18 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         run on this one chain at once, and a provider may number their call
         ids alike.
         """
-        from agentic_cli.workflow.adk.run_control_plugin import RunControlPlugin
+        from agentic_cli.workflow.adk.run_control_plugin import (
+            RunControlPlugin,
+            RunToolsPlugin,
+        )
         from agentic_cli.workflow.adk.subagent_outcome_plugin import SubAgentOutcomePlugin
         from agentic_cli.workflow.adk.tool_error_plugin import ToolErrorPlugin
 
+        def control() -> "RunControl | None":
+            return self._delegations.control(get_active_run())
+
         head: list = [
+            RunToolsPlugin(control),
             PermissionPlugin(self._open_calls, marks=self._outside_marks),
             ToolErrorPlugin(self._open_calls),
         ]
@@ -920,10 +935,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
             models = {**self._resolved_models, agent.name: model}
             if budget is not None:
                 budgets = {**self._budgets, agent.name: budget}
-        head.append(RunControlPlugin(
-            lambda: self._delegations.control(get_active_run()),
-            kinds.get(agent.name),
-        ))
+        head.append(RunControlPlugin(control, kinds.get(agent.name)))
         head.append(SubAgentOutcomePlugin())
         return self._chain(
             head=head,

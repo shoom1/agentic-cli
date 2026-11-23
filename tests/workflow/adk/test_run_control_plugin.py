@@ -1,5 +1,6 @@
-"""ADK: a sub-agent run's limits, and the tools a narrowed run is offered, at its model
-calls (``workflow/adk/run_control_plugin.py``).
+"""ADK: a sub-agent run's limits, and the tools a narrowed run is offered (its
+registered, skill and MCP tools, and ADK's built-ins), at its model calls
+(``workflow/adk/run_control_plugin.py``).
 
 What the plugin does to a request and an answer, alone. Whole turns, on both
 backends, are in the contract suite (``TestTheStepLimit``,
@@ -15,13 +16,19 @@ import pytest
 
 pytest.importorskip("google.adk")
 
+from google.adk.agents import LlmAgent  # noqa: E402
+from google.adk.agents.callback_context import CallbackContext  # noqa: E402
+from google.adk.agents.invocation_context import InvocationContext  # noqa: E402
 from google.adk.models.llm_request import LlmRequest  # noqa: E402
 from google.adk.models.llm_response import LlmResponse  # noqa: E402
-from google.adk.tools import BaseTool  # noqa: E402
+from google.adk.sessions import InMemorySessionService  # noqa: E402
+from google.adk.tools import BaseTool, FunctionTool, google_search  # noqa: E402
+from google.adk.tools.tool_context import ToolContext  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from agentic_cli.workflow.adk.run_control_plugin import (  # noqa: E402
     RunControlPlugin,
+    RunToolsPlugin,
     drop_calls,
     narrow,
     with_note,
@@ -34,6 +41,8 @@ from agentic_cli.workflow.sessions import RunRef  # noqa: E402
 REF = RunRef(
     agent="researcher", instance="researcher-1", run="researcher-1#1", parent_run=None, depth=1
 )
+#: A model ADK's built-ins run on.
+GEMINI = "gemini-2.5-flash"
 
 
 def user(*parts: types.Part) -> types.Content:
@@ -250,6 +259,33 @@ def offering(*names: str) -> LlmRequest:
     return request
 
 
+def lookup(q: str) -> dict:
+    """Look ``q`` up."""
+    return {"success": True}
+
+
+async def agent_context(tools: list) -> CallbackContext:
+    """A real callback context of a Gemini agent with ``tools``, as ADK passes
+    a plugin's model callbacks."""
+    service = InMemorySessionService()
+    session = await service.create_session(app_name="app", user_id="u", session_id="s")
+    agent = LlmAgent(name="researcher", model=GEMINI, tools=list(tools))
+    return CallbackContext(InvocationContext(
+        session_service=service, invocation_id="i", agent=agent, session=session,
+    ))
+
+
+async def processed(context: CallbackContext, tools: list) -> LlmRequest:
+    """The request ADK builds once each of ``tools`` processed it, before the
+    model callbacks."""
+    request = LlmRequest(model=GEMINI, contents=[user(text("# Task: Find X."))])
+    for tool in tools:
+        await tool.process_llm_request(
+            tool_context=ToolContext(context.get_invocation_context()), llm_request=request
+        )
+    return request
+
+
 def declared(request: LlmRequest) -> list[str]:
     return [
         d.name for tool in request.config.tools or ()
@@ -264,7 +300,7 @@ class TestANarrowedRunsTools:
 
     async def test_its_tools_and_those_every_run_keeps_and_no_other(self):
         control = RunControl(REF, AgentLimits(), tools=frozenset({"lookup"}))
-        plugin = RunControlPlugin(lambda: control, "anthropic")
+        plugin = RunToolsPlugin(lambda: control)
         request = offering("lookup", "fetch_page", "save_plan", "task", "check_agents")
 
         await plugin.before_model_callback(callback_context=None, llm_request=request)
@@ -272,8 +308,57 @@ class TestANarrowedRunsTools:
         assert list(request.tools_dict) == ["lookup", "save_plan", "task",
                                             "check_agents"]
         assert declared(request) == ["lookup", "save_plan", "task", "check_agents"]
-        # What is no function declaration stays.
+        # What no tool of the agent's is known to have made (here no agent) stays.
         assert request.config.tools[1].google_search is not None
+
+    @pytest.mark.parametrize("kept, searches", [
+        ({"lookup"}, False), ({"lookup", "google_search"}, True),
+    ], ids=["without-it", "keeping-it"])
+    async def test_a_built_in_goes_unless_the_run_keeps_it(self, kept, searches):
+        """ADK's built-ins (``google_search``) run inside the model: what one adds
+        to a request is no function declaration, and nothing in ``tools_dict``.
+        A run narrowed without it is not sent it; one that keeps it is sent what
+        ADK made, as it made it."""
+        tools = [FunctionTool(lookup), google_search]
+        context = await agent_context(tools)
+        request = await processed(context, tools)
+        made = list(request.config.tools)
+        control = RunControl(REF, AgentLimits(), tools=frozenset(kept))
+
+        await RunToolsPlugin(lambda: control).before_model_callback(
+            callback_context=context, llm_request=request
+        )
+
+        assert any(tool.google_search is not None for tool in request.config.tools) is searches
+        assert (declared(request), list(request.tools_dict)) == (["lookup"], ["lookup"])
+        assert (made[1] in request.config.tools) is searches  # ADK's own entry, kept
+
+    def test_narrow_leaves_out_the_entries_of_the_built_ins_it_refuses(self):
+        request = offering("lookup")
+        search = request.config.tools[1]
+        code = types.Tool(code_execution=types.ToolCodeExecution())
+        request.config.tools.append(code)
+
+        narrow(request, lambda name: name == "lookup",
+               built_ins={"google_search": [search], "url_context": []})
+
+        # A code executor's entry is no tool's: it stays.
+        assert request.config.tools[1:] == [code]
+        assert declared(request) == ["lookup"]
+
+    async def test_a_built_in_no_run_narrows_is_never_asked(self):
+        """A run not narrowed has every tool as ADK made it, built-ins too."""
+        tools = [FunctionTool(lookup), google_search]
+        context = await agent_context(tools)
+        request = await processed(context, tools)
+        made = list(request.config.tools)
+        control = RunControl(REF, AgentLimits())
+
+        await RunToolsPlugin(lambda: control).before_model_callback(
+            callback_context=context, llm_request=request
+        )
+
+        assert request.config.tools == made
 
     def test_a_tool_left_with_no_declaration_goes(self):
         request = LlmRequest(contents=[user(text("Go."))])
@@ -289,7 +374,7 @@ class TestANarrowedRunsTools:
 
     async def test_a_run_not_narrowed_keeps_them_all(self):
         control = RunControl(REF, AgentLimits())
-        plugin = RunControlPlugin(lambda: control, "anthropic")
+        plugin = RunToolsPlugin(lambda: control)
         request = offering("lookup", "fetch_page")
 
         await plugin.before_model_callback(callback_context=None, llm_request=request)

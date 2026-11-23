@@ -1462,16 +1462,18 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   ```
 - **Narrowing a run, and a cheaper model.** Any `task` call may give
   `tools`, some of the type's own tools (its registered, skill and MCP
-  tools, by name; its plan's tools and the delegation tools always stay):
-  the run is offered only those, and a call of another is answered as one
-  of a tool it does not have. A type's `model_choices` are the models a call
-  may pick instead of its own (`model`, named in the type's line in `task`'s
-  description); each is resolved and given its context numbers at startup,
-  and runs as the type's agent built on it (ADK: a runner of its own;
-  Deep Agents: a graph of its own), within its own window. Anything else is
-  the call's error result, naming what it may be, and no run starts. The
-  instance keeps both: its follow-ups, and its runs after a restart, run
-  with them, and `/agents <id>` shows them.
+  tools, and on ADK its built-ins such as `google_search`, by name; its
+  plan's tools and the delegation tools always stay): the run is offered
+  only those (a built-in it was not given is not in its requests), and a
+  call of another is answered as one of a tool it does not have. A type's
+  `model_choices` are the models a call may pick instead of its own
+  (`model`, named in the type's line in `task`'s description); each is
+  resolved and given its context numbers at startup, and runs as the
+  type's agent built on it (ADK: a runner of its own; Deep Agents: a graph
+  of its own), within its own window. Anything else is the call's error
+  result, naming what it may be, and no run starts. The instance keeps
+  both: its follow-ups, and its runs after a restart, run with them, and
+  `/agents <id>` shows them.
 
   ```python
   researcher = AgentConfig(name="researcher", prompt="Find facts.",
@@ -2687,7 +2689,7 @@ agentic-cli/
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── log_filters.py            # What ADK would print over the CLI, logged at debug (installed by run())
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
-│   │   │   ├── run_control_plugin.py     # RunControlPlugin: a sub-agent run's limits and steering at its model calls
+│   │   │   ├── run_control_plugin.py     # RunToolsPlugin, RunControlPlugin: a sub-agent run's tools, limits and steering at its model calls
 │   │   │   ├── task_progress_plugin.py   # TaskProgressPlugin (deprecated, unused)
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)

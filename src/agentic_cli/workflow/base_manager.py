@@ -1461,10 +1461,10 @@ class BaseWorkflowManager(ABC):
 
         Asked for a call that names tools and for a narrowed instance's
         follow-up: the agent's own tools by the names its model sees (a
-        backend adds its skill and MCP tools), the state and delegation tools
-        (``KEPT_TOOLS``) left out. The base's are the agent's configured tools
-        as ``_build_tools`` assembles them, each by its callable's name; an
-        agent that is not configured has none.
+        backend adds its skill and MCP tools, ADK its built-ins), the state
+        and delegation tools (``KEPT_TOOLS``) left out. The base's are the
+        agent's configured tools as ``_build_tools`` assembles them, each by
+        its callable's name; an agent that is not configured has none.
         """
         config = next((c for c in self._agent_configs if c.name == agent), None)
         if config is None:
