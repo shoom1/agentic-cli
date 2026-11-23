@@ -6544,6 +6544,24 @@ class TestTheOfferIsTheRuns:
             "helper", "helper", "helper",
         ]
 
+    async def test_a_delegating_types_model_choices_warn_of_it_no_more(self, make_crew):
+        """A type built once more for each of its model choices offers what its
+        own build offers: the missing description is warned of once for it."""
+        crew = make_crew(
+            [*team(), agent("helper", tools=(contract_lookup,), description="",
+                            spawnable_by=frozenset({"agent"}),
+                            model_choices=("anthropic:claude-haiku-4-5",))],
+            subagents=DEEPER,
+        )
+
+        with capture_logs() as logs:
+            await crew.manager.initialize_services()
+
+        # The coordinator, the researcher and the helper; none for the helper's choice.
+        assert [log["agent"] for log in logs if log["event"] == "subagent_without_description"] == [
+            "helper", "helper", "helper",
+        ]
+
 
 class TestAParentOfRunTimeTypesOnly:
     async def test_with_follow_ups_it_gets_the_parents_tools_and_the_roster(self, make_crew):

@@ -643,7 +643,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     f"Agent {config.name!r} delegates to sub-agents through a tool named "
                     f"{TASK_TOOL!r}, so its own tools cannot include one; rename that tool."
                 )
-            tools = [*tools, TaskTool(config.name, lambda: self._delegations, root=root)]
+            # A model choice's agent offers what its type's offers, whose build warned.
+            tools = [*tools, TaskTool(
+                config.name, lambda: self._delegations, root=root, warn=model is None,
+            )]
             if self.subagent_policy.follow_ups:
                 clash = next((name for name in FOLLOW_UP_TOOLS if name in names), None)
                 if clash is not None:

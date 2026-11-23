@@ -274,6 +274,8 @@ def build_agent_tree(
             settings=settings, checkpointer=checkpointer, bound=bound,
             budget=variant.budget,
             open_calls=open_calls, marks=marks, delegations=delegations,
+            # Its type's own build warned of what the offer lacks.
+            warn=False,
         )
 
     for key, variant in (variants or {}).items():
@@ -308,6 +310,7 @@ def build_agent(
     memory_index_forget: Callable[[], None] | None = None,
     delegations: "Callable[[], Delegations] | None" = None,
     roster: Callable[[], str] | None = None,
+    warn: bool = True,
 ) -> "CompiledStateGraph":
     """Build one agent's graph: ``config`` on ``chat_model``, with its tools and prompt.
 
@@ -316,7 +319,9 @@ def build_agent(
     ``root`` says whether this is the root: only it has the memory index and
     the roster (passed only for it), and every other agent has the run
     control and the outcome middleware; a sub-agent's graph has no
-    checkpointer of its own unless the tree has one.
+    checkpointer of its own unless the tree has one. ``warn`` is whether its
+    ``task`` warns of what its offer lacks: False for a variant, whose type's
+    own build warned.
 
     Raises:
         AgentGraphError: A delegating agent's own tools include one named
@@ -348,7 +353,7 @@ def build_agent(
     follows = delegates and delegations is not None and delegations().policy.follow_ups
     own = _own_tools(config, tools, delegates=delegates, follows=follows)
     if delegates and delegations is not None:
-        own = [*own, build_task_tool(name, delegations, root=root)]
+        own = [*own, build_task_tool(name, delegations, root=root, warn=warn)]
         if follows:
             own = [*own, *build_follow_up_tools(delegations)]
     return create_agent(
