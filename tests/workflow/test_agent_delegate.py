@@ -4369,6 +4369,41 @@ class TestAFollowUpKeepsThem:
         )
         assert len(asked) == 1
 
+    async def test_a_steer_of_its_running_run_never_asks_for_the_tools(self):
+        """Only a follow-up checks a narrowed instance's tools: a message steered
+        into its running run asks the backend for none, so a listing that fails
+        just then refuses no steer."""
+        hook, working, _ = blocking("choosy-1#2")
+        listed: list[str] = []
+        fail = [False]
+
+        async def listing(agent: str) -> frozenset[str]:
+            listed.append(agent)
+            if fail[0]:
+                raise ToolsUnlistedError(agent, OSError("the server is down"))
+            return frozenset(OWN.get(agent, ()))
+
+        made = delegations(hook, types=CHOOSING, tool_names=listing)
+
+        async def work():
+            await made.delegate(request(NARROW))
+            running = asyncio.create_task(made.message(follow("choosy-1")))
+            await working["choosy-1#2"].wait()
+            before = list(listed)
+            fail[0] = True
+            steered = await made.message(follow("choosy-1", "Find Z too.", call_id="c3"))
+            made.cancel("choosy-1#2", by="parent", error="enough")
+            await running
+            return steered, before
+
+        (steered, before), _ = await turned(work)
+
+        assert steered.result == {
+            "success": True, "agent": "choosy-1", "run": "choosy-1#2",
+            "status": RUN_RUNNING, "note": STEERED,
+        }
+        assert listed == before == ["choosy", "choosy"]  # the task call's, the follow-up's
+
     async def test_two_messages_at_once_to_a_narrowed_one_start_one_run_and_steer_the_other(
         self,
     ):

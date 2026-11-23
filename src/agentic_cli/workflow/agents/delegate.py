@@ -1066,6 +1066,11 @@ class Delegations:
         per instance at a time: everything up to a follow-up's start is one
         synchronous step, so of two messages to one idle instance in one
         response the first starts its run and the second is steered into it.
+        A narrowed instance's tool names, which a follow-up is checked
+        against, are asked for before that step, and only when the message
+        would start one (an idle instance's, an interrupt's): a steer asks
+        for none, so a listing that fails refuses no steer, and a run that
+        started while they were listed is steered.
         A run that takes no more steps (cancelled, its work ended, or an
         instance its parent is closing) is not steered: its end is waited for,
         and the message then follows up the idle instance or is refused as
@@ -1087,15 +1092,24 @@ class Delegations:
         conversation = (
             request.conversation if request.conversation is not None else get_active_turn()
         )
-        try:
-            own = await self._instance_tools(conversation, request.instance)
-        except BriefError as error:
-            return _refused(str(error))
+        if not isinstance(request.message, str) or not request.message.strip():
+            return _refused(MESSAGE_NEEDED_ERROR)
+        own: Any = _UNFETCHED
+        unlisted: BriefError | None = None
         with _as_turn(conversation):
-            if not isinstance(request.message, str) or not request.message.strip():
-                return _refused(MESSAGE_NEEDED_ERROR)
+            follows_up = self._follows_up(conversation, request, interrupt=interrupt)
+        if follows_up:
+            try:
+                own = await self._instance_tools(conversation, request.instance)
+            except BriefError as error:
+                unlisted = error
+        with _as_turn(conversation):
+            # Decided again after that await, in one step from here to a
+            # follow-up's start: a run that started meanwhile is steered.
             control = self._working_control(conversation, request)
             if control is None:
+                if unlisted is not None:
+                    return _refused(str(unlisted))
                 return await self.follow_up(request, _reserved=_reserved, _own=own)
             ref = control.ref
             if (conversation, ref.instance) in self._closing:
@@ -1112,6 +1126,10 @@ class Delegations:
             ended = self._ends[(conversation, ref.run or "")]
             made_here = False
             if interrupt and not stopping:
+                if unlisted is not None:
+                    return _refused(str(unlisted))
+                # Asked for above: the interrupt's follow-up was the next step.
+                assert own is not _UNFETCHED
                 error = self._follow_up_refused(
                     conversation, request, running_ok=True, own_tools=own
                 )
@@ -1360,6 +1378,23 @@ class Delegations:
         """The instances ``caller`` started (the root's, for None), in start order."""
         sender = caller.instance if caller is not None else "root"
         return [i for i in self._runs.instances(conversation) if i.parent == sender]
+
+    def _follows_up(
+        self, conversation: SessionRef | None, request: FollowUpRequest, *, interrupt: bool
+    ) -> bool:
+        """Whether ``message``'s next step starts a follow-up of the instance:
+        an idle one's (or one ``follow_up`` refuses), or an interrupt's of its
+        running run. What a narrowed instance's tool names are asked for: a
+        steer, a wait for a run that is stopping and the refusal of an
+        instance being closed need none."""
+        control = self._working_control(conversation, request)
+        if control is None:
+            return True
+        return (
+            interrupt
+            and not control.stopping
+            and (conversation, control.ref.instance) not in self._closing
+        )
 
     def _working_control(
         self,
