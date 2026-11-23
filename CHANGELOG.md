@@ -600,8 +600,8 @@ the start of the entry's title.
   sessions open at initialization, so a server that cannot start is a notice
   for it too, naming its spawner in `metadata["spawner"]`, and one that never
   answers is waited for once more per spawner), built again by a model
-  switch and released with the others; a main agent with no sub-agents gets `task` for it alone
-  when agents may start it. Its instances are `general_purpose-<n>`, and the
+  switch and released with the others; a main agent with no sub-agents gets
+  `task` for it alone when agents may start it. Its instances are `general_purpose-<n>`, and the
   records keep the type each was made for (`InstanceRecord.based_on`, from
   the run's start, `WorkflowEvent.agent_run(based_on=)`; records written
   before it read None), so its follow-ups, the user's and after a restart,

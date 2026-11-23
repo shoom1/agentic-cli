@@ -228,7 +228,8 @@ async def test_a_general_purpose_runner_has_a_sub_agents_chain_on_its_spawners_m
     """With the policy's ``general_purpose``, each type that may start it has a
     general-purpose agent of its own and its runner: the spawner's model, a
     sub-agent's chain reading that model's numbers, kind and reference under
-    ``general_purpose``, and no delegation tool. The release closes it."""
+    ``general_purpose``, and no delegation tool, and the release empties the maps (that it closes the
+    runner, and the MCP server with it, is ``test_adk_mcp_lifecycle.py``'s)."""
     spawner_model = "claude-haiku-4-5"
     manager = GoogleADKWorkflowManager(
         agent_configs=[

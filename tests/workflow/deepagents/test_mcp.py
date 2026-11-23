@@ -664,6 +664,13 @@ class TestNotices:
             ("lead", None), ("general_purpose", "lead"),
         ]
         assert all(n.metadata["error_code"] == "mcp_unavailable" for n in notices)
+        assert notices[0].content.startswith(
+            "MCP server 'broken' is unavailable, so agent 'lead' runs without its tools: "
+        )
+        assert notices[1].content.startswith(
+            "MCP server 'broken' is unavailable, so agent 'general_purpose' (for 'lead') "
+            "runs without its tools: "
+        )
 
     @pytest.mark.parametrize("rename, configs, taken_by", [
         ("add=read_file", lambda server: [_researcher(server, tools=[read_file])],

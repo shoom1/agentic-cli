@@ -492,7 +492,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         (``metadata["spawner"]``), since every type that may start one has an
         agent of that name.
         """
-        loaded, unavailable = await self._mcp.start(config.name, config.mcp_servers)
+        # Only a general-purpose agent's start names a spawner.
+        named = {"spawner": spawner} if spawner is not None else {}
+        loaded, unavailable = await self._mcp.start(config.name, config.mcp_servers, **named)
         kept, skipped = without_clashes(config.name, tools, loaded)
         for message, code in [
             *((message, "mcp_unavailable") for message in unavailable),
