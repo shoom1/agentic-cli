@@ -577,6 +577,33 @@ class TestBackfill:
                     await connection.__aexit__(None, None, None)
 
 
+    @pytest.mark.parametrize("kind", ["memory", "sqlite"])
+    async def test_it_leaves_a_kept_row_as_it_is(self, tmp_path, kind):
+        """A row ``keep`` wrote keeps its title and its mark when the scan finds
+        newer checkpoints of its conversation."""
+        from agentic_cli.workflow.checkpointers import open_store
+        from agentic_cli.workflow.deepagents.sessions import _rows_of
+
+        db = tmp_path / "c.db"
+        saver, saver_connection = await open_checkpointer(kind, sqlite_path=db)
+        store, store_connection = await open_store(kind, sqlite_path=db)
+        try:
+            kept = SessionRef("app", "u", "kept")
+            sessions = CheckpointSessions(saver, store)
+            await sessions.keep(kept, "Objective title.")
+            await say(saver, kept, "Typed later.")  # a checkpoint newer than the row
+
+            (row,) = await sessions.list("app", "u")
+
+            assert (row.title, row.turns) == ("Objective title.", 0)
+            held = await store.aget(_rows_of("app", "u"), "kept")
+            assert held.value.get("kept") is True
+        finally:
+            for connection in (store_connection, saver_connection):
+                if connection is not None:
+                    await connection.__aexit__(None, None, None)
+
+
 class SlowStore:
     """A store whose ``hold``-th write waits for ``release``, as a slow disk
     would; ``done`` names each write and delete as it completes."""

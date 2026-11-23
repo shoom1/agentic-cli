@@ -18,7 +18,12 @@ from thinking_prompt import ButtonConfig, Dialog, TextField
 from agentic_cli.cli.dialogs import dialog_lock
 from agentic_cli.constants import truncate
 from agentic_cli.logging import Loggers, bind_context
-from agentic_cli.workflow.agents.runs import RUN_INPUT_REQUIRED, RUN_QUEUED, RUN_RUNNING
+from agentic_cli.workflow.agents.runs import (
+    RUN_INPUT_REQUIRED,
+    RUN_QUEUED,
+    RUN_RUNNING,
+    RUN_STARTED,
+)
 from agentic_cli.workflow.sessions import ConversationChangedError, instance_of
 
 if TYPE_CHECKING:
@@ -464,6 +469,39 @@ class MessageProcessor:
                 request: thinking-prompt cancels the input handler running it.
                 ``CANCELLED_LINE`` has been said, once.
         """
+        def _source(workflow):
+            return workflow.process(
+                message=message,
+                user_id=settings.default_user,
+                session_id=session_id,
+            )
+
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker,
+            log="handling_message", fields={"message_length": len(message)},
+        )
+
+    async def _user_turn(
+        self,
+        source_factory,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None",
+        *,
+        log: str,
+        fields: dict[str, Any],
+        viewed: str | None = None,
+        opens: "Callable[[str], Awaitable[None]] | None" = None,
+    ) -> TurnResult:
+        """What a turn of the user's own does around ``_run_turn``: ``process``,
+        ``process_instance`` and ``process_start``.
+
+        Ctrl+C says ``CANCELLED_LINE`` once (``_says_so_when_stopped``). A
+        workflow that did not initialize is said and is an ``UNAVAILABLE``
+        result; otherwise the user is bound to the log, ``log`` is logged with
+        ``fields``, and the turn runs.
+        """
         async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
             # Wait for initialization if needed
             if not await workflow_controller.ensure_initialized(ui):
@@ -476,17 +514,10 @@ class MessageProcessor:
                 )
 
             bind_context(user_id=settings.default_user)
-            logger.info("handling_message", message_length=len(message))
-
-            def _source(workflow):
-                return workflow.process(
-                    message=message,
-                    user_id=settings.default_user,
-                    session_id=session_id,
-                )
-
+            logger.info(log, **fields)
             return await self._run_turn(
-                _source, workflow_controller, ui, settings, usage_tracker
+                source_factory, workflow_controller, ui, settings, usage_tracker,
+                viewed=viewed, opens=opens,
             )
 
     async def process_resume(
@@ -622,32 +653,73 @@ class MessageProcessor:
             asyncio.CancelledError: Ctrl+C stopped it (the user's stop of the
                 run): ``CANCELLED_LINE`` has been said, once.
         """
-        async with _says_so_when_stopped(ui, lambda: _job_manager(workflow_controller)):
-            if not await workflow_controller.ensure_initialized(ui):
-                ui.add_error(
-                    "Cannot process message - workflow not initialized. "
-                    "Please check your API keys (GOOGLE_API_KEY or ANTHROPIC_API_KEY)."
-                )
-                return TurnResult(
-                    TurnStatus.UNAVAILABLE, error="workflow not initialized"
-                )
-
-            bind_context(user_id=settings.default_user)
-            logger.info(
-                "handling_instance_message", instance=instance, message_length=len(message)
+        def _source(workflow):
+            return workflow.run_instance(
+                instance,
+                message,
+                session_id=session_id,
+                user_id=settings.default_user,
             )
 
-            def _source(workflow):
-                return workflow.run_instance(
-                    instance,
-                    message,
-                    session_id=session_id,
-                    user_id=settings.default_user,
-                )
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker, viewed=instance,
+            log="handling_instance_message",
+            fields={"instance": instance, "message_length": len(message)},
+        )
 
-            return await self._run_turn(
-                _source, workflow_controller, ui, settings, usage_tracker, viewed=instance
+    async def process_start(
+        self,
+        agent_type: str,
+        objective: str,
+        workflow_controller: "WorkflowController",
+        ui: "ThinkingPromptSession",
+        settings: "BaseSettings",
+        usage_tracker: "UsageTracker | None" = None,
+        session_id: str | None = None,
+        *,
+        opens: "Callable[[str], Awaitable[None]] | None" = None,
+    ) -> TurnResult:
+        """Start a new sub-agent instance for the user and draw its first run, in its view.
+
+        The source is ``workflow.start_instance`` (``/agent new``), whose
+        first event is the run's ``AGENT_RUN`` start. ``opens`` is called
+        with the instance that start names before it is drawn (the view
+        opens there), and from then on the run is drawn as
+        ``process_instance`` draws one: the instance's text is the reply and
+        its lines name nobody. A start that cannot run is the turn's one
+        ``ERROR``, and ``opens`` is not called.
+
+        Args:
+            agent_type: The type to start.
+            objective: The user's objective for it.
+            workflow_controller: Controller managing workflow lifecycle.
+            ui: UI session for output.
+            settings: Application settings.
+            usage_tracker: Optional tracker for accumulating LLM token usage.
+            session_id: The conversation, the app's durable session.
+            opens: Called once with the new instance's id (``researcher-2``).
+
+        Returns:
+            The turn's outcome; ``TurnResult.delivered`` is True only when the
+            event stream ran to completion.
+
+        Raises:
+            asyncio.CancelledError: Ctrl+C stopped it (the user's stop of the
+                run): ``CANCELLED_LINE`` has been said, once.
+        """
+        def _source(workflow):
+            return workflow.start_instance(
+                agent_type,
+                objective,
+                session_id=session_id,
+                user_id=settings.default_user,
             )
+
+        return await self._user_turn(
+            _source, workflow_controller, ui, settings, usage_tracker, opens=opens,
+            log="handling_instance_start",
+            fields={"agent_type": agent_type, "objective_length": len(objective)},
+        )
 
     async def process_notice(
         self,
@@ -797,12 +869,16 @@ class MessageProcessor:
         usage_tracker: "UsageTracker | None" = None,
         *,
         viewed: str | None = None,
+        opens: "Callable[[str], Awaitable[None]] | None" = None,
     ) -> TurnResult:
         """Drive one turn from an event-source factory through the UI.
 
         Shared by ``process`` (user message), ``process_resume`` (job
         result), ``process_instance`` (a sub-agent's run in its view, whose
-        instance is ``viewed``) and ``process_notice``.
+        instance is ``viewed``), ``process_start`` (a new instance's first
+        run, viewed once ``opens`` was told the instance its first
+        ``AGENT_RUN`` start names, before that start is drawn) and
+        ``process_notice``.
         ``source_factory(workflow)`` returns the WorkflowEvent async
         generator to consume; everything else (events box, HITL callback,
         Ctrl+C cancel, rate-limit retry, token accounting) is identical.
@@ -848,6 +924,8 @@ class MessageProcessor:
             The turn's outcome as a :class:`TurnResult`. ``partial`` reports
             whether the turn had already emitted output or run a tool.
         """
+        from agentic_cli.workflow.events import EventType
+
         state = _EventProcessingState(
             usage_tracker=usage_tracker,
             workflow_controller=workflow_controller,
@@ -944,6 +1022,16 @@ class MessageProcessor:
                     try:
                         async with aclosing(source_factory(workflow)) as events:
                             async for event in events:
+                                if (
+                                    opens is not None
+                                    and state.viewed is None
+                                    and event.type is EventType.AGENT_RUN
+                                    and event.metadata.get("status") == RUN_STARTED
+                                ):
+                                    # A start's run, named: its view opens here.
+                                    state.viewed = instance_of(event.run)
+                                    if state.viewed is not None:
+                                        await opens(state.viewed)
                                 handler = dispatch.get(event.type)
                                 if handler is not None:
                                     state.at_work = _at_work(event, state.viewed)

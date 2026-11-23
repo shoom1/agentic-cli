@@ -885,3 +885,29 @@ class TestNumberedPastTheStored:
         # The first manager's run is in its records, loaded with the conversation.
         assert runs == ["worker-1#1", "worker-2#1"]
         assert kept == ["worker-1", "worker-2"]
+
+
+class TestAKeptRow:
+    """A conversation whose only work is a run the user started has a row
+    ``keep`` wrote: a turn that stores no message leaves it, and a title it
+    holds is its title."""
+
+    async def test_a_turn_that_stored_no_message_leaves_the_kept_row(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+        await sessions.keep(ref(), "Objective title.")
+
+        await sessions.record(ref(), [HumanMessage("Typed.")])  # the turn's start
+        await sessions.record(ref())  # its end: the input was never stored
+
+        assert await sessions.exists(ref())
+        (row,) = await sessions.list("app", "alice")
+        assert row.title == "Objective title."
+
+    async def test_a_conversation_never_kept_is_titled_and_dropped_as_before(self, saver, store):
+        sessions = CheckpointSessions(saver, store)
+
+        await sessions.record(ref(), [HumanMessage("Typed.")])
+        assert [(r.title, r.turns) for r in await sessions.list("app", "alice")] == [("Typed.", 1)]
+        await sessions.record(ref())  # no message stored: its row goes
+
+        assert await sessions.list("app", "alice") == []

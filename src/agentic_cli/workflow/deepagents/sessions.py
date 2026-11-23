@@ -254,11 +254,34 @@ class CheckpointSessions:
         self._backfill = backfill
 
     async def exists(self, ref: SessionRef) -> bool:
-        """Whether ``ref``'s root thread holds at least one message."""
-        return bool(_messages(await self._root(ref)))
+        """Whether ``ref``'s root thread holds at least one message, or the index holds its row.
+
+        A row without a message is a conversation whose only work is a run the
+        user started (``keep``).
+        """
+        if _messages(await self._root(ref)):
+            return True
+        item = await self._store.aget(_rows_of(ref.app_name, ref.user_id), ref.session_id)
+        return item is not None and _from_value(ref.session_id, item.value) is not None
+
+    async def keep(self, ref: SessionRef, objective: str) -> None:
+        """Write ``ref``'s row, titled from ``objective`` with no turns, when it has none.
+
+        What a conversation whose only work is a run the user started
+        (``start_instance``) needs to be listed and found. A conversation that
+        holds a message or a row keeps its title and turns. A failed write is
+        raised: the start's conversation could not be stored.
+        """
+        if await self.exists(ref):
+            return
+        row = SessionInfo(ref.session_id, session_title(objective), 0, datetime.now(timezone.utc))
+        await self._store.aput(
+            _rows_of(ref.app_name, ref.user_id), ref.session_id, _value(row, kept=True),
+            index=False,
+        )
 
     async def info(self, ref: SessionRef) -> SessionInfo | None:
-        """``ref``'s row, or None when its root thread holds no message.
+        """``ref``'s row, or None when its root thread holds no message and the index no row.
 
         The index's row; a conversation it does not hold (written before it,
         or whose row could not be written) is read from its checkpoint.
@@ -283,21 +306,34 @@ class CheckpointSessions:
         ends, however it ends, and after ``/compact``, without ``adding``,
         which corrects that row. A conversation without a message has none:
         a first turn stopped before its input was stored takes its row back.
+        A row ``keep`` wrote (a conversation started by a run the user began)
+        is the exception: it keeps its title, the objective's, whatever is
+        typed later, and a turn that stored no message leaves it.
         A failed write is logged at debug and costs nothing else: the
         conversation's next turn writes its row again.
         """
         namespace = _rows_of(ref.app_name, ref.user_id)
         try:
             item = await self._root(ref)
+            held = await self._store.aget(namespace, ref.session_id)
+            kept = held.value if held is not None and _is_kept(held.value) else None
             if adding:
                 messages = [*_messages(item), *adding]
                 row = _row_of(ref.session_id, messages, datetime.now(timezone.utc))
             elif _messages(item):
                 row = _row(ref.session_id, item)
+            elif kept is not None:
+                return
             else:
                 await self._store.adelete(namespace, ref.session_id)
                 return
-            await self._store.aput(namespace, ref.session_id, _value(row), index=False)
+            if kept is not None:
+                title = _from_value(ref.session_id, kept)
+                if title is not None:
+                    row = SessionInfo(row.session_id, title.title, row.turns, row.updated)
+            await self._store.aput(
+                namespace, ref.session_id, _value(row, kept=kept is not None), index=False
+            )
         except Exception:  # noqa: BLE001 - the turn is not the index's to fail
             logger.debug(
                 "session_row_not_written", session_id=ref.session_id, exc_info=True
@@ -486,13 +522,19 @@ class CheckpointSessions:
         version = mark.value.get("v") if mark is not None else None
         return isinstance(version, int) and version >= _BACKFILL_VERSION
 
+    async def _is_kept_row(self, namespace: tuple[str, ...], session_id: str) -> bool:
+        """Whether the index's row of ``session_id`` is one ``keep`` wrote."""
+        item = await self._store.aget(namespace, session_id)
+        return item is not None and _is_kept(item.value)
+
     async def _fill(self, app_name: str, user_id: str) -> dict[str, SessionInfo]:
         """Index the app and user's conversations from their checkpoints, once.
 
         Scans the saver (``_scan``), writes the row of each conversation the
         index lacks or holds an older row of, and marks the app and user
         done, in one batch. The rows are read after the scan, so a newer one
-        that another process's turn wrote meanwhile is kept. A failed write
+        that another process's turn wrote meanwhile is kept, and so is a row
+        ``keep`` wrote. A failed write
         is logged at debug, and the next listing scans again.
 
         Returns:
@@ -504,6 +546,8 @@ class CheckpointSessions:
         writes: list[PutOp] = []
         for session_id, row in scanned.items():
             held = rows.get(session_id)
+            if held is not None and await self._is_kept_row(namespace, session_id):
+                continue  # ``keep``'s row is left as it is
             if held is None or held.updated < row.updated:
                 rows[session_id] = row
                 writes.append(PutOp(namespace, session_id, _value(row), index=False))
@@ -658,14 +702,22 @@ def _marks_of(app_name: str, user_id: str) -> tuple[str, ...]:
     return (*_BACKFILLS, _label(app_name), _label(user_id))
 
 
-def _value(row: SessionInfo) -> dict[str, Any]:
-    """A row as the index stores it."""
-    return {
+def _value(row: SessionInfo, *, kept: bool = False) -> dict[str, Any]:
+    """A row as the index stores it (``kept``: ``keep`` wrote it, and its title stays)."""
+    value: dict[str, Any] = {
         "title": row.title,
         "turns": row.turns,
         "updated": row.updated.isoformat(),
         "v": _ROW_VERSION,
     }
+    if kept:
+        value["kept"] = True
+    return value
+
+
+def _is_kept(value: Any) -> bool:
+    """Whether a stored row is one ``keep`` wrote."""
+    return isinstance(value, dict) and value.get("kept") is True
 
 
 def _from_value(session_id: str, value: Any) -> SessionInfo | None:

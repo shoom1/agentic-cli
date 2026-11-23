@@ -100,7 +100,7 @@ from agentic_cli.workflow.deepagents.summarization import (
     summary_event,
     write_summary,
 )
-from agentic_cli.workflow.deepagents.task_tool import SHARED_KEYS
+from agentic_cli.workflow.deepagents.task_tool import SHARED_KEYS, inherited_messages
 from agentic_cli.workflow.deepagents.tools import to_langchain_tools
 from agentic_cli.workflow.events import WorkflowEvent
 from agentic_cli.workflow.langchain_models import build_chat_model
@@ -566,6 +566,21 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         self._outside_marks.seed(ref, await self._sessions.outside_content(ref))
         mark = self._outside_marks.get(ref)
         return {"outside_content": mark} if mark else {}
+
+    async def _keep_conversation(self, ref: "SessionRef", objective: str) -> None:
+        """Write the conversation's row when it has none (``CheckpointSessions.keep``)."""
+        if self._sessions is not None:
+            await self._sessions.keep(ref, objective)
+
+    async def _inherited_history(self, ref: "SessionRef") -> list[Any]:
+        """``ref``'s conversation as an inheriting run the user starts reads it.
+
+        The root's messages in its newest checkpoint, its summary applied
+        (``inherited_messages``), as the root's ``task`` hands them from its
+        state; none for a conversation with no checkpoint yet.
+        """
+        values = (await self._root.aget_state(run_config(ref))).values
+        return inherited_messages(values)
 
     async def _deliver_job_notice(
         self, notice: str, record: Any, result: Any, ref: "SessionRef"

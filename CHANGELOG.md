@@ -575,6 +575,38 @@ the start of the entry's title.
 
 ### Added
 
+- **`/agent new <type> <objective>`: you start a sub-agent, and its view
+  opens on its first run.** A type whose `spawnable_by` names `"user"`, in
+  an app whose policy's `spawn_sources` names it too
+  (`SubAgentPolicy(spawn_sources={"user"})`), may be started by the user:
+  `/agent new researcher Find what changed in the 2.0 release.` starts
+  `researcher-<n>`, its parent the main agent (depth 1, so `max_spawn_depth`
+  never refuses it), `started_by: user`, its brief the objective (the rest of
+  the line, as typed), titled with the objective's first line. It is counted
+  toward no turn's runs, takes a working slot while it works, and an
+  inheriting type reads the main conversation as the main agent's `task`
+  would hand it. Its view opens as its run starts and the run streams there,
+  as a follow-up's does: a line typed steers it, Ctrl+C is your stop (the run
+  `cancelled`, the sub-agent `stopped`; one pressed before the run started
+  stops it as it starts, and no view opens), `/back` tells the main agent
+  once, and, being the main agent's sub-agent, the main agent's
+  `message_agent` may continue it (when the main agent has the follow-up
+  tools: `follow_ups`, and a sub-agent it may start or a type agents may
+  start). A conversation whose only work is a start is stored, titled with
+  the objective, so `/resume`, `--continue` and `--resume` reach it. In
+  another sub-agent's view it leaves that one first. A type you cannot start
+  opens nothing ("You cannot start 'writer' here. Types you can start:
+  researcher."; "This app lets you start no agent types." when there is
+  none), and a missing type or objective says
+  `Usage: /agent new <type> <objective>`. The manager's entry point
+  (provisional): `start_instance(agent_type, objective)`, a turn of its own
+  whose first event is the run's start, which names the instance; a refusal
+  is one `ERROR` ("A new agent needs an objective." for a blank one),
+  stopping the stream is the user's stop, and `interrupt_instance` ends it as
+  a process exit does. The app's `start_agent(agent_type, objective)` is what
+  the command calls; the manager's delegations' `start_by_user`,
+  `startable_by_user` and `user_start_refused` (provisional) start and refuse
+  it. On both backends, contract-tested.
 - **A skill that starts an agent: the frontmatter key `agent`, on both
   backends.** A skill's `SKILL.md` may name one of the app's agent types
   at the top of its frontmatter (`agent: researcher`). Where the app

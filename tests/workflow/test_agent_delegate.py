@@ -4441,3 +4441,212 @@ class TestAListingThatFails:
     def test_the_cause_is_cut_to_200_characters(self):
         error = ToolsUnlistedError("choosy", ValueError("x" * 500))
         assert len(error.reason) <= 203 and error.reason.startswith("ValueError: xxx")
+
+
+# -- the user's start: /agent new --------------------------------------------------------
+
+#: The user may start a type at run time (``/agent new``), agents none.
+USERS = SubAgentPolicy(spawn_sources={"user"})
+READS = AgentConfig(name="reads", prompt="p", description="Reads it all.", inherit_context=True,
+                    spawnable_by=frozenset({"user"}))
+STARTABLE = {**SPAWNING, "reads": READS}
+
+
+async def users_start(
+    made: Delegations, agent_type: str, objective: Any, **fields: Any
+) -> tuple[dict[str, Any], list[WorkflowEvent]]:
+    """``made.start_by_user(CONVERSATION, ...)`` in a turn of ``CONVERSATION``
+    (its span open), as the manager's ``start_instance`` runs it; its result,
+    the runs the turn counted, and what it reported."""
+    live = LiveEvents()
+    out: dict[str, Any] = {}
+
+    async def source():
+        token = set_active_turn(CONVERSATION)
+        scope = open_turn_scope()
+        try:
+            with live_events.reporting(live):
+                out["result"] = await made.start_by_user(
+                    CONVERSATION, agent_type, objective, **fields
+                )
+                out["counted"] = runs_this_turn()
+        finally:
+            close_turn_scope(scope)
+            reset_active_turn(token)
+        if False:  # pragma: no cover
+            yield
+
+    events = [item async for item in merged(source(), live)]
+    return out, events
+
+
+class TestTheUsersStart:
+    """``start_by_user``: a new instance the user starts (``/agent new``),
+    through ``start``: its parent the root, at depth 1, ``started_by`` the
+    user, counted toward no turn's runs, titled from its objective; only a
+    type the policy and the type let the user start."""
+
+    async def test_a_type_the_user_may_start_runs_under_the_root(self):
+        hook, asked = answering("Answered.")
+        runs = AgentRuns()
+
+        out, events = await users_start(
+            delegations(hook, runs=runs, types=STARTABLE, policy=USERS),
+            "asked", "Answer Y.\nIn full.",
+        )
+
+        assert out["result"].result == {
+            "success": True, "agent": "asked-1", "run": "asked-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Answered.", "error": None,
+        }
+        (run,) = asked
+        assert (run.ref.depth, run.ref.parent_run, run.history, run.follow_up) == (
+            1, None, None, False
+        )
+        assert run.message == task_message(
+            Brief(title="Answer Y.", objective="Answer Y.\nIn full.")
+        )
+        assert events[0].metadata == {
+            "status": RUN_STARTED, "agent": "asked", "partial": False, "title": "Answer Y.",
+            "brief": {"title": "Answer Y.", "objective": "Answer Y.\nIn full."},
+            "started_by": "user", "mode": "blocking",
+            "inherit_context": False, "continuable": True,
+        }
+        assert out["counted"] == 0
+        (instance,) = runs.instances(CONVERSATION)
+        assert (instance.instance, instance.parent, instance.depth, instance.title) == (
+            "asked-1", "root", 1, "Answer Y."
+        )
+        (record,) = runs.records(CONVERSATION)
+        assert (record.started_by, record.call_id) == ("user", None)
+
+    async def test_each_start_is_a_new_instance(self):
+        hook, _ = answering()
+        made = delegations(hook, types=STARTABLE, policy=USERS)
+
+        first, _ = await users_start(made, "asked", "One.")
+        second, _ = await users_start(made, "asked", "Two.")
+
+        assert [out["result"].result["agent"] for out in (first, second)] == [
+            "asked-1", "asked-2",
+        ]
+
+    async def test_it_runs_past_the_runs_a_turn_may_start(self):
+        """Its turn's runs are full: the user's start is no run of theirs."""
+        hook, asked = answering()
+        made = delegations(hook, types=STARTABLE,
+                           policy=SubAgentPolicy(spawn_sources={"user"}, max_runs_per_turn=1))
+        live = LiveEvents()
+        results: list[Any] = []
+
+        async def source():
+            token = set_active_turn(CONVERSATION)
+            scope = open_turn_scope()
+            try:
+                with live_events.reporting(live):
+                    results.append(await made.start(start_request(call_id="c1")))
+                    results.append(await made.start_by_user(CONVERSATION, "asked", "Go."))
+                    results.append(runs_this_turn())
+            finally:
+                close_turn_scope(scope)
+                reset_active_turn(token)
+            if False:  # pragma: no cover
+                yield
+
+        async for _ in merged(source(), live):
+            pass
+
+        counted, users, total = results
+        assert (counted.result["status"], users.result["status"], total) == (
+            RUN_COMPLETED, RUN_COMPLETED, 1
+        )
+        assert len(asked) == 2
+
+    async def test_an_inheriting_type_reads_the_conversation_given(self):
+        hook, asked = answering()
+
+        await users_start(
+            delegations(hook, types=STARTABLE, policy=USERS), "reads", "Read it.",
+            history=lambda: ["the conversation"],
+        )
+
+        (run,) = asked
+        assert run.history == ["the conversation"]
+        assert run.message == task_message(Brief(title="Read it.", objective="Read it."),
+                                           inherit=True)
+        assert run.message.endswith(INHERITED_CONTEXT_NOTE)
+
+    async def test_its_state_is_the_one_given(self):
+        hook, asked = answering()
+
+        await users_start(
+            delegations(hook, types=STARTABLE, policy=USERS), "asked", "Go.",
+            state={"outside_content": "web_fetch"},
+        )
+
+        assert asked[0].state == {"outside_content": "web_fetch"}
+
+    def test_the_types_the_user_may_start(self):
+        hook, _ = answering()
+        assert delegations(hook, types=STARTABLE, policy=USERS).startable_by_user() == (
+            "asked", "reads",
+        )
+        assert delegations(hook, types=STARTABLE).startable_by_user() == ()
+        # Agents may start helper; only the user may start asked and reads.
+        assert delegations(hook, types=STARTABLE, policy=AGENTS).startable_by_user() == (
+            "asked", "reads",
+        )
+        agents_only = SubAgentPolicy(spawn_sources={"agent"})
+        assert delegations(hook, types=STARTABLE, policy=agents_only).startable_by_user() == ()
+
+    @pytest.mark.parametrize("agent_type", ["researcher", "helper", "nobody", "coordinator"])
+    async def test_one_it_may_not_start_is_refused_naming_those_it_may(self, agent_type):
+        hook, asked = answering()
+        runs = AgentRuns()
+
+        out, events = await users_start(
+            delegations(hook, runs=runs, types=STARTABLE, policy=USERS), agent_type, "Go."
+        )
+
+        assert out["result"].result == {
+            "success": False,
+            "error": f"You cannot start '{agent_type}' here. Types you can start: asked, reads.",
+        }
+        assert out["result"].run is None
+        assert (asked, events, runs.records(CONVERSATION), out["counted"]) == ([], [], [], 0)
+
+    @pytest.mark.parametrize("policy", [SubAgentPolicy(), SubAgentPolicy(spawn_sources={"agent"})])
+    async def test_with_none_the_user_may_start_it_says_so(self, policy):
+        hook, asked = answering()
+
+        out, events = await users_start(
+            delegations(hook, types=STARTABLE, policy=policy), "asked", "Go."
+        )
+
+        assert out["result"].result == {
+            "success": False, "error": "This app lets you start no agent types.",
+        }
+        assert (asked, events) == ([], [])
+
+    @pytest.mark.parametrize("objective", ["", "  \n ", None, 42])
+    async def test_a_start_needs_an_objective(self, objective):
+        hook, asked = answering()
+
+        out, events = await users_start(
+            delegations(hook, types=STARTABLE, policy=USERS), "asked", objective
+        )
+
+        assert out["result"].result == {
+            "success": False, "error": "A new agent needs an objective.",
+        }
+        assert (asked, events) == ([], [])
+
+    def test_its_refusals_say_why_before_any_run(self):
+        hook, _ = answering()
+        made = delegations(hook, types=STARTABLE, policy=USERS)
+
+        assert made.user_start_refused("asked", "Go.") is None
+        assert made.user_start_refused("nobody", " ") == (
+            "You cannot start 'nobody' here. Types you can start: asked, reads."
+        )
+        assert made.user_start_refused("asked", " ") == "A new agent needs an objective."

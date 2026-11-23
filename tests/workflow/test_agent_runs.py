@@ -148,6 +148,22 @@ class TestRunFor:
 
         assert [run_instance(ref.run) for ref in (middle, leaf)] == ["middle-1", "leaf-1"]
 
+    def test_without_a_call_each_is_a_new_instance_under_the_root(self):
+        """The user's start (``/agent new``) has no call: each is its own run,
+        an open one too, numbered with the rest."""
+        runs = AgentRuns()
+        first = started(runs, ONE, "c1", "helper")
+
+        named = [runs.run_for(ONE, None, None, "helper") for _ in range(2)]
+
+        assert named == [
+            RunRef(agent="helper", instance="helper-2", run="helper-2#1", parent_run=None,
+                   depth=1),
+            RunRef(agent="helper", instance="helper-3", run="helper-3#1", parent_run=None,
+                   depth=1),
+        ]
+        assert runs.run_for(ONE, None, "c1", "helper") is first  # the call's own, still open
+
 
 class TestNumberFrom:
     """A conversation's store may keep instances an earlier manager numbered

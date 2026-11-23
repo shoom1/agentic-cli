@@ -1,7 +1,8 @@
 """Turns on a real console, over a pty: Ctrl+C, a question, typing ahead,
 ``/new``, ``/resume``, ``/compact``, the status bar's ``ctx`` and a
 sub-agent's view (``/agent <id>``: a follow-up, a line that steers the run
-that works, Ctrl+C on it, ``/back``).
+that works, Ctrl+C on it, ``/back``; ``/agent new``: a new
+sub-agent's first run in its view).
 
 thinking-prompt 0.4's Ctrl+C cancels the turn's task, its dialogs are
 ``Dialog`` objects, drawn in a box or inline, and it refuses Enter while a
@@ -597,3 +598,37 @@ def test_in_a_view_a_line_steers_the_run_that_works_and_ctrl_c_stops_it(console)
     transcript = console.transcript
     assert transcript.count("Operation cancelled...") == 1
     assert "Busy" not in transcript
+
+
+def test_agent_new_opens_the_view_its_run_streams_there_and_back_tells_the_main_agent(console):
+    """``/agent new <type> <objective>`` opens the new sub-agent's view on its
+    first run: its reply streams there, a line typed while it works steers
+    it (the prompt takes it: no "Busy"), and ``/back`` tells the main agent once."""
+    console.type_line("/agent new researcher hold")
+    console.expect("── researcher-1 · researcher · running ──")
+    console.expect("Holding.")
+    console.type_line("Also find Z.")
+    console.expect("Given to researcher-1's run before its next step.")
+    console.expect("Steered: Also find Z.")
+    console.type_line("/back")
+    console.expect("── back to main ──")
+    console.expect("Told: The user worked with researcher-1 directly")
+    console.type_line("which")
+    console.expect("Session: ")
+    console.exit()
+
+    transcript = console.transcript
+    steered = transcript.index("Steered: Also find Z.")
+    assert steered < transcript.index("── back to main ──")
+    assert transcript.count("Told: The user worked with researcher-1 directly") == 1
+    assert "Busy" not in transcript
+
+
+def test_a_conversation_whose_only_work_is_agent_new_is_named_at_exit(console):
+    """Nothing was said to the main agent: the exit still names how to come
+    back to the conversation the new sub-agent worked in."""
+    console.type_line("/agent new researcher look")
+    console.expect("Researched: look")
+    console.exit()
+
+    assert "Resume this conversation" in console.transcript

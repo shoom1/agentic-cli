@@ -270,7 +270,8 @@ class AgentRuns:
 
     def __init__(self, *, on_change: Callable[[SessionRef | None], None] | None = None) -> None:
         self._on_change = on_change
-        # (conversation, parent run, call id) -> the run that call started.
+        # (conversation, parent run, call id) -> the run that call started (a
+        # start with no call, the user's, has no key).
         self._runs: dict[tuple[Any, str | None, str], RunRef] = {}
         # (conversation, agent) -> how many instances of it are numbered.
         self._numbered: dict[tuple[Any, str], int] = {}
@@ -285,18 +286,23 @@ class AgentRuns:
         self._end_numbers: dict[Any, int] = {}
 
     def run_for(
-        self, conversation: SessionRef | None, parent: RunRef | None, call_id: str, agent: str
+        self,
+        conversation: SessionRef | None,
+        parent: RunRef | None,
+        call_id: str | None,
+        agent: str,
     ) -> RunRef:
         """The run the call ``call_id`` of ``parent``'s starts, of ``agent``.
 
         The same key names the same run while it is open; one that has ended
         is followed by a new instance of ``agent`` (numbered per agent, per
         conversation, from 1) and its run ``#1``. ``parent`` None, or the
-        root's own (``root_run``), is the root.
+        root's own (``root_run``), is the root. A start with no call
+        (``call_id`` None: the user's) has no key: each is a new instance.
         """
         parent_run = None if parent is None or parent.is_root else parent.run
         key = (conversation, parent_run, call_id)
-        ref = self._runs.get(key)
+        ref = self._runs.get(key) if call_id is not None else None
         if ref is not None and not self._ended(conversation, ref):
             return ref
         count = self._numbered.get((conversation, agent), 0) + 1
@@ -309,7 +315,8 @@ class AgentRuns:
             parent_run=parent_run,
             depth=(parent.depth if parent is not None else 0) + 1,
         )
-        self._runs[key] = ref
+        if call_id is not None:
+            self._runs[key] = ref
         return ref
 
     def number_from(self, conversation: SessionRef | None, counts: Mapping[str, int]) -> None:

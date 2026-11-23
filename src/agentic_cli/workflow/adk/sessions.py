@@ -70,6 +70,7 @@ from urllib.parse import unquote
 from agentic_cli.logging import Loggers
 from agentic_cli.tools.jobs.resume import JOB_NOTICE_HEADER
 from agentic_cli.workflow.agents.runs import stored_instance_ids
+from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef, session_title
 
 if TYPE_CHECKING:
@@ -407,6 +408,43 @@ def turn_state(session: "Session", message: str) -> dict[str, Any]:
     if not title:
         delta[TITLE_KEY] = session_title(typed[0] if typed else message)
     return delta
+
+
+async def keep_conversation(
+    service: "BaseSessionService", ref: SessionRef, objective: str, *, author: str
+) -> None:
+    """Store ``ref``'s conversation when it holds no event yet, titled from ``objective``.
+
+    ADK lists a session only once it holds an event, and keeps its state only
+    through events: the session is made when there is none, and one state-only
+    event (no content: no request carries it) sets its title and no turns of
+    the user's, the row ``turn_state`` would leave, and an unmarked
+    outside-content record (a session with events and none is read as one
+    from before 0.7.0 and marked). Its ``author`` is the root
+    agent's name: it is only ever the first event of a new conversation, and
+    ADK's router, which warns of an event from an agent the app lacks, picks
+    the root for it as it would anyway. A session with events is left as it is.
+    """
+    from google.adk.events import Event, EventActions
+    from google.adk.sessions.base_session_service import GetSessionConfig
+
+    session = await service.get_session(
+        app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        config=GetSessionConfig(num_recent_events=1),
+    )
+    if session is not None and session.events:
+        return
+    if session is None:
+        session = await service.create_session(
+            app_name=ref.app_name, user_id=ref.user_id, session_id=ref.session_id,
+        )
+    # The conversation is new: it holds no outside content (what a first turn records).
+    delta: dict[str, Any] = {
+        TURNS_KEY: 0, TITLE_KEY: session_title(objective), OUTSIDE_CONTENT_KEY: "",
+    }
+    await service.append_event(session, Event(
+        author=author, actions=EventActions(state_delta=delta),
+    ))
 
 
 def row_from_state(session: "Session") -> SessionInfo | None:

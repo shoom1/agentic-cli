@@ -23,6 +23,13 @@ the binding ``bind_ctrl_c`` adds (the user's stop: the instance is
 the user's, so the instance stays ``idle``. A closed instance's view is
 read-only: no prompt, and a line typed there is refused.
 
+``/agent new <type> <objective>`` starts an instance for the user (the
+manager's ``start_instance``: its parent the main agent, ``started_by:
+user``) and opens its view once the run's start names it: the run streams
+there, in a task the view holds as it holds a follow-up's, so a line typed
+steers it, Ctrl+C stops it and ``/back`` tells the main agent of it. In
+another view it leaves that one first, as ``/back`` does.
+
 ``/back`` leaves: it waits for a run still working, prints ``── back to main
 ──``, and, when a run the user started there ended since the main agent was
 last told, tells the main agent once, in a notice turn (``tell_root`` with
@@ -97,10 +104,18 @@ class AgentView:
         told: The run of the user's whose envelope the main agent knows of
             (``instance_result``'s, as the view opened): ``/back`` tells it
             only of a later one.
+        processor: The view's message processor; None: a new one
+            (``/agent new``'s is the one drawing the instance's first run).
     """
 
     def __init__(
-        self, app: Any, instance: str, conversation: "SessionRef", told: str | None
+        self,
+        app: Any,
+        instance: str,
+        conversation: "SessionRef",
+        told: str | None,
+        *,
+        processor: MessageProcessor | None = None,
     ) -> None:
         self.app = app
         self.instance = instance
@@ -108,7 +123,7 @@ class AgentView:
         self.told = told
         #: The view's own message processor: its runs' task list is the
         #: instance's, never the main agent's task box.
-        self.processor = MessageProcessor()
+        self.processor = processor if processor is not None else MessageProcessor()
         #: The prompt the app had: put back by ``/back``.
         self.prompt_before: Any = None
         self._runs: set[asyncio.Task[None]] = set()
@@ -241,9 +256,14 @@ class AgentView:
         ):
             app.session.add_message("system", STEERED.format(instance=self.instance))
             return
-        run = asyncio.create_task(
+        self.adopt(asyncio.create_task(
             self._run(line, self._last), name=f"view run of {self.instance}"
-        )
+        ))
+
+    def adopt(self, run: "asyncio.Task[None]") -> None:
+        """Hold ``run``, a task that works for the instance in view: its last,
+        which a line typed next waits for, stopped by Ctrl+C (``stop``) and
+        waited for by ``settled``."""
         self._last = run
         self._runs.add(run)
         run.add_done_callback(self._ended)
@@ -346,14 +366,78 @@ async def open_view(app: Any, instance: str) -> bool:
     latest = workflow.instance_result(
         instance, session_id=conversation.session_id, user_id=conversation.user_id
     )
-    view = AgentView(app, instance, conversation, told=(latest or {}).get("run"))
+    _enter(app, AgentView(app, instance, conversation, told=(latest or {}).get("run")), record)
+    return True
+
+
+def _enter(app: Any, view: AgentView, record: "InstanceRecord") -> None:
+    """Make ``view`` the app's: its rule and recap, its prompt and status bar."""
     view.show(record)
     view.prompt_before = app.session.message
     app._agent_view = view
     app._workflow_controller.view_segment = view.status_segment
     view.refresh()
-    logger.info("agent_view_opened", instance=instance)
-    return True
+    logger.info("agent_view_opened", instance=view.instance)
+
+
+async def start_view(app: Any, agent_type: str, objective: str) -> bool:
+    """``/agent new <type> <objective>`` (``BaseCLIApp.start_agent``): a new
+    instance for the user, and its view.
+
+    A view open first is left, as ``/back`` leaves it (its run waited for,
+    the main agent told). The start runs in a task of its own, a write to
+    the conversation under its turn lock (``ConversationCore.start_instance``)
+    drawn by a processor of its own; once the run's start names the
+    instance, its view opens on it, holding that task and that processor,
+    so the rest of the run streams there as a follow-up's does. This
+    returns then, or when the start ended without a run (a refusal, said;
+    a conversation another process has open). Ctrl+C before the view
+    opened (the command's cancel) stops the run as the view's Ctrl+C does,
+    and opens none.
+
+    Returns:
+        Whether the new instance's view opened.
+    """
+    if app.agent_view is not None:
+        await leave_view(app)
+    processor = MessageProcessor()
+    opened: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    start: asyncio.Task[None] | None = None
+
+    async def opens(instance: str) -> None:
+        # Called inside the start, once its run's start names the instance.
+        workflow = app.workflow
+        conversation = workflow.session_ref(getattr(app, "session_id", None))
+        record = workflow.agent_runs.instance(conversation, instance)
+        if record is None or opened.done():
+            return
+        view = AgentView(app, instance, conversation, told=None, processor=processor)
+        assert start is not None
+        view.adopt(start)
+        _enter(app, view, record)
+        opened.set_result(True)
+
+    async def run() -> None:
+        parts = dataclasses.replace(app._turn_parts(), processor=processor)
+        try:
+            await app._conversation.start_instance(agent_type, objective, parts, opens=opens)
+        finally:
+            if not opened.done():
+                opened.set_result(False)
+            view = app.agent_view
+            if view is not None and view.processor is processor:
+                view.refresh()
+
+    start = asyncio.create_task(run(), name=f"new {agent_type}")
+    try:
+        if await asyncio.shield(opened):
+            return True
+    except asyncio.CancelledError:
+        start.cancel()
+        await asyncio.wait({start})
+        raise
+    await start  # ended without a run: its failure, if any, is the command's
+    return False
 
 
 async def leave_view(app: Any) -> bool:
