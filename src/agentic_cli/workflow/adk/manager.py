@@ -257,6 +257,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     #: runner of each, by (type, choice): what a run on a choice runs on.
     _variant_agents: "Mapping[tuple[str, str], LlmAgent]" = MappingProxyType({})
     _variant_runners: "Mapping[tuple[str, str], Runner]" = MappingProxyType({})
+    #: The built-in general-purpose type built for each type that may start it
+    #: (``Delegations.general_purpose``), and the runner of each, by that type.
+    _general_agents: "Mapping[str, LlmAgent]" = MappingProxyType({})
+    _general_runners: "Mapping[str, Runner]" = MappingProxyType({})
 
     def __init__(
         self,
@@ -415,8 +419,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
     def _detach_backend(self) -> list[Closer]:
         """The runners and the agents, and the LLM logging plugin.
 
-        The conversation's runner and each sub-agent type's, and each of a
-        type's model choices': a runner closes
+        The conversation's runner and each sub-agent type's, each of a
+        type's model choices' and each general-purpose agent's: a runner closes
         its agent's toolsets (an MCP server stops with its toolset) and
         plugins; the session service it only flushes, so one a model switch
         keeps stays open. They close before the session service (the base
@@ -428,6 +432,8 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         chosen_runners, self._variant_runners = (
             self._variant_runners, MappingProxyType({})
         )
+        general_runners, self._general_runners = self._general_runners, MappingProxyType({})
+        self._general_agents = MappingProxyType({})
         self._variant_agents = MappingProxyType({})
         self._agents = MappingProxyType({})
         self._root_agent = None
@@ -453,6 +459,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     ),
                 )
                 for (name, choice), owned in chosen_runners.items()
+            ),
+            *(
+                (
+                    f"runner general_purpose for {spawner}",
+                    functools.partial(
+                        self._aclose_owned, owned, f"runner general_purpose for {spawner}"
+                    ),
+                )
+                for spawner, owned in general_runners.items()
             ),
         ]
 
@@ -660,7 +675,10 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         itself. Every agent is kept by name (``_agents``): each sub-agent
         type gets a runner of its own (``_do_initialize``), and so does each
         of its model choices, an agent built once more on that model
-        (``_variant_agents``, by (type, choice)).
+        (``_variant_agents``, by (type, choice)), and the built-in
+        general-purpose type, one for each type that may start it
+        (``Delegations.general_purpose``: that type's tools, toolsets of its
+        own and model, no delegation tools; ``_general_agents``, by that type).
 
         Prompt factories are called under this manager's settings context (see
         ``AgentConfig.get_prompt``), so a prompt that reads settings sees the
@@ -682,6 +700,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         agents: dict[str, LlmAgent] = {}
         variants: dict[tuple[str, str], LlmAgent] = {}
+        general: dict[str, LlmAgent] = {}
         # What this build's skill checks warned of: an agent built once more
         # for each model choice has skills of its own, and warns once.
         self._skill_warned: set[tuple[str, str]] = set()
@@ -711,9 +730,15 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     type="coordinator" if delegates else "leaf",
                     sub_agents=list(config.sub_agents),
                 )
+            # The general-purpose agent starts none (``delegates`` stays False).
+            for spawner, config in self._delegations.general_purpose.items():
+                general[spawner] = self._build_agent(
+                    config, service_map, root=False, model=self._general_model(spawner)
+                )
 
         self._agents = agents
         self._variant_agents = variants
+        self._general_agents = general
         root_agent = agents[graph.root_name]
         logger.info("agents_created", root=root_agent.name, total=len(agents))
         return root_agent
@@ -1087,6 +1112,24 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                 session_service=self._session_service,
             )
             for key, agent in self._variant_agents.items()
+        }
+        # And of each general-purpose agent: the chain on its spawner's model
+        # and numbers, under the name general_purpose.
+        self._general_runners = {
+            spawner: NoAfterTurnCompactionRunner(
+                app=App(
+                    name=child_app(self.app_name),
+                    root_agent=agent,
+                    plugins=self._agent_plugin_chain(
+                        agent, model=self._general_model(spawner),
+                        budget=self._budgets.get(spawner),
+                    ),
+                    context_cache_config=build.cache,
+                    events_compaction_config=None,
+                ),
+                session_service=self._session_service,
+            )
+            for spawner, agent in self._general_agents.items()
         }
         # A call's usage names its agent's own model and context numbers (the
         # default model stands in for an agent without one); only the agents
@@ -1707,7 +1750,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
 
         A run on a model choice (``run.model``) runs on the runner of its type
         built on that model (``_variant_runners``), its usage and context the
-        choice's (``_run_models``).
+        choice's (``_run_models``). A run of the built-in ``general_purpose``
+        type (``run.based_on``) runs on the runner built for that type
+        (``_general_runners``), on that type's model.
 
         In the run's own task (``agents/delegate.py``): the child session
         (``child_app``, ``child_session_id``: the conversation's id and the
@@ -1762,8 +1807,9 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         _, budgets = self._run_models(run)
         models, kinds = dict(build.models), self._agent_kinds()
         chosen = (
-            self._choice_models[(run.ref.agent, run.model)]
-            if run.model is not None else None
+            self._general_model(run.based_on) if run.based_on is not None
+            else self._choice_models[(run.ref.agent, run.model)] if run.model is not None
+            else None
         )
         if chosen is not None:
             models[run.ref.agent] = str(chosen.ref)
@@ -1780,10 +1826,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         )
         aborted = asyncio.Event()
         raised: BaseException | None = None
-        runner = (
-            self._agent_runners[run.ref.agent] if chosen is None
-            else self._variant_runners[(run.ref.agent, run.model)]
-        )
+        if run.based_on is not None:
+            runner = self._general_runners[run.based_on]
+        elif chosen is None:
+            runner = self._agent_runners[run.ref.agent]
+        else:
+            runner = self._variant_runners[(run.ref.agent, run.model)]
         key = (conversation, run.ref.run or "")
         if chosen is not None:
             self._chosen_runs[key] = chosen

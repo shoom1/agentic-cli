@@ -7905,3 +7905,309 @@ class TestTheGeneralPurposeTypeOff:
             "An agent named 'general_purpose' clashes with the built-in general_purpose type, "
             "which this app's SubAgentPolicy enables."
         )
+
+
+class TestTheGeneralPurposeType:
+    """``SubAgentPolicy.general_purpose``: a run that may start a type may start
+    the built-in ``general_purpose`` one, offered last, made for the caller's
+    type: that type's own tools (but ``task`` and the parent's other tools),
+    its model, the framework's prompt."""
+
+    async def test_the_root_starts_one_with_its_own_tools_model_and_prompt(self, make_crew):
+        crew = make_crew(
+            general_team(), subagents=GENERAL,
+            coordinator=[calls(delegate("general_purpose", "Sum it up.", "c1")), says("Done.")],
+            general_purpose=[calls(use("contract_lookup", "g1", q="x")), says("Summed.")],
+        )
+
+        with no_blocking_calls():
+            events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "general_purpose-1", "run": "general_purpose-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Summed.", "error": None,
+        }
+        assert crew.tool_names(GENERAL_PURPOSE) == GENERAL_TOOLS
+        assert json.loads(crew.results_read(GENERAL_PURPOSE, 1)["g1"]) == {
+            "success": True, "value": 42,
+        }
+        assert crew.system(GENERAL_PURPOSE).startswith(GENERAL_PURPOSE_PROMPT)
+        assert crew.sent_models(GENERAL_PURPOSE) == ["claude-sonnet-4-6"] * 2
+        assert crew.sent_models("coordinator")[0] == "claude-sonnet-4-6"
+        declared = crew.declared("coordinator")
+        assert agent_types(declared) == ["researcher", "general_purpose"]
+        assert declared["description"].endswith(
+            "- researcher: The researcher.\n" + GENERAL_LINE
+        )
+        assert SPAWN_LIMITS in declared["description"]
+        started = runs_of(events, RUN_STARTED)[0]
+        assert (started.run, started.metadata["based_on"]) == (GENERAL_1, "coordinator")
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert (instance.agent, instance.based_on, instance.parent, instance.status) == (
+            GENERAL_PURPOSE, "coordinator", "root", INSTANCE_IDLE
+        )
+        (record,) = crew.records()
+        assert list(record.usage) == ["anthropic:claude-sonnet-4-6"]
+
+    async def test_its_skills_start_no_agent(self, make_crew, project):
+        """The spawner's skills are its own too, but a load of one that starts an
+        agent is refused: a general-purpose agent starts none."""
+        skill = make_skill(project.parent / "skills")
+        crew = make_crew(
+            [*general_team(skills=[skill]), helper(spawnable_by=frozenset({"skill"}))],
+            subagents=SubAgentPolicy(spawn_sources={"agent", "skill"}, general_purpose=True),
+            coordinator=[calls(delegate("general_purpose", "Research it.", "c1")),
+                         says("Done.")],
+            general_purpose=[calls(load("research", "g1")), says("Could not.")],
+        )
+
+        await crew.turn()
+
+        assert json.loads(crew.results_read(GENERAL_PURPOSE, 1)["g1"]) == refused_by_skill(
+            "helper", "cannot be started here: sub-agents cannot start sub-agents"
+        )
+        assert [r.ref.instance for r in crew.records()] == ["general_purpose-1"]
+
+    async def test_a_root_without_sub_agents_gets_task_for_it_alone(self, make_crew):
+        crew = make_crew(
+            [agent("solo", tools=(contract_lookup,))], subagents=GENERAL,
+            solo=[calls(delegate("general_purpose", "Look X up.", "c1")), says("Done.")],
+            general_purpose=[says("X is 42.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names("solo") == ["contract_lookup", "task"]
+        assert agent_types(crew.declared("solo")) == ["general_purpose"]
+        assert crew.tool_names(GENERAL_PURPOSE) == [
+            "contract_lookup", "save_plan", "get_plan", "save_tasks", "get_tasks",
+        ]
+        assert envelope_read(crew.results_read("solo")["c1"])["result"] == "X is 42."
+
+    async def test_one_level_down_a_type_starts_one_with_its_tools_and_model(self, make_crew):
+        crew = make_crew(
+            [*general_team(), helper(tools=(contract_whoami,), model=CHOICE)],
+            subagents=SubAgentPolicy(spawn_sources={"agent"}, max_spawn_depth=2,
+                                     general_purpose=True),
+            coordinator=[calls(delegate("helper", "Help with X.", "c1")), says("Done.")],
+            helper=[calls(delegate("general_purpose", "Find who.", "h1")), says("Helped.")],
+            general_purpose=[says("You are helper-1's.")],
+        )
+
+        await crew.turn()
+
+        assert agent_types(crew.declared("helper")) == ["helper", "general_purpose"]
+        assert crew.tool_names(GENERAL_PURPOSE) == [
+            "contract_whoami", "save_plan", "get_plan", "save_tasks", "get_tasks",
+        ]
+        assert crew.sent_models(GENERAL_PURPOSE) == ["claude-haiku-4-5"]
+        assert crew.sent_models("coordinator")[0] == "claude-sonnet-4-6"
+        assert [(r.ref.instance, r.ref.depth, r.ref.parent_run, r.started_by)
+                for r in crew.records()] == [
+            ("helper-1", 1, None, "agent:root"),
+            ("general_purpose-1", 2, "helper-1#1", "agent:helper-1"),
+        ]
+        assert crew.manager.agent_runs.instance(
+            crew.conversation, "general_purpose-1"
+        ).based_on == "helper"
+        assert envelope_read(crew.results_read("helper", 1)["h1"])["result"] == (
+            "You are helper-1's."
+        )
+
+    async def test_narrowed_to_some_of_its_spawners_tools(self, make_crew):
+        crew = make_crew(
+            general_team(), subagents=GENERAL,
+            coordinator=[calls(delegate("general_purpose", "Look X up.", "c1",
+                                        tools=["contract_lookup"])), says("Done.")],
+            general_purpose=[calls(use("contract_whoami", "g1")), says("Could not.")],
+        )
+
+        await crew.turn()
+
+        assert crew.tool_names(GENERAL_PURPOSE) == NARROWED
+        assert json.loads(crew.results_read(GENERAL_PURPOSE, 1)["g1"]) == WHOAMI_NOT_FOUND
+        assert SEEN == []
+        (instance,) = crew.manager.agent_runs.instances(crew.conversation)
+        assert instance.tools == ("contract_lookup",)
+
+    @pytest.mark.parametrize("fields, error", [
+        ({"tools": ["write_file"]},
+         "The tools for 'general_purpose' must be some of its own: contract_lookup, "
+         "contract_whoami."),
+        ({"model": CHOICE}, "'general_purpose' has no model choices; leave model out."),
+    ], ids=["tools", "model"])
+    async def test_what_it_cannot_take_starts_no_run(self, make_crew, fields, error):
+        crew = make_crew(
+            general_team(), subagents=GENERAL,
+            coordinator=[calls(delegate("general_purpose", "Look X up.", "c1", **fields)),
+                         says("Done.")],
+        )
+
+        events = await crew.turn()
+
+        assert json.loads(crew.results_read("coordinator", 1)["c1"]) == {
+            "success": False, "error": error,
+        }
+        assert (runs_of(events), crew.records(), crew.requests(GENERAL_PURPOSE)) == ([], [], 0)
+
+    async def test_a_follow_up_runs_on_the_same_build_and_after_a_restart(self, make_crew):
+        following = SubAgentPolicy(follow_ups=True, spawn_sources={"agent"}, general_purpose=True)
+        first = make_crew(
+            general_team(), subagents=following, store="sqlite",
+            coordinator=[calls(delegate("general_purpose", "Find X.", "c1")), says("Asked."),
+                         calls(message("general_purpose-1", "Now find Y.", "c2")),
+                         says("Asked again.")],
+            general_purpose=[says("X is 42."), says("Y is 7.")],
+        )
+        await first.turn()
+        await first.turn("Find Y too.")
+        await first.manager.cleanup()
+        second = make_crew(
+            general_team(), subagents=following, store="sqlite",
+            coordinator=[calls(message("general_purpose-1", "Now find Z.", "c3")),
+                         says("Done.")],
+            general_purpose=[says("Z is 3.")],
+        )
+
+        await second.turn("And Z.")
+
+        assert envelope_read(first.results_read("coordinator")["c2"])["result"] == "Y is 7."
+        assert envelope_read(second.results_read("coordinator")["c3"])["run"] == (
+            "general_purpose-1#3"
+        )
+        for crew in (first, second):
+            assert all(
+                crew.tool_names(GENERAL_PURPOSE, n) == GENERAL_TOOLS
+                for n in range(crew.requests(GENERAL_PURPOSE))
+            )
+            assert crew.system(GENERAL_PURPOSE).startswith(GENERAL_PURPOSE_PROMPT)
+        assert "Y is 7." in second.bodies(GENERAL_PURPOSE)[0]
+        (instance,) = second.manager.agent_runs.instances(second.conversation)
+        assert (instance.based_on, instance.runs) == (
+            "coordinator", ["general_purpose-1#1", "general_purpose-1#2", "general_purpose-1#3"]
+        )
+
+
+class TestTheGeneralPurposeTypeFromASkillAndTheUser:
+    async def test_a_skill_that_names_it_starts_one_made_for_the_loading_agent(
+        self, make_crew, project
+    ):
+        skill = make_skill(project.parent / "skills", agent_type="general_purpose")
+        crew = make_crew(
+            general_team(skills=[skill]),
+            subagents=SubAgentPolicy(spawn_sources={"skill"}, general_purpose=True),
+            coordinator=[calls(load("research", "c1")), says("Done.")],
+            general_purpose=[says("Found it.")],
+        )
+
+        events = await crew.turn()
+
+        assert envelope_read(crew.results_read("coordinator")["c1"]) == {
+            "success": True, "agent": "general_purpose-1", "run": "general_purpose-1#1",
+            "status": RUN_COMPLETED, "partial": False, "result": "Found it.", "error": None,
+            "skill": "research",
+        }
+        assert crew.last_message(GENERAL_PURPOSE, 0) == RESEARCH_TASK
+        # The loading agent's tools, its skills' too.
+        assert crew.tool_names(GENERAL_PURPOSE) == [
+            *GENERAL_TOOLS, "list_skills", "load_skill", "load_skill_resource",
+        ]
+        assert crew.system(GENERAL_PURPOSE).startswith(GENERAL_PURPOSE_PROMPT)
+        started = runs_of(events, RUN_STARTED)[0]
+        assert (started.metadata["started_by"], started.metadata["based_on"]) == (
+            "skill:research", "coordinator"
+        )
+
+    async def test_the_user_starts_one_made_for_the_root(self, make_crew):
+        crew = make_crew(
+            general_team(),
+            subagents=SubAgentPolicy(spawn_sources={"user"}, general_purpose=True),
+            general_purpose=[calls(use("contract_whoami", "g1")), says("Summed.")],
+        )
+
+        events = await user_start(crew, "general_purpose", "Sum it up.")
+
+        started, ended = runs_of(events)
+        assert events[0] is started
+        assert (started.run, started.metadata["started_by"], started.metadata["based_on"]) == (
+            GENERAL_1, "user", "coordinator"
+        )
+        assert ended.metadata["result"] == "Summed."
+        assert crew.tool_names(GENERAL_PURPOSE) == GENERAL_TOOLS
+        assert SEEN == [(GENERAL_1, "g1")]
+        assert crew.requests("coordinator") == 0
+        assert crew.manager._delegations.startable_by_user() == ("general_purpose",)
+
+
+#: The stdio MCP server the MCP tests start (``atlas_add``, ``atlas_lookup``
+#: here); each process records its pid.
+MCP_SERVER = Path(__file__).parent / "deepagents" / "mcp_server.py"
+
+
+def _alive(pid: int) -> bool:
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+class TestAGeneralPurposeAgentAcrossAModelSwitch:
+    """A general-purpose agent made for a type with an MCP server has
+    connections of its own: across a model switch (``reinitialize``) each
+    connection opens once and closes once, the spawner's own MCP tools keep
+    working, and a follow-up of the general-purpose instance runs on the new
+    build (its spawner's new model)."""
+
+    async def test_each_connection_opens_and_closes_once(self, make_crew, project):
+        pytest.importorskip("mcp")
+        from agentic_cli.workflow.mcp import MCPServerConfig
+
+        pids = project.parent / "server-pids"
+        pids.mkdir()
+        server = MCPServerConfig(
+            name="atlas", command=sys.executable, args=[str(MCP_SERVER)], timeout=30,
+            env={"MCP_TEST_PID_DIR": str(pids)}, tool_name_prefix="atlas",
+        )
+        crew = make_crew(
+            general_team(mcp_servers=[server]),
+            subagents=SubAgentPolicy(follow_ups=True, spawn_sources={"agent"},
+                                     general_purpose=True),
+            coordinator=[calls(use("atlas_add", "c0", a=1, b=2)),
+                         calls(delegate("general_purpose", "Add 2 and 3.", "c1")), says("Asked."),
+                         calls(use("atlas_add", "c2", a=3, b=4)),
+                         calls(message("general_purpose-1", "Now 4 and 5.", "c3")), says("Done.")],
+            general_purpose=[calls(use("atlas_add", "g1", a=2, b=3)), says("5."),
+                             calls(use("atlas_add", "g2", a=4, b=5)), says("9.")],
+        )
+
+        async def allow_once(request: UserInputRequest) -> str:
+            return ALLOW_ONCE_CHOICE
+
+        crew.answer_with(allow_once)
+        opened = lambda: sorted(int(p.name) for p in pids.iterdir())  # noqa: E731
+        try:
+            await crew.turn()
+            before = opened()
+            await crew.manager.reinitialize(model="claude-opus-4-7", preserve_sessions=True)
+            await crew.turn("Again.")
+            after = opened()
+            alive_after = [pid for pid in after if _alive(pid)]
+        finally:
+            await crew.manager.cleanup()
+
+        # The spawner's and the general-purpose agent's, then each anew.
+        assert len(before) == 2 and len(after) == 4
+        assert sorted(set(after) - set(before)) == alive_after
+        assert [pid for pid in after if _alive(pid)] == []
+        assert ["3" in crew.results_read("coordinator", 1)["c0"],
+                "7" in crew.results_read("coordinator", -2)["c2"],
+                "5" in crew.results_read(GENERAL_PURPOSE, 1)["g1"],
+                "9" in crew.results_read(GENERAL_PURPOSE, -1)["g2"]] == [True] * 4
+        assert crew.sent_models(GENERAL_PURPOSE) == [
+            "claude-sonnet-4-6", "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-7",
+        ]
+        assert "5." in crew.bodies(GENERAL_PURPOSE)[2]
+        assert envelope_read(crew.results_read("coordinator")["c3"])["result"] == "9."
