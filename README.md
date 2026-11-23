@@ -1444,7 +1444,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   agent does, and `task`'s description then says "Sub-agents cannot start
   sub-agents."; a run that may start nothing is offered no `task`, and the
   configured tree keeps its own depth. An inheriting type is offered to the
-  main agent alone.
+  main agent alone, and with the policy's `general_purpose` the built-in
+  general-purpose type is offered last (below).
 
   ```python
   coordinator = AgentConfig(name="coordinator", prompt="Hand self-contained "
@@ -1511,6 +1512,31 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
 
   Its body is all a fresh type's run reads (an inheriting type reads the
   conversation too), so write it as a task that stands on its own.
+- **The general-purpose type.** `SubAgentPolicy(spawn_sources=..., general_purpose=True)`
+  adds a type the app does not configure, `general_purpose`, which every
+  source the policy enables may start: `task` lists it last ("A
+  general-purpose agent with your own tools (but not the ones that start
+  agents) and your model, for a self-contained task no other agent fits."),
+  a skill may name it (`agent: general_purpose`), and `/agent new
+  general_purpose <objective>` starts one. Its run has the tools, MCP
+  servers, skills and model of the type that started it (the main agent's,
+  for the user's start), the framework's system prompt and a fresh context,
+  and starts no agent itself; `task`'s `tools` narrows it as any type, and
+  it has no model choices. One is built for each type that may start it
+  (the main agent, and with `max_spawn_depth` 2 or more each type that does
+  not inherit), with MCP connections of its own. Its instances
+  (`general_purpose-1`) keep the type that started them, so a follow-up runs
+  as the first run did. An agent of the app's named `general_purpose` is
+  refused while the policy enables it.
+
+  ```python
+  manager = create_workflow_manager_from_settings(
+      [coordinator, researcher], settings,
+      subagents=SubAgentPolicy(spawn_sources={"agent", "user"}, general_purpose=True),
+  )
+  # The coordinator's call: {"agent_type": "general_purpose", "title": "Tally it",
+  #   "objective": "Count the TODO comments under src/ by file."}
+  ```
 - **The parent's tools.** With `subagents=SubAgentPolicy(follow_ups=True)`
   every agent that can have sub-agents (its own, or types it may start at run
   time) gets three more tools beside `task` (with the
