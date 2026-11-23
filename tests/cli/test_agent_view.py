@@ -1123,6 +1123,18 @@ class TestANewInstancesView:
         assert app.session.message == ">>> "
         assert crew.records() == []
 
+    async def test_a_refusal_leaves_a_new_conversation_fresh(self, make_crew):
+        """Nothing ran and nothing was stored: the conversation is still one a
+        switch of backend may move, as before the command."""
+        crew, app = await new_view(make_crew, store="sqlite")
+        app._conversation.opened_empty = True  # as a new conversation is opened
+
+        await typed(app, "/agent new researcher Find X.")
+
+        assert said(app.session, "add_error")[-1].startswith("You cannot start 'researcher'")
+        assert not await app._is_stored(app.workflow, app.session_id)
+        assert app._conversation.fresh and not app._conversation.written
+
     async def test_in_a_view_it_leaves_that_view_first(self, make_crew):
         crew, app = await in_a_view(
             make_crew, team=[*follow_team(), *user_team()[2:]], subagents=STARTING,
