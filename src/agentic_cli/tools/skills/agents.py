@@ -9,9 +9,9 @@ envelope with the skill's name added.
 
 The key takes effect only where the app lets a skill start an agent
 (``"skill"`` in ``SubAgentPolicy.spawn_sources``); otherwise it is ignored, the
-skill loads as instructions, as any skill does, and the build warns of it
+skill loads as instructions, as any skill does, and the build logs it at info
 (``skill_agent_ignored``: other tools, Claude Code's among them, give skills
-an ``agent`` key of their own).
+an ``agent`` key of their own; such a skill loads as it always did).
 
 A load starts a run only where any run-time start is allowed: the type is one
 of the app's, the type's ``spawnable_by`` and the policy's ``spawn_sources``
@@ -164,7 +164,8 @@ class SkillAgents:
 
     def check(self, skills: Sequence[Any]) -> None:
         """Warn, once per skill, of each that names an agent this agent's first run
-        could not start, or that the app lets no skill start (the key is ignored)."""
+        could not start; log at info each that the app lets no skill start (the
+        key is ignored)."""
         if self._general():
             return
         for skill in skills:
@@ -172,8 +173,11 @@ class SkillAgents:
             if name is None or (self._agent, skill.name) in self._warned:
                 continue
             if not self.starts(skill):
+                # At info: the skill loads as it always did, and a warning
+                # would print above the prompt at every build, to a user who
+                # can do nothing about it.
                 self._warned.add((self._agent, skill.name))
-                logger.warning(
+                logger.info(
                     "skill_agent_ignored",
                     agent=self._agent, skill=skill.name, agent_type=name,
                     message=IGNORED.format(skill=skill.name, agent=name),

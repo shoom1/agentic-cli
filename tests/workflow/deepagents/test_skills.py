@@ -773,6 +773,64 @@ class TestInTheManager:
             await manager.cleanup()
         assert manager._own_tool_names == {}
 
+    async def test_a_model_choices_skill_tools_are_made_for_its_provider(
+        self, tmp_path, monkeypatch, skills_dir
+    ):
+        """A model choice's graph has the skill tools of the choice's provider, as
+        the type's has its own's: a Chat Completions endpoint gets a binary
+        resource as a status (an image block would fail every later request of
+        the run's thread), Google as an image. Its other tools are the type's:
+        the same objects, its MCP sessions opened once."""
+        from agentic_cli.tools import read_file
+
+        async def call_tool(**arguments):
+            return [{"type": "text", "text": "found"}], None
+
+        _fake_mcp(monkeypatch, StructuredTool(
+            name="search", description="A server's tool.", args_schema={"type": "object"},
+            coroutine=call_tool, response_format="content_and_artifact",
+        ))
+        (tmp_path / "home").mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        logo = ("load_skill_resource", {"skill_name": "pdf-tools", "file_path": "assets/logo.png"})
+        models = scripted(
+            monkeypatch,
+            lead=[ai(calls=[task("writer", "Draw it.", model="local:small")]),
+                  ai(calls=[task("writer", "Draw it again.")]), ai("Done.")],
+            writer=[ai(calls=[logo]), ai("Drawn."), ai(calls=[logo]), ai("Drawn again.")],
+        )
+        with MockContext(
+            google_api_key="test-key", session_store="memory", skills_dirs=[str(skills_dir)],
+            model_providers={"local": {"base_url": "http://localhost:8000/v1"}},
+            models={"local:small": {"context_window": 32_000}},
+        ) as context:
+            manager = _manager(context.settings, [
+                AgentConfig(name="lead", prompt="Lead.", sub_agents=["writer"],
+                            include_state_tools=False),
+                _writer(description="Writes.", tools=[read_file],
+                        model_choices=("local:small",),
+                        mcp_servers=[MCPServerConfig(name="atlas", command="srv")]),
+            ])
+            try:
+                await turn(manager)
+                own = manager._agent_graphs["writer"].nodes["tools"].bound.tools_by_name
+                chosen = manager._variant_graphs[("writer", "local:small")].nodes[
+                    "tools"].bound.tools_by_name
+            finally:
+                await manager.cleanup()
+
+        writer = models.chats["writer"]
+        (on_the_choice,) = _tool_messages(writer, 1, 1)
+        (on_its_own,) = _tool_messages(writer, 3, 1)
+        assert isinstance(on_the_choice.content, str)
+        assert "cannot be shown" in json.loads(on_the_choice.content)["status"]
+        assert [block["type"] for block in on_its_own.content] == ["text", "text", "image"]
+        assert list(chosen) == list(own)
+        assert all(chosen[name] is own[name] for name in ("read_file", "search"))
+        assert all(chosen[name] is not own[name] for name in SKILL_TOOL_NAMES)
+        assert identify_tool(chosen["load_skill"]) is get_registry().get("load_skill")
+
     async def test_a_model_switch_rebuilds_them(self, ctx, monkeypatch):
         models = scripted(monkeypatch, writer=_steps(("load_skill", {"skill_name": "pdf-tools"})))
         manager = _manager(ctx.settings, [_writer()])

@@ -1,16 +1,28 @@
-"""ADK plugin: a sub-agent run's control at each of its model calls (``workflow/agents/control.py``).
+"""ADK plugins: a sub-agent run's control at each of its model calls (``workflow/agents/control.py``).
 
 In each sub-agent type's plugin chain (``GoogleADKWorkflowManager._agent_plugin_chain``),
 for the run in progress (``get_active_run``: the run's own task,
-``agents/delegate.py``), whose control the manager's ``Delegations`` holds:
+``agents/delegate.py``), whose control the manager's ``Delegations`` holds.
 
-- before each model call, a run narrowed to some of its type's tools
-  (``RunControl.tools``) has the others left out of the request and of
-  its ``tools_dict``, which ADK resolves a call from, so a call of one is
-  answered as one of a tool the agent does not have (``narrow``: before
-  the fit guard, which measures the narrowed request; a skill toolset's
-  instruction text stays in the system prompt, only its calls are refused);
-- before each, the messages steered to the run since its last
+``RunToolsPlugin``, first in the chain's head: before each model call, a run
+narrowed to some of its type's tools (``RunControl.tools``) has the others
+left out of the request and of its ``tools_dict``, which ADK resolves a call
+from, so a call of one is answered as one of a tool the agent does not have
+(``narrow``). An ADK built-in it was not given (``google_search``,
+``url_context``: it runs inside the model, so what it adds to the request is
+no function declaration and nothing in ``tools_dict``) is left out too, its
+entries found by having it process a request of its own
+(``built_in_entries``), once per model for the build (the plugin keeps them;
+a reinitialize makes a new chain): one that raises there adds nothing to
+leave out. One the run keeps is sent as ADK made it. It runs
+before the permission gate, whose mark for the built-ins a request carries
+then follows what is sent, and before the fit guard, which measures the
+narrowed request; a skill toolset's instruction text stays in the system
+prompt, only its calls are refused.
+
+``RunControlPlugin``, after the raw log:
+
+- before each model call, the messages steered to the run since its last
   (``RunControl.take_steering``) go after its last message, each a user
   event appended to the run's child session (through the callback
   context's session service: the invocation's own session, which a session
@@ -41,39 +53,76 @@ for the run in progress (``get_active_run``: the run's own task,
   alone keeps an empty text, which ADK takes as the run's last answer
   (``MODEL_RETURNED_NO_CONTENT``, no failure for a run).
 
-It changes the request, the answer and an event's time in place and
+Each changes the request, the answer and an event's time in place and
 returns None, as ``ForeignReasoningPlugin`` does, so every plugin after it
-still runs; what it keeps is kept by invocation, and let go of as the run
-ends (two runs of one type share their runner, and this plugin). It sits
-before ``SubAgentOutcomePlugin``, which then reads an answer whose calls were
-dropped as the run's final one. The root's calls (no active run) and a run
-without a control are left alone.
+still runs; what ``RunControlPlugin`` keeps is kept by invocation, and let
+go of as the run ends (two runs of one type share their runner, and these
+plugins). It sits before ``SubAgentOutcomePlugin``, which then reads an
+answer whose calls were dropped as the run's final one. The root's calls (no
+active run) and a run without a control are left alone.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
 from google.adk.events import Event
+from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins.base_plugin import BasePlugin
+from google.adk.tools import BaseTool
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
+from agentic_cli.logging import Loggers
 from agentic_cli.workflow.agents.control import STEP_LIMIT_NOTE
 from agentic_cli.workflow.usage import UsageTotals, adk_tokens
 
 if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.agents.invocation_context import InvocationContext
-    from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
 
     from agentic_cli.workflow.agents.control import RunControl
+
+logger = Loggers.workflow()
+
+#: What a built-in adds to a request on a model (``built_in_entries``), learned
+#: once: by the tool's id and the model, the tool kept with them (an id is only
+#: its own while it lives).
+Learned = dict[tuple[int, "str | None"], tuple[BaseTool, list[types.Tool]]]
 
 #: How much later than a steered message the run's next events are stamped,
 #: at least: past what a durable store keeps of a time (``DatabaseSessionService``
 #: keeps microseconds), so it reads them back in the order they came.
 _STAMP_STEP = 2e-6
+
+
+class RunToolsPlugin(BasePlugin):
+    """A narrowed sub-agent run's tools at its model calls (see the module docstring).
+
+    Args:
+        control: The control of the run in progress (None: no run, or none
+            to control), asked at each call.
+    """
+
+    def __init__(self, control: Callable[[], RunControl | None]) -> None:
+        super().__init__(name="run_tools")
+        self._control = control
+        # The entries each refused built-in adds, per model, for the build.
+        self._learned: Learned = {}
+
+    async def before_model_callback(
+        self, *, callback_context: CallbackContext, llm_request: LlmRequest
+    ) -> Optional[LlmResponse]:
+        control = self._control()
+        if control is None or control.tools is None:
+            return None
+        built_ins = await built_in_entries(
+            callback_context, llm_request, control.keeps, learned=self._learned
+        )
+        narrow(llm_request, control.keeps, built_ins=built_ins)
+        return None
 
 
 class RunControlPlugin(BasePlugin):
@@ -100,8 +149,6 @@ class RunControlPlugin(BasePlugin):
         control = self._control()
         if control is None:
             return None
-        if control.tools is not None:
-            narrow(llm_request, control.keeps)
         steered = control.take_steering()
         if steered:
             self._stamped[callback_context.invocation_id] = await _steer(
@@ -179,18 +226,99 @@ async def _steer(
     return stamped
 
 
-def narrow(llm_request: LlmRequest, keeps: Callable[[str], bool]) -> None:
-    """Leave the function tools ``keeps`` refuses out of ``llm_request``, in place.
+async def built_in_entries(
+    callback_context: CallbackContext | None,
+    llm_request: LlmRequest,
+    keeps: Callable[[str], bool],
+    *,
+    learned: Learned | None = None,
+) -> dict[str, list[types.Tool]]:
+    """What each of the running agent's built-ins that ``keeps`` refuses added to
+    ``llm_request``, by the tool's name.
+
+    A built-in (``google_search``, ``url_context``, a Vertex AI Search) is an
+    ADK tool of the agent's own (``agent.tools``, not a toolset's) that ADK did
+    not put in ``tools_dict``: it runs inside the model, and what it adds to the
+    request is a tool entry that is no function declaration. Which entry is
+    whose the request does not say, so each such tool processes a request of
+    its own, for the same model and with a tool context of the same
+    invocation, as ADK had it process this one (``process_llm_request``); of
+    what it adds there, the entries that are more than function declarations
+    are its. Given ``learned``, each is asked once per model (its processing
+    may do work: ``PreloadMemoryTool`` searches the memory) and kept there. A
+    tool that raises on its own request adds nothing to leave out (logged at
+    debug, once per model): ``google_search`` with
+    ``bypass_multi_tools_limit`` on a model it does not serve, which ADK sends
+    as an agent tool instead. No callback context (no agent to ask): none.
+    """
+    get = getattr(callback_context, "get_invocation_context", None)
+    invocation = get() if get is not None else None
+    agent = getattr(invocation, "agent", None)
+    found: dict[str, list[types.Tool]] = {}
+    for tool in getattr(agent, "tools", None) or ():
+        if (
+            not isinstance(tool, BaseTool)
+            or keeps(tool.name)
+            or tool.name in llm_request.tools_dict
+        ):
+            continue
+        key = (id(tool), llm_request.model)
+        known = learned.get(key) if learned is not None else None
+        if known is not None and known[0] is tool:
+            found[tool.name] = known[1]
+            continue
+        alone = LlmRequest(model=llm_request.model)
+        error: Exception | None = None
+        try:
+            await tool.process_llm_request(
+                tool_context=ToolContext(invocation), llm_request=alone
+            )
+        except Exception as raised:  # noqa: BLE001 - it adds nothing, the run goes on
+            error = raised
+        entries = [] if error is not None else [
+            entry for entry in alone.config.tools or ()
+            if entry.model_dump(exclude={"function_declarations"}, exclude_none=True)
+        ]
+        found[tool.name] = entries
+        if learned is not None and learned.get(key, (None,))[0] is tool:
+            continue  # another run of the build learned it meanwhile
+        if learned is not None:
+            learned[key] = (tool, entries)
+        if error is not None:
+            logger.debug(
+                "built_in_entries_unknown", tool=tool.name, model=llm_request.model,
+                error=f"{type(error).__name__}: {error}",
+            )
+    return found
+
+
+def narrow(
+    llm_request: LlmRequest,
+    keeps: Callable[[str], bool],
+    *,
+    built_ins: Mapping[str, Sequence[types.Tool]] | None = None,
+) -> None:
+    """Leave the tools ``keeps`` refuses out of ``llm_request``, in place.
 
     Out of ``tools_dict`` (what ADK resolves a call from: a call of a name
     left out gets ADK's answer for a tool that is not there) and out of the
-    declarations the model is sent. A tool left with no declaration and
-    nothing else (a built-in's field) goes; the others stay as they are.
+    declarations the model is sent. ``built_ins`` are the entries each
+    built-in added, by its name (``built_in_entries``): one ``keeps`` refuses
+    has each of its entries left out, once; one it keeps stays as ADK made
+    it. A tool left with no declaration and nothing else goes; an entry no
+    built-in made (a code executor's) stays as it is.
     """
     for name in [name for name in llm_request.tools_dict if not keeps(name)]:
         del llm_request.tools_dict[name]
+    dropped = [
+        entry for name, entries in (built_ins or {}).items() if not keeps(name)
+        for entry in entries
+    ]
     kept: list[types.Tool] = []
     for tool in llm_request.config.tools or ():
+        if tool in dropped:
+            dropped.remove(tool)
+            continue
         declarations = tool.function_declarations
         if declarations is None:
             kept.append(tool)

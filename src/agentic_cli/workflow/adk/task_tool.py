@@ -92,6 +92,9 @@ class TaskTool(BaseTool):
         agent: The agent's name.
         delegations: The manager's delegations, asked for at each call.
         root: Whether the agent is the root.
+        warn: Whether making its first offer warns of what it lacks (a type
+            offered with no description): False for an agent that is its
+            type built once more, on a model choice, whose own build warned.
     """
 
     def __init__(
@@ -100,8 +103,9 @@ class TaskTool(BaseTool):
         delegations: Callable[[], Delegations],
         *,
         root: bool = True,
+        warn: bool = True,
     ) -> None:
-        offer = delegations().task_offer(agent, 0 if root else 1, warn=True)
+        offer = delegations().task_offer(agent, 0 if root else 1, warn=warn)
         super().__init__(
             name=TASK_TOOL, description=offer.description if offer is not None else ""
         )

@@ -1307,8 +1307,8 @@ than `agent`, `skill` and `user` raises too (a free type the app's policy lets
 no source start is a warning: `validate_agent_graph(configs, policy=...)`).
 An agent named `general_purpose` raises too while the policy enables the
 built-in type of that name (`SubAgentPolicy(general_purpose=True)`).
-`model_choices` on the root, one that is no tuple or list of texts, and a choice
-named twice raise it too.
+`model_choices` on the root, one that is no tuple or list of texts, a choice
+written with spaces around it and a choice named twice raise it too.
 `inherit_context=True` on the root, on an agent with sub-agents of its own or
 on an agent below another sub-agent, and an `inherit_context` that is not True
 or False, raise it too, and, when the agents are built, so does a coordinator
@@ -1462,16 +1462,18 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   ```
 - **Narrowing a run, and a cheaper model.** Any `task` call may give
   `tools`, some of the type's own tools (its registered, skill and MCP
-  tools, by name; its plan's tools and the delegation tools always stay):
-  the run is offered only those, and a call of another is answered as one
-  of a tool it does not have. A type's `model_choices` are the models a call
-  may pick instead of its own (`model`, named in the type's line in `task`'s
-  description); each is resolved and given its context numbers at startup,
-  and runs as the type's agent built on it (ADK: a runner of its own;
-  Deep Agents: a graph of its own), within its own window. Anything else is
-  the call's error result, naming what it may be, and no run starts. The
-  instance keeps both: its follow-ups, and its runs after a restart, run
-  with them, and `/agents <id>` shows them.
+  tools, and on ADK its built-ins such as `google_search`, by name; its
+  plan's tools and the delegation tools always stay): the run is offered
+  only those (a built-in it was not given is not in its requests), and a
+  call of another is answered as one of a tool it does not have. A type's
+  `model_choices` are the models a call may pick instead of its own
+  (`model`, named in the type's line in `task`'s description); each is
+  resolved and given its context numbers at startup, and runs as the
+  type's agent built on it (ADK: a runner of its own; Deep Agents: a graph
+  of its own), within its own window. Anything else is the call's error
+  result, naming what it may be, and no run starts. The instance keeps
+  both: its follow-ups, and its runs after a restart, run with them, and
+  `/agents <id>` shows them.
 
   ```python
   researcher = AgentConfig(name="researcher", prompt="Find facts.",
@@ -1486,8 +1488,8 @@ reviewer = AgentConfig(name="reviewer", prompt="Check what was said.",
   an agent that loads the skill starts a run of that type instead of
   reading the skill's instructions. Without `"skill"` in `spawn_sources`
   (the default) the key is ignored: the skill loads as instructions, as
-  any skill does, and the build warns of it (`skill_agent_ignored`). The
-  run's task message is the skill's body under its name (`# Task:
+  any skill does, and the build logs it at info (`skill_agent_ignored`).
+  The run's task message is the skill's body under its name (`# Task:
   research`, `## Objective`), its parent the loading agent's run
   (`started_by: skill:research`), and it counts toward
   `max_runs_per_turn`; the `load_skill` call's result is the run's
@@ -2687,7 +2689,7 @@ agentic-cli/
 │   │   │   ├── plugins.py                # LLMLoggingPlugin
 │   │   │   ├── log_filters.py            # What ADK would print over the CLI, logged at debug (installed by run())
 │   │   │   ├── permission_plugin.py      # PermissionPlugin (capability gating)
-│   │   │   ├── run_control_plugin.py     # RunControlPlugin: a sub-agent run's limits and steering at its model calls
+│   │   │   ├── run_control_plugin.py     # RunToolsPlugin, RunControlPlugin: a sub-agent run's tools, limits and steering at its model calls
 │   │   │   ├── task_progress_plugin.py   # TaskProgressPlugin (deprecated, unused)
 │   │   │   └── tool_result_cap_plugin.py # ToolResultCapPlugin (the tool result cap)
 │   │   ├── deepagents/                   # The Deep Agents backend (deepagents extra)

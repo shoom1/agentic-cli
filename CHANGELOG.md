@@ -601,12 +601,13 @@ the start of the entry's title.
   for it too, naming its spawner in `metadata["spawner"]`, and one that never
   answers is waited for once more per spawner), built again by a model
   switch and released with the others; a main agent with no sub-agents gets
-  `task` for it alone when agents may start it. Its instances are `general_purpose-<n>`, and the
-  records keep the type each was made for (`InstanceRecord.based_on`, from
-  the run's start, `WorkflowEvent.agent_run(based_on=)`; records written
-  before it read None), so its follow-ups, the user's and after a restart,
-  run as its first run did (one whose type no longer makes one is refused as
-  a type that is gone), and its view shows that type's model and context.
+  `task` for it alone when agents may start it. Its instances are
+  `general_purpose-<n>`, and the records keep the type each was made for
+  (`InstanceRecord.based_on`, from the run's start,
+  `WorkflowEvent.agent_run(based_on=)`; records written before it read
+  None), so its follow-ups, the user's and after a restart, run as its first
+  run did (one whose type no longer makes one is refused as a type that is
+  gone), and its view shows that type's model and context.
   While the policy enables it, an app's agent of that name is refused
   (`AgentGraphError`: "An agent named 'general_purpose' clashes with the
   built-in general_purpose type, which this app's SubAgentPolicy
@@ -653,7 +654,7 @@ the start of the entry's title.
   lets a skill start an agent (`"skill"` in
   `SubAgentPolicy.spawn_sources`; with the default policy it does not,
   and the key is ignored: the skill loads as instructions, as any skill
-  does, and the build warns of it, `skill_agent_ignored`, since other
+  does, and the build logs it at info, `skill_agent_ignored`, since other
   tools give skills an `agent` key of their own), when an agent loads it
   (`load_skill`), a run of that type starts instead of the skill's
   instructions being handed back: its task message is the skill's body
@@ -684,7 +685,6 @@ the start of the entry's title.
   ADK's declaration) takes the place of ADK's in an agent's toolset only
   when one of its skills names an agent type and the app lets a skill
   start one.
-
 - **`AgentConfig.model_choices`: the models a delegation may run a type on
   instead of its own, on both backends.** References, bare model ids or
   roles (`model_choices=("fast",)`; the agent YAML's `model_choices:
@@ -699,25 +699,30 @@ the start of the entry's title.
   agent and a runner of its own, whose plugin chain reads the choice's
   model, provider kind and context numbers under the type's name, so the
   fit guard and the overflow handler keep a run within them; on Deep
-  Agents a graph of its own, summarized by the choice's numbers. A model
-  switch builds them again, and the release closes them with the type's. A
-  run on a choice keeps its type's name in its events and records; its
-  usage is the choice's model's (`RunRecord.usage`, the ledger's
-  `by_model`, the raw LLM log). The manager gives each choice's model and
-  numbers: `choice_models[(agent, choice)]` and `context_budget(agent,
-  model=choice)`. `validate_agent_graph` raises `AgentGraphError` for
-  `model_choices` on the root, for one that is no tuple or list of texts,
-  and for a choice named twice.
+  Agents a graph of its own, summarized by the choice's numbers, its skill
+  tools made for the choice's provider (how a binary resource is sent). A
+  model switch builds them again, and the release closes them with the
+  type's. A run on a choice keeps its type's name in its events and
+  records; its usage is the choice's model's (`RunRecord.usage`, the
+  ledger's `by_model`, the raw LLM log). The manager gives each choice's
+  model and numbers: `choice_models[(agent, choice)]` and
+  `context_budget(agent, model=choice)`. `validate_agent_graph` raises
+  `AgentGraphError` for `model_choices` on the root, for one that is no
+  tuple or list of texts, for a choice written with spaces around it
+  ("Agent 'researcher' has the model choice ' fast' with surrounding
+  spaces: write it without them.") and for a choice named twice.
 - **`task`'s `tools` and `model`: a delegation may narrow its run's tools and
   pick a cheaper model, never widen, on both backends.** Every `task` call
   may give `tools`, some of the type's own tools (its registered, skill and
-  MCP tools, by the names its model is offered them; the plan's tools and
-  the delegation tools are always kept): the run's model is offered only
-  those, and a call of any other is answered as one of a tool the agent
-  does not have ("<tool> failed: ValueError: Tool '<tool>' not found.", then
-  the tools it has), and the run goes on. A call to a type with model
-  choices may give `model`, one of them: the run is on that model. Anything
-  else is the call's error result, and no run starts nor counts toward the
+  MCP tools, and on ADK its built-ins such as `google_search`, by the names
+  its model is offered them; the plan's tools and the delegation tools are
+  always kept): the run's model is offered only those (a built-in it was not
+  given is not in its requests, so it marks no conversation either), and a
+  call of any other is answered as one of a tool the agent does not have
+  ("<tool> failed: ValueError: Tool '<tool>' not found.", then the tools it
+  has), and the run goes on. A call to a type with model choices may give
+  `model`, one of them: the run is on that model. Anything else is the
+  call's error result, and no run starts nor counts toward the
   turn's ("The tools for 'researcher' must be some of its own: lookup.",
   "The model for 'researcher' must be one of its model choices: fast.",
   "'researcher' has no model choices; leave model out."; a backend that

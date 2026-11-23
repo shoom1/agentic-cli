@@ -652,9 +652,11 @@ class ConversationCore:
 
         A write to the conversation under the turn lock, as ``run_instance``
         is: held to write, the conversations ``/new`` left dropped around
-        it, ``written`` once it reached a ready workflow, not ``turned``.
-        ``opens`` is called with the new instance's id once its run's start
-        names it (``MessageProcessor.process_start``).
+        it, not ``turned``, and ``written`` once its run started (the
+        workflow stores the conversation then): a refusal, which runs and
+        stores nothing, leaves a fresh conversation fresh. ``opens`` is
+        called with the new instance's id once its run's start names it
+        (``MessageProcessor.process_start``).
 
         Args:
             agent_type: The type to start.
@@ -670,6 +672,14 @@ class ConversationCore:
             asyncio.CancelledError: Ctrl+C stopped it, as the processor says,
                 or while it waited for the turn lock.
         """
+        started = False
+
+        async def opening(instance: str) -> None:
+            nonlocal started
+            started = True  # its run started: the conversation is stored
+            if opens is not None:
+                await opens(instance)
+
         return await self._write(
             parts,
             lambda: parts.processor.process_start(
@@ -680,9 +690,10 @@ class ConversationCore:
                 settings=parts.settings,
                 usage_tracker=parts.tracker,
                 session_id=self.session_id,
-                opens=opens,
+                opens=opening,
             ),
             turns=False,
+            reached=lambda result: started,
         )
 
     async def tell_root(self, text: str, parts: TurnParts) -> bool:
@@ -725,6 +736,7 @@ class ConversationCore:
         *,
         turns: bool,
         echo: str | None = None,
+        reached: Callable[[Any], bool] | None = None,
     ) -> bool:
         """``run()`` under the turn lock: the frame of every write to the conversation.
 
@@ -733,8 +745,9 @@ class ConversationCore:
         Ctrl+C stops while it waits is shown and said cancelled, not dropped
         unseen). The conversation is held to write first; ``turned`` when
         ``turns`` (the main agent answered in it); ``written`` once ``run``
-        reached a ready workflow (its result's status is not ``UNAVAILABLE``;
-        one that raised or was cancelled counts when the workflow was ready).
+        reached a ready workflow (``reached`` of its result; by default, its
+        status is not ``UNAVAILABLE``; one that raised or was cancelled
+        counts when the workflow was ready).
 
         Returns:
             Whether it ran: False when another process has the conversation
@@ -760,15 +773,18 @@ class ConversationCore:
             async with self._dropping_left(parts):
                 if turns:
                     self.turned = True
-                reached = False
+                wrote = False
                 try:
                     result = await run()
-                    reached = getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+                    wrote = (
+                        reached(result) if reached is not None
+                        else getattr(result, "status", None) is not TurnStatus.UNAVAILABLE
+                    )
                 except BaseException:
-                    reached = parts.controller.is_ready  # it may have begun
+                    wrote = parts.controller.is_ready  # it may have begun
                     raise
                 finally:
-                    if reached:
+                    if wrote:
                         self.written = True
             return True
         finally:

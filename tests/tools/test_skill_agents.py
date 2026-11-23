@@ -176,7 +176,7 @@ class TestTheKeyWhileNoSkillMayStart:
     @pytest.mark.parametrize("policy", [SubAgentPolicy(), SubAgentPolicy(spawn_sources={"agent"})],
                              ids=["default", "agents-only"])
     @pytest.mark.parametrize("named", ["Explore", "helper"], ids=["no-such-type", "a-real-type"])
-    def test_it_is_ignored_and_warned_of_once(self, tmp_path, logged, policy, named):
+    def test_it_is_ignored_and_logged_once_at_info(self, tmp_path, logged, policy, named):
         skill = make_skill(tmp_path, "research", f"agent: {named}\n")
         agents = SkillAgents("lead", lambda: made(policy=policy), root=True)
 
@@ -190,7 +190,7 @@ class TestTheKeyWhileNoSkillMayStart:
             "this app does not let a skill start."
         )
         assert logged == [{
-            "event": "skill_agent_ignored", "log_level": "warning", "agent": "lead",
+            "event": "skill_agent_ignored", "log_level": "info", "agent": "lead",
             "skill": "research", "agent_type": named,
             "message": f"The skill 'research' names the agent '{named}', but this app lets "
                        "no skill start an agent: it loads as instructions.",

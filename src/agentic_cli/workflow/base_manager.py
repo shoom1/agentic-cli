@@ -1027,10 +1027,11 @@ class BaseWorkflowManager(ABC):
         is ``stopped``; a stop before the run started stops the run as it
         starts. ``interrupt_instance`` ends it as a turn's cancel does.
 
-        A conversation that is not stored yet is stored first, titled from
-        the objective with no turns of the user's with the main agent
-        (``_keep_conversation``), so what the user did here is found by
-        ``/resume``, ``--continue`` and ``--resume``.
+        A conversation that is not stored yet is stored right before the run
+        starts (after every read that can fail, so a start that raised
+        stores nothing), titled from the objective with no turns of the
+        user's with the main agent (``_keep_conversation``), so what the user
+        did here is found by ``/resume``, ``--continue`` and ``--resume``.
 
         Yields:
             The run's ``WorkflowEvent``s, its start first.
@@ -1045,13 +1046,15 @@ class BaseWorkflowManager(ABC):
             if refused is not None:
                 yield WorkflowEvent.error(refused)
                 return
-            await self._keep_conversation(ref, objective)
             config = next((c for c in self._agent_configs if c.name == agent_type), None)
             history = None
             if config is not None and config.inherit_context:
                 copy = await self._inherited_history(ref)
                 history = lambda: copy  # noqa: E731 - read once, before the run
             state = await self._conversation_state(ref)
+            # Stored after every read that can fail, right before the run
+            # starts: a start that raised lists no empty conversation.
+            await self._keep_conversation(ref, objective)
             async with contextlib.aclosing(self._users_run(
                 ref,
                 lambda: self._delegations.start_by_user(
@@ -1458,10 +1461,10 @@ class BaseWorkflowManager(ABC):
 
         Asked for a call that names tools and for a narrowed instance's
         follow-up: the agent's own tools by the names its model sees (a
-        backend adds its skill and MCP tools), the state and delegation tools
-        (``KEPT_TOOLS``) left out. The base's are the agent's configured tools
-        as ``_build_tools`` assembles them, each by its callable's name; an
-        agent that is not configured has none.
+        backend adds its skill and MCP tools, ADK its built-ins), the state
+        and delegation tools (``KEPT_TOOLS``) left out. The base's are the
+        agent's configured tools as ``_build_tools`` assembles them, each by
+        its callable's name; an agent that is not configured has none.
         """
         config = next((c for c in self._agent_configs if c.name == agent), None)
         if config is None:

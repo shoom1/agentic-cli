@@ -9,6 +9,7 @@ tools before the model callbacks run.
 
 from __future__ import annotations
 
+import json
 import textwrap
 from types import SimpleNamespace
 
@@ -32,6 +33,7 @@ from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.outside_content import OUTSIDE_CONTENT_KEY, OutsideContentMarks  # noqa: E402
 from agentic_cli.workflow.sessions import SessionRef, reset_active_turn, set_active_turn  # noqa: E402
 from tests.workflow.test_adk_context_cache import gemini_api, route_gemini  # noqa: E402
+from tests.loop_guard import no_blocking_calls  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI  # noqa: E402
 from tests.workflow.test_manager_models import KEYS, adk, keys, settings  # noqa: E402
 
@@ -247,3 +249,80 @@ async def test_the_agent_is_read_through_adks_public_accessor(active_turn):
     await plugin.before_model_callback(callback_context=context, llm_request=await _request())
 
     assert marks.get(REF) == "code_executor"
+
+
+# --- a narrowed sub-agent run -----------------------------------------------------------
+
+
+class GeminiTeam:
+    """The Gemini API for a team: each agent answers from its own script (a
+    part each call), told apart by its prompt; the bodies each was sent."""
+
+    def __init__(self, **scripts: list[dict]) -> None:
+        self.scripts = {name: list(parts) for name, parts in scripts.items()}
+        self.sent: dict[str, list[dict]] = {name: [] for name in scripts}
+
+    def __call__(self, request) -> dict:
+        body = json.loads(request.content)
+        system = "".join(
+            part.get("text", "") for part in (body.get("systemInstruction") or {}).get("parts", ())
+        )
+        name = next(name for name in self.scripts if f"You are {name}." in system)
+        self.sent[name].append(body)
+        answer = gemini_api(request)
+        answer["candidates"][0]["content"]["parts"] = [self.scripts[name].pop(0)]
+        return answer
+
+
+def _searches(body: dict) -> bool:
+    """Whether a Gemini request carries Google Search."""
+    return any("googleSearch" in tool for tool in body.get("tools") or ())
+
+
+@pytest.mark.parametrize("given, sent, mark", [
+    (["read_file"], False, None),
+    (["read_file", "google_search"], True, "google_search"),
+    (None, True, "google_search"),
+], ids=["narrowed-without-it", "narrowed-to-keep-it", "not-narrowed"])
+async def test_a_narrowed_run_is_sent_a_built_in_only_when_it_keeps_it(
+    monkeypatch, given, sent, mark
+):
+    """A built-in such as ``google_search`` is one of a type's own tools: a
+    ``task`` call's ``tools`` may name it, and a run narrowed without it is not
+    sent it, so nothing it never ran marks the conversation; one kept is sent as
+    ADK makes it, and marks it."""
+    from agentic_cli.tools import read_file
+
+    keys(monkeypatch, "google")
+    brief = {"agent_type": "researcher", "title": "Look", "objective": "Look it up."}
+    if given is not None:
+        brief["tools"] = given
+    api = GeminiTeam(
+        coordinator=[{"functionCall": {"name": "task", "args": brief}}, {"text": "Done."}],
+        researcher=[{"text": "Found it."}],
+    )
+    route_gemini(monkeypatch, FakeAPI(api))
+    manager = adk(
+        [
+            AgentConfig(name="coordinator", prompt="You are coordinator.",
+                        sub_agents=["researcher"], include_state_tools=False),
+            AgentConfig(name="researcher", prompt="You are researcher.",
+                        description="Researches.", tools=[read_file, google_search],
+                        include_state_tools=False),
+        ],
+        settings(default_model=MODEL, prompt_caching_enabled=False),
+    )
+    try:
+        await manager.initialize_services()
+        with no_blocking_calls():
+            [_ async for _ in manager.process("Look it up.", user_id="u", session_id="s")]
+        (researched,) = api.sent["researcher"]
+        assert _searches(researched) is sent
+        assert [
+            declaration["name"] for tool in researched["tools"]
+            for declaration in tool.get("functionDeclarations", ())
+        ] == ["read_file"]
+        assert _marked(manager) == mark
+        assert await _stored_mark(manager) == (mark or "")
+    finally:
+        await manager.cleanup()

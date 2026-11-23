@@ -6123,6 +6123,57 @@ class TestTheUsersStopInTheWindowBeforeTheRunStarts:
         assert entered == []  # stopped before its first step: no hook, no model call
 
 
+class TestAnInterruptInTheWindowBeforeTheRunStarts:
+    """``interrupt_instance`` (a process exit) that lands once ``run_instance``
+    holds its run, before the run's task is made: no run starts, the instance
+    stays ``idle``, and the stream ends as a turn's cancel ends it."""
+
+    async def test_an_interrupt_before_the_run_starts_starts_none(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42."), says("[never asked]")],
+        )
+        # Ready first (its turn initialized it): only the follow-up's own steps
+        # run inside the window searched.
+        await crew.turn()
+        entered = watch_hook(crew)
+
+        async def view() -> None:
+            async for _ in crew.manager.run_instance("researcher-1", "Go on."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        landed = False
+        while loop.time() < deadline:
+            await asyncio.sleep(0)
+            held = next(iter(crew.manager._user_runs.values()), None)
+            if held is not None and held.work is None:
+                landed = crew.manager.interrupt_instance("researcher-1")
+                break
+            if viewing.done():
+                break
+        if not landed:
+            ended = (
+                f"the follow-up ended first: {viewing.exception() or 'no error'}"
+                if viewing.done() and not viewing.cancelled() else "no window within 10 s"
+            )
+            viewing.cancel()
+            raise AssertionError(f"the interrupt could not be landed in the window: {ended}")
+        done, _ = await asyncio.wait({viewing}, timeout=10)
+        if not done:
+            await Crew.stop(viewing)
+        assert done, "the interrupted stream did not end"
+
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+        assert (entered, crew.requests("researcher")) == ([], 1)
+        assert viewing.cancelled()
+        assert crew.manager.interrupt_instance("researcher-1") is False
+
+
 class TestTheUsersControlAfterARestart:
     async def test_stop_and_close_load_the_records_first(self, make_crew):
         first = make_crew(
@@ -6540,6 +6591,24 @@ class TestTheOfferIsTheRuns:
         assert crew.requests("helper") == 3 and crew.requests("coordinator") == 2
         # One for each agent built with task (the coordinator, the researcher and the
         # helper: each offers the helper), at build; none for a request.
+        assert [log["agent"] for log in logs if log["event"] == "subagent_without_description"] == [
+            "helper", "helper", "helper",
+        ]
+
+    async def test_a_delegating_types_model_choices_warn_of_it_no_more(self, make_crew):
+        """A type built once more for each of its model choices offers what its
+        own build offers: the missing description is warned of once for it."""
+        crew = make_crew(
+            [*team(), agent("helper", tools=(contract_lookup,), description="",
+                            spawnable_by=frozenset({"agent"}),
+                            model_choices=("anthropic:claude-haiku-4-5",))],
+            subagents=DEEPER,
+        )
+
+        with capture_logs() as logs:
+            await crew.manager.initialize_services()
+
+        # The coordinator, the researcher and the helper; none for the helper's choice.
         assert [log["agent"] for log in logs if log["event"] == "subagent_without_description"] == [
             "helper", "helper", "helper",
         ]
@@ -7096,7 +7165,7 @@ class TestASkillThatStartsAnAgent:
         )
 
     @pytest.mark.parametrize("sources", [set(), {"agent"}], ids=["default", "agents-only"])
-    async def test_while_no_skill_may_start_one_the_key_is_ignored_and_warned_of(
+    async def test_while_no_skill_may_start_one_the_key_is_ignored_and_logged_at_info(
         self, make_crew, project, monkeypatch, sources
     ):
         warned = recorded_warnings(monkeypatch)
@@ -7127,12 +7196,13 @@ class TestASkillThatStartsAnAgent:
                 for call, e in shown.items()} == {
             "c1": (True, "notes"), "c2": (True, "research"), "c3": (True, "explore"),
         }
-        # Warned of once each, as the coordinator was built.
+        # Logged once each, as the coordinator was built: at info, since the
+        # skill loads as before and the app's user can do nothing about it.
         assert sorted((w["skill"], w["agent_type"]) for w in warned) == [
             ("explore", "Explore"), ("research", "helper"),
         ]
         assert {(w["event"], w["log_level"], w["agent"]) for w in warned} == {
-            ("skill_agent_ignored", "warning", "coordinator"),
+            ("skill_agent_ignored", "info", "coordinator"),
         }
         assert all(w["message"] == (
             f"The skill '{w['skill']}' names the agent '{w['agent_type']}', but this app lets "
@@ -7674,6 +7744,28 @@ class TestTheUsersStartStoresItsConversation:
 
         assert not await crew.manager.session_exists(SESSION, user_id=USER)
         assert await crew.manager.list_sessions(user_id=USER) == []
+
+    @pytest.mark.parametrize("read, inherit", [
+        ("_conversation_state", False), ("_inherited_history", True),
+    ], ids=["its-state", "an-inheriting-types-history"])
+    async def test_a_read_that_fails_stores_nothing(self, make_crew, read, inherit):
+        """The conversation is stored right before the run starts, after every
+        read that can fail: a start that raises lists no empty conversation."""
+        crew = make_crew(user_team(inherit_context=inherit), subagents=STARTING, store="sqlite",
+                         helper=[says("[never asked]")])
+        await crew.manager.initialize_services()
+
+        async def fails(ref: SessionRef) -> Any:
+            raise OSError("the store is unreadable")
+
+        setattr(crew.manager, read, fails)
+
+        with pytest.raises(OSError, match="the store is unreadable"):
+            await user_start(crew, "helper", "Help with X.")
+
+        assert not await crew.manager.session_exists(SESSION, user_id=USER)
+        assert await crew.manager.list_sessions(user_id=USER) == []
+        assert (crew.records(), crew.requests("helper")) == ([], 0)
 
 
 class TestTheUsersStopOfANewInstance:

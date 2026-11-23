@@ -80,7 +80,7 @@ SHARED_KEYS = ("outside_content",)
 
 
 def build_task_tool(
-    agent: str, delegations: Callable[[], Delegations], *, root: bool = True
+    agent: str, delegations: Callable[[], Delegations], *, root: bool = True, warn: bool = True
 ) -> StructuredTool:
     """``agent``'s ``task`` tool, which starts a run of a type the calling run may start.
 
@@ -92,8 +92,11 @@ def build_task_tool(
         agent: The delegating agent's name.
         delegations: The manager's delegations, asked for at each call.
         root: Whether the agent is the root.
+        warn: Whether the offer warns of what it lacks (a type offered with no
+            description): False for a model choice's graph of its type, whose
+            own build warned.
     """
-    offer = delegations().task_offer(agent, 0 if root else 1, warn=True)
+    offer = delegations().task_offer(agent, 0 if root else 1, warn=warn)
 
     async def task(runtime: ToolRuntime, **arguments: Any) -> Command:
         state = runtime.state
