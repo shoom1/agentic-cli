@@ -7694,6 +7694,28 @@ class TestTheUsersStartStoresItsConversation:
         assert not await crew.manager.session_exists(SESSION, user_id=USER)
         assert await crew.manager.list_sessions(user_id=USER) == []
 
+    @pytest.mark.parametrize("read, inherit", [
+        ("_conversation_state", False), ("_inherited_history", True),
+    ], ids=["its-state", "an-inheriting-types-history"])
+    async def test_a_read_that_fails_stores_nothing(self, make_crew, read, inherit):
+        """The conversation is stored right before the run starts, after every
+        read that can fail: a start that raises lists no empty conversation."""
+        crew = make_crew(user_team(inherit_context=inherit), subagents=STARTING, store="sqlite",
+                         helper=[says("[never asked]")])
+        await crew.manager.initialize_services()
+
+        async def fails(ref: SessionRef) -> Any:
+            raise OSError("the store is unreadable")
+
+        setattr(crew.manager, read, fails)
+
+        with pytest.raises(OSError, match="the store is unreadable"):
+            await user_start(crew, "helper", "Help with X.")
+
+        assert not await crew.manager.session_exists(SESSION, user_id=USER)
+        assert await crew.manager.list_sessions(user_id=USER) == []
+        assert (crew.records(), crew.requests("helper")) == ([], 0)
+
 
 class TestTheUsersStopOfANewInstance:
     """Stopping ``start_instance``'s stream (Ctrl+C in its view) is the user's
