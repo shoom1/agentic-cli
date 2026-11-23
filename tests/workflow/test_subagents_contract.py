@@ -6123,6 +6123,57 @@ class TestTheUsersStopInTheWindowBeforeTheRunStarts:
         assert entered == []  # stopped before its first step: no hook, no model call
 
 
+class TestAnInterruptInTheWindowBeforeTheRunStarts:
+    """``interrupt_instance`` (a process exit) that lands once ``run_instance``
+    holds its run, before the run's task is made: no run starts, the instance
+    stays ``idle``, and the stream ends as a turn's cancel ends it."""
+
+    async def test_an_interrupt_before_the_run_starts_starts_none(self, make_crew):
+        crew = make_crew(
+            follow_team(),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42."), says("[never asked]")],
+        )
+        # Ready first (its turn initialized it): only the follow-up's own steps
+        # run inside the window searched.
+        await crew.turn()
+        entered = watch_hook(crew)
+
+        async def view() -> None:
+            async for _ in crew.manager.run_instance("researcher-1", "Go on."):
+                pass
+
+        viewing = asyncio.create_task(view())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        landed = False
+        while loop.time() < deadline:
+            await asyncio.sleep(0)
+            held = next(iter(crew.manager._user_runs.values()), None)
+            if held is not None and held.work is None:
+                landed = crew.manager.interrupt_instance("researcher-1")
+                break
+            if viewing.done():
+                break
+        if not landed:
+            ended = (
+                f"the follow-up ended first: {viewing.exception() or 'no error'}"
+                if viewing.done() and not viewing.cancelled() else "no window within 10 s"
+            )
+            viewing.cancel()
+            raise AssertionError(f"the interrupt could not be landed in the window: {ended}")
+        done, _ = await asyncio.wait({viewing}, timeout=10)
+        if not done:
+            await Crew.stop(viewing)
+        assert done, "the interrupted stream did not end"
+
+        assert [r.ref.run for r in crew.records()] == ["researcher-1#1"]
+        assert crew.instances() == [("researcher-1", INSTANCE_IDLE)]
+        assert (entered, crew.requests("researcher")) == ([], 1)
+        assert viewing.cancelled()
+        assert crew.manager.interrupt_instance("researcher-1") is False
+
+
 class TestTheUsersControlAfterARestart:
     async def test_stop_and_close_load_the_records_first(self, make_crew):
         first = make_crew(
