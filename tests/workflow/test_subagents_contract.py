@@ -5515,6 +5515,62 @@ class TestARunWhoseStartIsNotStored:
         assert await transcripts(second) == ["researcher-1", "researcher-2"]
 
 
+class TestAFollowUpThatMakesItsTranscript:
+    """An instance whose first run failed ``RECORDS_NOT_STORED`` is left
+    ``idle`` and can be followed up. A follow-up that makes its transcript
+    (it has none: the first run made none) waits for its start to be stored
+    as a first run does, so the records name every transcript."""
+
+    @staticmethod
+    def crew_of(make_crew, monkeypatch):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Try again.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+        return crew
+
+    async def test_it_fails_while_the_store_still_fails_and_leaves_no_transcript(
+        self, make_crew, monkeypatch
+    ):
+        crew = self.crew_of(make_crew, monkeypatch)
+
+        await crew.turn("Find X.")
+
+        read = crew.results_read("coordinator")
+        assert envelope_read(read["c1"])["error"] == RECORDS_NOT_STORED
+        assert envelope_read(read["c2"])["error"] == RECORDS_NOT_STORED
+        assert await transcripts(crew) == []
+        monkeypatch.undo()
+        assert await crew.manager.delete_session(SESSION, user_id=USER) is True
+        assert await transcripts(crew) == []
+
+    async def test_it_completes_once_the_store_recovers_and_the_delete_removes_it(
+        self, make_crew, monkeypatch
+    ):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Try again.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+        await crew.turn("Find X.")
+        monkeypatch.undo()
+
+        await crew.turn("Try again.")
+
+        read = envelope_read(crew.results_read("coordinator")["c2"])
+        assert (read["status"], read["result"]) == (RUN_COMPLETED, "X is 42.")
+        stored = await crew.manager._load_agent_records(crew.conversation)
+        assert "researcher-1" in [i["instance"] for i in stored["instances"]]
+        assert await transcripts(crew) == ["researcher-1"]
+        assert await crew.manager.delete_session(SESSION, user_id=USER) is True
+        assert await transcripts(crew) == []
+
+
 class TestRecordsThatDoNotRead:
     """A conversation whose stored records are another version's: this
     manager writes none of its runs, so only the store can say what it

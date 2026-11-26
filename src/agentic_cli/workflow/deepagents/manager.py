@@ -970,8 +970,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window, still
                 after its summary (``subagent_overflow_message``), with the
                 last text it wrote.
-            RunFailed: A first run whose start the store did not take
-                (``RECORDS_NOT_STORED``): its thread is not made.
+            RunFailed: A run that makes its thread (a first run, or a
+                follow-up whose thread is gone) whose start the store did
+                not take (``RECORDS_NOT_STORED``): its thread is not made.
             RunFailed: A first run whose instance's thread the store already
                 keeps: a stored transcript is never another run's.
             RuntimeError: The run has no conversation (its thread needs one).
@@ -994,25 +995,27 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             HumanMessage(content=run.message, id=task_id) if run.follow_up
             else brief_message(run.message, id=task_id)
         )
-        if not run.follow_up:
-            # Its thread is made only once its start is in the records, which
-            # then name every thread the conversation keeps.
-            await self._agent_start_stored(conversation)
-        if not run.follow_up and self._checkpointer is not None:
-            # A first run never continues a thread the store already keeps
-            # (as ADK refuses to make an existing session): whatever numbered
-            # it, a stored transcript is never another run's.
+        kept = None
+        if self._checkpointer is not None:
             kept = await self._checkpointer.aget_tuple(
                 {"configurable": {
                     "thread_id": instance_thread_id(conversation, run.ref.instance),
                     "checkpoint_ns": "",
                 }}
             )
-            if kept is not None:
-                raise RunFailed(
-                    f"The thread of sub-agent {run.ref.instance} already exists.",
-                    code="THREAD_EXISTS",
-                )
+        if not run.follow_up and kept is not None:
+            # A first run never continues a thread the store already keeps
+            # (as ADK refuses to make an existing session): whatever numbered
+            # it, a stored transcript is never another run's.
+            raise RunFailed(
+                f"The thread of sub-agent {run.ref.instance} already exists.",
+                code="THREAD_EXISTS",
+            )
+        if kept is None:
+            # A run that makes its thread (a first run, or a follow-up whose
+            # thread is gone) does so only once its start is in the records,
+            # which then name every thread the conversation keeps.
+            await self._agent_start_stored(conversation)
         if run.follow_up:
             inputs: dict[str, Any] = {
                 **{k: v for k, v in run.state.items() if k in SHARED_KEYS and v},
@@ -1214,8 +1217,9 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
         """The highest instance number of each type ``conversation``'s checkpointer keeps.
 
         The base's hook (``Delegations`` asks it once per conversation per
-        turn): read from the conversation's stored records and, as their
-        floor, its instance threads (``CheckpointSessions.stored_instances``),
+        turn): read from the conversation's stored records (their ids and
+        counters, none without records) and, only for records that do not
+        read, its instance threads (``CheckpointSessions.stored_instances``),
         so a manager after a restart numbers past what another ran there.
         """
         if self._sessions is None:

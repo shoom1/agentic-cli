@@ -748,7 +748,7 @@ class BaseWorkflowManager(ABC):
     # store through the backend's hooks: written at a run's start and end and
     # at an instance's status change (``RecordsWriter``: one write at a time
     # per conversation, the latest records each time), all written before a
-    # turn returns, a first run's start before its transcript is made
+    # turn returns, a run's start before it makes its transcript
     # (``_agent_start_stored``: the records name every transcript),
     # loaded once per conversation (``load_agents``: ``load_session`` and each
     # turn's start), and deleted with the conversation by the backend's
@@ -771,8 +771,8 @@ class BaseWorkflowManager(ABC):
 
         Replaces what the store kept. Called one at a time per conversation
         (``RecordsWriter``); a failure is warned of once per conversation and
-        fails no run or turn but a first run whose start it was
-        (``_agent_start_stored``). The base keeps none.
+        fails no run or turn but a run that makes its transcript and whose
+        start it was (``_agent_start_stored``). The base keeps none.
         """
         return None
 
@@ -895,11 +895,12 @@ class BaseWorkflowManager(ABC):
             await writer.flush(conversation)
 
     async def _agent_start_stored(self, conversation: SessionRef) -> None:
-        """Wait until a first run's start is in ``conversation``'s stored records.
+        """Wait until a run's start is in ``conversation``'s stored records.
 
-        A first run's transcript is made only after this returns, so the
-        records name every transcript the conversation keeps, which is what
-        its numbering and its delete read. A conversation whose stored
+        A run that makes its transcript (a first run, or a follow-up whose
+        transcript is gone) calls it first, and makes the transcript only
+        after it returns, so the records name every transcript the
+        conversation keeps, which is what its numbering and its delete read. A conversation whose stored
         records do not read returns at once: this manager writes none of its
         runs, and the store's own look covers it (``_agents_unwritten``).
 
