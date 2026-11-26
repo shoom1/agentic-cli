@@ -6,6 +6,7 @@ from typing import get_args
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from agentic_cli.config import (
     BaseSettings,
@@ -18,6 +19,7 @@ from agentic_cli.config import (
     set_settings,
     validate_settings,
 )
+from agentic_cli.settings_persistence import PROJECT_SETTABLE_KEYS
 from agentic_cli.workflow.config import AgentConfig
 
 
@@ -36,6 +38,27 @@ class TestBaseSettings:
         assert settings.app_name == "agentic_cli"
         assert settings.embedding_model == "all-MiniLM-L6-v2"
         assert settings.python_executor_timeout == 30
+
+    def test_the_adk_sub_agent_records_rewrite(self, temp_workspace: Path):
+        """How many writes ADK's sub-agent records session takes before the next
+        rewrites it: 100 by default, at least 1."""
+        with patch.dict(os.environ, {}, clear=True):
+            settings = BaseSettings(workspace_dir=temp_workspace)
+            assert settings.adk_subagent_records_rewrite_after == 100
+            one = BaseSettings(
+                workspace_dir=temp_workspace, adk_subagent_records_rewrite_after=1
+            )
+            assert one.adk_subagent_records_rewrite_after == 1
+            env = {"AGENTIC_ADK_SUBAGENT_RECORDS_REWRITE_AFTER": "500"}
+            with patch.dict(os.environ, env):
+                from_env = BaseSettings(workspace_dir=temp_workspace)
+            assert from_env.adk_subagent_records_rewrite_after == 500
+            with pytest.raises(ValidationError):
+                BaseSettings(
+                    workspace_dir=temp_workspace, adk_subagent_records_rewrite_after=0
+                )
+        # An app's or the user's to set, never a project file's.
+        assert "adk_subagent_records_rewrite_after" not in PROJECT_SETTABLE_KEYS
 
     def test_workspace_path_expansion(self):
         """Test that ~ is expanded in workspace_dir."""

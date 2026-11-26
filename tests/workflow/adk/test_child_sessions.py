@@ -282,6 +282,22 @@ class TestTheRecordsSession:
         loaded = await adk_sessions.load_records(service, conversation)
         assert loaded["runs"] == data["runs"]
 
+    async def test_a_lower_bound_rewrites_sooner(self, service):
+        """``rewrite_after`` is the bound a write keeps (the manager passes its
+        ``adk_subagent_records_rewrite_after``)."""
+        conversation = SessionRef(APP, "u", "s")
+        data = records_naming("researcher-1")
+        data["runs"].append({"run": "researcher-1#1", "status": "running"})
+        for number in range(5):  # a create, three appends, then the rewrite
+            data = json.loads(json.dumps(data))  # the service keeps what it is given
+            data["runs"][0]["status"] = f"running-{number}"
+            await adk_sessions.save_records(
+                service, conversation, data, rewrite_after=3
+            )
+
+        assert await stored_ids(service, child_app(APP)) == ["s/"]
+        assert await adk_sessions.load_records(service, conversation) == data
+
     async def test_a_rewrite_holds_the_whole_records_and_the_next_generation(self, service):
         conversation = SessionRef(APP, "u", "s")
         data = records_naming("researcher-1", "researcher-2")
@@ -451,6 +467,35 @@ class TestAManagersRecords:
         assert [(run["run"], run["status"]) for run in kept["runs"]] == [
             ("researcher-1#1", "completed"),
         ]
+
+    async def test_each_write_keeps_the_settings_bound(self, project, monkeypatch):
+        """``adk_subagent_records_rewrite_after`` is read at each write: a
+        change applies at the next one."""
+        route(monkeypatch, anthropic, "AsyncAnthropic", FakeAPI(two_delegations()))
+        manager = manager_on("memory")
+        try:
+            await say(manager, "Find X.")  # the store is open
+            conversation = manager.session_ref("t", "u")
+            children = child_app(conversation.app_name)
+            data = records_naming("researcher-1")
+            for number in range(4):  # a create and three appends
+                # A copy each time: the service keeps what it is given.
+                data = json.loads(json.dumps(data))
+                data["numbered"] = {"researcher": number}
+                await manager._save_agent_records(conversation, data)
+            before = await stored_ids(manager._session_service, children)
+            manager._settings.adk_subagent_records_rewrite_after = 3
+            data = json.loads(json.dumps(data))
+            data["numbered"] = {"researcher": 4}
+            await manager._save_agent_records(conversation, data)
+            after = await stored_ids(manager._session_service, children)
+            loaded = await manager._load_agent_records(conversation)
+        finally:
+            await manager.cleanup()
+
+        assert ("t" in before, "t/" in before) == (True, False)  # 100: no rewrite yet
+        assert ("t" in after, "t/" in after) == (False, True)
+        assert loaded == data
 
     async def test_a_first_runs_start_is_written_before_its_transcript_is_made(
         self, project, monkeypatch

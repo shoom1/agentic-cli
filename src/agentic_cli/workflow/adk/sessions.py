@@ -49,10 +49,11 @@ a write's event holds what changed and the records grow in step with the
 conversation, not with the square of it: ``RECORDS_KEY`` holds the header
 (version, time, counters) and ``RECORDS_KEY.instance.<n>`` and
 ``RECORDS_KEY.run.<n>`` the n-th instance and run. Its events would still
-grow without bound, so past ``RECORDS_REWRITE_AFTER`` writes the next one
-rewrites the records whole into a second session (``records_session_ids``:
-the conversation's id and that plus ``/``, alternating, ``_GENERATION_KEY``
-telling the newer, which a read takes), then deletes the first. No two conversations'
+grow without bound, so past ``RECORDS_REWRITE_AFTER`` writes (the settings'
+``adk_subagent_records_rewrite_after``) the next one rewrites the records
+whole into a second session (``records_session_ids``: the conversation's id
+and that plus ``/``, alternating, ``_GENERATION_KEY`` telling the newer,
+which a read takes), then deletes the first. No two conversations'
 records or transcripts share an id. Numbering past the stored instances
 finds a conversation's children by the instances its records name: a first
 run's session is made only once its start is in the records, so they name
@@ -109,7 +110,8 @@ _INSTANCE_KEY = f"{RECORDS_KEY}.instance."
 _RUN_KEY = f"{RECORDS_KEY}.run."
 
 #: How many writes are appended to one records session before the next write
-#: rewrites the records whole into the other one (``save_records``).
+#: rewrites the records whole into the other one (``save_records``), unless
+#: the settings say otherwise (``adk_subagent_records_rewrite_after``).
 RECORDS_REWRITE_AFTER = 100
 #: The state key of a records session's generation: ``{"n": <int>, "writes":
 #: <int>}``, the rewrites so far and the writes appended since the last.
@@ -331,7 +333,11 @@ def _flat(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def save_records(
-    service: "BaseSessionService", ref: SessionRef, data: Mapping[str, Any]
+    service: "BaseSessionService",
+    ref: SessionRef,
+    data: Mapping[str, Any],
+    *,
+    rewrite_after: int = RECORDS_REWRITE_AFTER,
 ) -> None:
     """Keep ``data`` as ``ref``'s sub-agent records, replacing what its records session held.
 
@@ -341,12 +347,14 @@ async def save_records(
     the instances and runs that changed or came, a key the records no longer
     hold set to None), so a write costs what changed (``append_event``: ADK
     keeps a session's state only through its events). Its events would grow
-    without bound, so once ``RECORDS_REWRITE_AFTER`` writes were appended the
-    next one rewrites the records whole into the other of the two sessions
-    (``records_session_ids``), one generation on (``_GENERATION_KEY``), and
-    deletes the first: the older session is deleted before the new one is
-    made (one a cut-short rewrite left), and the new one before the old, so
-    a crash between leaves both and a read takes the newer.
+    without bound, so once ``rewrite_after`` writes were appended (the
+    manager's ``adk_subagent_records_rewrite_after``, ``RECORDS_REWRITE_AFTER``
+    by default) the next one rewrites the records whole into the other of
+    the two sessions (``records_session_ids``), one generation on
+    (``_GENERATION_KEY``), and deletes the first: the older session is
+    deleted before the new one is made (one a cut-short rewrite left), and
+    the new one before the old, so a crash between leaves both and a read
+    takes the newer.
     """
     from google.adk.events import Event, EventActions
 
@@ -369,7 +377,7 @@ async def save_records(
     if not delta:
         return
     generation = _generation(held)
-    if generation["writes"] >= RECORDS_REWRITE_AFTER and second is not None:
+    if generation["writes"] >= rewrite_after and second is not None:
         other = second if session.id == first else first
         await service.delete_session(app_name=app, user_id=ref.user_id, session_id=other)
         await service.create_session(
