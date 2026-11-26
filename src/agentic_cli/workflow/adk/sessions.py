@@ -48,7 +48,11 @@ own session while a turn runs. Its state holds the records split by key, so
 a write's event holds what changed and the records grow in step with the
 conversation, not with the square of it: ``RECORDS_KEY`` holds the header
 (version, time, counters) and ``RECORDS_KEY.instance.<n>`` and
-``RECORDS_KEY.run.<n>`` the n-th instance and run. No two conversations'
+``RECORDS_KEY.run.<n>`` the n-th instance and run. Its events would still
+grow without bound, so past ``RECORDS_REWRITE_AFTER`` writes the next one
+rewrites the records whole into a second session (``records_session_ids``:
+the conversation's id and that plus ``/``, alternating, ``_GENERATION_KEY``
+telling the newer, which a read takes), then deletes the first. No two conversations'
 records or transcripts share an id. Numbering past the stored instances
 finds a conversation's children by the instances its records name: a first
 run's session is made only once its start is in the records, so they name
@@ -104,6 +108,13 @@ RECORDS_AUTHOR = "agentic_cli"
 _INSTANCE_KEY = f"{RECORDS_KEY}.instance."
 _RUN_KEY = f"{RECORDS_KEY}.run."
 
+#: How many writes are appended to one records session before the next write
+#: rewrites the records whole into the other one (``save_records``).
+RECORDS_REWRITE_AFTER = 100
+#: The state key of a records session's generation: ``{"n": <int>, "writes":
+#: <int>}``, the rewrites so far and the writes appended since the last.
+_GENERATION_KEY = f"{RECORDS_KEY}.generation"
+
 #: What a child session's app name adds to the conversation's app name.
 CHILD_APP_SUFFIX = "--agents"
 #: The longest app name or session id ADK stores (``sessions/schemas/shared.py``).
@@ -136,9 +147,27 @@ def records_session_id(conversation: str) -> str:
     return session_id
 
 
+def records_session_ids(conversation: str) -> tuple[str, str | None]:
+    """The two child-app sessions that alternate as ``conversation``'s records session.
+
+    ``(records_session_id(conversation), that + "/")``: the records are
+    rewritten whole into the other one past ``RECORDS_REWRITE_AFTER`` writes
+    (``save_records``). The second is None when its id would be longer than
+    ADK stores (``MAX_KEY``): that conversation keeps appending to its one.
+    Neither names an instance (``child_of``).
+
+    Raises:
+        ValueError: The first id is longer than ADK stores, as ``records_session_id``.
+    """
+    first = records_session_id(conversation)
+    second = f"{first}/"
+    return first, second if len(second) <= MAX_KEY else None
+
+
 def child_of(session_id: str) -> tuple[str, str] | None:
     """The conversation and the instance a child app's session id names
-    (``child_session_id``, decoded); None for a records session or an id that names none."""
+    (``child_session_id``, decoded); None for a records session (either of its
+    two, ``records_session_ids``) or an id that names none."""
     encoded, slash, instance = session_id.partition("/")
     if not slash or not instance or "/" in instance:
         return None
@@ -217,26 +246,63 @@ async def _children(
     return await _listed_children(service, app_name, user_id, conversation)
 
 
+async def _current_records(
+    service: "BaseSessionService", ref: SessionRef
+) -> tuple["Session", str, str | None] | None:
+    """The records session of ``ref`` with the higher generation (``_GENERATION_KEY``),
+    with the two ids (``records_session_ids``); None for none, or when no id fits.
+
+    Read without events (``num_recent_events=0``). Both sessions exist only
+    when a rewrite was cut short before it deleted the older one: the newer
+    holds the whole records, and a session without the key is generation 0.
+    """
+    from google.adk.sessions.base_session_service import GetSessionConfig
+
+    try:
+        first, second = records_session_ids(ref.session_id)
+    except ValueError:
+        return None  # its records could never be stored: none are
+    best: Session | None = None
+    best_generation = -1
+    for session_id in (first, second):
+        if session_id is None:
+            continue
+        session = await service.get_session(
+            app_name=child_app(ref.app_name), user_id=ref.user_id, session_id=session_id,
+            config=GetSessionConfig(num_recent_events=0),
+        )
+        if session is None:
+            continue
+        generation = _generation(session.state or {})
+        if generation["n"] > best_generation:
+            best, best_generation = session, generation["n"]
+    return None if best is None else (best, first, second)
+
+
+def _generation(state: Mapping[str, Any]) -> dict[str, int]:
+    """``state``'s generation: its rewrites so far (``n``) and the writes appended since (``writes``)."""
+    held = state.get(_GENERATION_KEY)
+    if not isinstance(held, Mapping):
+        return {"n": 0, "writes": 0}
+    n, writes = held.get("n"), held.get("writes")
+    return {
+        "n": n if type(n) is int else 0,
+        "writes": writes if type(writes) is int else 0,
+    }
+
+
 async def load_records(service: "BaseSessionService", ref: SessionRef) -> Any | None:
     """``ref``'s records, put back together from its records session; None for none.
 
     The header under ``RECORDS_KEY`` with ``instances`` and ``runs`` from the
     keys that hold each (in order). Read without the session's events
-    (``num_recent_events=0``).
+    (``num_recent_events=0``), from the newer of the two sessions the records
+    alternate between (``records_session_ids``).
     """
-    from google.adk.sessions.base_session_service import GetSessionConfig
-
-    try:
-        session_id = records_session_id(ref.session_id)
-    except ValueError:
-        return None  # its records could never be stored: none are
-    session = await service.get_session(
-        app_name=child_app(ref.app_name), user_id=ref.user_id, session_id=session_id,
-        config=GetSessionConfig(num_recent_events=0),
-    )
-    if session is None:
+    found = await _current_records(service, ref)
+    if found is None:
         return None
-    state = session.state or {}
+    state = found[0].state or {}
     header = state.get(RECORDS_KEY)
     if not isinstance(header, Mapping):
         return None
@@ -273,23 +339,27 @@ async def save_records(
     holds only the keys that differ from what the session holds (the header,
     the instances and runs that changed or came, a key the records no longer
     hold set to None), so a write costs what changed (``append_event``: ADK
-    keeps a session's state only through its events).
+    keeps a session's state only through its events). Its events would grow
+    without bound, so once ``RECORDS_REWRITE_AFTER`` writes were appended the
+    next one rewrites the records whole into the other of the two sessions
+    (``records_session_ids``), one generation on (``_GENERATION_KEY``), and
+    deletes the first: the older session is deleted before the new one is
+    made (one a cut-short rewrite left), and the new one before the old, so
+    a crash between leaves both and a read takes the newer.
     """
     from google.adk.events import Event, EventActions
-    from google.adk.sessions.base_session_service import GetSessionConfig
 
     app = child_app(ref.app_name)
-    session_id = records_session_id(ref.session_id)
+    first, second = records_session_ids(ref.session_id)
     flat = _flat(data)
-    session = await service.get_session(
-        app_name=app, user_id=ref.user_id, session_id=session_id,
-        config=GetSessionConfig(num_recent_events=0),
-    )
-    if session is None:
+    found = await _current_records(service, ref)
+    if found is None:
         await service.create_session(
-            app_name=app, user_id=ref.user_id, session_id=session_id, state=flat,
+            app_name=app, user_id=ref.user_id, session_id=first,
+            state={**flat, _GENERATION_KEY: {"n": 0, "writes": 0}},
         )
         return
+    session = found[0]
     held = session.state or {}
     delta: dict[str, Any] = {key: value for key, value in flat.items() if held.get(key) != value}
     for key, value in held.items():
@@ -297,20 +367,33 @@ async def save_records(
             delta[key] = None
     if not delta:
         return
+    generation = _generation(held)
+    if generation["writes"] >= RECORDS_REWRITE_AFTER and second is not None:
+        other = second if session.id == first else first
+        await service.delete_session(app_name=app, user_id=ref.user_id, session_id=other)
+        await service.create_session(
+            app_name=app, user_id=ref.user_id, session_id=other,
+            state={**flat, _GENERATION_KEY: {"n": generation["n"] + 1, "writes": 0}},
+        )
+        await service.delete_session(app_name=app, user_id=ref.user_id, session_id=session.id)
+        return
+    delta[_GENERATION_KEY] = {"n": generation["n"], "writes": generation["writes"] + 1}
     await service.append_event(session, Event(
         author=RECORDS_AUTHOR, actions=EventActions(state_delta=delta),
     ))
 
 
 async def delete_records(service: "BaseSessionService", ref: SessionRef) -> None:
-    """Delete ``ref``'s records session, its events with it; none is nothing to do."""
+    """Delete ``ref``'s records sessions (both: ``records_session_ids``), their events with them; none is nothing to do."""
     try:
-        session_id = records_session_id(ref.session_id)
+        ids = records_session_ids(ref.session_id)
     except ValueError:
         return  # its records could never be stored: none are
-    await service.delete_session(
-        app_name=child_app(ref.app_name), user_id=ref.user_id, session_id=session_id,
-    )
+    for session_id in ids:
+        if session_id is not None:
+            await service.delete_session(
+                app_name=child_app(ref.app_name), user_id=ref.user_id, session_id=session_id,
+            )
 
 
 async def delete_children(

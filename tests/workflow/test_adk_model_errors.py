@@ -260,8 +260,9 @@ async def test_a_failing_state_read_keeps_a_no_answer_runs_own_error(monkeypatch
 
     async def locked(**kwargs):
         config = kwargs.get("config")
-        # The run's child session (``s/researcher-1``), not the conversation's records (``s``).
-        if kwargs["app_name"].endswith("--agents") and "/" in kwargs["session_id"] \
+        # The run's child session (``s/researcher-1``), not the conversation's
+        # records (``s``, ``s/``).
+        if kwargs["app_name"].endswith("--agents") and kwargs["session_id"].partition("/")[2] \
                 and config is not None \
                 and config.num_recent_events == 0:
             raise RuntimeError("database is locked")

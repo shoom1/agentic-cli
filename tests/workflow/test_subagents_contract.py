@@ -2976,7 +2976,7 @@ async def transcripts(crew: Crew) -> list[str]:
         prefix = f"{conversation.session_id}/"
         return sorted(
             session.id.removeprefix(prefix) for session in listed.sessions
-            if session.id.startswith(prefix)
+            if session.id.startswith(prefix) and session.id != prefix  # ``s/``: records
         )
     found: set[str] = set()
     own = [conversation.app_name, conversation.user_id, conversation.session_id]
@@ -3175,8 +3175,9 @@ class TestTheTimeLimit:
 
         async def slow_state_read(**kwargs: Any) -> Any:
             config = kwargs.get("config")
-            # The run's child session (``s/researcher-1``), not the conversation's records (``s``).
-            if kwargs["app_name"].endswith("--agents") and "/" in kwargs["session_id"] \
+            # The run's child session (``s/researcher-1``), not the conversation's
+            # records (``s``, ``s/``).
+            if kwargs["app_name"].endswith("--agents") and kwargs["session_id"].partition("/")[2] \
                     and config is not None \
                     and config.num_recent_events == 0:
                 stopped = None

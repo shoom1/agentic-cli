@@ -943,8 +943,12 @@ the start of the entry's title.
   the child app named as the conversation (`<app_name>--agents`, id
   `<conversation id>`, its `%` and `/` percent-encoded, as in its instances' ids; the state split by key so a
   write holds what changed: the header under `agentic_cli.agents`,
-  `adk/sessions.py::RECORDS_KEY`, and a key for each instance and run), on Deep Agents in
-  the store beside the checkpointer (namespace `("agentic_cli", "agents",
+  `adk/sessions.py::RECORDS_KEY`, and a key for each instance and run; its
+  events stay bounded: after 100 appended writes,
+  `adk/sessions.py::RECORDS_REWRITE_AFTER`, the next one writes the records
+  whole into a second session, id `<conversation id>/`, one generation on,
+  and deletes the first, the two alternating, a read taking the newer), on
+  Deep Agents in the store beside the checkpointer (namespace `("agentic_cli", "agents",
   <app>, <user>)`, key the session id); the memory store keeps them for the
   process. They load with the conversation (`load_session`, a turn's start,
   `/agents`; the manager's `load_agents(ref)`, provisional): a run found
