@@ -52,7 +52,14 @@ from agentic_cli.tools.registry import register_tool  # noqa: E402
 from agentic_cli.workflow.adk import sessions as adk_sessions  # noqa: E402
 from agentic_cli.workflow.adk.manager import GoogleADKWorkflowManager  # noqa: E402
 from agentic_cli.workflow.adk.fit_guard_plugin import brief_of  # noqa: E402
-from agentic_cli.workflow.adk.sessions import BRIEF_KEY, RECORDS_KEY, child_app  # noqa: E402
+from agentic_cli.workflow.adk.sessions import (  # noqa: E402
+    _GENERATION_KEY,
+    BRIEF_KEY,
+    MAX_KEY,
+    RECORDS_KEY,
+    RECORDS_REWRITE_AFTER,
+    child_app,
+)
 from agentic_cli.workflow.agents import SubAgentPolicy  # noqa: E402
 from agentic_cli.workflow.agents.runs import RECORDS_VERSION  # noqa: E402
 from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
@@ -130,11 +137,15 @@ class TestDeleteChildren:
             (APP, "u", "s"),                             # the conversation itself
         ]:
             await service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+        # Records that do not read: the store's own listing is what finds them.
+        await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
 
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
         assert deleted == 3
-        assert await stored_ids(service, child_app(APP)) == ["s%2Fx/researcher-1", "t/researcher-1"]
+        assert await stored_ids(service, child_app(APP)) == [
+            "s", "s%2Fx/researcher-1", "t/researcher-1",  # "s": the records
+        ]
         assert await stored_ids(service, child_app(APP), "v") == ["s/researcher-1"]
         assert await stored_ids(service, APP) == ["s"]
 
@@ -157,6 +168,7 @@ class TestDeleteChildren:
                 author="researcher",
                 content=types.Content(role="model", parts=[types.Part(text="X is 42.")]),
             ))
+            await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
             before = events()
 
             await adk_sessions.delete_children(service, APP, "u", "s")
@@ -245,6 +257,158 @@ class TestTheRecordsSession:
         loaded = await adk_sessions.load_records(service, conversation)
 
         assert [i["instance"] for i in loaded["instances"]] == ["writer-1"]
+
+    async def test_its_events_stay_bounded(self, service):
+        """Past ``RECORDS_REWRITE_AFTER`` appended writes the records are
+        written whole into the other of two sessions and the first is
+        deleted, so a conversation's records never hold more events than
+        that."""
+        conversation = SessionRef(APP, "u", "s")
+        data = records_naming("researcher-1")
+        data["runs"].append({"run": "researcher-1#1", "status": "running"})
+        for number in range(3 * RECORDS_REWRITE_AFTER):
+            data = json.loads(json.dumps(data))  # the service keeps what it is given
+            data["runs"][0]["status"] = f"running-{number}"
+            await adk_sessions.save_records(service, conversation, data)
+
+        events = 0
+        for session_id in ("s", "s/"):
+            session = await service.get_session(
+                app_name=child_app(APP), user_id="u", session_id=session_id
+            )
+            events += len(session.events) if session is not None else 0
+
+        assert events <= RECORDS_REWRITE_AFTER
+        loaded = await adk_sessions.load_records(service, conversation)
+        assert loaded["runs"] == data["runs"]
+
+    async def test_a_rewrite_holds_the_whole_records_and_the_next_generation(self, service):
+        conversation = SessionRef(APP, "u", "s")
+        data = records_naming("researcher-1", "researcher-2")
+        data["runs"] = [{"run": "researcher-1#1", "status": "x"}, {"run": "researcher-2#1"}]
+        for number in range(RECORDS_REWRITE_AFTER + 1):
+            data = json.loads(json.dumps(data))
+            data["runs"][0]["status"] = f"x{number}"
+            await adk_sessions.save_records(service, conversation, data)
+        data = json.loads(json.dumps(data))
+        data["runs"][0]["status"] = "rewritten"
+        with no_blocking_calls():  # the save that rewrites
+            await adk_sessions.save_records(service, conversation, data)
+
+        assert await stored_ids(service, child_app(APP)) == ["s/"]
+        session = await service.get_session(
+            app_name=child_app(APP), user_id="u", session_id="s/"
+        )
+        assert session.state[_GENERATION_KEY] == {"n": 1, "writes": 0}
+        assert session.state[f"{RECORDS_KEY}.run.000000"] == data["runs"][0]
+        assert session.state[f"{RECORDS_KEY}.run.000001"] == data["runs"][1]
+        assert [k for k in session.state if k.startswith(f"{RECORDS_KEY}.instance.")] == [
+            f"{RECORDS_KEY}.instance.000000", f"{RECORDS_KEY}.instance.000001",
+        ]
+        assert await adk_sessions.load_records(service, conversation) == data
+
+    async def test_a_crash_between_the_rewrite_and_the_delete_keeps_the_newer(
+        self, service, monkeypatch
+    ):
+        conversation = SessionRef(APP, "u", "s")
+        data = records_naming("researcher-1")
+        data["runs"] = [{"run": "researcher-1#1", "status": "x"}]
+
+        async def save(label: str) -> dict:
+            changed = json.loads(json.dumps(data))
+            changed["runs"][0]["status"] = label
+            await adk_sessions.save_records(service, conversation, changed)
+            return changed
+
+        for number in range(RECORDS_REWRITE_AFTER + 1):
+            await save(f"x{number}")
+        real = service.delete_session
+
+        async def crashing(**names):
+            if names["session_id"] == "s":
+                raise OSError("killed")
+            await real(**names)
+
+        monkeypatch.setattr(service, "delete_session", crashing)
+        with pytest.raises(OSError):
+            await save("rewritten")
+        monkeypatch.undo()
+
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/"]
+        assert (await adk_sessions.load_records(service, conversation))["runs"][0]["status"] == (
+            "rewritten"
+        )
+        newer = await save("after")
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/"]
+        session = await service.get_session(
+            app_name=child_app(APP), user_id="u", session_id="s/"
+        )
+        assert session.state[_GENERATION_KEY] == {"n": 1, "writes": 1}  # appended there
+        assert await adk_sessions.load_records(service, conversation) == newer
+        for number in range(RECORDS_REWRITE_AFTER):
+            await save(f"y{number}")
+        # The rewrite after it deleted the stale one first: one session is left.
+        assert len(await stored_ids(service, child_app(APP))) == 1
+        await adk_sessions.delete_records(service, conversation)
+        assert await stored_ids(service, child_app(APP)) == []
+
+    async def test_a_delete_after_a_crash_removes_both(self, service, monkeypatch):
+        """A rewrite cut short leaves both records sessions: the
+        conversation's delete removes both, and the transcripts they name."""
+        conversation = SessionRef(APP, "u", "s")
+        await service.create_session(app_name=APP, user_id="u", session_id="s")
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="s/researcher-1"
+        )
+        data = records_naming("researcher-1")
+        data["runs"] = [{"run": "researcher-1#1", "status": "x"}]
+        for number in range(RECORDS_REWRITE_AFTER + 1):
+            data = json.loads(json.dumps(data))
+            data["runs"][0]["status"] = f"x{number}"
+            await adk_sessions.save_records(service, conversation, data)
+        real = service.delete_session
+
+        async def crashing(**names):
+            if names["session_id"] == "s":
+                raise OSError("killed")
+            await real(**names)
+
+        monkeypatch.setattr(service, "delete_session", crashing)
+        data = json.loads(json.dumps(data))
+        data["runs"][0]["status"] = "rewritten"
+        with pytest.raises(OSError):
+            await adk_sessions.save_records(service, conversation, data)
+        monkeypatch.undo()
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/", "s/researcher-1"]
+
+        assert await adk_sessions.ServiceSessions(service).delete(conversation) is True
+
+        assert await stored_ids(service, child_app(APP)) == []
+        assert await stored_ids(service, APP) == []
+
+    async def test_a_conversation_whose_second_id_is_too_long_keeps_appending(self, service):
+        conversation = "c" * MAX_KEY
+        ref = SessionRef(APP, "u", conversation)
+        assert adk_sessions.records_session_ids(conversation) == (conversation, None)
+        data = records_naming("researcher-1")
+        data["runs"] = [{"run": "researcher-1#1", "status": "x"}]
+        for number in range(RECORDS_REWRITE_AFTER + 2):
+            data = json.loads(json.dumps(data))
+            data["runs"][0]["status"] = f"x{number}"
+            await adk_sessions.save_records(service, ref, data)
+
+        assert await stored_ids(service, child_app(APP)) == [conversation]
+        assert await adk_sessions.load_records(service, ref) == data
+
+    async def test_neither_records_session_names_an_instance(self, service):
+        assert adk_sessions.child_of("s") is None and adk_sessions.child_of("s/") is None
+        assert adk_sessions.records_session_ids("s") == ("s", "s/")
+        for session_id in ("s", "s/"):
+            await service.create_session(
+                app_name=child_app(APP), user_id="u", session_id=session_id
+            )
+
+        assert await adk_sessions._listed_children(service, APP, "u", "s") == []
 
     async def test_a_records_id_too_long_for_adk_is_refused_and_a_delete_goes_on(self, service):
         conversation = "/" * 50  # a storable id that encodes to 150 characters
@@ -379,21 +543,52 @@ class TestTheChildrenRecordsName:
         assert await adk_sessions.delete_children(service, APP, "u", "s") == 2
         assert await stored_ids(service, child_app(APP)) == ["s"]
 
-    async def test_a_delete_also_removes_what_the_records_never_named(self, service):
-        """A start write can be lost: the records miss a transcript that exists,
-        which numbering leaves to the store's refusal and a delete must not."""
+    async def test_a_delete_removes_what_the_records_name_and_lists_nothing(
+        self, service, monkeypatch
+    ):
+        """A first run's transcript is made only once the records name it, so
+        the records name every transcript: a session they do not name is
+        another's, and nothing is listed to look for one."""
         conversation = SessionRef(APP, "u", "s")
         for session_id in ("s/researcher-1", "s/researcher-2", "t/researcher-1"):
             await service.create_session(
                 app_name=child_app(APP), user_id="u", session_id=session_id
             )
         await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+        listed: list[str] = []
+        real = service.list_sessions
+
+        async def listing(**names):
+            listed.append(names["app_name"])
+            return await real(**names)
+
+        monkeypatch.setattr(service, "list_sessions", listing)
 
         counts = await adk_sessions.stored_instances(service, APP, "u", "s")
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
-        assert (counts, deleted) == ({"researcher": 1}, 2)
-        assert await stored_ids(service, child_app(APP)) == ["s", "t/researcher-1"]
+        assert (counts, deleted, listed) == ({"researcher": 1}, 1, [])
+        monkeypatch.undo()
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/researcher-2", "t/researcher-1"]
+
+    async def test_a_conversation_without_records_lists_nothing(self, service, monkeypatch):
+        """No records means no transcript was ever made for it."""
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="t/researcher-1"
+        )
+        listed: list[str] = []
+        real = service.list_sessions
+
+        async def listing(**names):
+            listed.append(names["app_name"])
+            return await real(**names)
+
+        monkeypatch.setattr(service, "list_sessions", listing)
+
+        counts = await adk_sessions.stored_instances(service, APP, "u", "s")
+        deleted = await adk_sessions.delete_children(service, APP, "u", "s")
+
+        assert (counts, deleted, listed) == ({}, 0, [])
 
     async def test_records_of_another_version_are_no_list(self, service):
         await service.create_session(
@@ -441,8 +636,13 @@ class TestDeletingTheConversation:
         service.delete_session = deleting
 
         assert await adk_sessions.ServiceSessions(service).delete(conversation) is True
+        # The records are two sessions (``s``, ``s/``): neither is a transcript.
         assert deleted == [
-            (child_app(APP), "s/researcher-1"), (child_app(APP), "s"), (APP, "s"),
+            (child_app(APP), "s/researcher-1"), (child_app(APP), "s"), (child_app(APP), "s/"),
+            (APP, "s"),
+        ]
+        assert [d for d in deleted if d[0] == child_app(APP) and d[1].partition("/")[2]] == [
+            (child_app(APP), "s/researcher-1"),
         ]
 
     async def test_a_conversation_already_gone_leaves_none_behind(self, project, monkeypatch):
@@ -534,6 +734,8 @@ class TestStoredInstances:
             await service.create_session(
                 app_name=child_app(APP), user_id="u", session_id=session_id
             )
+        # Records that do not read: the listing's filtering is what counts them.
+        await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
 
         counts = await adk_sessions.stored_instances(service, APP, "u", "s")
 

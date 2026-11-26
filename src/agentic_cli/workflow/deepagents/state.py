@@ -2,7 +2,7 @@
 
 from typing import Annotated, NotRequired
 
-from langchain.agents import AgentState
+from deepagents import DeepAgentState
 
 
 def _last(old: object, new: object) -> object:
@@ -15,10 +15,14 @@ def _first(old: object, new: object) -> object:
     return old or new
 
 
-class AgentCliState(AgentState):
-    """LangChain's agent state, plus the plan and task state tools' keys.
+class AgentCliState(DeepAgentState):
+    """Deep Agents' agent state, plus the plan and task state tools' keys.
 
-    ``messages`` keeps LangChain's ``add_messages``. ``plan`` and ``tasks``
+    ``messages`` is Deep Agents' delta channel: each checkpoint stores the
+    messages its step added (a full copy every 50 updates), and LangGraph
+    puts the list together from the thread's writes as it reads a
+    checkpoint, so a conversation's checkpoints grow with its length, not
+    its square (``CheckpointSessions`` reads them so too). ``plan`` and ``tasks``
     are written by ``save_plan`` and ``save_tasks`` (the LangGraph-library
     state tools). A sub-agent has its own, starting empty, and none flows
     back to the coordinator; one agent's parallel ``save_tasks`` calls in

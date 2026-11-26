@@ -62,6 +62,7 @@ from agentic_cli.tools.jobs.backends import TERMINAL_STATES
 from agentic_cli.tools.registry import register_tool
 from agentic_cli.workflow import live_events
 from agentic_cli.workflow.agents import records as agent_records
+from agentic_cli.workflow.agents.records import RECORDS_NOT_STORED
 from agentic_cli.workflow.agents import (
     INSTANCE_CLOSED,
     INSTANCE_IDLE,
@@ -2975,7 +2976,7 @@ async def transcripts(crew: Crew) -> list[str]:
         prefix = f"{conversation.session_id}/"
         return sorted(
             session.id.removeprefix(prefix) for session in listed.sessions
-            if session.id.startswith(prefix)
+            if session.id.startswith(prefix) and session.id != prefix  # ``s/``: records
         )
     found: set[str] = set()
     own = [conversation.app_name, conversation.user_id, conversation.session_id]
@@ -3174,8 +3175,9 @@ class TestTheTimeLimit:
 
         async def slow_state_read(**kwargs: Any) -> Any:
             config = kwargs.get("config")
-            # The run's child session (``s/researcher-1``), not the conversation's records (``s``).
-            if kwargs["app_name"].endswith("--agents") and "/" in kwargs["session_id"] \
+            # The run's child session (``s/researcher-1``), not the conversation's
+            # records (``s``, ``s/``).
+            if kwargs["app_name"].endswith("--agents") and kwargs["session_id"].partition("/")[2] \
                     and config is not None \
                     and config.num_recent_events == 0:
                 stopped = None
@@ -5341,9 +5343,12 @@ class TestARestart:
             ("researcher-2#1", RUN_COMPLETED),
         ]
 
-    async def test_a_failing_write_is_warned_of_once_and_the_runs_complete(
+    async def test_a_failing_write_is_warned_of_once_and_a_follow_up_completes(
         self, make_crew, monkeypatch
     ):
+        """A follow-up's instance is named in the records already: a store
+        that fails its writes fails it not (a first run it does:
+        ``TestARunWhoseStartIsNotStored``)."""
         crew = make_crew(
             follow_team(),
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
@@ -5362,9 +5367,10 @@ class TestARestart:
                     {"event": event, "log_level": level, **fields}
                 )
 
+        events = await crew.turn()
         monkeypatch.setattr(crew.manager, "_save_agent_records", fails)
         monkeypatch.setattr(agent_records, "logger", Recorder())
-        events = [*await crew.turn(), *await crew.turn("Go on.")]
+        events += await crew.turn("Go on.")
 
         read = crew.results_read("coordinator")
         assert [envelope_read(read[call])["status"] for call in ("c1", "c2")] == [
@@ -5379,48 +5385,114 @@ class TestARestart:
         assert [e for e in events if e.type is EventType.ERROR] == []
 
 
-class TestATranscriptTheRecordsNeverNamed:
-    """A run's start write can be lost (the store failed, the process was
-    killed first) while its transcript exists. The records then miss an
-    instance: a new instance never continues it, and a delete still removes
-    it."""
+async def store_fails(conversation: SessionRef, data: Any) -> None:
+    """A store that fails every records write."""
+    raise OSError("disk full")
 
-    @staticmethod
-    async def lost_start_write(make_crew, monkeypatch):
-        first = make_crew(
+
+class TestARunWhoseStartIsNotStored:
+    """A first run's transcript is made only once its start is in the
+    records, so the records name every transcript the conversation keeps
+    (what its numbering and its delete read). A store that fails that write
+    fails the run, and nothing of it is made: the turn goes on."""
+
+    async def test_it_fails_and_makes_no_transcript(self, make_crew, monkeypatch):
+        crew = make_crew(
             follow_team(), store="sqlite",
             coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
                          calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
             researcher=[says("X is 42."), says("Y is 7.")],
         )
-        await first.turn("Find X.")
-        monkeypatch.setattr(first.manager, "_save_agent_records", written_no_more)
-        await first.turn("Find Y.")
-        assert await transcripts(first) == ["researcher-1", "researcher-2"]
-        await first.manager.cleanup()
+        await crew.turn("Find X.")
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
 
-    async def test_a_new_instance_never_continues_it(self, make_crew, monkeypatch):
-        await self.lost_start_write(make_crew, monkeypatch)
+        events = await crew.turn("Find Y.")
+
+        second = next(r for r in crew.records() if r.ref.instance == "researcher-2")
+        assert (second.status, second.error) == (RUN_FAILED, RECORDS_NOT_STORED)
+        assert envelope_read(crew.results_read("coordinator")["c2"])["error"] == RECORDS_NOT_STORED
+        assert await transcripts(crew) == ["researcher-1"]
+        assert "Find Y." not in "".join(crew.bodies("researcher"))
+        assert [e.content for e in events if e.type is EventType.TEXT][-1] == "Done."
+
+    async def test_parallel_first_runs_each_fail_and_give_their_slots_back(
+        self, make_crew, monkeypatch
+    ):
+        crew = make_crew(
+            follow_team(), store="sqlite", subagents=SubAgentPolicy(max_active=1),
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+
+        events = await crew.turn("Find X and Y.")
+
+        assert [(r.ref.instance, r.status, r.error) for r in crew.records()] == [
+            ("researcher-1", RUN_FAILED, RECORDS_NOT_STORED),
+            ("researcher-2", RUN_FAILED, RECORDS_NOT_STORED),
+        ]
+        read = crew.results_read("coordinator")
+        assert [envelope_read(read[c])["error"] for c in ("c1", "c2")] == [RECORDS_NOT_STORED] * 2
+        assert await transcripts(crew) == []
+        assert crew.requests("researcher") == 0
+        assert [e.content for e in events if e.type is EventType.TEXT][-1] == "Done."
+        assert (crew.slots().free, crew.slots().waiting) == (1, 0)
+
+    async def test_a_follow_up_still_runs(self, make_crew, monkeypatch):
+        """Its instance is named in the records already."""
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Go on.", "c3")), says("Done.")],
+            researcher=[says("X is 42."), says("Went on.")],
+        )
+        await crew.turn("Find X.")
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+
+        await crew.turn("Go on.")
+
+        read = envelope_read(crew.results_read("coordinator")["c3"])
+        assert (read["status"], read["result"]) == (RUN_COMPLETED, "Went on.")
+        assert await transcripts(crew) == ["researcher-1"]
+
+    async def test_records_of_another_version_still_start_runs(self, make_crew):
+        """This manager writes none of that conversation's records, so its
+        runs wait for none."""
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        await first.turn("Find X.")
+        await first.manager._save_agent_records(first.conversation, {"v": 0})
+        await first.manager.cleanup()
         second = make_crew(
             follow_team(), store="sqlite",
-            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
-            researcher=[says("Z is 3.")],
+            coordinator=[calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("Y is 7.")],
         )
 
-        await second.turn("Find Z.")
+        await second.turn("Find Y.")
 
-        assert "researcher-2" not in [
-            r.ref.instance for r in second.records() if r.status == RUN_COMPLETED
-        ]
-        assert "Find Y." not in "".join(second.bodies("researcher"))
-        assert "researcher-2" in await transcripts(second)  # as it was
+        (record,) = second.records()
+        assert (record.ref.instance, record.status) == ("researcher-2", RUN_COMPLETED)
+        assert await transcripts(second) == ["researcher-1", "researcher-2"]
 
     async def test_a_first_run_onto_a_stored_transcript_fails_rather_than_continue_it(
-        self, make_crew, monkeypatch
+        self, make_crew
     ):
         """Whatever numbered it: here a store that could tell nothing of what
         it keeps."""
-        await self.lost_start_write(make_crew, monkeypatch)
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        await first.turn("Find X and Y.")
+        assert await transcripts(first) == ["researcher-1", "researcher-2"]
+        await first.manager.cleanup()
         second = make_crew(
             follow_team(), store="sqlite",
             coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
@@ -5442,17 +5514,95 @@ class TestATranscriptTheRecordsNeverNamed:
         assert "Find X." not in "".join(second.bodies("researcher"))
         assert await transcripts(second) == ["researcher-1", "researcher-2"]
 
-    async def test_a_delete_removes_it_too(self, make_crew, monkeypatch):
-        await self.lost_start_write(make_crew, monkeypatch)
-        second = make_crew(
-            follow_team(), store="sqlite", coordinator=[says("Hi.")], researcher=[],
+
+class TestAFollowUpThatMakesItsTranscript:
+    """An instance whose first run failed ``RECORDS_NOT_STORED`` is left
+    ``idle`` and can be followed up. A follow-up that makes its transcript
+    (it has none: the first run made none) waits for its start to be stored
+    as a first run does, so the records name every transcript."""
+
+    @staticmethod
+    def crew_of(make_crew, monkeypatch):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")),
+                         calls(follow("researcher-1", "Try again.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
         )
-        await second.turn("Hi.")
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+        return crew
 
-        assert await second.manager.delete_session(SESSION, user_id=USER) is True
+    async def test_it_fails_while_the_store_still_fails_and_leaves_no_transcript(
+        self, make_crew, monkeypatch
+    ):
+        crew = self.crew_of(make_crew, monkeypatch)
 
+        await crew.turn("Find X.")
+
+        read = crew.results_read("coordinator")
+        assert envelope_read(read["c1"])["error"] == RECORDS_NOT_STORED
+        assert envelope_read(read["c2"])["error"] == RECORDS_NOT_STORED
+        assert await transcripts(crew) == []
+        monkeypatch.undo()
+        assert await crew.manager.delete_session(SESSION, user_id=USER) is True
+        assert await transcripts(crew) == []
+
+    async def test_it_completes_once_the_store_recovers_and_the_delete_removes_it(
+        self, make_crew, monkeypatch
+    ):
+        crew = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1")), says("Done."),
+                         calls(follow("researcher-1", "Try again.", "c2")), says("Done.")],
+            researcher=[says("X is 42.")],
+        )
+        monkeypatch.setattr(crew.manager, "_save_agent_records", store_fails)
+        await crew.turn("Find X.")
+        monkeypatch.undo()
+
+        await crew.turn("Try again.")
+
+        read = envelope_read(crew.results_read("coordinator")["c2"])
+        assert (read["status"], read["result"]) == (RUN_COMPLETED, "X is 42.")
+        stored = await crew.manager._load_agent_records(crew.conversation)
+        assert "researcher-1" in [i["instance"] for i in stored["instances"]]
+        assert await transcripts(crew) == ["researcher-1"]
+        assert await crew.manager.delete_session(SESSION, user_id=USER) is True
+        assert await transcripts(crew) == []
+
+
+class TestRecordsThatDoNotRead:
+    """A conversation whose stored records are another version's: this
+    manager writes none of its runs, so only the store can say what it
+    keeps. Its runs are numbered past the transcripts the store keeps, and a
+    delete removes every one of them."""
+
+    async def test_numbering_and_a_delete_still_find_their_transcripts(self, make_crew):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        await first.turn("Find X and Y.")
+        await first.manager._save_agent_records(first.conversation, {"v": 0})
+        await first.manager.cleanup()
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
+            researcher=[says("Z is 3.")],
+        )
+
+        with no_blocking_calls():
+            await second.turn("Find Z.")
+            (record,) = second.records()
+            made = await transcripts(second)
+            deleted = await second.manager.delete_session(SESSION, user_id=USER)
+
+        assert (record.ref.instance, record.status) == ("researcher-3", RUN_COMPLETED)
+        assert made == ["researcher-1", "researcher-2", "researcher-3"]
+        assert deleted is True
         assert await transcripts(second) == []
-        assert await second.manager._load_agent_records(second.conversation) is None
 
 
 class TestADeletedConversation:

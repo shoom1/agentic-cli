@@ -23,7 +23,9 @@ started outside a manager's turn.
 
 The registry is in memory; a conversation's records are kept beside it in
 its store as well (``BaseWorkflowManager``'s store hooks): ``on_change`` is
-told each time a conversation's records change, ``export`` gives them as
+told each time a conversation's records change at a run's start or end or
+an instance's status change (not at a working status: a restart reads any as
+``interrupted``, so the stored one is never used), ``export`` gives them as
 JSON-safe data (every instance, every run's record, the id counters,
 ``RECORDS_VERSION``) and ``restore`` reads that back when the conversation
 is loaded again (after a restart, or by another manager); a run found still
@@ -268,8 +270,10 @@ class AgentRuns:
 
     Args:
         on_change: Told the conversation each time its records change (a
-            run's event that changes them, ``interrupt_open``), never by
-            ``restore``: what a store's writes follow. None: nobody is told.
+            run's start or end, an instance's status change, ``interrupt_open``;
+            not a run's working status, which a restart reads as
+            ``interrupted`` whatever was stored), never by ``restore``: what
+            a store's writes follow. None: nobody is told.
     """
 
     def __init__(self, *, on_change: Callable[[SessionRef | None], None] | None = None) -> None:
@@ -371,7 +375,8 @@ class AgentRuns:
         A start makes the run's record (its call, title, brief, input, who
         started it and its mode), ``running``, and makes its instance or
         reopens it (``running``); a working status (``queued``,
-        ``running``, ``input_required``) becomes a working record's status;
+        ``running``, ``input_required``) becomes a working record's status
+        (``on_change`` is not told: a restart reads it as ``interrupted``);
         an end gives it its status, time, result, error, whether it is
         partial, what it used, who cancelled it and its own last plan and
         tasks, and sets its instance's status from the end's
@@ -424,7 +429,6 @@ class AgentRuns:
                 and working.status != status
             ):
                 working.status = status
-                self._changed(conversation)
             return
         if status not in RUN_END_STATUSES:
             return

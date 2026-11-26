@@ -62,7 +62,7 @@ from agentic_cli.workflow.sessions import (  # noqa: E402
 )
 from tests.conftest import MockContext  # noqa: E402
 from tests.workflow.adk.fakes import FakeAPI, anthropic_message, openai_response  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedModels, ai, task  # noqa: E402
+from tests.workflow.deepagents.fakes import ScriptedModels, ai, stored_messages, task  # noqa: E402
 from tests.workflow.langchain_fakes import gemini_reply, route, route_google  # noqa: E402
 
 # What the tools below wait on, set by the test that runs them.
@@ -789,7 +789,7 @@ class TestRecentMessages:
         saved = await manager._checkpointer.aget_tuple({"configurable": {
             "thread_id": thread_id(manager.session_ref("s", "u")), "checkpoint_ns": "",
         }})
-        assert [m.text for m in saved.checkpoint["channel_values"]["messages"]] == [
+        assert [m.text for m in await stored_messages(manager._checkpointer, saved.config)] == [
             "Start it.", "Started.", _notice_text(_record(), "ok"), "It finished."
         ]
 

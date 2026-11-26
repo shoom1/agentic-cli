@@ -1947,10 +1947,12 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         the store lost is made as a first run's, the follow-up's message
         alone.
 
-        A session is made only once the conversation's records name its
-        instance (the run's start written: ``_agent_records_written``), so
-        the records name every transcript the conversation keeps, which is
-        how its delete and its numbering find them (``adk/sessions.py``).
+        A session is made, by a first run or a follow-up whose session is
+        gone, only once the conversation's records name its instance (the
+        run's start written: ``_agent_start_stored``, which fails the run
+        when the store did not take the write), so the records name every
+        transcript the conversation keeps, which is how its delete and its
+        numbering find them (``adk/sessions.py``).
 
         Returns:
             The shared state the run starts from, and the state delta its
@@ -1971,7 +1973,7 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
                     return start, {OUTSIDE_CONTENT_KEY: mark}
                 return start, None
         if run.conversation is not None:
-            await self._agent_records_written(run.conversation)
+            await self._agent_start_stored(run.conversation)
         session = await service.create_session(
             app_name=app, user_id=user_id, session_id=session_id, state=dict(run.state)
         )

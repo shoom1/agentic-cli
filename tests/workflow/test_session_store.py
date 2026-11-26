@@ -261,9 +261,10 @@ class TestAdkNativeSessions:
         assert await mgr.delete_session("sess-x") is True
         assert await mgr.delete_session("missing") is False
 
-        # A delete looks at the conversation, then its sub-agent records, neither with events.
+        # A delete looks at the conversation, then its sub-agent records (the two
+        # sessions they alternate between), neither with events.
         assert [getattr(config, "num_recent_events", None) for config in asked] == [
-            1, 1, 0, 0, 0, 0,
+            1, 1, 0, 0, 0, 0, 0, 0,
         ]
 
     async def test_exists_list_recent_delete(self, tmp_path: Path):

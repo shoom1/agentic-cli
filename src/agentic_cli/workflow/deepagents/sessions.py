@@ -37,12 +37,14 @@ its runs, its id counters) are one item of the same store, under
 that changes them, never a row of the index. ``delete`` deletes the
 instances' threads first, then the records, then the conversation's thread
 and row, so a delete cut short leaves the conversation, by which the rest is
-found again. The instances a conversation keeps, which number a new
-manager's next ones (``stored_instances``), are the records' ids and
-counters and the threads', read from each thread's first checkpoint only
-(it holds the first run's input, which the saver decodes: the brief, and an
-inheriting instance's copy of its parent's conversation), so an instance
-whose start write was lost is numbered past too.
+found again. A first run's thread is made only once its start is in the
+records, so the records name every instance a conversation keeps: they are
+what number a new manager's next ones (``stored_instances``: their ids and
+counters, none without records) and what ``delete`` removes. The threads are
+looked at only for records that do not read (another version's: this manager
+writes none of its runs), by each thread's first checkpoint only (it holds
+the first run's input, which the saver decodes: the brief, and an inheriting
+instance's copy of its parent's conversation).
 
 A finished job reports to the conversation in a ``HumanMessage`` of its own
 (``job_notification``), marked in its ``response_metadata``, which no
@@ -233,10 +235,14 @@ def is_notice(message: BaseMessage) -> bool:
 class CheckpointSessions:
     """The session hooks, answered from a checkpointer and the index beside it.
 
-    Reads go to the saver and the store, not to a compiled graph, so they
-    work whenever the checkpointer is open, also while the agents are being
-    rebuilt. Listing and ``info`` read the index; ``exists`` and ``recent``
-    read the conversation itself, from its latest root checkpoint.
+    Reads go to the saver and the store, not to the agents' compiled graphs,
+    so they work whenever the checkpointer is open, also while the agents are
+    being rebuilt, and without a manager. A checkpoint's ``messages`` is a
+    delta channel (``AgentCliState``): its raw values hold what its step
+    added, so messages are read through a one-node graph of the agents' state
+    compiled over the saver (``_messages_at``), which puts them together from
+    the thread's writes. Listing and ``info`` read the index; ``exists`` and
+    ``recent`` read the conversation itself, from its latest root checkpoint.
 
     Args:
         saver: The checkpointer the root agent writes to.
@@ -252,6 +258,39 @@ class CheckpointSessions:
         self._saver = saver
         self._store = store
         self._backfill = backfill
+        # The graph messages are read through (``_reader``), made at its first use.
+        self._reading: Any = None
+
+    def _reader(self) -> Any:
+        """The graph the messages are read through, compiled at its first use.
+
+        One node and the agents' state (``AgentCliState``), over the saver:
+        its ``aget_state`` puts a checkpoint's messages together from their
+        deltas, as the agents' own graphs do. Deep Agents is imported here,
+        not with this module (``open_sessions`` imports it for a store that
+        holds nothing yet). Compiled once, over the saver held at that first
+        read.
+        """
+        if self._reading is None:
+            from langgraph.graph import START, StateGraph
+
+            from agentic_cli.workflow.deepagents.state import AgentCliState
+
+            graph = StateGraph(AgentCliState)
+            graph.add_node("read", _read_nothing)
+            graph.add_edge(START, "read")
+            self._reading = graph.compile(checkpointer=self._saver)
+        return self._reading
+
+    async def _messages_at(self, item: "CheckpointTuple | None") -> list[BaseMessage]:
+        """The messages of the checkpoint ``item`` names, put together.
+
+        Through ``_reader``; none for None.
+        """
+        if item is None:
+            return []
+        snapshot = await self._reader().aget_state(item.config)
+        return list(snapshot.values.get("messages") or ())
 
     async def exists(self, ref: SessionRef) -> bool:
         """Whether ``ref``'s root thread holds at least one message, or the index holds its row.
@@ -259,7 +298,7 @@ class CheckpointSessions:
         A row without a message is a conversation whose only work is a run the
         user started (``keep``).
         """
-        if _messages(await self._root(ref)):
+        if await self._messages_at(await self._root(ref)):
             return True
         item = await self._store.aget(_rows_of(ref.app_name, ref.user_id), ref.session_id)
         return item is not None and _from_value(ref.session_id, item.value) is not None
@@ -292,7 +331,8 @@ class CheckpointSessions:
         if row is not None:
             return row
         checkpoint = await self._root(ref)
-        return _row(ref.session_id, checkpoint) if _messages(checkpoint) else None
+        messages = await self._messages_at(checkpoint)
+        return _row(ref.session_id, checkpoint, messages) if messages else None
 
     async def record(self, ref: SessionRef, adding: Sequence[BaseMessage] = ()) -> None:
         """Write ``ref``'s row from its latest root checkpoint. Never raises.
@@ -315,13 +355,14 @@ class CheckpointSessions:
         namespace = _rows_of(ref.app_name, ref.user_id)
         try:
             item = await self._root(ref)
+            stored = await self._messages_at(item)
             held = await self._store.aget(namespace, ref.session_id)
             kept = held.value if held is not None and _is_kept(held.value) else None
             if adding:
-                messages = [*_messages(item), *adding]
+                messages = [*stored, *adding]
                 row = _row_of(ref.session_id, messages, datetime.now(timezone.utc))
-            elif _messages(item):
-                row = _row(ref.session_id, item)
+            elif stored:
+                row = _row(ref.session_id, item, stored)
             elif kept is not None:
                 return
             else:
@@ -363,10 +404,13 @@ class CheckpointSessions:
     async def instances(self, ref: SessionRef) -> list[str]:
         """The sub-agent instances whose transcript thread ``ref``'s conversation keeps, sorted.
 
-        Read from the instance runs' first input checkpoints, by their
-        metadata (``source`` ``input``, ``step`` -1): one per thread, never
-        a later one, which would hold the transcript (the saver decodes every
-        checkpoint it returns, and its filter is a metadata equality). The
+        The store's own look, for a conversation whose stored records do not
+        read (``stored_instances``, ``delete``): the records name every
+        instance otherwise. Read from the instance runs' first input
+        checkpoints, by their metadata (``source`` ``input``, ``step`` -1):
+        one per thread, never a later one, which would hold the transcript
+        (the saver decodes every checkpoint it returns, and its filter is a
+        metadata equality). The
         one read holds its run's input, in its ``__start__`` channel and its
         pending writes, and the saver decodes it on the event loop: the
         brief, and an inheriting instance's copy of its parent's
@@ -398,19 +442,24 @@ class CheckpointSessions:
         Read from the instances' ids (``<type>-<n>``, ``AgentRuns``'
         instance ids), as ``adk/sessions.py::stored_instances`` reads ADK's:
         what another manager ran there, which this one numbers past. An
-        instance that names no such number is left out. The threads are the
-        floor (``instances``: a thread a start write never named is numbered
-        past too), and the stored records' ids and counters count with them:
-        the counters never fall below an instance kept.
+        instance that names no such number is left out. The stored records'
+        ids and counters count (a first run's thread is made only once its
+        start is in them, so they name every instance: none without
+        records), and the counters never fall below an instance kept. The
+        threads are looked at only for records that do not read
+        (``instances``).
         """
         counts: dict[str, int] = {}
         records = await self.agent_records(ref)
-        named = stored_instance_ids(records) or []
-        for instance in sorted({*named, *await self.instances(ref)}):
+        if records is None:
+            return counts
+        readable = stored_instance_ids(records)
+        named = await self.instances(ref) if readable is None else readable
+        for instance in sorted(named):
             agent, _, number = instance.rpartition("-")
             if agent and number.isascii() and number.isdigit():
                 counts[agent] = max(counts.get(agent, 0), int(number))
-        numbered = records.get("numbered") if named else None
+        numbered = records.get("numbered") if readable else None
         if isinstance(numbered, Mapping):
             for agent, count in numbered.items():
                 if isinstance(agent, str) and type(count) is int and count > counts.get(agent, 0):
@@ -423,11 +472,19 @@ class CheckpointSessions:
         False if there was no conversation (its instances' threads and its
         records are deleted whatever else is found: they go first, so a delete
         cut short leaves the conversation, by which the rest is found again).
-        The instances are found from their threads, not the records, so a
-        thread the records never named goes too. The thread goes with any
+        The instances are the ones its records name, which name every one
+        (a first run's thread is made only once its start is in them): none
+        without records. Records that do not read (another version's) leave
+        the store's own look, ``instances``. The thread goes with any
         sub-agent checkpoints an older version stored in it.
         """
-        for instance in await self.instances(ref):
+        records = await self.agent_records(ref)
+        if records is None:
+            kept: list[str] = []
+        else:
+            named = stored_instance_ids(records)
+            kept = await self.instances(ref) if named is None else named
+        for instance in kept:
             await self._saver.adelete_thread(instance_thread_id(ref, instance))
         await self.delete_agent_records(ref)
         namespace = _rows_of(ref.app_name, ref.user_id)
@@ -448,7 +505,7 @@ class CheckpointSessions:
         are left out.
         """
         out: list[dict] = []
-        for message in _messages(await self._root(ref)):
+        for message in await self._messages_at(await self._root(ref)):
             if isinstance(message, HumanMessage):
                 if is_notice(message):
                     continue
@@ -585,11 +642,12 @@ class CheckpointSessions:
             seen = latest.get(ref.session_id)
             if seen is None or _updated(item) > _updated(seen):
                 latest[ref.session_id] = item
-        return {
-            session_id: _row(session_id, item)
-            for session_id, item in latest.items()
-            if _messages(item)
-        }
+        rows: dict[str, SessionInfo] = {}
+        for session_id, item in latest.items():
+            messages = await self._messages_at(item)
+            if messages:
+                rows[session_id] = _row(session_id, item, messages)
+        return rows
 
 
 #: What closes a store a reader opened.
@@ -734,19 +792,20 @@ def _from_value(session_id: str, value: Any) -> SessionInfo | None:
         return None
 
 
-def _messages(item: "CheckpointTuple | None") -> list[BaseMessage]:
-    if item is None:
-        return []
-    return list(item.checkpoint["channel_values"].get("messages") or ())
+def _read_nothing(state: Any) -> dict[str, Any]:
+    """The reader graph's node: never run (the graph is only read)."""
+    return {}
 
 
 def _updated(item: "CheckpointTuple") -> datetime:
     return datetime.fromisoformat(item.checkpoint["ts"])
 
 
-def _row(session_id: str, item: "CheckpointTuple") -> SessionInfo:
-    """A conversation's row from its latest root checkpoint."""
-    return _row_of(session_id, _messages(item), _updated(item))
+def _row(
+    session_id: str, item: "CheckpointTuple", messages: Sequence[BaseMessage]
+) -> SessionInfo:
+    """A conversation's row from its latest root checkpoint and its messages."""
+    return _row_of(session_id, messages, _updated(item))
 
 
 def _row_of(

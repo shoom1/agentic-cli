@@ -46,7 +46,13 @@ from agentic_cli.workflow.events import EventType  # noqa: E402
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 from tests.workflow.compacting import compact_now  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai, task  # noqa: E402
+from tests.workflow.deepagents.fakes import (  # noqa: E402
+    ScriptedChat,
+    ScriptedModels,
+    ai,
+    stored_messages,
+    task,
+)
 from tests.workflow.deepagents.test_compact import THREE, answers, solo  # noqa: E402
 from tests.workflow.deepagents.test_context import (  # noqa: E402,F401
     GatedChat,
@@ -82,10 +88,20 @@ async def unread(manager, call):
     sessions = manager._sessions
     counting = CountingSaver(sessions._saver)
     sessions._saver = counting
+    # The messages are read through a graph over the saver the sessions were
+    # made with, which the wrapper never sees: count those reads too.
+    messages_at = sessions._messages_at
+
+    async def counted(item):
+        counting.reads.append("messages")
+        return await messages_at(item)
+
+    sessions._messages_at = counted
     try:
         value = await call()
     finally:
         sessions._saver = counting.saver
+        del sessions._messages_at
     assert counting.reads == [], f"it read checkpoints: {counting.reads}"
     return value
 
@@ -101,7 +117,7 @@ async def truth(manager, session: str = "s", user: str = "u") -> SessionInfo:
     item = await manager._checkpointer.aget_tuple(
         {"configurable": {"thread_id": thread_id(ref), "checkpoint_ns": ""}}
     )
-    return _row(session, item)
+    return _row(session, item, await stored_messages(manager._checkpointer, item.config))
 
 
 async def say(saver, session: SessionRef, text: str) -> None:
@@ -563,12 +579,14 @@ class TestBackfill:
             ours._saver = TurnDuringScan(saver, their_turn_ends)
             rows = {row.session_id: row for row in await ours.list("app", "u")}
 
-            truth_of = {
-                ref.session_id: _row(ref.session_id, await saver.aget_tuple(
+            truth_of = {}
+            for ref in (stale, raced):
+                item = await saver.aget_tuple(
                     {"configurable": {"thread_id": thread_id(ref), "checkpoint_ns": ""}}
-                ))
-                for ref in (stale, raced)
-            }
+                )
+                truth_of[ref.session_id] = _row(
+                    ref.session_id, item, await stored_messages(saver, item.config)
+                )
             assert rows == truth_of
             assert (rows["stale"].turns, rows["raced"].turns) == (2, 2)
         finally:
