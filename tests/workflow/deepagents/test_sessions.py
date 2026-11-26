@@ -1183,8 +1183,7 @@ class TestMessagesStoredAsDeltas:
             await manager.cleanup()
 
         contents = [m["content"] for m in recent]
-        assert contents[:3] == ["Q0.", "A0.", "Hold."]
-        assert contents[-2:] == ["Next.", "A2."]
+        assert contents == ["Q0.", "A0.", "Hold.", "Holding.", "Next.", "A2."]
         assert info.turns == 3
 
     async def test_a_conversation_stored_with_plain_messages_reads_and_goes_on(
