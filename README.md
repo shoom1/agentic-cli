@@ -602,6 +602,7 @@ configured is reported (`settings_secrets_dir_ignored`).
 | `thinking_effort` | `AGENTIC_THINKING_EFFORT` | "medium" | Thinking level: none, low, medium, high |
 | `prompt_caching_enabled` | `AGENTIC_PROMPT_CACHING_ENABLED` | true | Prompt caching: Claude, and Gemini on ADK |
 | `orchestrator` | `AGENTIC_ORCHESTRATOR` | "adk" | The backend new conversations run on: `adk`, `deepagents`, or `langgraph` (deprecated); a conversation keeps its own |
+| `adk_subagent_records_rewrite_after` | `AGENTIC_ADK_SUBAGENT_RECORDS_REWRITE_AFTER` | 100 | ADK: a conversation's sub-agent records session takes this many appended writes, then the next copies the records whole into a fresh session and deletes the old one with its events (at least 1) |
 | `session_store` | `AGENTIC_SESSION_STORE` | "sqlite" | Where conversations are kept: `sqlite`, `postgres`, or `memory` (nothing on disk: one conversation at a time, none to resume) |
 | `context_summarize_at` | `AGENTIC_CONTEXT_SUMMARIZE_AT` | 0.85 | Summarize the earlier conversation at this fraction of the model's input budget (0.5 to 0.95) |
 | `context_max_tokens` | `AGENTIC_CONTEXT_MAX_TOKENS` | 200000 | Or once a prompt reaches this many tokens, if that comes first (0: no ceiling; otherwise at least 16000) |

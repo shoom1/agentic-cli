@@ -2016,12 +2016,17 @@ class GoogleADKWorkflowManager(BaseWorkflowManager):
         records session, made at the first write (``adk/sessions.py::save_records``).
 
         A session of its own, never the conversation's: ADK takes no second
-        writer on a session while a turn runs on it.
+        writer on a session while a turn runs on it. Rewritten past
+        ``adk_subagent_records_rewrite_after`` appended writes, read at each
+        write, so a change applies at the next.
 
         Raises:
             RuntimeError: The session store is not open.
         """
-        await save_records(self._open_store(), conversation, data)
+        await save_records(
+            self._open_store(), conversation, data,
+            rewrite_after=self._settings.adk_subagent_records_rewrite_after,
+        )
 
     def _open_store(self) -> Any:
         service = self._session_service

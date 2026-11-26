@@ -779,6 +779,20 @@ class WorkflowSettingsMixin(SettingsSourcesMixin):
         description="LangGraph only: store type for long-term memory (memory or postgres)",
         json_schema_extra={"ui_order": 148},
     )
+    # ADK keeps a conversation's sub-agent records in a session of their own;
+    # past this many appended writes the next one rewrites it
+    # (workflow/adk/sessions.py::save_records). Read at each write.
+    adk_subagent_records_rewrite_after: int = Field(
+        default=100,
+        ge=1,
+        title="Sub-agent Records Rewrite",
+        description=(
+            "ADK only: once this many writes were appended to a conversation's "
+            "sub-agent records session, the next one copies the records whole into "
+            "a fresh session and deletes the old one with its events (at least 1)"
+        ),
+        json_schema_extra={"ui_order": 149},
+    )
 
     def session_db_url(self, store: str | None = None) -> str | None:
         """Async SQLAlchemy URL for the session store, or None when ephemeral.

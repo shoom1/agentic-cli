@@ -945,8 +945,9 @@ the start of the entry's title.
   `<conversation id>`, its `%` and `/` percent-encoded, as in its instances' ids; the state split by key so a
   write holds what changed: the header under `agentic_cli.agents`,
   `adk/sessions.py::RECORDS_KEY`, and a key for each instance and run; its
-  events stay bounded: after 100 appended writes,
-  `adk/sessions.py::RECORDS_REWRITE_AFTER`, the next one writes the records
+  events stay bounded: after `adk_subagent_records_rewrite_after` appended
+  writes (a setting: 100 by default, at least 1, read at each write, so a
+  change applies at the next), the next one writes the records
   whole into a second session, id `<conversation id>/`, one generation on,
   and deletes the first, the two alternating, a read taking the newer), on
   Deep Agents in the store beside the checkpointer (namespace `("agentic_cli", "agents",
