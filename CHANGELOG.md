@@ -930,7 +930,9 @@ the start of the entry's title.
   backends, and survive a restart.** A conversation's instances, its runs
   (each with its brief, its envelope's fields, its tokens by model, its own
   plan and tasks) and its id counters are written to the conversation's
-  store at each run event that changes them (one write at a time per
+  store at each run's start and end and each change of an instance's status
+  (not at a working status, `queued`, `running` or `input_required`, which a
+  restart reads as `interrupted` all the same; one write at a time per
   conversation, the records as they are when it starts; a turn returns once
   its records are written; a write that fails is warned of once per
   conversation, `subagent_records_not_saved`, and fails no turn, nor any run

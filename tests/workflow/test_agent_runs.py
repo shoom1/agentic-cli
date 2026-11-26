@@ -1080,15 +1080,27 @@ class TestEachChangeIsTold:
 
         ref = started(runs, ONE, "c1", "researcher")
         assert told == [ONE]
-        for status, changes in [(RUN_RUNNING, False), (RUN_QUEUED, True), (RUN_QUEUED, False)]:
-            in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(ref, status, call_id="c1")))
-            assert len(told) == 1 + changes
-            told[:] = [ONE]
         ended(runs, ONE, ref)
         assert told == [ONE, ONE]
         for _ in range(2):
             in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_instance(ref, INSTANCE_CLOSED)))
         assert told == [ONE, ONE, ONE]
+
+    def test_a_working_status_changes_the_record_and_tells_no_change(self):
+        """A restart reads any working status as ``interrupted``, so the
+        stored one is never used: a run's start and end are written, not
+        its working statuses."""
+        told: list[SessionRef | None] = []
+        runs = AgentRuns(on_change=told.append)
+
+        ref = started(runs, ONE, "c1", "researcher")
+        for status in (RUN_QUEUED, RUN_RUNNING, RUN_INPUT_REQUIRED, RUN_RUNNING):
+            in_turn(ONE, lambda: runs.observe(WorkflowEvent.agent_run(ref, status, call_id="c1")))
+            assert runs.records(ONE)[0].status == status
+        ended(runs, ONE, ref)
+
+        assert [record.status for record in runs.records(ONE)] == [RUN_COMPLETED]
+        assert len(told) == 2  # the start and the end
 
     def test_interrupt_open_tells_when_it_ends_one(self):
         told: list[SessionRef | None] = []
