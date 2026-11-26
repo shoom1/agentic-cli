@@ -199,3 +199,21 @@ def tree_delegations(
         types={config.name: config for config in configs}, hook=hook,
     )
     return lambda: made
+
+
+async def stored_messages(saver: Any, config: dict) -> list[BaseMessage]:
+    """The messages of the checkpoint ``config`` names, put together from their deltas.
+
+    ``config`` is a run config (its thread's newest checkpoint) or a
+    ``CheckpointTuple``'s ``.config``. Read as ``CheckpointSessions`` reads
+    them: a one-node graph of the agents' state over ``saver``.
+    """
+    from langgraph.graph import START, StateGraph
+
+    from agentic_cli.workflow.deepagents.state import AgentCliState
+
+    graph = StateGraph(AgentCliState)
+    graph.add_node("read", lambda state: {})
+    graph.add_edge(START, "read")
+    snapshot = await graph.compile(checkpointer=saver).aget_state(config)
+    return list(snapshot.values.get("messages") or ())

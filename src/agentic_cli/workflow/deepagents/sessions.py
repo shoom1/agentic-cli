@@ -235,10 +235,14 @@ def is_notice(message: BaseMessage) -> bool:
 class CheckpointSessions:
     """The session hooks, answered from a checkpointer and the index beside it.
 
-    Reads go to the saver and the store, not to a compiled graph, so they
-    work whenever the checkpointer is open, also while the agents are being
-    rebuilt. Listing and ``info`` read the index; ``exists`` and ``recent``
-    read the conversation itself, from its latest root checkpoint.
+    Reads go to the saver and the store, not to the agents' compiled graphs,
+    so they work whenever the checkpointer is open, also while the agents are
+    being rebuilt, and without a manager. A checkpoint's ``messages`` is a
+    delta channel (``AgentCliState``): its raw values hold what its step
+    added, so messages are read through a one-node graph of the agents' state
+    compiled over the saver (``_messages_at``), which puts them together from
+    the thread's writes. Listing and ``info`` read the index; ``exists`` and
+    ``recent`` read the conversation itself, from its latest root checkpoint.
 
     Args:
         saver: The checkpointer the root agent writes to.
@@ -254,6 +258,36 @@ class CheckpointSessions:
         self._saver = saver
         self._store = store
         self._backfill = backfill
+        # The graph messages are read through (``_reader``), made at its first use.
+        self._reading: Any = None
+
+    def _reader(self) -> Any:
+        """The graph the messages are read through, compiled at its first use.
+
+        One node and the agents' state (``AgentCliState``), over the saver:
+        its ``aget_state`` puts a checkpoint's messages together from their
+        deltas, as the agents' own graphs do. Deep Agents is imported here,
+        not with this module (``open_sessions`` imports it for a store that
+        holds nothing yet). Compiled once, over the saver held at that first
+        read.
+        """
+        if self._reading is None:
+            from langgraph.graph import START, StateGraph
+
+            from agentic_cli.workflow.deepagents.state import AgentCliState
+
+            graph = StateGraph(AgentCliState)
+            graph.add_node("read", _read_nothing)
+            graph.add_edge(START, "read")
+            self._reading = graph.compile(checkpointer=self._saver)
+        return self._reading
+
+    async def _messages_at(self, item: "CheckpointTuple | None") -> list[BaseMessage]:
+        """The messages of the checkpoint ``item`` names, put together (``_reader``); none for None."""
+        if item is None:
+            return []
+        snapshot = await self._reader().aget_state(item.config)
+        return list(snapshot.values.get("messages") or ())
 
     async def exists(self, ref: SessionRef) -> bool:
         """Whether ``ref``'s root thread holds at least one message, or the index holds its row.
@@ -261,7 +295,7 @@ class CheckpointSessions:
         A row without a message is a conversation whose only work is a run the
         user started (``keep``).
         """
-        if _messages(await self._root(ref)):
+        if await self._messages_at(await self._root(ref)):
             return True
         item = await self._store.aget(_rows_of(ref.app_name, ref.user_id), ref.session_id)
         return item is not None and _from_value(ref.session_id, item.value) is not None
@@ -294,7 +328,8 @@ class CheckpointSessions:
         if row is not None:
             return row
         checkpoint = await self._root(ref)
-        return _row(ref.session_id, checkpoint) if _messages(checkpoint) else None
+        messages = await self._messages_at(checkpoint)
+        return _row(ref.session_id, checkpoint, messages) if messages else None
 
     async def record(self, ref: SessionRef, adding: Sequence[BaseMessage] = ()) -> None:
         """Write ``ref``'s row from its latest root checkpoint. Never raises.
@@ -317,13 +352,14 @@ class CheckpointSessions:
         namespace = _rows_of(ref.app_name, ref.user_id)
         try:
             item = await self._root(ref)
+            stored = await self._messages_at(item)
             held = await self._store.aget(namespace, ref.session_id)
             kept = held.value if held is not None and _is_kept(held.value) else None
             if adding:
-                messages = [*_messages(item), *adding]
+                messages = [*stored, *adding]
                 row = _row_of(ref.session_id, messages, datetime.now(timezone.utc))
-            elif _messages(item):
-                row = _row(ref.session_id, item)
+            elif stored:
+                row = _row(ref.session_id, item, stored)
             elif kept is not None:
                 return
             else:
@@ -465,7 +501,7 @@ class CheckpointSessions:
         are left out.
         """
         out: list[dict] = []
-        for message in _messages(await self._root(ref)):
+        for message in await self._messages_at(await self._root(ref)):
             if isinstance(message, HumanMessage):
                 if is_notice(message):
                     continue
@@ -602,11 +638,12 @@ class CheckpointSessions:
             seen = latest.get(ref.session_id)
             if seen is None or _updated(item) > _updated(seen):
                 latest[ref.session_id] = item
-        return {
-            session_id: _row(session_id, item)
-            for session_id, item in latest.items()
-            if _messages(item)
-        }
+        rows: dict[str, SessionInfo] = {}
+        for session_id, item in latest.items():
+            messages = await self._messages_at(item)
+            if messages:
+                rows[session_id] = _row(session_id, item, messages)
+        return rows
 
 
 #: What closes a store a reader opened.
@@ -751,19 +788,20 @@ def _from_value(session_id: str, value: Any) -> SessionInfo | None:
         return None
 
 
-def _messages(item: "CheckpointTuple | None") -> list[BaseMessage]:
-    if item is None:
-        return []
-    return list(item.checkpoint["channel_values"].get("messages") or ())
+def _read_nothing(state: Any) -> dict[str, Any]:
+    """The reader graph's node: never run (the graph is only read)."""
+    return {}
 
 
 def _updated(item: "CheckpointTuple") -> datetime:
     return datetime.fromisoformat(item.checkpoint["ts"])
 
 
-def _row(session_id: str, item: "CheckpointTuple") -> SessionInfo:
-    """A conversation's row from its latest root checkpoint."""
-    return _row_of(session_id, _messages(item), _updated(item))
+def _row(
+    session_id: str, item: "CheckpointTuple", messages: Sequence[BaseMessage]
+) -> SessionInfo:
+    """A conversation's row from its latest root checkpoint and the messages it holds."""
+    return _row_of(session_id, messages, _updated(item))
 
 
 def _row_of(

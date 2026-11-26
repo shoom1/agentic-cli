@@ -1549,7 +1549,15 @@ the start of the entry's title.
     `{workspace}/sessions/checkpoints.db`, next to ADK's `sessions.db` and,
     as it is, owner-only (`sqlite_uri` may point ADK and Deep Agents at one
     file: their tables do not collide), Postgres at `postgres_uri`, or
-    memory. Every session hook takes `user_id`. `list_sessions` gives each
+    memory. Each agent's messages are Deep Agents' delta channel
+    (`AgentCliState` subclasses `deepagents.DeepAgentState`): a checkpoint
+    stores the messages its step added, a full copy every 50 updates, so a
+    conversation's checkpoints grow with its length, not its square (40
+    turns of 1,000-character prompts and answers: about 0.3 MB, where whole
+    copies took 8 MB), and the session hooks, a reader's too, read messages
+    through a graph of that state over the checkpointer, which puts them
+    together; a conversation stored with whole copies reads and continues
+    as before. Every session hook takes `user_id`. `list_sessions` gives each
     conversation's row (`SessionInfo`, below) from its newest checkpoint,
     `delete_session` also removes the sub-agents' checkpoints and returns
     False for an unknown id, and `recent_messages` is the user's and the

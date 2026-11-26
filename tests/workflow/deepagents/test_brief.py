@@ -27,7 +27,7 @@ from agentic_cli.workflow.deepagents.summarization import (
     is_brief,
 )
 from agentic_cli.workflow.summary_prompt import SUMMARY_PREFIX
-from tests.workflow.deepagents.fakes import ScriptedChat, ai, task
+from tests.workflow.deepagents.fakes import ScriptedChat, ai, stored_messages, task
 from tests.workflow.deepagents.test_context import USER_TURN, context, resolved
 from tests.workflow.deepagents.test_manager import _manager, ctx, hermetic, scripted, turn  # noqa: F401
 
@@ -97,10 +97,10 @@ class TestTheMark:
             await turn(manager, "Again.")
             thread = instance_thread_id(manager.session_ref("s", "u"), "helper-1")
             saved = await manager._checkpointer.aget_tuple({"configurable": {"thread_id": thread}})
+            messages = await stored_messages(manager._checkpointer, saved.config)
         finally:
             await manager.cleanup()
 
-        messages = saved.checkpoint["channel_values"]["messages"]
         humans = [m for m in messages if isinstance(m, HumanMessage)]
         assert [is_brief(m) for m in humans] == [True, False]
         assert humans[0].text.startswith("# Task: Find X.") and humans[1].text == "Now Y."

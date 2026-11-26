@@ -33,7 +33,10 @@ and Deep Agents sharing one sqlite file (Review Focus 3).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -42,9 +45,17 @@ pytest.importorskip("deepagents")
 
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
 
-from agentic_cli.workflow.checkpointers import open_checkpointer, open_store  # noqa: E402
+from agentic_cli.tools.registry import register_tool  # noqa: E402
+from agentic_cli.workflow.checkpointers import (  # noqa: E402
+    deepagents_sqlite_location,
+    open_checkpointer,
+    open_store,
+)
+from agentic_cli.workflow.permissions import EXEMPT  # noqa: E402
+from agentic_cli.workflow.session_readers import open_session_reader  # noqa: E402
 from agentic_cli.workflow.config import AgentConfig  # noqa: E402
 from agentic_cli.workflow.deepagents import manager as manager_module  # noqa: E402
+from agentic_cli.workflow.deepagents import sessions as sessions_module  # noqa: E402
 from agentic_cli.workflow.deepagents.agent_builder import build_agent_tree  # noqa: E402
 from agentic_cli.workflow.deepagents.manager import DeepAgentsWorkflowManager  # noqa: E402
 from agentic_cli.tools.jobs import JobState  # noqa: E402
@@ -61,7 +72,13 @@ from agentic_cli.workflow.deepagents.sessions import (  # noqa: E402
 from agentic_cli.workflow.sessions import SessionInfo, SessionRef  # noqa: E402
 from tests.conftest import MockContext  # noqa: E402
 from tests.loop_guard import no_blocking_calls  # noqa: E402
-from tests.workflow.deepagents.fakes import ScriptedChat, ScriptedModels, ai, task  # noqa: E402
+from tests.workflow.deepagents.fakes import (  # noqa: E402
+    ScriptedChat,
+    ScriptedModels,
+    ai,
+    stored_messages,
+    task,
+)
 
 AWKWARD = SessionRef("app", "ü/ser:1", 'a "quoted"/id')
 SOLO = AgentConfig(name="solo", prompt="p")
@@ -948,3 +965,201 @@ class TestAKeptRow:
         await sessions.record(ref())  # no message stored: its row goes
 
         assert await sessions.list("app", "alice") == []
+
+
+# --- messages stored as deltas -----------------------------------------------------------
+
+#: What the blocking tool waits for: set when it starts, and to let it end.
+HELD: dict[str, threading.Event] = {}
+
+
+@register_tool(capabilities=EXEMPT, description="Waits until released (a session-test tool).")
+def sessions_test_hold() -> dict:
+    """Waits until the test releases it."""
+    HELD["started"].set()
+    HELD["go"].wait(10)
+    return {"success": True}
+
+
+def texts(messages) -> list[str]:
+    return [message.text for message in messages if message.text]
+
+
+class TestMessagesStoredAsDeltas:
+    """Each agent's ``messages`` is Deep Agents' delta channel
+    (``AgentCliState(DeepAgentState)``): a checkpoint holds the messages its
+    step added, a full copy every 50 updates, so a conversation's checkpoints
+    grow with its length, not its square. The session hooks read the
+    messages put together (``CheckpointSessions._messages_at``), with or
+    without a manager."""
+
+    @staticmethod
+    async def turns(manager, count: int, size: int = 0, *, user: str = "u") -> None:
+        for n in range(count):
+            await converse(manager, f"Q{n}." + "q" * size, user=user, session="s")
+
+    @pytest.fixture
+    def sqlite_settings(self, hermetic):
+        with MockContext(google_api_key="test-key", session_store="sqlite") as context:
+            yield context.settings
+
+    @staticmethod
+    def made(monkeypatch, settings, answers, configs=(SOLO,)) -> DeepAgentsWorkflowManager:
+        """A manager whose one agent answers ``answers`` (texts, or scripted answers)."""
+        script = [ai(a) if isinstance(a, str) else a for a in answers]
+        monkeypatch.setattr(manager_module, "build_chat_model", ScriptedModels(solo=script))
+        return DeepAgentsWorkflowManager(
+            agent_configs=list(configs), settings=settings, model="gemini-2.5-flash",
+        )
+
+    async def test_a_checkpoint_holds_the_new_messages_not_all_of_them(
+        self, sqlite_settings, monkeypatch
+    ):
+        manager = self.made(monkeypatch, sqlite_settings, ["A0.", "A1.", "A2."])
+        try:
+            await self.turns(manager, 3)
+            ref = manager.session_ref("s", "u")
+            item = await manager._checkpointer.aget_tuple(run_config(ref))
+            values = item.checkpoint["channel_values"]
+            read = await stored_messages(manager._checkpointer, item.config)
+        finally:
+            await manager.cleanup()
+
+        assert not isinstance(values.get("messages"), list) or len(values["messages"]) < 6
+        assert texts(read) == ["Q0.", "A0.", "Q1.", "A1.", "Q2.", "A2."]
+
+    async def test_a_long_conversation_stores_each_message_about_once(
+        self, sqlite_settings, monkeypatch
+    ):
+        """40 turns of a 1,000-character prompt and answer: about 80 KB of
+        messages. Stored whole at each checkpoint they cost over 8 MB."""
+        manager = self.made(
+            monkeypatch, sqlite_settings, [f"A{n}." + "a" * 1_000 for n in range(40)]
+        )
+        try:
+            await self.turns(manager, 40, size=1_000)
+            ref = manager.session_ref("s", "u")
+        finally:
+            await manager.cleanup()
+
+        with contextlib.closing(sqlite3.connect(deepagents_sqlite_location(sqlite_settings))) as db:
+            stored = sum(
+                db.execute(
+                    f"select coalesce(sum(length({column})), 0) from {table}"
+                    " where thread_id = ? and checkpoint_ns = ''",
+                    (thread_id(ref),),
+                ).fetchone()[0]
+                for table, column in (("checkpoints", "checkpoint"), ("writes", "value"))
+            )
+        assert stored < 1_000_000
+
+    async def test_the_hooks_read_a_conversation_stored_as_deltas(
+        self, sqlite_settings, monkeypatch
+    ):
+        manager = self.made(monkeypatch, sqlite_settings, ["A0.", "A1.", "A2."])
+        user = sqlite_settings.default_user  # the reader's
+        try:
+            await self.turns(manager, 3, user=user)
+            ref = manager.session_ref("s", user)
+            with no_blocking_calls():
+                exists = await manager.session_exists("s", user_id=user)
+                info = await manager.session_info("s", user_id=user)
+                recent = await manager.recent_messages("s", limit=10, user_id=user)
+                await manager._sessions.record(ref)
+                row = await manager._sessions.info(ref)
+        finally:
+            await manager.cleanup()
+        reader = await open_session_reader("deepagents", sqlite_settings, store="sqlite")
+        try:
+            with no_blocking_calls():
+                read = (await reader.exists("s"), await reader.info("s"))
+        finally:
+            await reader.aclose()
+
+        assert (exists, info.turns, info.title) == (True, 3, "Q0.")
+        assert [m["content"] for m in recent] == ["Q0.", "A0.", "Q1.", "A1.", "Q2.", "A2."]
+        assert (row.title, row.turns) == ("Q0.", 3)
+        assert (read[0], read[1].title, read[1].turns) == (True, "Q0.", 3)
+
+    async def test_a_cancelled_turn_reads_whole(self, sqlite_settings, monkeypatch):
+        HELD["started"], HELD["go"] = threading.Event(), threading.Event()
+        hold = AgentConfig(name="solo", prompt="p", tools=[sessions_test_hold])
+        manager = self.made(monkeypatch, sqlite_settings, [
+            "A0.", ai("Holding.", calls=[("sessions_test_hold", {})]),
+        ], configs=(hold,))
+        try:
+            await self.turns(manager, 1)
+            turn = asyncio.ensure_future(converse(manager, "Hold.", user="u", session="s"))
+            await asyncio.to_thread(HELD["started"].wait, 10)
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+            HELD["go"].set()
+            ref = manager.session_ref("s", "u")
+            truth = (await manager._root.aget_state(run_config(ref))).values["messages"]
+            recent = await manager.recent_messages("s", limit=10, user_id="u")
+            info = await manager.session_info("s", user_id="u")
+        finally:
+            HELD["go"].set()
+            await manager.cleanup()
+
+        assert texts(truth)[:3] == ["Q0.", "A0.", "Hold."]
+        assert [m["content"] for m in recent] == [
+            m.text for m in truth if m.type in ("human", "ai") and m.text
+        ]
+        assert (info.title, info.turns) == ("Q0.", 2)
+
+    async def test_the_backfill_reads_a_conversation_stored_as_deltas(
+        self, sqlite_settings, monkeypatch
+    ):
+        manager = self.made(monkeypatch, sqlite_settings, ["A0.", "A1."])
+        try:
+            await self.turns(manager, 2)
+            ref = manager.session_ref("s", "u")
+            store = manager._sessions._store
+            await store.adelete(sessions_module._rows_of(ref.app_name, "u"), "s")
+            await store.adelete(
+                sessions_module._marks_of(ref.app_name, "u"), sessions_module._MARK_KEY
+            )
+            assert await manager._sessions._rows(ref.app_name, "u") == {}
+            with no_blocking_calls():
+                listed = await manager.list_sessions(user_id="u")
+            written = await manager._sessions._rows(ref.app_name, "u")
+        finally:
+            await manager.cleanup()
+
+        assert [(r.session_id, r.title, r.turns) for r in listed] == [("s", "Q0.", 2)]
+        assert [(r.title, r.turns) for r in written.values()] == [("Q0.", 2)]
+
+    async def test_a_conversation_stored_with_plain_messages_reads_and_goes_on(
+        self, sqlite_settings, monkeypatch
+    ):
+        """What an older version stored: the whole list in each checkpoint."""
+        manager = self.made(monkeypatch, sqlite_settings, ["A1."])
+        try:
+            await manager.initialize_services()
+            ref = manager.session_ref("s", "u")
+            await plain_thread(manager._checkpointer, ref, "Q0.", "A0.")
+            await converse(manager, "Q1.", user="u", session="s")
+            recent = await manager.recent_messages("s", limit=10, user_id="u")
+        finally:
+            await manager.cleanup()
+
+        assert [m["content"] for m in recent] == ["Q0.", "A0.", "Q1.", "A1."]
+
+
+async def plain_thread(saver, session: SessionRef, *texts: str) -> None:
+    """A root checkpoint holding ``texts`` (a user's, then an answer, in turn)
+    whole in its values, as a version without the delta channel stored it."""
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    checkpoint = empty_checkpoint()
+    checkpoint["channel_values"] = {"messages": [
+        (HumanMessage if n % 2 == 0 else AIMessage)(text, id=f"m{n}")
+        for n, text in enumerate(texts)
+    ]}
+    checkpoint["channel_versions"] = {"messages": "1"}
+    config = {"configurable": {"thread_id": thread_id(session), "checkpoint_ns": ""}}
+    metadata = {"app_name": session.app_name, "user_id": session.user_id,
+                "session_id": session.session_id, "source": "loop", "step": 1}
+    await saver.aput(config, checkpoint, metadata, {"messages": "1"})
