@@ -261,6 +261,8 @@ class TestStoredInstances:
         await instance_ran(saver, ref(session="s2"), "researcher-7")  # another conversation's
         await instance_ran(saver, ref(user="bob"), "writer-9")  # another user's
         sessions = CheckpointSessions(saver, store)
+        # Records that do not read: the scan's filtering is what counts them.
+        await sessions.save_agent_records(ref(), {"v": 99})
 
         assert await sessions.instances(ref()) == [
             "notes", "researcher-1", "researcher-3", "writer-2",
@@ -279,60 +281,71 @@ class TestStoredInstances:
 
         assert await CheckpointSessions(saver, store).stored_instances(ref()) == {}
 
-    async def test_the_threads_are_the_floor_under_the_records_read_from_their_first_input(
-        self, saver, store, monkeypatch
-    ):
-        """The records' counters and ids number past what they hold, and the
-        threads past what the records never named (a start write that was
-        lost): each thread's first checkpoint says so. That checkpoint holds
-        the run's first input, its brief (in the ``__start__`` channel and in
-        its pending writes), which the saver decodes, and no message of the
-        transcript after it: no later checkpoint is read."""
+    async def test_readable_records_are_read_alone(self, saver, store, monkeypatch):
+        """A first run's thread is made only once the records name it, so the
+        records' ids and counters are every instance the conversation keeps:
+        no thread is scanned."""
         await say(saver, ref())
-        await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
-        await instance_ran(saver, ref(), "researcher-6", "Lost.", "Lost again.")  # unnamed
+        for instance in ("researcher-1", "researcher-2", "researcher-3"):
+            await instance_ran(saver, ref(), instance)
         sessions = CheckpointSessions(saver, store)
-        await sessions.save_agent_records(ref(), {
-            **records_of(), "numbered": {"researcher": 5, "writer": 2},
-            "instances": [
-                {"instance": "researcher-1"}, {"instance": "writer-2"}, {"instance": "notes"},
-            ],
-        })
-        decoded: list[tuple[int, list[str], list[str]]] = []
+        await sessions.save_agent_records(
+            ref(), records_naming("researcher-1", researcher=2)
+        )
+        scans: list[dict] = []
         alist = saver.alist
 
-        async def listing(*args, **kwargs):
-            async for item in alist(*args, **kwargs):
-                values = item.checkpoint["channel_values"]
-                start = values.get("__start__") or {}
-                decoded.append((
-                    len(values.get("messages", ())),
-                    [message.content for message in start.get("messages", ())],
-                    [message.content for _, channel, written in item.pending_writes
-                     if channel == "messages" for message in written],
-                ))
-                yield item
+        def listing(config, *, filter=None, **kwargs):
+            if filter and "thread_kind" in filter:
+                scans.append(filter)
+            return alist(config, filter=filter, **kwargs)
 
         monkeypatch.setattr(saver, "alist", listing)
 
-        counts = await sessions.stored_instances(ref())
+        with no_blocking_calls():
+            counts = await sessions.stored_instances(ref())
 
-        assert counts == {"researcher": 6, "writer": 2}
-        first_inputs = [
-            (0, ["Then One."], ["Then One."]), (0, ["Then Lost."], ["Then Lost."]),
-        ]
-        # Each thread's first input, twice over; nothing a later run wrote.
-        assert sorted(decoded) == sorted(first_inputs)
-        decoded.clear()
-        assert await sessions.instances(ref()) == ["researcher-1", "researcher-6"]
-        assert sorted(decoded) == sorted(first_inputs)
+        assert counts == {"researcher": 2}
+        assert scans == []
 
-    async def test_records_that_name_no_instance_read_the_threads(self, saver, store):
+    async def test_records_that_name_no_instance_count_none(self, saver, store, monkeypatch):
         await instance_ran(saver, ref(), "researcher-4")
         sessions = CheckpointSessions(saver, store)
         await sessions.save_agent_records(ref(), records_of("researcher-4#1"))
+        scans: list[dict] = []
+        alist = saver.alist
 
-        assert await sessions.stored_instances(ref()) == {"researcher": 4}
+        def listing(config, *, filter=None, **kwargs):
+            if filter and "thread_kind" in filter:
+                scans.append(filter)
+            return alist(config, filter=filter, **kwargs)
+
+        monkeypatch.setattr(saver, "alist", listing)
+
+        assert await sessions.stored_instances(ref()) == {}
+        assert scans == []
+
+    async def test_a_conversation_without_records_scans_nothing(self, saver, store, monkeypatch):
+        """No records means no instance thread was ever made for it: a thread
+        named like one of its instances is left."""
+        await say(saver, ref())
+        await instance_ran(saver, ref(), "researcher-4")
+        sessions = CheckpointSessions(saver, store)
+        scans: list[dict] = []
+        alist = saver.alist
+
+        def listing(config, *, filter=None, **kwargs):
+            if filter and "thread_kind" in filter:
+                scans.append(filter)
+            return alist(config, filter=filter, **kwargs)
+
+        monkeypatch.setattr(saver, "alist", listing)
+
+        assert await sessions.stored_instances(ref()) == {}
+        assert await sessions.delete(ref()) is True
+        assert scans == []
+        monkeypatch.undo()
+        assert await sessions.instances(ref()) == ["researcher-4"]
 
     async def test_records_of_another_version_read_the_threads(self, saver, store):
         await instance_ran(saver, ref(), "researcher-4")
@@ -563,6 +576,15 @@ class TestInfo:
         assert await sessions.info(ref(user="bob")) is None
 
 
+def records_naming(*instances: str, **numbered: int) -> dict:
+    """Stored records that name ``instances`` (each with its first run) and number past ``numbered``."""
+    return {
+        "v": 1, "saved": "2026-11-19T10:00:00", "numbered": numbered,
+        "instances": [{"instance": instance} for instance in instances],
+        "runs": [{"run": f"{instance}#1"} for instance in instances],
+    }
+
+
 class TestDelete:
     async def test_it_removes_the_thread_with_its_sub_agents(self, saver, store):
         await delegate(saver, ref())
@@ -579,6 +601,7 @@ class TestDelete:
         await instance_ran(saver, ref(), "researcher-1", "One.", "Two.")
         await instance_ran(saver, ref(session="s2"), "researcher-1")
         sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), records_naming("researcher-1"))
 
         with no_blocking_calls():
             assert await sessions.delete(ref()) is True
@@ -595,7 +618,7 @@ class TestDelete:
         await say(saver, ref())
         await instance_ran(saver, ref(), "researcher-1")
         sessions = CheckpointSessions(saver, store)
-        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+        await sessions.save_agent_records(ref(), records_naming("researcher-1"))
         await sessions.save_agent_records(ref(session="s2"), records_of("writer-1#1"))
         done: list[str] = []
         delete_thread, delete_item = type(saver).adelete_thread, type(store).adelete
@@ -619,11 +642,25 @@ class TestDelete:
     async def test_a_conversation_already_gone_leaves_no_instance_behind(self, saver, store):
         await instance_ran(saver, ref(), "researcher-1")
         sessions = CheckpointSessions(saver, store)
-        await sessions.save_agent_records(ref(), records_of("researcher-1#1"))
+        await sessions.save_agent_records(ref(), records_naming("researcher-1"))
 
         assert await sessions.delete(ref()) is False
         assert await threads(saver) == []
         assert await sessions.agent_records(ref()) is None
+
+    async def test_a_delete_with_records_of_another_version_scans(self, saver, store):
+        """Only the store can say what a conversation keeps when this manager
+        wrote none of its records: its instances' threads are found by the scan."""
+        await say(saver, ref())
+        await instance_ran(saver, ref(), "researcher-1")
+        await instance_ran(saver, ref(session="s2"), "researcher-1")
+        sessions = CheckpointSessions(saver, store)
+        await sessions.save_agent_records(ref(), {"v": 99})
+
+        assert await sessions.delete(ref()) is True
+
+        assert await sessions.instances(ref()) == []
+        assert await sessions.instances(ref(session="s2")) == ["researcher-1"]
 
     async def test_an_unknown_session_is_not_deleted(self, saver, store):
         await say(saver, ref())

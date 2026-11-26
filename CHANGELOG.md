@@ -948,11 +948,11 @@ the start of the entry's title.
   `/agents`; the manager's `load_agents(ref)`, provisional): a run found
   working (the app was killed in it) reads `interrupted` and its instance
   `idle` (`closed` for a type that is not continuable), so a follow-up
-  continues it, new instances are numbered past them (on Deep Agents past the
-  records' counters and ids and the checkpointer's instance threads, read
-  from each thread's first checkpoint, which holds its first run's input:
-  the brief, and an inheriting instance's copy of its parent's
-  conversation; and a first run whose thread the store
+  continues it, new instances are numbered past them (the records' counters
+  and ids, which name every transcript the conversation keeps; for records
+  that do not read, the transcripts the store finds: ADK's listing of the
+  user's child sessions, Deep Agents' instance threads, read from each
+  thread's first checkpoint; and a first run whose transcript the store
   keeps all the same fails rather than continue it), and records of another
   version, or that do not read, are ignored with one warning
   (`subagent_records_ignored`) and never written over: that conversation's
@@ -961,7 +961,8 @@ the start of the entry's title.
   `AgentRuns(on_change=)` tells each change; a backend keeps them through
   `BaseWorkflowManager._load_agent_records` and `_save_agent_records` (the
   base keeps none: its records stay in memory). Deleting the conversation
-  deletes them, after its transcripts and before the conversation.
+  deletes them, after the transcripts they name (for records that do not
+  read, those the store finds) and before the conversation.
 - **Sub-agent instances, continued with follow-up runs, on both backends.**
   A delegation starts an instance (`researcher-2`) that outlives its run:
   `idle` once the run ends, it takes follow-ups, each its next run
@@ -2096,17 +2097,19 @@ the start of the entry's title.
   `SessionReader` (`/sessions --delete` on another backend's conversation),
   `/new` on the memory store, and a conversation already gone leaves none
   behind (`adk/sessions.py::delete_children`: the child sessions its records
-  name and every one that names the conversation, a transcript whose start
-  write was lost too; Deep Agents deletes the instances' threads). The
+  name, which name every transcript, since a first run's is made only once
+  its start is stored; a listing's only for records that do not read; Deep
+  Agents deletes the instances' threads the same way). The
   manager forgets the conversation it deletes (its sub-agent records, the
   record of a failed turn's calls and every stop, its usage ledger, its
   numbering), so a conversation of the same id starts from `researcher-1`.
   Instances are numbered from the conversation's stored records, and each
   turn's first run past the instances the conversation's store keeps
   besides (`BaseWorkflowManager._stored_instances`, asked once per
-  conversation per turn, under a lock of the conversation's own; on ADK the
-  child sessions its records name, a listing's for one without records;
-  `AgentRuns.number_from`), whoever ran them: a manager before a
+  conversation per turn, under a lock of the conversation's own: the
+  instances its records name, none without records, and the store's own
+  look, ADK's listing or Deep Agents' threads, only for records that do not
+  read; `AgentRuns.number_from`), whoever ran them: a manager before a
   restart or a switch of backend or store, or another process that had the
   conversation between two turns.
   `researcher-2` follows a stored `researcher-1`, whose transcript stays as

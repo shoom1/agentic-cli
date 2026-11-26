@@ -50,10 +50,12 @@ conversation, not with the square of it: ``RECORDS_KEY`` holds the header
 (version, time, counters) and ``RECORDS_KEY.instance.<n>`` and
 ``RECORDS_KEY.run.<n>`` the n-th instance and run. No two conversations'
 records or transcripts share an id. Numbering past the stored instances
-finds a conversation's children by the instances its records name, a
-listing of the user's child sessions only for a conversation without
-readable records; a delete removes both, so a transcript the records never
-named (a start write that was lost) goes too. ``ServiceSessions.delete``
+finds a conversation's children by the instances its records name: a first
+run's session is made only once its start is in the records, so they name
+every one, and a conversation without records has none. A listing of the
+user's child sessions is only for records that do not read (another
+version's), which this manager writes none of its runs to; a delete follows
+the same rule. ``ServiceSessions.delete``
 deletes the transcripts first, then the records, then the conversation, so a
 delete cut short leaves the conversation, by which the rest is found again.
 """
@@ -164,11 +166,18 @@ def child_session_id(conversation: str, instance: str) -> str:
 async def _named_children(
     service: "BaseSessionService", app_name: str, user_id: str, conversation: str
 ) -> list[str] | None:
-    """The ids of the child sessions ``conversation``'s stored records name; None
-    without readable records (one look at its records session)."""
-    named = stored_instance_ids(
-        await load_records(service, SessionRef(app_name, user_id, conversation))
-    )
+    """The ids of the child sessions ``conversation``'s stored records name (one
+    look at its records session).
+
+    A first run's session is made only once its start is in the records, so
+    they name every one: none when the conversation has no records. None
+    only for records that do not read (another version's), which only a
+    listing can answer for.
+    """
+    stored = await load_records(service, SessionRef(app_name, user_id, conversation))
+    if stored is None:
+        return []
+    named = stored_instance_ids(stored)
     if named is None:
         return None
     prefix = f"{_encoded(conversation)}/"
@@ -198,10 +207,9 @@ async def _children(
 ) -> list[str]:
     """The ids of ``conversation``'s child sessions, ``user_id``'s, to number past.
 
-    Each is ``child_session_id(conversation, <instance>)``. A conversation
-    with records has the instances they name; one without, those a listing
-    finds. A transcript the records never named is no loss here: a first run
-    onto an existing session is refused.
+    Each is ``child_session_id(conversation, <instance>)``: the instances the
+    conversation's records name, none without records, and a listing's only
+    for records that do not read.
     """
     named = await _named_children(service, app_name, user_id, conversation)
     if named is not None:
@@ -312,10 +320,10 @@ async def delete_children(
 
     Every session of ``app_name``'s child app (``child_app``) that is
     ``user_id``'s and ``conversation``'s (``child_session_id``): those its
-    records name and those a listing finds (a transcript the records never
-    named, its start write lost, goes too); their events go with them (ADK's
-    session store deletes a session's events with it). What a conversation's
-    delete leaves of it otherwise.
+    records name, which name every one (none without records), and, for
+    records that do not read, those a listing finds; their events go with
+    them (ADK's session store deletes a session's events with it). What a
+    conversation's delete leaves of it otherwise.
 
     Args:
         service: The session service the conversation is in.
@@ -326,10 +334,11 @@ async def delete_children(
     Returns:
         How many it deleted: the instances' transcripts, not the records.
     """
-    children = sorted({
-        *(await _named_children(service, app_name, user_id, conversation) or ()),
-        *await _listed_children(service, app_name, user_id, conversation),
-    })
+    named = await _named_children(service, app_name, user_id, conversation)
+    children = sorted(
+        named if named is not None
+        else await _listed_children(service, app_name, user_id, conversation)
+    )
     for session_id in children:
         await service.delete_session(
             app_name=child_app(app_name), user_id=user_id, session_id=session_id

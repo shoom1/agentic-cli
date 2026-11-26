@@ -130,11 +130,15 @@ class TestDeleteChildren:
             (APP, "u", "s"),                             # the conversation itself
         ]:
             await service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+        # Records that do not read: the store's own listing is what finds them.
+        await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
 
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
         assert deleted == 3
-        assert await stored_ids(service, child_app(APP)) == ["s%2Fx/researcher-1", "t/researcher-1"]
+        assert await stored_ids(service, child_app(APP)) == [
+            "s", "s%2Fx/researcher-1", "t/researcher-1",  # "s": the records
+        ]
         assert await stored_ids(service, child_app(APP), "v") == ["s/researcher-1"]
         assert await stored_ids(service, APP) == ["s"]
 
@@ -157,6 +161,7 @@ class TestDeleteChildren:
                 author="researcher",
                 content=types.Content(role="model", parts=[types.Part(text="X is 42.")]),
             ))
+            await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
             before = events()
 
             await adk_sessions.delete_children(service, APP, "u", "s")
@@ -379,21 +384,52 @@ class TestTheChildrenRecordsName:
         assert await adk_sessions.delete_children(service, APP, "u", "s") == 2
         assert await stored_ids(service, child_app(APP)) == ["s"]
 
-    async def test_a_delete_also_removes_what_the_records_never_named(self, service):
-        """A start write can be lost: the records miss a transcript that exists,
-        which numbering leaves to the store's refusal and a delete must not."""
+    async def test_a_delete_removes_what_the_records_name_and_lists_nothing(
+        self, service, monkeypatch
+    ):
+        """A first run's transcript is made only once the records name it, so
+        the records name every transcript: a session they do not name is
+        another's, and nothing is listed to look for one."""
         conversation = SessionRef(APP, "u", "s")
         for session_id in ("s/researcher-1", "s/researcher-2", "t/researcher-1"):
             await service.create_session(
                 app_name=child_app(APP), user_id="u", session_id=session_id
             )
         await adk_sessions.save_records(service, conversation, records_naming("researcher-1"))
+        listed: list[str] = []
+        real = service.list_sessions
+
+        async def listing(**names):
+            listed.append(names["app_name"])
+            return await real(**names)
+
+        monkeypatch.setattr(service, "list_sessions", listing)
 
         counts = await adk_sessions.stored_instances(service, APP, "u", "s")
         deleted = await adk_sessions.delete_children(service, APP, "u", "s")
 
-        assert (counts, deleted) == ({"researcher": 1}, 2)
-        assert await stored_ids(service, child_app(APP)) == ["s", "t/researcher-1"]
+        assert (counts, deleted, listed) == ({"researcher": 1}, 1, [])
+        monkeypatch.undo()
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/researcher-2", "t/researcher-1"]
+
+    async def test_a_conversation_without_records_lists_nothing(self, service, monkeypatch):
+        """No records means no transcript was ever made for it."""
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="t/researcher-1"
+        )
+        listed: list[str] = []
+        real = service.list_sessions
+
+        async def listing(**names):
+            listed.append(names["app_name"])
+            return await real(**names)
+
+        monkeypatch.setattr(service, "list_sessions", listing)
+
+        counts = await adk_sessions.stored_instances(service, APP, "u", "s")
+        deleted = await adk_sessions.delete_children(service, APP, "u", "s")
+
+        assert (counts, deleted, listed) == ({}, 0, [])
 
     async def test_records_of_another_version_are_no_list(self, service):
         await service.create_session(
@@ -534,6 +570,8 @@ class TestStoredInstances:
             await service.create_session(
                 app_name=child_app(APP), user_id="u", session_id=session_id
             )
+        # Records that do not read: the listing's filtering is what counts them.
+        await adk_sessions.save_records(service, SessionRef(APP, "u", "s"), {"v": 0})
 
         counts = await adk_sessions.stored_instances(service, APP, "u", "s")
 

@@ -5514,6 +5514,40 @@ class TestARunWhoseStartIsNotStored:
         assert await transcripts(second) == ["researcher-1", "researcher-2"]
 
 
+class TestRecordsThatDoNotRead:
+    """A conversation whose stored records are another version's: this
+    manager writes none of its runs, so only the store can say what it
+    keeps. Its runs are numbered past the transcripts the store keeps, and a
+    delete removes every one of them."""
+
+    async def test_numbering_and_a_delete_still_find_their_transcripts(self, make_crew):
+        first = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find X.", "c1"),
+                               delegate("researcher", "Find Y.", "c2")), says("Done.")],
+            researcher=[says("X is 42."), says("Y is 7.")],
+        )
+        await first.turn("Find X and Y.")
+        await first.manager._save_agent_records(first.conversation, {"v": 0})
+        await first.manager.cleanup()
+        second = make_crew(
+            follow_team(), store="sqlite",
+            coordinator=[calls(delegate("researcher", "Find Z.", "c3")), says("Done.")],
+            researcher=[says("Z is 3.")],
+        )
+
+        with no_blocking_calls():
+            await second.turn("Find Z.")
+            (record,) = second.records()
+            made = await transcripts(second)
+            deleted = await second.manager.delete_session(SESSION, user_id=USER)
+
+        assert (record.ref.instance, record.status) == ("researcher-3", RUN_COMPLETED)
+        assert made == ["researcher-1", "researcher-2", "researcher-3"]
+        assert deleted is True
+        assert await transcripts(second) == []
+
+
 class TestADeletedConversation:
     """Deleting a conversation removes its records and every instance's
     transcript (the transcripts first, then the records, then the

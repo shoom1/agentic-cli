@@ -37,12 +37,14 @@ its runs, its id counters) are one item of the same store, under
 that changes them, never a row of the index. ``delete`` deletes the
 instances' threads first, then the records, then the conversation's thread
 and row, so a delete cut short leaves the conversation, by which the rest is
-found again. The instances a conversation keeps, which number a new
-manager's next ones (``stored_instances``), are the records' ids and
-counters and the threads', read from each thread's first checkpoint only
-(it holds the first run's input, which the saver decodes: the brief, and an
-inheriting instance's copy of its parent's conversation), so an instance
-whose start write was lost is numbered past too.
+found again. A first run's thread is made only once its start is in the
+records, so the records name every instance a conversation keeps: they are
+what number a new manager's next ones (``stored_instances``: their ids and
+counters, none without records) and what ``delete`` removes. The threads are
+looked at only for records that do not read (another version's: this manager
+writes none of its runs), by each thread's first checkpoint only (it holds
+the first run's input, which the saver decodes: the brief, and an inheriting
+instance's copy of its parent's conversation).
 
 A finished job reports to the conversation in a ``HumanMessage`` of its own
 (``job_notification``), marked in its ``response_metadata``, which no
@@ -363,7 +365,9 @@ class CheckpointSessions:
     async def instances(self, ref: SessionRef) -> list[str]:
         """The sub-agent instances whose transcript thread ``ref``'s conversation keeps, sorted.
 
-        Read from the instance runs' first input checkpoints, by their
+        The store's own look, for a conversation whose stored records do not
+        read (``stored_instances``, ``delete``): the records name every
+        instance otherwise. Read from the instance runs' first input checkpoints, by their
         metadata (``source`` ``input``, ``step`` -1): one per thread, never
         a later one, which would hold the transcript (the saver decodes every
         checkpoint it returns, and its filter is a metadata equality). The
@@ -398,19 +402,24 @@ class CheckpointSessions:
         Read from the instances' ids (``<type>-<n>``, ``AgentRuns``'
         instance ids), as ``adk/sessions.py::stored_instances`` reads ADK's:
         what another manager ran there, which this one numbers past. An
-        instance that names no such number is left out. The threads are the
-        floor (``instances``: a thread a start write never named is numbered
-        past too), and the stored records' ids and counters count with them:
-        the counters never fall below an instance kept.
+        instance that names no such number is left out. The stored records'
+        ids and counters count (a first run's thread is made only once its
+        start is in them, so they name every instance: none without
+        records), and the counters never fall below an instance kept. The
+        threads are looked at only for records that do not read
+        (``instances``).
         """
         counts: dict[str, int] = {}
         records = await self.agent_records(ref)
-        named = stored_instance_ids(records) or []
-        for instance in sorted({*named, *await self.instances(ref)}):
+        if records is None:
+            return counts
+        readable = stored_instance_ids(records)
+        named = await self.instances(ref) if readable is None else readable
+        for instance in sorted(named):
             agent, _, number = instance.rpartition("-")
             if agent and number.isascii() and number.isdigit():
                 counts[agent] = max(counts.get(agent, 0), int(number))
-        numbered = records.get("numbered") if named else None
+        numbered = records.get("numbered") if readable else None
         if isinstance(numbered, Mapping):
             for agent, count in numbered.items():
                 if isinstance(agent, str) and type(count) is int and count > counts.get(agent, 0):
@@ -423,11 +432,19 @@ class CheckpointSessions:
         False if there was no conversation (its instances' threads and its
         records are deleted whatever else is found: they go first, so a delete
         cut short leaves the conversation, by which the rest is found again).
-        The instances are found from their threads, not the records, so a
-        thread the records never named goes too. The thread goes with any
+        The instances are the ones its records name, which name every one
+        (a first run's thread is made only once its start is in them): none
+        without records. Records that do not read (another version's) leave
+        the store's own look, ``instances``. The thread goes with any
         sub-agent checkpoints an older version stored in it.
         """
-        for instance in await self.instances(ref):
+        records = await self.agent_records(ref)
+        if records is None:
+            kept: list[str] = []
+        else:
+            named = stored_instance_ids(records)
+            kept = await self.instances(ref) if named is None else named
+        for instance in kept:
             await self._saver.adelete_thread(instance_thread_id(ref, instance))
         await self.delete_agent_records(ref)
         namespace = _rows_of(ref.app_name, ref.user_id)
