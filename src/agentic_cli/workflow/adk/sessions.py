@@ -280,7 +280,8 @@ async def _current_records(
 
 
 def _generation(state: Mapping[str, Any]) -> dict[str, int]:
-    """``state``'s generation: its rewrites so far (``n``) and the writes appended since (``writes``)."""
+    """``state``'s generation: its rewrites so far (``n``) and the writes
+    appended since (``writes``)."""
     held = state.get(_GENERATION_KEY)
     if not isinstance(held, Mapping):
         return {"n": 0, "writes": 0}
@@ -384,7 +385,10 @@ async def save_records(
 
 
 async def delete_records(service: "BaseSessionService", ref: SessionRef) -> None:
-    """Delete ``ref``'s records sessions (both: ``records_session_ids``), their events with them; none is nothing to do."""
+    """Delete ``ref``'s records sessions (both: ``records_session_ids``).
+
+    Their events go with them; none is nothing to do.
+    """
     try:
         ids = records_session_ids(ref.session_id)
     except ValueError:

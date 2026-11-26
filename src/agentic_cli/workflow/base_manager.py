@@ -900,9 +900,10 @@ class BaseWorkflowManager(ABC):
         A run that makes its transcript (a first run, or a follow-up whose
         transcript is gone) calls it first, and makes the transcript only
         after it returns, so the records name every transcript the
-        conversation keeps, which is what its numbering and its delete read. A conversation whose stored
-        records do not read returns at once: this manager writes none of its
-        runs, and the store's own look covers it (``_agents_unwritten``).
+        conversation keeps, which is what its numbering and its delete read.
+        A conversation whose stored records do not read returns at once: this
+        manager writes none of its runs, and the store's own look covers it
+        (``_agents_unwritten``).
 
         Raises:
             RunFailed: The latest write of the conversation's records failed,

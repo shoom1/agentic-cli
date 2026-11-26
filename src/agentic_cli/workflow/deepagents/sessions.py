@@ -283,7 +283,10 @@ class CheckpointSessions:
         return self._reading
 
     async def _messages_at(self, item: "CheckpointTuple | None") -> list[BaseMessage]:
-        """The messages of the checkpoint ``item`` names, put together (``_reader``); none for None."""
+        """The messages of the checkpoint ``item`` names, put together.
+
+        Through ``_reader``; none for None.
+        """
         if item is None:
             return []
         snapshot = await self._reader().aget_state(item.config)
@@ -403,10 +406,11 @@ class CheckpointSessions:
 
         The store's own look, for a conversation whose stored records do not
         read (``stored_instances``, ``delete``): the records name every
-        instance otherwise. Read from the instance runs' first input checkpoints, by their
-        metadata (``source`` ``input``, ``step`` -1): one per thread, never
-        a later one, which would hold the transcript (the saver decodes every
-        checkpoint it returns, and its filter is a metadata equality). The
+        instance otherwise. Read from the instance runs' first input
+        checkpoints, by their metadata (``source`` ``input``, ``step`` -1):
+        one per thread, never a later one, which would hold the transcript
+        (the saver decodes every checkpoint it returns, and its filter is a
+        metadata equality). The
         one read holds its run's input, in its ``__start__`` channel and its
         pending writes, and the saver decodes it on the event loop: the
         brief, and an inheriting instance's copy of its parent's
@@ -800,7 +804,7 @@ def _updated(item: "CheckpointTuple") -> datetime:
 def _row(
     session_id: str, item: "CheckpointTuple", messages: Sequence[BaseMessage]
 ) -> SessionInfo:
-    """A conversation's row from its latest root checkpoint and the messages it holds."""
+    """A conversation's row from its latest root checkpoint and its messages."""
     return _row_of(session_id, messages, _updated(item))
 
 
