@@ -1131,6 +1131,62 @@ class TestMessagesStoredAsDeltas:
         assert [(r.session_id, r.title, r.turns) for r in listed] == [("s", "Q0.", 2)]
         assert [(r.title, r.turns) for r in written.values()] == [("Q0.", 2)]
 
+    async def test_a_reader_reads_a_conversation_stored_as_deltas_without_a_row(
+        self, sqlite_settings, monkeypatch
+    ):
+        """No manager runs: the reader's ``info`` and its listing (the
+        backfill) put the messages together themselves."""
+        manager = self.made(monkeypatch, sqlite_settings, ["A0.", "A1.", "A2."])
+        user = sqlite_settings.default_user
+        try:
+            await self.turns(manager, 3, user=user)
+            ref = manager.session_ref("s", user)
+            store = manager._sessions._store
+            await store.adelete(sessions_module._rows_of(ref.app_name, user), "s")
+            await store.adelete(
+                sessions_module._marks_of(ref.app_name, user), sessions_module._MARK_KEY
+            )
+        finally:
+            await manager.cleanup()
+        reader = await open_session_reader("deepagents", sqlite_settings, store="sqlite")
+        try:
+            with no_blocking_calls():
+                info = await reader.info("s")
+                listed = await reader.list()
+        finally:
+            await reader.aclose()
+
+        assert (info.title, info.turns) == ("Q0.", 3)
+        assert [(r.session_id, r.title, r.turns) for r in listed] == [("s", "Q0.", 3)]
+
+    async def test_a_cancelled_turn_then_a_new_one_reads_whole(
+        self, sqlite_settings, monkeypatch
+    ):
+        HELD["started"], HELD["go"] = threading.Event(), threading.Event()
+        hold = AgentConfig(name="solo", prompt="p", tools=[sessions_test_hold])
+        manager = self.made(monkeypatch, sqlite_settings, [
+            "A0.", ai("Holding.", calls=[("sessions_test_hold", {})]), "A2.",
+        ], configs=(hold,))
+        try:
+            await self.turns(manager, 1)
+            turn = asyncio.ensure_future(converse(manager, "Hold.", user="u", session="s"))
+            await asyncio.to_thread(HELD["started"].wait, 10)
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+            HELD["go"].set()
+            await converse(manager, "Next.", user="u", session="s")
+            recent = await manager.recent_messages("s", limit=20, user_id="u")
+            info = await manager.session_info("s", user_id="u")
+        finally:
+            HELD["go"].set()
+            await manager.cleanup()
+
+        contents = [m["content"] for m in recent]
+        assert contents[:3] == ["Q0.", "A0.", "Hold."]
+        assert contents[-2:] == ["Next.", "A2."]
+        assert info.turns == 3
+
     async def test_a_conversation_stored_with_plain_messages_reads_and_goes_on(
         self, sqlite_settings, monkeypatch
     ):

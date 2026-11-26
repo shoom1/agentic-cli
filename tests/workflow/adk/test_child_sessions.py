@@ -286,9 +286,13 @@ class TestTheRecordsSession:
         conversation = SessionRef(APP, "u", "s")
         data = records_naming("researcher-1", "researcher-2")
         data["runs"] = [{"run": "researcher-1#1", "status": "x"}, {"run": "researcher-2#1"}]
-        for number in range(RECORDS_REWRITE_AFTER + 2):
+        for number in range(RECORDS_REWRITE_AFTER + 1):
             data = json.loads(json.dumps(data))
             data["runs"][0]["status"] = f"x{number}"
+            await adk_sessions.save_records(service, conversation, data)
+        data = json.loads(json.dumps(data))
+        data["runs"][0]["status"] = "rewritten"
+        with no_blocking_calls():  # the save that rewrites
             await adk_sessions.save_records(service, conversation, data)
 
         assert await stored_ids(service, child_app(APP)) == ["s/"]
@@ -347,6 +351,40 @@ class TestTheRecordsSession:
         assert len(await stored_ids(service, child_app(APP))) == 1
         await adk_sessions.delete_records(service, conversation)
         assert await stored_ids(service, child_app(APP)) == []
+
+    async def test_a_delete_after_a_crash_removes_both(self, service, monkeypatch):
+        """A rewrite cut short leaves both records sessions: the
+        conversation's delete removes both, and the transcripts they name."""
+        conversation = SessionRef(APP, "u", "s")
+        await service.create_session(app_name=APP, user_id="u", session_id="s")
+        await service.create_session(
+            app_name=child_app(APP), user_id="u", session_id="s/researcher-1"
+        )
+        data = records_naming("researcher-1")
+        data["runs"] = [{"run": "researcher-1#1", "status": "x"}]
+        for number in range(RECORDS_REWRITE_AFTER + 1):
+            data = json.loads(json.dumps(data))
+            data["runs"][0]["status"] = f"x{number}"
+            await adk_sessions.save_records(service, conversation, data)
+        real = service.delete_session
+
+        async def crashing(**names):
+            if names["session_id"] == "s":
+                raise OSError("killed")
+            await real(**names)
+
+        monkeypatch.setattr(service, "delete_session", crashing)
+        data = json.loads(json.dumps(data))
+        data["runs"][0]["status"] = "rewritten"
+        with pytest.raises(OSError):
+            await adk_sessions.save_records(service, conversation, data)
+        monkeypatch.undo()
+        assert await stored_ids(service, child_app(APP)) == ["s", "s/", "s/researcher-1"]
+
+        assert await adk_sessions.ServiceSessions(service).delete(conversation) is True
+
+        assert await stored_ids(service, child_app(APP)) == []
+        assert await stored_ids(service, APP) == []
 
     async def test_a_conversation_whose_second_id_is_too_long_keeps_appending(self, service):
         conversation = "c" * MAX_KEY
