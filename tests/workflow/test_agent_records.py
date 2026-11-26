@@ -28,11 +28,15 @@ from agentic_cli.workflow.agents import (
     RUN_INTERRUPTED,
     RUN_RUNNING,
 )
-from agentic_cli.workflow.agents.delegate import AgentRun, DelegationRequest, RunAnswer
+from agentic_cli.workflow.agents.delegate import AgentRun, DelegationRequest, RunAnswer, RunFailed
 from agentic_cli.workflow.agents.envelope import INTERRUPTED_ERROR
 from agentic_cli.workflow import base_manager as base_manager_module
 from agentic_cli.workflow.agents import records as records_module
-from agentic_cli.workflow.agents.records import RecordsWriter
+from agentic_cli.workflow.agents.records import (
+    RECORDS_NOT_STORED,
+    RECORDS_NOT_STORED_CODE,
+    RecordsWriter,
+)
 from agentic_cli.workflow.agents.runs import RECORDS_VERSION
 from agentic_cli.workflow.base_manager import BaseWorkflowManager
 from agentic_cli.workflow.config import AgentConfig
@@ -947,3 +951,57 @@ class TestADeletedConversation:
         manager.save_gate.set()
 
         assert ref in manager._agents_loaded
+
+
+class TestAStartStored:
+    """A first run's transcript is made only once its start is in the
+    records (``_agent_start_stored``), so the records name every transcript
+    the conversation keeps: a store that failed that write fails the run,
+    and so does a conversation whose records were never loaded. A
+    conversation whose stored records do not read is never written, so its
+    runs start without waiting."""
+
+    async def test_a_written_start_returns(self, kept):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        manager._agent_records_changed(ref)
+
+        with no_blocking_calls():
+            await manager._agent_start_stored(ref)
+
+        assert not manager._agent_records.unsaved(ref)
+
+    async def test_a_failed_write_fails_the_run(self, kept):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        manager.save_fails = OSError("disk full")
+        manager._agent_records_changed(ref)  # the run's start, which the store fails
+
+        with pytest.raises(RunFailed) as raised:
+            await manager._agent_start_stored(ref)
+
+        assert raised.value.code == RECORDS_NOT_STORED_CODE == "RECORDS_NOT_STORED"
+        assert str(raised.value) == RECORDS_NOT_STORED
+
+    async def test_a_conversation_never_loaded_fails_the_run(self, kept):
+        manager = kept({})
+        await manager.initialize_services()
+
+        with pytest.raises(RunFailed) as raised:
+            await manager._agent_start_stored(manager.session_ref("s", "u"))
+
+        assert raised.value.code == RECORDS_NOT_STORED_CODE
+
+    async def test_unreadable_records_do_not_wait(self, kept):
+        manager = kept({})
+        ref = manager.session_ref("s", "u")
+        await turn(manager)
+        manager._agents_unwritten.add(ref)
+        manager.save_gate = asyncio.Event()  # a write that never ends
+        manager._agent_records.changed(ref)
+        try:
+            await asyncio.wait_for(manager._agent_start_stored(ref), 1)
+        finally:
+            manager.save_gate.set()

@@ -970,6 +970,8 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             RunFailed: Its request no longer fits its model's window, still
                 after its summary (``subagent_overflow_message``), with the
                 last text it wrote.
+            RunFailed: A first run whose start the store did not take
+                (``RECORDS_NOT_STORED``): its thread is not made.
             RunFailed: A first run whose instance's thread the store already
                 keeps: a stored transcript is never another run's.
             RuntimeError: The run has no conversation (its thread needs one).
@@ -992,6 +994,10 @@ class DeepAgentsWorkflowManager(BaseWorkflowManager):
             HumanMessage(content=run.message, id=task_id) if run.follow_up
             else brief_message(run.message, id=task_id)
         )
+        if not run.follow_up:
+            # Its thread is made only once its start is in the records, which
+            # then name every thread the conversation keeps.
+            await self._agent_start_stored(conversation)
         if not run.follow_up and self._checkpointer is not None:
             # A first run never continues a thread the store already keeps
             # (as ADK refuses to make an existing session): whatever numbered

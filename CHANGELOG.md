@@ -933,10 +933,13 @@ the start of the entry's title.
   store at each run event that changes them (one write at a time per
   conversation, the records as they are when it starts; a turn returns once
   its records are written; a write that fails is warned of once per
-  conversation, `subagent_records_not_saved`, and fails neither the run nor
-  the turn): on ADK in a session of the child app named as the conversation
-  (`<app_name>--agents`, id `<conversation id>`, its `%` and `/`
-  percent-encoded, as in its instances' ids; the state split by key so a
+  conversation, `subagent_records_not_saved`, and fails no turn, nor any run
+  but a first run whose start it was: a transcript is made only once the
+  records name its instance, so that run fails with `The conversation's
+  sub-agent records could not be stored, so this run was not started.`, code
+  `RECORDS_NOT_STORED`, and nothing of it is made): on ADK in a session of
+  the child app named as the conversation (`<app_name>--agents`, id
+  `<conversation id>`, its `%` and `/` percent-encoded, as in its instances' ids; the state split by key so a
   write holds what changed: the header under `agentic_cli.agents`,
   `adk/sessions.py::RECORDS_KEY`, and a key for each instance and run), on Deep Agents in
   the store beside the checkpointer (namespace `("agentic_cli", "agents",

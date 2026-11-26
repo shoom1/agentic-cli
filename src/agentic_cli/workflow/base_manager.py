@@ -61,10 +61,15 @@ from agentic_cli.workflow.agents.delegate import (
     Delegations,
     FollowUpRequest,
     RunAnswer,
+    RunFailed,
     waiting_on_user,
 )
 from agentic_cli.workflow.agents.policy import SubAgentPolicy, as_policy
-from agentic_cli.workflow.agents.records import RecordsWriter
+from agentic_cli.workflow.agents.records import (
+    RECORDS_NOT_STORED,
+    RECORDS_NOT_STORED_CODE,
+    RecordsWriter,
+)
 from agentic_cli.workflow.agents.roster import Rosters
 from agentic_cli.workflow.agents.runs import (
     INSTANCE_CLOSED,
@@ -740,9 +745,11 @@ class BaseWorkflowManager(ABC):
     #
     # A conversation's records (``agent_runs``: its instances, its runs with
     # their briefs, envelopes and usage, its id counters) are kept in its
-    # store through the backend's hooks: written at each run event that
-    # changes them (``RecordsWriter``: one write at a time per conversation,
-    # the latest records each time), all written before a turn returns,
+    # store through the backend's hooks: written at a run's start and end and
+    # at an instance's status change (``RecordsWriter``: one write at a time
+    # per conversation, the latest records each time), all written before a
+    # turn returns, a first run's start before its transcript is made
+    # (``_agent_start_stored``: the records name every transcript),
     # loaded once per conversation (``load_agents``: ``load_session`` and each
     # turn's start), and deleted with the conversation by the backend's
     # session code, after the transcripts and before the conversation
@@ -764,7 +771,8 @@ class BaseWorkflowManager(ABC):
 
         Replaces what the store kept. Called one at a time per conversation
         (``RecordsWriter``); a failure is warned of once per conversation and
-        fails nothing. The base keeps none.
+        fails no run or turn but a first run whose start it was
+        (``_agent_start_stored``). The base keeps none.
         """
         return None
 
@@ -885,6 +893,28 @@ class BaseWorkflowManager(ABC):
         writer = self.__dict__.get("_records_writer")
         if writer is not None:
             await writer.flush(conversation)
+
+    async def _agent_start_stored(self, conversation: SessionRef) -> None:
+        """Wait until a first run's start is in ``conversation``'s stored records.
+
+        A first run's transcript is made only after this returns, so the
+        records name every transcript the conversation keeps, which is what
+        its numbering and its delete read. A conversation whose stored
+        records do not read returns at once: this manager writes none of its
+        runs, and the store's own look covers it (``_agents_unwritten``).
+
+        Raises:
+            RunFailed: The latest write of the conversation's records failed,
+                or its records were never loaded (``RECORDS_NOT_STORED``).
+        """
+        if conversation in self._agents_unwritten:
+            return
+        await self._agent_records_written(conversation)
+        writer = self.__dict__.get("_records_writer")
+        if conversation not in self._agents_loaded or (
+            writer is not None and writer.unsaved(conversation)
+        ):
+            raise RunFailed(RECORDS_NOT_STORED, code=RECORDS_NOT_STORED_CODE)
 
     @contextlib.asynccontextmanager
     async def _deleting(self, conversation: SessionRef) -> AsyncGenerator[None, None]:

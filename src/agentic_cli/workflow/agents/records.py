@@ -6,10 +6,12 @@ hooks), so they outlive the process. ``RecordsWriter`` makes those writes:
 one at a time per conversation, each taking the records as they are when it
 starts (``export``), so changes made while one is under way are written
 together by the next (the latest wins), and a burst of run events costs one
-write or two. A write never fails a run or a turn: a failure is warned of
-once per conversation and logged at debug after that. ``flush`` waits until
-a conversation's records are written (a turn's end, a delete); its own
-cancel leaves the write to finish.
+write or two. A write fails no run or turn but a first run whose start it
+was (``RECORDS_NOT_STORED``): that run's transcript is made only once its
+start is in the records, so the records name every transcript. A failure is
+warned of once per conversation and logged at debug after that. ``flush``
+waits until a conversation's records are written (a turn's end, a delete,
+a first run's start); its own cancel leaves the write to finish.
 """
 
 from __future__ import annotations
@@ -23,6 +25,13 @@ from agentic_cli.logging import Loggers
 from agentic_cli.workflow.sessions import SessionRef
 
 logger = Loggers.workflow()
+
+#: A first run's failure when its start could not be stored: its transcript
+#: is not made, so the records never lack one.
+RECORDS_NOT_STORED = (
+    "The conversation's sub-agent records could not be stored, so this run was not started."
+)
+RECORDS_NOT_STORED_CODE = "RECORDS_NOT_STORED"
 
 #: The longest error text a failed write's log line carries.
 _MAX_LOGGED_ERROR = 500
